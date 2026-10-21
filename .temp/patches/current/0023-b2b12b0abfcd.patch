@@ -167,7 +167,7 @@ diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/confi
      name: info.name,
      env: info.env,
      api: info.npm
-@@ -181,7 +186,10 @@
+@@ -181,7 +186,14 @@
            ...(url === undefined ? {} : { url }),
 -          settings: options.settings ?? {},
 +          settings: options?.settings ?? {},
@@ -178,7 +178,11 @@ diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/confi
 +        ? { ...(url === undefined ? {} : { url }), settings: options?.settings ?? {} }
 +        : undefined,
 -    request: info.options && { headers: options.headers, body: options.body },
-+    request: info.options && options && { headers: options.headers, body: options.body },
++    request: info.options && options && {
++      headers: options.headers,
++      // 显式 SDK 同样保留可用性信号；resolver 在编码 provider 请求前移除内部 apiKey。
++      body: typeof info.options.apiKey === "string" ? { apiKey: info.options.apiKey, ...options.body } : options.body,
++    },
      models:
        info.models &&
 @@ -188,11 +196,13 @@
@@ -285,7 +289,7 @@ diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/con
                })
              }
            }
-@@ -50,15 +75,87 @@
+@@ -50,15 +75,90 @@
 +        // 累积原始配置层而非继承结果，每次都从当前直接基础重建再重放显式覆盖。
 +        const configured = new Map<string, ConfigProvider.Info[]>()
          for (const file of files) {
@@ -361,15 +365,18 @@ diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/con
 +                if (url !== undefined) provider.api.url = url
 +                if (legacy?.settings !== undefined || item.api?.settings !== undefined)
 +                  provider.api.settings = mergeJsonRecords(provider.api.settings, legacy?.settings, item.api?.settings) ?? {}
++                // 既有 Catalog/resolver 以 body.apiKey 识别配置凭据，withDefaults 会在发送前剔除。
++                if (typeof item.v1?.options.apiKey === "string")
++                  provider.request.body.apiKey = item.v1.options.apiKey
 +                Object.assign(provider.request.headers, legacy?.headers, item.request?.headers)
 +                // 只有继承合并基础默认值；普通配置继续按上游规则浅覆盖嵌套对象。
 +                Object.assign(provider.request.body, baseType === undefined ? { ...legacy?.body, ...item.request?.body } : mergeJsonRecords(provider.request.body, legacy?.body, item.request?.body))
-+                if (baseType !== undefined && legacy !== undefined) {
++                if (baseType !== undefined && (legacy !== undefined || item.api !== undefined)) {
 +                  for (const model of catalog.provider.get(providerID)?.models.values() ?? []) {
 +                    catalog.model.update(providerID, model.id, (draft) => {
 +                      if (url !== undefined) draft.api.url = url
-+                      if (legacy.settings !== undefined)
-+                        draft.api.settings = mergeJsonRecords(draft.api.settings, legacy.settings, item.api?.settings) ?? {}
++                      if (legacy?.settings !== undefined || item.api?.settings !== undefined)
++                        draft.api.settings = mergeJsonRecords(draft.api.settings, legacy?.settings, item.api?.settings) ?? {}
 +                    })
 +                  }
 +                }
@@ -385,7 +392,7 @@ diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/con
 +                // 独立副本保留 variant/cost/capabilities，不共享基础模型的可变数组。
 +                catalog.model.update(providerID, id, (model) => Object.assign(model, structuredClone(existing)))
 +              }
-@@ -67,6 +164,13 @@
+@@ -67,6 +167,13 @@
                  if (config.name !== undefined) model.name = config.name
 -                if (config.api !== undefined) model.api = { ...model.api, ...config.api }
 +                if (config.api !== undefined) {
@@ -401,7 +408,7 @@ diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/con
 -                  (config.api === undefined || !("type" in config.api)) && model.api.type === "native")
 +                  (config.api === undefined || config.api.type === undefined) && model.api.type === "native")
                    model.api = { type: "aisdk", package: "@ai-sdk/anthropic", id: model.api.id, url: model.api.url, settings: model.api.settings }
-@@ -80,7 +184,25 @@
+@@ -80,7 +187,25 @@
 +                const v1 = config.v1
 +                // 仅复用纯 SDK lowerer；不猜 provider 名称，也不调用 V1 provider/session 执行器。
 +                const legacy = v1 === undefined ? undefined : (() => {
@@ -487,13 +494,70 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
  import { testEffect } from "../lib/effect"
  import { PluginTestLayer } from "../plugin/fixture"
-@@ -180,3 +190,4 @@
+@@ -57,1 +67,56 @@
+ describe("ConfigProviderPlugin.Plugin", () => {
++  it.effect("preserves configured API keys through availability and native authentication", () =>
++    withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: "fallback-key" }, () =>
++      Effect.gen(function* () {
++        const catalog = yield* Catalog.Service
++        const integrations = yield* Integration.Service
++        // 同时覆盖未决 SDK 与显式 SDK 的继承配置，空连接不能掩盖凭据缺失。
++        const providers = [ProviderV2.ID.anthropic, ProviderV2.ID.make("claudecode"), ProviderV2.ID.make("explicit-anthropic"), ProviderV2.ID.make("explicit-claudecode")]
++        const id = ModelV2.ID.make("configured")
++        // 与 models.dev 一样保留无连接的 Integration，不能靠无认证记录绕过 available。
++        yield* integrations.transform((draft) => {
++          for (const provider of providers) draft.update(Integration.ID.make(provider), (value) => { value.name = provider })
++        })
++        yield* catalog.transform((draft) => {
++          for (const provider of providers) {
++            draft.provider.update(provider, (value) => {
++              value.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: "https://configured.test/v1", settings: {} }
++            })
++            draft.model.update(provider, id, (value) => {
++              value.api.id = ModelV2.ID.make("claude-sonnet-4-5")
++              value.limit = { context: 200_000, output: 8192 }
++              value.cost = [{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }]
++            })
++          }
++        })
++        const info = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({
++          provider: Object.fromEntries(providers.map((provider, index) => [provider, {
++            ...(index < 2 ? {} : { extends: providers[index - 2], npm: "@ai-sdk/anthropic" }), options: { apiKey: "configured-key" },
++          }])),
++        }))
++        yield* addPlugin(Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) }))
++        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
++        for (const provider of providers) {
++          expect((yield* integrations.get(Integration.ID.make(provider)))?.connections).toEqual([])
++          expect((yield* catalog.model.available()).some((model) => model.providerID === provider && model.id === id)).toBe(true)
++          const selection = yield* resolver.resolve(SessionSchema.Info.make({
++            id: SessionSchema.ID.make("ses_config_key"), projectID: ProjectV2.ID.global, title: "test", cost: 0,
++            model: { providerID: provider, id }, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++            time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
++          }))
++          const selected = selection.model
++          expect(selection.pricing).toEqual([{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }])
++          const input = LLM.request({ model: selected, prompt: "hello", cache: "none", http: { ...selected.route.defaults.http, headers: selected.route.defaults.headers } })
++          const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input).pipe(Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))))
++          const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
++          const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
++          expect(web.headers.get(provider === "claudecode" ? "authorization" : "x-api-key")).toBe(provider === "claudecode" ? "Bearer configured-key" : "configured-key")
++          // 检查真正编码的请求，内部可用性信号不能成为发送给模型的密钥正文。
++          const body = yield* Effect.promise(() => web.text())
++          expect(body).not.toContain("configured-key")
++          expect(body).not.toContain("fallback-key")
++        }
++      }),
++    ),
++  )
++
+@@ -180,3 +239,4 @@
                            cost: { input: 1, output: 2 },
 -                          request: request({ first: "first", shared: "first" }, "retained"),
 +                          // 基础模型的嵌套 metadata 和数组分别检验深合并与整体替换。
 +                          request: { ...request({ first: "first", shared: "first" }, "retained"), body: { metadata: { base: "keep", shared: "base" }, items: ["base"] } },
                            variants: [
-@@ -190,4 +201,21 @@
+@@ -190,4 +250,21 @@
                      },
 +                    plain: { request: { body: { nested: { first: true } } }, models: { chat: { request: { body: { metadata: { first: true } } } } } },
 +                    // B 与 A 的模型集合不重叠，切换后必须删除 A 的自动继承模型。
@@ -515,7 +579,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
                    },
                  }),
                }),
-@@ -220,6 +247,33 @@
+@@ -220,6 +296,34 @@
                            ],
                          },
                        },
@@ -536,6 +600,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +                        options: { metadata: { base: "keep", userId: "model-user" } },
 +                        variants: { high: { metadata: { userId: "variant-user" } } },
 +                      } } },
++                      "native-override": { extends: "anthropic-base", options: { baseURL: "https://low.test/v1", region: "low" } },
 +                    } })).providers,
 +                    // 未使用的普通 native V1 配置必须保留 raw options/variants，不能阻断整个 catalog。
 +                    ...ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
@@ -549,11 +614,12 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +                    } })).providers,
                    },
                  }),
-@@ -230,4 +284,20 @@
+@@ -230,4 +333,21 @@
 +                  model: "switched/kept",
                    providers: {
                      custom: { name: "Renamed" },
 +                    plain: { request: { body: { nested: { last: true } } }, models: { chat: { request: { body: { metadata: { last: true } } } } } },
++                    "native-override": { api: { type: "aisdk", package: "@ai-sdk/anthropic", url: "https://high.test/v1", settings: { region: "high" } } },
 +                    // 后层名称覆盖不应重置之前继承的模型与环境方法。
 +                    mirror: { name: "Mirror", api: { url: "https://mirror-later.test" }, models: { urlonly: { api: { settings: { region: "override" } } } } },
 +                    // 后层切到 B，并更新 provider URL；旧显式 API 与分层 variant 仍须保留。
@@ -570,12 +636,12 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +                    } })).providers,
                    },
                  }),
-@@ -242,3 +311,3 @@
+@@ -242,3 +360,3 @@
 -        expect((yield* catalog.model.default())?.id).toBe(ModelV2.ID.make("default"))
 +        expect((yield* catalog.model.default())?.id).toBe(ModelV2.ID.make("kept"))
          expect(provider.name).toBe("Renamed")
          expect((yield* integrations.get(Integration.ID.make("custom")))?.methods).toContainEqual({
-@@ -265,4 +334,109 @@
+@@ -265,4 +383,113 @@
          expect(model.variants[1]?.headers).toEqual({ slow: "slow" })
 +        const mirror = required(yield* catalog.model.get(ProviderV2.ID.make("mirror"), modelID))
 +        // 独立预期同时覆盖重绑、实际 API ID、npm/URL 和保留的基础 variant。
@@ -654,8 +720,8 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +        })
 +        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
 +        const unauth = yield* resolver.resolve(session)
-+        expect(unauth.id).toBe(ModelID.make("beta"))
-+        expect(unauth.route.endpoint.baseURL).toBe("https://base-b.test")
++        expect(unauth.model.id).toBe(ModelID.make("beta"))
++        expect(unauth.model.route.endpoint.baseURL).toBe("https://base-b.test")
 +        const anthropic = required(yield* catalog.model.get(ProviderV2.ID.make("anthropic-copy"), ModelV2.ID.make("claude")))
 +        // 同一个已有 SDK lowerer 应同时转换模型与变体；中间配置和实际 wire 都无 camel userId。
 +        expect(anthropic.request.body).toEqual({ extension: { base: "keep", child: "add", shared: "high" }, items: ["high"], metadata: { base: "keep", user_id: "later-model-user" } })
@@ -665,6 +731,10 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +        expect(anthropic.api.settings).not.toHaveProperty("authToken")
 +        expect(anthropic.request.headers).toMatchObject({ Authorization: "Bearer new-token", "x-layer": "high" })
 +        expect((yield* catalog.provider.get(ProviderV2.ID.make("anthropic-base")))?.api.url).toBe("https://anthropic.test/v1")
++        // 低层 V1 延迟转换后，高层 V2 地址和 settings 仍须同时到达继承模型及真实路由。
++        const override = required(yield* catalog.model.get(ProviderV2.ID.make("native-override"), ModelV2.ID.make("claude")))
++        expect(override.api).toMatchObject({ url: "https://high.test/v1", settings: { region: "high" } })
++        expect((yield* SessionRunnerModel.fromCatalogModel(override)).route.endpoint.baseURL).toBe("https://high.test/v1")
 +        const llmLayer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))
 +        for (const variant of [undefined, ModelV2.VariantID.make("high")]) {
 +          const selected = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: anthropic.providerID, id: anthropic.id, variant } }), anthropic)

@@ -1359,17 +1359,6 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
        const nextPrompt =
          compacting.prompt ??
          [
-@@ -910,7 +913,8 @@ const layer = Layer.effect(
-       const estimatedInput = TokenEstimate.estimateUploadInput({
-         text: compactionEstimate.text,
-         attachments: compactionEstimate.attachments,
--        history: selected.head,
-+        // #553：upload 估算与 wire 同源——hidden 的 transformed history 不得计入 history 侧估算。
-+        history: visibleMsgs,
-         model,
-       }).inputTokens
-       // #456：pending 细分与 processor 交接——summary 请求绕过 prompt.ts，流式期间不能闪回 0。
-
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
@@ -1406,8 +1395,8 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  const older = (row: Cursor) =>
    or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
  
--function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
-+function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
+-function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[]) {
++function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
    // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
    // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
    // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
@@ -1415,9 +1404,9 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
          .pipe(Effect.orDie)
        // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
        // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
--      const restoredParts = ColdStorage.thawPartRows(sync, partRows)
+-      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, partRows))
 +      // #553：visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
-+      const restoredParts = ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden))
++      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)))
        for (const row of restoredParts) {
          const next = partFromRestored(row)
          const list = partByMessage.get(row.message_id)
@@ -1430,73 +1419,26 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
    const result: UIMessage[] = []
    const toolNames = new Set<string>()
    // Track media from tool results that need to be injected as user messages
-@@ -726,14 +734,37 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-     ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
-     : eq(MessageTable.session_id, input.sessionID)
-   const where = before ? and(base, older(before)) : base
--  const rows = yield* db
-+  // #553：raw page 保留 indexed limit 与 structural caller 合同；visible page 在相同 physical cursor 上 refill，
-+  // 直到业务 capacity 成立后才 hydrate，避免 hidden rows 消耗 limit 或触发无意义 Part thaw。
-+  const scanLimit = input.includeHidden ? input.limit + 1 : input.limit + Math.min(input.limit, 10) + 1
-+  let chunk = yield* db
-     .select()
-     .from(MessageTable)
-     .where(where)
-     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
--    .limit(input.limit + 1)
-+    .limit(scanLimit)
-     .all()
-     .pipe(Effect.orDie)
-+  let rows = chunk
-+  if (!input.includeHidden) {
-+    // #553：refill 只沿最后一条 physical row 前进；hidden row 只驱动扫描，永不成为公开 cursor。
-+    // 小额 overfetch 控制常见页成本，聚集 tombstone 仍由同一 indexed range 循环补足 capacity。
-+    const visibleRows = chunk.filter((row) => !row.data.hidden)
-+    while (visibleRows.length <= input.limit && chunk.length === scanLimit) {
-+      const physicalCursor = chunk.at(-1)
-+      if (!physicalCursor) break
-+      chunk = yield* db
-+        .select()
-+        .from(MessageTable)
-+        .where(and(base, older({ id: physicalCursor.id, time: physicalCursor.time_created })))
-+        .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-+        .limit(scanLimit)
-+        .all()
-+        .pipe(Effect.orDie)
-+      visibleRows.push(...chunk.filter((row) => !row.data.hidden))
-+    }
-+    rows = visibleRows
-+  }
-   if (rows.length === 0) {
-     const row = yield* db
-       .select({ id: SessionTable.id })
-@@ -751,23 +782,14 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
- 
-   const more = rows.length > input.limit
-   const slice = more ? rows.slice(0, input.limit) : rows
--  const items = yield* hydrate(db, sync, slice)
+@@ -750,8 +756,6 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
+   // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
+-  const items = (yield* hydrate(db, sync, slice)).map((item) =>
+-    input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
+-  )
 +  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden))
    items.reverse()
- // Hidden messages remain persisted for audit/recovery, but are removed from
- // normal prompt replay and visible history. Each reason names the workflow that
- // owns the invisibility boundary: undo hides reverted turns, repair hides empty
- // dangling assistants, and permission-reviewer protocol retry hides malformed
- // reviewer attempts before the same permission request is retried once.
--  // #106：默认剔除 hidden 消息与 part；includeHidden=true 时原样返回
--  if (!input.includeHidden) {
--    for (let i = items.length - 1; i >= 0; i--) {
--      if (items[i].info.hidden) {
--        items.splice(i, 1)
--        continue
--      }
--      items[i].parts = items[i].parts.filter((p) => !p.hidden)
--    }
--  }
-+
    const tail = slice.at(-1)
    return {
-     items,
-@@ -1013,24 +1035,30 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
+@@ -764,2 +768,2 @@
+ // #493：findHot 的 page 扫描只构造 HotInfo，不查 Parts、不调用 thaw；首个匹配 row 才 hydrate。
+-// hidden Message 在 SQL 阶段排除；hidden Part 只在最终一条 hydrate 后过滤。
++// hidden Message 在SQL阶段排除，hidden Part在选中一条的thaw前过滤，避免预热不可见正文。
+@@ -794,3 +798,2 @@
+-      const found = (yield* hydrate(db, sync, [row]))[0]
++      const found = (yield* hydrate(db, sync, [row], false))[0]
+       if (!found) throw new Error(`Message row disappeared during find: ${row.id}`)
+-      found.parts = found.parts.filter((part) => !part.hidden)
+@@ -995,23 +1001,28 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
    }
  })
  
@@ -1510,9 +1452,8 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +
  export function filterCompacted(msgs: Iterable<WithParts>) {
    // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
-   // #204：调用方传入顺序不一（流式 newest-first 或按时序数组），此处归一化把安全边界留在过滤器内部
-   // #204：MessageID.ascending() 是持久化顺序不变量；依赖调用方顺序会复活 summary 前历史并撑爆下次压缩
-   const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
+   // #204：沿用分页的时间/ID顺序；导入消息的ID未必单调，不能覆盖它们真实的创建顺序。
+   const ordered = Array.from(msgs).toSorted((a, b) => b.info.time.created - a.info.time.created || b.info.id.localeCompare(a.info.id))
    const result = [] as WithParts[]
 -  const completed = new Set<string>()
 +  const completed = new Map<MessageID, boolean>()
@@ -1527,10 +1468,9 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 -      .filter((msg) => !msg.info.hidden)
 -      .map((msg) => ({ ...msg, parts: msg.parts.filter((part) => !part.hidden) })),
 -  )
-+// #553：hidden Part 必须保留给 visibleCompactions 做配对证明（marker 的 hidden Compaction Part
-+// 要以“配对失败”的方式被剔除，而不是提前消失）；hidden 消息前置剔除，
-+// 配对后由模块级 visible() 统一收敛 part 级 hidden。
-+const visibleWindow = (items: SessionV1.WithParts[]) => visible(visibleCompactions(items.filter((msg) => !msg.info.hidden)))
++// 配对证明必须先看原始Message/Part；提前移除隐藏marker会遗留其可见summary。
++// 证明完成后统一visible投影，部分隐藏和失败配对均不能裁掉旧head。
++const visibleWindow = (items: SessionV1.WithParts[]) => visible(visibleCompactions(items))
    // #204：遍历 newest-first 序列，发现 summary→compaction 边界并锁定 retained tail
    for (const msg of ordered) {
      result.push(msg)
@@ -1617,20 +1557,6 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
      }),
    )
 
-diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
---- a/packages/opencode/src/session/processor.ts
-+++ b/packages/opencode/src/session/processor.ts
-@@ -497,7 +497,8 @@ const layer = Layer.effect(
-             Effect.provideService(Database.Service, database),
-           )
-           const currentTools = parts.filter(
--            (part) => part.type === "tool" && part.state.status !== "pending",
-+            // #553：current Tool 与历史 Tool 使用同一 visible contract，hidden error 不计入阈值。
-+              (part) => part.type === "tool" && !part.hidden && part.state.status !== "pending",
-           )
-           const preceding = yield* MessageV2.previousAssistantToolTail({
-             sessionID: ctx.sessionID,
-
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
@@ -1641,20 +1567,12 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 +            // #553：plugin 是第二个 Message producer；先收敛到同一 visible projection，避免 wire、usage 和 overflow 分叉。
 +            msgs = MessageV2.visible(msgs)
  
-             // 仅用户可配置工具计入 system prompt 的工具使用指引；decide 无工具
-             const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
+             // decide 跳过 skills/MCP 指令，只保留 env + instructions
+             const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
 
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -48,6 +48,7 @@ import {
-   UpdatePayload,
- } from "../groups/session"
- import { PermissionNotFoundError } from "../errors"
-+import * as ApiError from "../errors"
- import * as SessionError from "./session-errors"
- 
- const tryParseJson = (text: string) =>
 @@ -194,9 +195,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
      const message = Effect.fn("SessionHttpApi.message")(function* (ctx: {
        params: { sessionID: SessionID; messageID: MessageID }
@@ -1664,7 +1582,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
          MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
        )
 +      // #553：internal get 保持 raw 给 repair/reviewer；这里只有普通 SDK wire 才应用 not-found visibility。
-+      if (result.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
++      if (result.info.hidden) return yield* notFound(`Message not found: ${ctx.params.messageID}`)
 +      // #553：visible parent 的 hidden Part 仍作为 tombstone producer 保留在 raw storage，但不进入 SDK response。
 +      return { ...result, parts: result.parts.filter((part) => !part.hidden) }
      })
@@ -1678,7 +1596,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 +        MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
 +      )
 +      // #553：parent visibility 必须在 updatePart 前判定，否则已知 Part ID 会重新产生普通事件。
-+      if (parent.info.hidden) return yield* ApiError.notFound(`Message not found: ${ctx.params.messageID}`)
++      if (parent.info.hidden) return yield* notFound(`Message not found: ${ctx.params.messageID}`)
        return yield* session.updatePart(payload)
      })
  
@@ -1932,46 +1850,27 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
        if (name !== "experimental.compaction.autocontinue") return Effect.succeed(output)
        return Effect.sync(() => {
          ;(output as { enabled: boolean }).enabled = enabled
-@@ -1318,11 +1328,17 @@ describe("session.compaction.process", () => {
-     }),
-   )
- 
--  it.instance(
-+  itCompaction.instance(
-     "stores pending input estimate on summary assistant before streaming",
--    Effect.gen(function* () {
-+    () => {
-+      // #553：plugin transform 隐藏 120K history 后，upload 估算与 wire 都不得消费它。
-+      const stub = llm()
-+      let captured: LLM.StreamInput | undefined
-+      stub.push(reply("summary", (input) => (captured = input)))
-+      return Effect.gen(function* () {
+@@ -1373,6 +1383,8 @@ describe("session.compaction.process", () => {
        const ssn = yield* SessionNs.Service
        const session = yield* ssn.create({})
++      // 插件隐藏长history后，准备屏障同时检验wire与同源估算，不放松原账本及step交接断言。
 +      yield* createUserMessage(session.id, `plugin-hidden-compaction-history ${"x".repeat(120_000)}`)
        const msg = yield* createUserMessage(session.id, "hello")
        const msgs = yield* ssn.messages({ sessionID: session.id })
- 
-@@ -1339,12 +1355,15 @@ describe("session.compaction.process", () => {
- 
-       expect(summary?.info.role).toBe("assistant")
-       if (summary?.info.role !== "assistant") return
--      // 三个断言分别锁 pending 估算的三个落点：tokens、字符数、组件细分。
-       expect(summary.info.inputTokens).toBeGreaterThan(0)
-       expect(summary.info.inputChars).toBeGreaterThan(0)
--      // breakdown.total>0 证明 summary 消息携带了完整请求体口径，而非 0 占位。
--      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
--    }),
-+      // #553：#194 后 summary wire 即 nextPrompt 单文本（serialize(visibleMsgs)），estimate 直接度量 upload 内容；
-+      // inputBreakdown 是 upload snapshot——hidden 120K history 不得进入，以总 token 上界锁死。
-+      expect(summary.info.inputBreakdown?.messages.total).toBeLessThan(20_000)
-+      // 估算的字符口径同样不得承载 hidden 原文（120K >> 20K tokens 上界的字符侧证明）。
-+      expect(summary.info.inputChars).toBeLessThan(200_000)
-+      }).pipe(withCompaction({ llm: stub.llmLayer, plugin: autocontinue(true, true) }))
-+    },
-   )
- 
-   itCompaction.instance(
+       const prepared = yield* Deferred.make<void>()
+       const release = yield* Deferred.make<void>()
+@@ -1381,1 +1393,2 @@
+           withCompaction({
++            plugin: autocontinue(true, true),
+@@ -1384,2 +1397,3 @@
+                 (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
++                  Effect.tap(() => Effect.sync(() => expect(JSON.stringify(input.messages)).not.toContain("plugin-hidden-compaction-history"))),
+                   Effect.andThen(Deferred.succeed(prepared, undefined)),
+@@ -1405,2 +1419,4 @@
+         expect(estimate.inputBreakdown?.messages.total).toBeGreaterThan(0)
++        // 字符上限必须低于隐藏的120K正文，不能用200K上限让泄漏也通过。
++        expect(estimate.bodyChars).toBeLessThan(120_000)
+         // provisional 快照只供展示；确认 tokens 和账本不能提前计入估算。
 
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 --- a/packages/opencode/test/session/message-v2.test.ts
@@ -1995,7 +1894,7 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
 --- a/packages/opencode/test/session/messages-pagination.test.ts
 +++ b/packages/opencode/test/session/messages-pagination.test.ts
-@@ -232,18 +232,68 @@ describe("MessageV2.page", () => {
+@@ -232,18 +232,90 @@ describe("MessageV2.page", () => {
      ),
    )
  
@@ -2027,12 +1926,30 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 +    "visibility performance uses the production page and chronology seams",
 +    withSession(({ session, sessionID }) =>
 +      Effect.gen(function* () {
-+        // #553：固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
-+        const ids = yield* fill(sessionID, 6326)
-+        for (const id of ids.filter((_, index) => index % 17 === 0).slice(0, 364)) {
-+          const message = yield* MessageV2.get({ sessionID, messageID: id })
-+          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
-+        }
++        // 此处测量读取而非事件生产；批量建立同一6326/364持久cohort，保留真实page/chronology及全部时限。
++        const database = yield* Database.Service
++        const ids = Array.from({ length: 6326 }, () => MessageID.ascending())
++        const hidden = new Set(ids.filter((_, index) => index % 17 === 0).slice(0, 364))
++        yield* Database.withSync(database, (sync) => sync.transaction((tx) => {
++          for (let offset = 0; offset < ids.length; offset += 250) {
++            const batch = ids.slice(offset, offset + 250)
++            tx.insert(MessageTable).values(batch.map((id, index) => ({
++              id, session_id: sessionID,
++              time_created: offset + index,
++              data: {
++                role: "user" as const,
++                time: { created: offset + index },
++                agent: "test",
++                model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++                ...(hidden.has(id) ? { hidden: { time: 1, reason: "undo" as const } } : {}),
++              },
++            }))).run()
++            tx.insert(PartTable).values(batch.map((id, index) => ({
++              id: PartID.ascending(), session_id: sessionID, message_id: id,
++              data: { type: "text" as const, text: `m${offset + index}` },
++            }))).run()
++          }
++        }))
 +
 +        // page/chronology 都是需服务上下文的 Effect——计时在 generator 内以 yield* 采样，保持 production seam。
 +        const timed = function* <A, E, R>(run: Effect.Effect<A, E, R>) {
@@ -2063,7 +1980,11 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 +        expect(visiblePage).toBeLessThanOrEqual(rawPage + Math.max(5, rawPage * 0.25))
 +        const chronologyBaseline = 51.831
 +        expect(medianOf(chronologyRuns)).toBeLessThanOrEqual(chronologyBaseline * 1.25)
-+      }),
++      }).pipe(Effect.ensuring(Database.Service.use((database) => Database.withSync(database, (sync) => {
++        // 与批量建数对称清理本fixture的热行；读基准不把数千行Session级删除延迟混进时限。
++        sync.delete(PartTable).where(eq(PartTable.session_id, sessionID)).run()
++        sync.delete(MessageTable).where(eq(MessageTable.session_id, sessionID)).run()
++      })))),
 +    ),
 +    90_000,
 +  )
@@ -2088,7 +2009,7 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
          yield* addCompactionPart(sessionID, u1)
  
          const u2 = yield* addUser(sessionID, "new question")
-@@ -849,10 +903,9 @@ describe("MessageV2.filterCompacted", () => {
+@@ -849,10 +903,14 @@ describe("MessageV2.filterCompacted", () => {
            text: "new response",
          })
  
@@ -2099,6 +2020,11 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 +        const result = yield* MessageV2.filterCompactedEffect(sessionID)
 +        // #553：hidden summary 使配对不成立——marker 失去 completed 资格被剔除，hidden summary 亦不返回。
 +        expect(result.map((item) => item.info.id)).toEqual([old, u2, a2])
++        // 反向部分隐藏同样不能留下无marker的可见summary或裁掉旧head。
++        const marker = yield* MessageV2.get({ sessionID, messageID: u1 })
++        yield* session.updateMessage({ ...marker.info, hidden: { time: Date.now(), reason: "undo" } })
++        yield* session.updateMessage(summary.info)
++        expect((yield* MessageV2.filterCompactedEffect(sessionID)).map((item) => item.info.id)).toEqual([old, u2, a2])
        }),
      ),
    )
@@ -2154,8 +2080,8 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
          })
          const next = yield* addUser(sessionID, "next request")
  
--        // #205：stream 传 includeHidden=true 让 hidden 锚点参与边界遍历；visible() 保证其不返回
--        const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID, { includeHidden: true }))
+-        // #205：真实恢复入口负责读取hidden锚点，测试不替生产代码预先提供隐藏消息。
+-        const result = yield* MessageV2.filterCompactedEffect(sessionID)
 +        // #553：marker/summary 成对隐藏后，边界仍参与结构遍历但从返回窗口剔除。
 +        for (const id of [compact, summary]) {
 +          const message = yield* MessageV2.get({ sessionID, messageID: id })
@@ -2293,7 +2219,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      // 且 raw 120K 文本也不能触发 Compaction（无 summary 落盘）。
 +      const wireExcludes = JSON.stringify((yield* llm.inputs).at(-1)?.messages).includes("plugin-hidden-history")
 +      expect(wireExcludes).toBe(false)
-+      expect(assistant.info.inputBreakdown?.messages.userText ?? 0).toBeLessThan(1_000)
++      expect(assistant.info.inputEstimate?.inputBreakdown?.messages.userText).toBeLessThan(1_000)
 +      expect(messages.some((message) => message.info.summary)).toBe(false)
      }),
    { git: true },

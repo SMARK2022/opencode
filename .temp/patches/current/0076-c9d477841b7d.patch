@@ -116,13 +116,13 @@ index 1558c707c3..8eec73edab 100644
 -    seen.add(entry)
 +  // 命名后缀提供显式插件选择，模块中的其他函数不会被误当插件。
 +  const named = Object.entries(mod).filter(
-+    ([name, entry]) => name !== "default" && name.endsWith("Plugin") && isServerPlugin(entry),
++    ([name, entry]) => name !== "default" && name.endsWith("Plugin") && getServerPlugin(entry) !== undefined,
 +  )
 +  const candidates =
 +    named.length > 0
 +      ? named.map(([, entry]) => entry)
 +      : Object.entries(mod)
-+          .filter(([name, entry]) => name !== "default" && isServerPlugin(entry))
++          .filter(([name, entry]) => name !== "default" && getServerPlugin(entry) !== undefined)
 +          .map(([, entry]) => entry)
 +
 +  // 无显式选择且有多个函数时拒绝猜测，避免误执行非插件导出。
@@ -141,3 +141,38 @@ index 1558c707c3..8eec73edab 100644
      result.push(plugin)
    }
  
+diff --git a/packages/opencode/test/plugin/loader-shared.test.ts b/packages/opencode/test/plugin/loader-shared.test.ts
+--- a/packages/opencode/test/plugin/loader-shared.test.ts
++++ b/packages/opencode/test/plugin/loader-shared.test.ts
+@@ -774,6 +774,31 @@
+     ),
+   )
+ 
++  it.live("loads named object exports without duplicate initialization", () =>
++    Effect.gen(function* () {
++      // 同时覆盖后缀选择与单一对象回退，别名应按解包后的函数去重。
++      for (const name of ["ExamplePlugin", "example"]) {
++        yield* withTmp(
++          async (dir) => {
++            const file = path.join(dir, "named-object.ts")
++            const mark = path.join(dir, "calls.txt")
++            await Bun.write(file, [
++              "let calls = 0",
++              `export const ${name} = { server: async () => { await Bun.write(${JSON.stringify(mark)}, String(++calls)); return {} } }`,
++              name.endsWith("Plugin") ? `export { ${name} as AliasPlugin }` : "",
++            ].join("\n"))
++            await Bun.write(path.join(dir, "opencode.json"), JSON.stringify({ plugin: [pathToFileURL(file).href] }))
++            return { mark }
++          },
++          (tmp) => Effect.gen(function* () {
++            yield* load(tmp.path)
++            expect(yield* Effect.promise(() => Bun.file(tmp.extra.mark).text())).toBe("1")
++          }),
++        )
++      }
++    }),
++  )
++
+   it.live("loads object plugin via plugin.server", () =>
+     withTmp(
+       async (dir) => {

@@ -484,9 +484,9 @@ index 48127c9c4..b0af25151 100644
 +const TOOL_INCOMPLETE_ERROR = "Tool execution did not complete before stream ended"
 +
  // #198：reviewer 不可用——服务已禁用，回退到用户审批
- // #198：Disabled 是配置信号——approvals_reviewer 非 auto_review 时抛出，auto.ts 将其转为 ask
+ // #280：Disabled 仅表示显式 approvals_reviewer=user，auto.ts 将其转为 ask
  export class ReviewerDisabled extends Schema.TaggedErrorClass<ReviewerDisabled>()("PermissionReviewerDisabled", {}) {
-@@ -441,6 +447,19 @@ export const layer = Layer.effect(
+@@ -441,6 +447,20 @@ export const layer = Layer.effect(
            time: { created: Date.now() },
          }
          yield* session.updateMessage(message)
@@ -500,8 +500,9 @@ index 48127c9c4..b0af25151 100644
 +            error,
 +            interrupted,
 +          }).pipe(
-+            Effect.catch(() => Effect.logWarning("reviewer closeMessageTools failed")),
-+            Effect.catchDefect(() => Effect.logWarning("reviewer closeMessageTools defect")),
++            Effect.provideService(Database.Service, database),
++            Effect.catch((cause) => Effect.logWarning("reviewer closeMessageTools failed", { cause, sessionID: sessionInfo.id, messageID: message.id })),
++            Effect.catchDefect((cause) => Effect.logWarning("reviewer closeMessageTools defect", { cause, sessionID: sessionInfo.id, messageID: message.id })),
 +          )
          const assessment = yield* runReviewerStream(input.messages, input.model, {
            sessionID: sessionInfo.id,
@@ -530,7 +531,7 @@ index 48127c9c4..b0af25151 100644
                if (message.time.completed) return
                message.error ??= MessageV2.fromError(
                  new DOMException("Aborted", "AbortError"),
-@@ -640,40 +661,26 @@ export const layer = Layer.effect(
+@@ -640,48 +661,34 @@ export const layer = Layer.effect(
              // durable state 的单一真相留在 Session.Service，避免发布窗口产生双重 winner。
              const toolParts = new Map<string, PartID>()
              const toolInput = new Map<string, string>()
@@ -540,8 +541,8 @@ index 48127c9c4..b0af25151 100644
 +            // provider 原始错误或伪装 reviewer 成功（INV-04）。
 +            const safeFinalize = (error: string, interrupted: boolean) =>
 +              finalizeOpenToolParts(error, interrupted).pipe(
-+                Effect.catch(() => Effect.logWarning("reviewer finalizeOpenToolParts failed")),
-+                Effect.catchDefect(() => Effect.logWarning("reviewer finalizeOpenToolParts defect")),
++                Effect.catch((cause) => Effect.logWarning("reviewer finalizeOpenToolParts failed", { cause, sessionID: persist?.sessionID, messageID: persist?.messageID })),
++                Effect.catchDefect((cause) => Effect.logWarning("reviewer finalizeOpenToolParts defect", { cause, sessionID: persist?.sessionID, messageID: persist?.messageID })),
 +              )
              const finalizeOpenToolParts = Effect.fnUntraced(function* (error: string, interrupted: boolean) {
                if (!persist) return
@@ -585,8 +586,16 @@ index 48127c9c4..b0af25151 100644
 +                knownPartIDs: toolParts.values(),
 +                error,
 +                interrupted,
-+              })
++              }).pipe(Effect.provideService(Database.Service, database))
              })
+ 
+             const iterator = result.fullStream[Symbol.asyncIterator]()
+             const close = iterator.return
+             if (close) iterator.return = (value) => {
+               // SDK的tee分支关闭要等待底层流结束，必须先中止请求再等待迭代器释放。
+               abort.abort()
+               return close.call(iterator, value)
+             }
  
              yield* Stream.runForEach(
 @@ -880,24 +887,27 @@ export const layer = Layer.effect(
@@ -623,20 +632,16 @@ index 48127c9c4..b0af25151 100644
              // #497：正常 drain 仍可能只有 tool-input-start 而没有合法 tool-call；在协议
              // retry/fallback 接管前先闭合本 attempt，防止每次重试累积 pending Part。
 -            yield* finalizeOpenToolParts("Tool execution did not complete before stream ended", false)
-+            yield* finalizeOpenToolParts(TOOL_INCOMPLETE_ERROR, false)
++            yield* safeFinalize(TOOL_INCOMPLETE_ERROR, false)
  
              // #209：流结束后收尾未关闭的 text/reasoning part——provider 可能不发 *-end 事件，避免 part 残留无结束时间
              if (textPart)
-@@ -1208,6 +1218,60 @@ function assessmentFromUnknown(input: unknown) {
+@@ -1208,6 +1218,57 @@ function assessmentFromUnknown(input: unknown) {
    }
  }
  
-+// #546：map∪durable 双扫描闭合协议 tool——attempt 以 interrupt/timeout/stream 失败/drain
-+// 不完整退出后，permission_review_decision Part 不得停留 pending/running（INV-01）。
-+// knownPartIDs 只覆盖首次 durable write 前分配的 identity（#497）；commit 后中断的 part
-+// 只能从存储读到，故 durable 全集经 sessions.messages 补齐（#208 同因：避免 MessageV2.parts
-+// 的 Database.Service 泄漏进本模块）。getPart 逐个重读后非 open 跳过——幂等且尊重
-+// completed winner（INV-03）；写失败上抛交由调用方降级（INV-04）。
++// map∪durable闭合同一message的协议tool；按message精确读取，避免历史窗口截断漏掉未登记Part。
++// getPart逐个重读并跳过终态，尊重completed winner；cleanup失败只记录，不产生授权结果。
 +function closeOpenReviewerTools(
 +  session: Session.Interface,
 +  input: {
@@ -650,8 +655,9 @@ index 48127c9c4..b0af25151 100644
 +  return Effect.gen(function* () {
 +    const end = Date.now()
 +    const known = new Set(input.knownPartIDs ?? [])
-+    const messages = yield* session.messages({ sessionID: input.sessionID, limit: 100 })
-+    const durable = messages.find((m) => m.info.id === input.messageID)?.parts ?? []
++    const durable = yield* MessageV2.parts(input.messageID).pipe(
++      Effect.catchDefect((cause) => Effect.logWarning("reviewer durable tool scan failed", { cause, sessionID: input.sessionID, messageID: input.messageID }).pipe(Effect.as([]))),
++    )
 +    // durable 只补 tool 类型——text/reasoning 的收尾走既有 drain 路径，不在闭合范围
 +    for (const part of durable) {
 +      if (part.type === "tool") known.add(part.id)
@@ -771,7 +777,7 @@ index 03f4b54df..009b3f283 100644
    // #531：durable 必红夹具：session.messages 读到仍为 pending 的父 ToolPart 时，promote 必须用
    // metadata.command 写出可渲染的 input.command，不能停在历史 { raw } 形状。
    // 常见 tool-call-first 路径上 SessionPrompt 集成断言往往已绿，故此 fixture 才是 owner 级红测。
-@@ -1071,6 +1135,118 @@ function openAIReviewDecisionStream() {
+@@ -1071,6 +1135,126 @@ function openAIReviewDecisionStream() {
  }
  
  
@@ -789,7 +795,13 @@ index 03f4b54df..009b3f283 100644
 +      const encoder = new TextEncoder()
 +      const body = new ReadableStream<Uint8Array>({
 +        start(controller) {
-+          controller.enqueue(encoder.encode(openAIReviewPendingStream()))
++          // 只发工具开始和未完成参数；不能复用含response.completed的drain夹具来伪装timeout。
++          const events = [
++            { type: "response.created", response: { id: "resp_timeout", created_at: 0, model: "gpt-5", service_tier: null } },
++            { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_timeout", call_id: "call_timeout", name: "permission_review_decision", arguments: "" } },
++            { type: "response.function_call_arguments.delta", item_id: "fc_timeout", output_index: 0, delta: "{" },
++          ]
++          controller.enqueue(encoder.encode(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")))
 +        },
 +        cancel() {},
 +      })
@@ -828,12 +840,14 @@ index 03f4b54df..009b3f283 100644
 +  }
 +  const sessionLayer = Layer.mock(Session.Service)({
 +    get: () => Effect.succeed(parentSession),
-+    // #546：closeOpenReviewerTools 的 durable 补扫走 messages——空列表使 known set 为唯一来源
++    // 父级transcript读取不伪造消息；durable补扫走精确Part读取，不借用最近消息窗口。
 +    messages: () => Effect.succeed([]),
 +    children: () => Effect.succeed([]),
 +    create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
 +    updateMessage: (message) =>
 +      Effect.sync(() => {
++        // 在写入完成消息的当刻检查tool，不能仅凭最终快照证明先tool后message。
++        if (message.role === "assistant" && message.time.completed !== undefined) expect([...parts.values()].filter((part) => part.messageID === message.id && part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
 +        messages.set(message.id, structuredClone(message) as MessageV2.Assistant)
 +        return message
 +      }),

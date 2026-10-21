@@ -71,3 +71,9 @@
 
 - materialize 358 通过（states/v1.18.32/0358-ddb68abdf40a）；typecheck 358 passed 358/358（31 workspace）。
 - 行为测试（.test-workspace）：precheck 80 pass / 0 fail。
+
+## 2026-10-17 累计复查
+
+- 355 累计失败来自旧 V1 路径，实际分类器已迁移至 Core；将整套 splitter/evaluateShell/raw 注释修改转到共享 owner，保留现有测试入口及所有断言。
+- 仅迁移所属路径，继续保持 fd-merge 原子消费、opaque/tainted 分段与既有 general 边界，不增加第二分类器。
+- 最新355累计与30 workspace通过，precheck既有及新增用例包含在本轮226项通过的聚焦测试中。完整原始命令文本只交分类器，不启动shell或真实应用。

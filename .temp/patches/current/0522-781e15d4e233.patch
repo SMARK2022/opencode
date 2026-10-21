@@ -888,10 +888,10 @@ index 0000000000000000000000000000000000000000..f4399afc3eef55ce8a1952f32113a986
 +
 +> **APPROVE** — The exact audited R4 implementation diff has no blocking findings and satisfies the original behavioral, primary-path, scope, performance, budget, Unicode/CRLF, tie, attribution, renderer, test-independence, typecheck, and comment-gate requirements. The package-wide test command remains environmentally incomplete with unrelated failures, but the changed matcher and Tool surfaces pass the complete focused verification suite.
 
-diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
+diff --git a/packages/core/src/patch-match.ts b/packages/core/src/patch-match.ts
 index e41385a31..2a86abc27 100644
---- a/packages/opencode/src/patch/match.ts
-+++ b/packages/opencode/src/patch/match.ts
+--- a/packages/core/src/patch-match.ts
++++ b/packages/core/src/patch-match.ts
 @@ -85,58 +85,330 @@ export type ClosestWindow = {
  }
  

@@ -435,7 +435,7 @@ index 3af26d96b..24c2f30df 100644
              }
              yield* sessions.updatePart(part)
 @@ -891,13 +906,31 @@ const layer = Layer.effect(
-                 forceKillAfter: "3 seconds",
+                 forceKillAfter: "500 millis",
                })
                const handle = yield* spawner.spawn(cmd)
 +              // coordinator 与 child stream 共用这个 scoped lifetime；scope close 会先
@@ -630,10 +630,7 @@ index f8daad033..cd9eb40f0 100644
  import path from "path"
  import { containsPath, type InstanceContext } from "../project/instance-context"
  import { InstanceState } from "@/effect/instance-state"
-@@ -1160,29 +1161,25 @@ export const ShellTool = Tool.define(
-       const hiddenDiag = new BashDiagnosticCollector()
-       const started = Date.now()
- 
+@@ -619,5 +620,7 @@
 +      // version 0 是新 producer initial 与旧持久化 running Part 的共同基线。
        yield* ctx.metadata({
          metadata: {
@@ -641,35 +638,20 @@ index f8daad033..cd9eb40f0 100644
 +          progressVersion: 0,
          },
        })
- 
-+      let lastVisible = ""
-       const code: number | null = yield* Effect.scoped(
-         Effect.gen(function* () {
--          yield* Effect.addFinalizer(closeSink)
--          const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
--
--          // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
--          // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
--          // #128：按 input.encoding 锁定或自动探测
--          const decoder = createAutoTextDecoder({ encoding: input.encoding })
--          // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
--          display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
--          displayed = false
--          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
--          // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
-+          // initial v0 已在 scope 外 durable 提交；这里的 worker 只协调真实变化，
-+          // scope 结束时必须完成 trailing flush 后才能返回 exit code 给 terminal owner。
+@@ -633,6 +636,12 @@
+           const decoder = createAutoTextDecoder({ encoding: input.encoding })
++          // 沿现有进程 scope 收尾：输出消费完成后 flush，外层才提交 terminal Part。
 +          const progress = yield* ToolProgress.make({
 +            live: (metadata) => ctx.metadata({ metadata, delivery: "ephemeral" }),
 +            durable: (metadata) => ctx.metadata({ metadata, delivery: "durable" }),
 +          })
++          let lastVisible = ""
+           // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
            const onChunk = (chunk: string) => {
              if (!chunk) return Effect.void
--            // #293：诊断只收集被窗口丢弃的 chunk；可见输出不再进入摘录来源
-             // #215：display.push 返回终端屏幕快照，preview 仅做最终长度封顶，CR 覆盖与清行已由渲染器吸收
              const visible = preview(display.push(chunk))
              displayed = true
-@@ -1199,48 +1196,48 @@ export const ShellTool = Tool.define(
+@@ -649,39 +657,36 @@
                used -= item.size
                cut = true
              }
@@ -691,10 +673,6 @@ index f8daad033..cd9eb40f0 100644
 -                  Effect.andThen(
 -                    ctx.metadata({
 -                      metadata: {
--                        // `metadata.output` is the default live UI surface. Keep it
--                        // as a terminal display snapshot so CR progress and clear-line
--                        // redraws do not leak control bytes into TUI/OpenTUI, while the
--                        // raw chunks below still feed truncation and the model output.
 -                        output: visible,
 -                      },
 -                    }),
@@ -722,13 +700,8 @@ index f8daad033..cd9eb40f0 100644
 -              }
 -            }
 -
--            // #215：每个 chunk 都发出流式显示快照作为默认 live UI，而非只在完成时才更新
 -            return ctx.metadata({
 -              metadata: {
--                // Same invariant as the truncated branch above: metadata is the
--                // default display channel, not the faithful model-return channel. An
--                // empty terminal screen after a clear-line/clear-screen sequence is a
--                // valid display state, so never fall back to the raw chunk preview here.
 -                output: visible,
 -              },
 -            })
@@ -741,18 +714,6 @@ index f8daad033..cd9eb40f0 100644
 +            )
            }
  
-+          yield* Effect.addFinalizer(closeSink)
-+          const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
-+
-+          // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
-+          // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
-+          // #128：按 input.encoding 锁定或自动探测
-+          const decoder = createAutoTextDecoder({ encoding: input.encoding })
-+          // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
-+          display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
-+          displayed = false
-+          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
-+
            // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成
            const output = yield* Effect.forkScoped(
              // #126：end 时 flush decoder 尾部不完整码点
@@ -808,7 +769,7 @@ index 8271b2826..4680ff686 100644
  
      expect(toolUpdates(harness.updates).filter((item) => item.update.sessionUpdate === "tool_call")).toHaveLength(1)
      expect(toolUpdates(harness.updates).map((item) => item.update.sessionUpdate)).toEqual([
-@@ -586,23 +605,77 @@ describe("acp event routing", () => {
+@@ -586,23 +605,93 @@ describe("acp event routing", () => {
      ])
    })
  
@@ -848,8 +809,28 @@ index 8271b2826..4680ff686 100644
 +    // durable PartUpdated 在较新 live 后到达：stale version 即使 output 不同也不能让 ACP 展示回退。
 +    await harness.subscription.handle(toolUpdated(versionedRunning("ses_progress", "call_progress", "stale", 2)))
 +
++    // live 完成与 replay 失败都建立终态；迟到 v99 必须由终态标记拒绝，而不是仅靠版本比较。
++    for (const [callID, source] of [
++      ["call_progress", "live"],
++      ["call_replay_error", "replay"],
++    ] as const) {
++      const part = completedTool("ses_progress", callID)
++      await (source === "live"
++        ? harness.subscription.handle(toolUpdated(part))
++        : harness.subscription.replayMessage(assistantToolMessage({
++            ...part,
++            state: { status: "error", input: part.state.input, error: "failed", time: part.state.time },
++          })))
++      await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", callID, `late-${callID}`, 99)))
++    }
++    expect(toolUpdates(harness.updates)
++      .filter((item) => item.update.status === "completed" || item.update.status === "failed")
++      .map((item) => [item.update.toolCallId, item.update.status]))
++      .toEqual([["call_progress", "completed"], ["call_replay_error", "failed"]])
++
 +    // v1 内容一次；v2 同 hash 只发 status-only 帧（无 content）；v3 新内容；stale v2 整体拒绝。
 +    const contents = toolUpdates(harness.updates)
++      .filter((item) => item.update.status === "in_progress")
 +      .map((item) => ("content" in item.update ? item.update.content : undefined))
 +      .filter((content) => content !== undefined)
 +    expect(contents).toEqual([
@@ -883,10 +864,6 @@ index 8271b2826..4680ff686 100644
 +    ])
 +  })
 +
-+  // 完整 terminal-lifecycle 观察（terminal 后 late progress 不重开 tool_call）依赖
-+  // toolStart 的 terminal 守卫，属于 #0445 语义；0443 阶段 terminal marker 只在
-+  // runningTool 内拒绝 stale snapshot。
-+
    it("clears shell snapshot marker when a tool returns to pending", async () => {
      const harness = createHarness()
      await Effect.runPromise(harness.session.create({ id: "ses_pending", cwd: "/workspace" }))
@@ -899,8 +876,8 @@ index da0f80cee..6efc21e90 100644
      expect(EventManifest.Latest).toBe(SchemaEventManifest.Latest)
      expect(EventManifest.Durable).toBe(SchemaEventManifest.Durable)
 -    expect(EventManifest.Latest.size).toBe(88)
-+        // PartProgress 注册为 V1-only 纯广播事件后 manifest 集合 +1。
-+    expect(EventManifest.Latest.size).toBe(95)
++    // PartProgress 注册为 V1-only 纯广播事件后 manifest 集合 +1。
++    expect(EventManifest.Latest.size).toBe(99)
      expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
      expect(EventManifest.Latest.get("todo.updated")).toBe(Todo.Event.Updated)
      expect(EventManifest.Latest.has("ide.installed")).toBe(false)
@@ -1050,7 +1027,7 @@ index 714861b5a..e0cc78e4b 100644
  import { EventV2Bridge } from "@/event-v2-bridge"
 +import { GlobalBus } from "@/bus/global"
  import { expect } from "bun:test"
- import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+ import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
  import { NodeFileSystem } from "@effect/platform-node"
  import { Logging } from "@opencode-ai/core/observability/logging"
  import { Logger, References } from "effect"
@@ -1132,9 +1109,9 @@ index 87dfa3ab6..381b7c609 100644
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { InstanceStore } from "@/project/instance-store"
  
-@@ -235,2 +236,112 @@ describe("tool.shell", () => {
-   60_000)
+@@ -239,2 +239,112 @@
  
+ describe("tool.shell", () => {
 +  it.live(
 +    "coalesces shell progress without changing final output",
 +    () =>
@@ -1297,12 +1274,12 @@ index 5694afdd3..9d1b24bcd 100644
    test("owns the complete public event surface", () => {
 -    expect(EventManifest.ServerDefinitions.length).toBe(55)
 -    expect(EventManifest.Definitions.length).toBe(85)
-+    expect(EventManifest.ServerDefinitions.length).toBe(60)
-+    expect(EventManifest.Definitions.length).toBe(95)
++    expect(EventManifest.ServerDefinitions.length).toBe(68)
++    expect(EventManifest.Definitions.length).toBe(99)
      expect(SessionV1.Event.Definitions).toEqual([
        SessionV1.Event.Created,
        SessionV1.Event.Updated,
-@@ -20,11 +20,12 @@ describe("public event manifest", () => {
+@@ -20,11 +20,15 @@ describe("public event manifest", () => {
        SessionV1.Event.PartUpdated,
        SessionV1.Event.PartRemoved,
        SessionV1.Event.PartDelta,
@@ -1312,8 +1289,11 @@ index 5694afdd3..9d1b24bcd 100644
      ])
 -    expect(EventManifest.Latest.size).toBe(85)
 -    expect(EventManifest.Durable.size).toBe(32)
-+    expect(EventManifest.Latest.size).toBe(95)
-+    expect(EventManifest.Durable.size).toBe(35)
++    expect(EventManifest.Latest.size).toBe(99)
++    expect(EventManifest.Durable.size).toBe(39)
++    // V1 展示事件只扩展兼容通道，不能进入当前协议或变成逐 tick 的持久事件。
++    expect(EventManifest.ServerDefinitions.some((event) => event.type === "message.part.progress")).toBe(false)
++    expect(EventManifest.Durable.has("message.part.progress")).toBe(false)
    })
  
    test("uses canonical definitions for current public events", () => {
@@ -1322,7 +1302,7 @@ index 5694afdd3..9d1b24bcd 100644
      expect(EventManifest.Latest.has("ide.installed")).toBe(false)
      expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
 -    expect(EventManifest.Definitions.slice(40, 43)).toEqual([
-+    expect(EventManifest.Definitions.slice(42, 46)).toEqual([
++    expect(EventManifest.Definitions.slice(47, 51)).toEqual([
        SessionV1.Event.PartDelta,
 +      SessionV1.Event.PartProgress,
        SessionV1.Event.Diff,
@@ -1331,19 +1311,18 @@ index 5694afdd3..9d1b24bcd 100644
      expect(EventManifest.Durable.has("session.next.step.ended.1")).toBe(false)
      expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
-index 1df38ee00..6b4276348 100644
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -15,6 +15,7 @@ export type Event =
-   | EventMessageUpdated
-   | EventMessageRemoved
-   | EventMessagePartUpdated
+@@ -53,6 +53,7 @@ export type Event =
+   | EventSessionNextRevertCleared
+   | EventSessionNextRevertCommitted
+   | EventMessagePartDelta
 +  | EventMessagePartProgress
-   | EventMessagePartRemoved
-   | EventSessionNextAgentSwitched
-   | EventSessionNextModelSwitched
-@@ -815,6 +816,15 @@ export type GlobalEvent = {
-           time: number
+   | EventSessionDiff
+   | EventSessionError
+   | EventInstallationUpdated
+@@ -1370,6 +1371,15 @@ export type GlobalEvent = {
+           delta: string
          }
        }
 +    | {
@@ -1357,13 +1336,48 @@ index 1df38ee00..6b4276348 100644
 +      }
      | {
          id: string
-         type: "message.part.removed"
-@@ -6259,6 +6269,18 @@ export type EventMessagePartUpdated = {
+         type: "session.diff"
+@@ -2030,1 +2040,1 @@
+-     * Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.
++     * Timeout in milliseconds from request dispatch to the first streamed SSE chunk and between subsequent chunks. Each received chunk resets the window. Default is 180000 (3 minutes). Set to false to disable timeout.
+@@ -3230,6 +3240,7 @@ export type V2Event =
+   | SessionNextRevertCleared
+   | SessionNextRevertCommitted
+   | MessagePartDelta
++  | MessagePartProgress
+   | SessionDiff
+   | SessionError
+   | InstallationUpdated
+@@ -5948,6 +5959,25 @@ export type MessagePartDelta = {
    }
  }
  
-+// 进度快照与 PartUpdated 同构，但由发布端 1s 节流且不落盘；
-+// 消费端必须与 PartUpdated 共享同一 merge/terminal 规则。
++export type MessagePartProgress = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "message.part.progress"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++    part: ToolPart
++    time: number
++  }
++}
++
+ export type SessionDiff = {
+   id: string
+   metadata?: {
+@@ -7485,6 +7515,16 @@ export type EventMessagePartDelta = {
+   }
+ }
+ 
 +export type EventMessagePartProgress = {
 +  id: string
 +  type: "message.part.progress"
@@ -1374,9 +1388,183 @@ index 1df38ee00..6b4276348 100644
 +  }
 +}
 +
- export type EventMessagePartRemoved = {
+ export type EventSessionDiff = {
    id: string
-   type: "message.part.removed"
+   type: "session.diff"
+diff --git a/packages/sdk/openapi.json b/packages/sdk/openapi.json
+--- a/packages/sdk/openapi.json
++++ b/packages/sdk/openapi.json
+@@ -17325,6 +17325,9 @@
+           {
+             "$ref": "#/components/schemas/EventMessagePartDelta"
+           },
++          {
++            "$ref": "#/components/schemas/EventMessagePartProgress"
++          },
+           {
+             "$ref": "#/components/schemas/EventSessionDiff"
+           },
+@@ -21779,6 +21782,39 @@
+                 "required": ["id", "type", "properties"],
+                 "additionalProperties": false
+               },
++              {
++                "type": "object",
++                "properties": {
++                  "id": {
++                    "type": "string",
++                    "pattern": "^evt_"
++                  },
++                  "type": {
++                    "type": "string",
++                    "enum": ["message.part.progress"]
++                  },
++                  "properties": {
++                    "type": "object",
++                    "properties": {
++                      "sessionID": {
++                        "type": "string",
++                        "pattern": "^ses"
++                      },
++                      "part": {
++                        "$ref": "#/components/schemas/ToolPart"
++                      },
++                      "time": {
++                        "type": "integer",
++                        "minimum": 0
++                      }
++                    },
++                    "required": ["sessionID", "part", "time"],
++                    "additionalProperties": false
++                  }
++                },
++                "required": ["id", "type", "properties"],
++                "additionalProperties": false
++              },
+               {
+                 "type": "object",
+                 "properties": {
+@@ -23931,7 +23967,7 @@
+                     "enum": [false]
+                   }
+                 ],
+-                "description": "Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout."
++                "description": "Timeout in milliseconds from request dispatch to the first streamed SSE chunk and between subsequent chunks. Each received chunk resets the window. Default is 180000 (3 minutes). Set to false to disable timeout."
+               }
+             },
+             "additionalProperties": {}
+@@ -27503,6 +27539,9 @@
+           {
+             "$ref": "#/components/schemas/MessagePartDelta"
+           },
++          {
++            "$ref": "#/components/schemas/MessagePartProgress"
++          },
+           {
+             "$ref": "#/components/schemas/SessionDiff"
+           },
+@@ -35956,6 +35995,61 @@
+         "required": ["id", "type", "data"],
+         "additionalProperties": false
+       },
++      "MessagePartProgress": {
++        "type": "object",
++        "properties": {
++          "id": {
++            "type": "string",
++            "pattern": "^evt_"
++          },
++          "metadata": {
++            "type": "object"
++          },
++          "type": {
++            "type": "string",
++            "enum": ["message.part.progress"]
++          },
++          "durable": {
++            "type": "object",
++            "properties": {
++              "aggregateID": {
++                "type": "string"
++              },
++              "seq": {
++                "type": "integer"
++              },
++              "version": {
++                "type": "integer"
++              }
++            },
++            "required": ["aggregateID", "seq", "version"],
++            "additionalProperties": false
++          },
++          "location": {
++            "$ref": "#/components/schemas/LocationRef"
++          },
++          "data": {
++            "type": "object",
++            "properties": {
++              "sessionID": {
++                "type": "string",
++                "pattern": "^ses"
++              },
++              "part": {
++                "$ref": "#/components/schemas/ToolPart"
++              },
++              "time": {
++                "type": "integer",
++                "minimum": 0
++              }
++            },
++            "required": ["sessionID", "part", "time"],
++            "additionalProperties": false
++          }
++        },
++        "required": ["id", "type", "data"],
++        "additionalProperties": false
++      },
+       "SessionDiff": {
+         "type": "object",
+         "properties": {
+@@ -40516,6 +40610,39 @@
+         "required": ["id", "type", "properties"],
+         "additionalProperties": false
+       },
++      "EventMessagePartProgress": {
++        "type": "object",
++        "properties": {
++          "id": {
++            "type": "string",
++            "pattern": "^evt_"
++          },
++          "type": {
++            "type": "string",
++            "enum": ["message.part.progress"]
++          },
++          "properties": {
++            "type": "object",
++            "properties": {
++              "sessionID": {
++                "type": "string",
++                "pattern": "^ses"
++              },
++              "part": {
++                "$ref": "#/components/schemas/ToolPart"
++              },
++              "time": {
++                "type": "integer",
++                "minimum": 0
++              }
++            },
++            "required": ["sessionID", "part", "time"],
++            "additionalProperties": false
++          }
++        },
++        "required": ["id", "type", "properties"],
++        "additionalProperties": false
++      },
+       "EventSessionDiff": {
+         "type": "object",
+         "properties": {
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 index 168c5d6d5..094a87eb7 100644
 --- a/packages/tui/src/context/sync.tsx
@@ -1440,7 +1628,7 @@ index 168c5d6d5..094a87eb7 100644
 +        // progress 与 PartUpdated 共享同一 merge owner：终端支配与 bash version
 +        // 排序在 mergeLivePart 内统一裁决，避免双通道各写各的。
 +        case "message.part.progress": {
-           // #98：隐藏 part 从 TUI store 删除
+           // #98：隐藏部件先记入 hydration，再从 store 移除。
            const part = event.properties.part
            if ((part as Record<string, unknown>).hidden) {
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx

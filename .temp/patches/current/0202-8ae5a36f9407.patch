@@ -4,13 +4,12 @@ Date: Sat, 23 May 2026 03:04:13 +0800
 Subject: [PATCH] refactor: 权限边界 precheck levels
 
 
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
 index 5c99d76..d547a46 100644
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
-@@ -2,10 +2,11 @@ import { Effect } from "effect"
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
+@@ -2,9 +2,10 @@ import { Effect } from "effect"
  import { PermissionPrecheck } from "./precheck"
- import type { SessionID } from "@/session/schema"
  
 -// #198：自动决策类型——allow/ask/deny 三态，source 追踪决策来源（precheck 或 reviewer），ask 表示 reviewer 不可用时回退到用户审批
 +// #202：自动决策类型——allow/ask/deny 三态，source 追踪决策来源（precheck 或 reviewer）
@@ -77,10 +76,10 @@ index 5c99d76..d547a46 100644
        },
      }).pipe(
        Effect.match({
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index 54a9ae2..9b9f84f 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -1,19 +1,20 @@
 -// #197：确定性预检决策类型——三态边界：allow 仅限可直接判定的只读命令，prompt 用于需人工或 reviewer 裁定的模糊命令，deny 用于可见的危险载荷
 -export type Decision =
@@ -665,13 +664,13 @@ index 54a9ae2..9b9f84f 100644
        normalized.endsWith("/id_ed25519") ||
        normalized.endsWith(".pem") ||
        normalized.endsWith(".key")
-diff --git a/packages/opencode/src/permission/reviewer/schema.ts b/packages/opencode/src/permission/reviewer/schema.ts
+diff --git a/packages/core/src/permission/reviewer/schema.ts b/packages/core/src/permission/reviewer/schema.ts
 index 8a10384..6ba79ea 100644
---- a/packages/opencode/src/permission/reviewer/schema.ts
-+++ b/packages/opencode/src/permission/reviewer/schema.ts
+--- a/packages/core/src/permission/reviewer/schema.ts
++++ b/packages/core/src/permission/reviewer/schema.ts
 @@ -1,4 +1,5 @@
  import { Schema } from "effect"
-+import { LEVELS as PRECHECK_LEVELS } from "../precheck"
++import { PermissionPrecheck } from "../precheck"
  
  // #198：风险等级——low/medium/high/critical，critical 在 invalidReviewContract 中强制 deny
  // #198：critical 表示不可逆损害——删除根文件系统、凭证外泄等，reviewer 不得放行
@@ -680,7 +679,7 @@ index 8a10384..6ba79ea 100644
  export type UserAuthorization = Schema.Schema.Type<typeof UserAuthorization>
  
 +// #202：precheck 层级 schema——safe/general/cautious/dangerous，复用 precheck 模块的 LEVELS 常量保证一致
-+export const PrecheckLevel = Schema.Literals(PRECHECK_LEVELS)
++export const PrecheckLevel = Schema.Literals(PermissionPrecheck.LEVELS)
 +export type PrecheckLevel = Schema.Schema.Type<typeof PrecheckLevel>
 +
  // #198：评估结果 schema——outcome/risk_level/user_authorization/rationale 四字段，用于 generateObject 结构化输出
@@ -706,6 +705,24 @@ index 8a10384..6ba79ea 100644
      reason: Schema.String,
    }),
  }) {}
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -365,2 +365,2 @@
+-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
+     // 危险组合不等待模型，也不会产生可被用户误批准的 pending。
+@@ -395,2 +395,2 @@
+     malformed = true
+-    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
++    expect(yield* service.ask({ ...edit, metadata: { diff: "malformed" } })).toMatchObject({ effect: "deny" })
+@@ -397,1 +397,1 @@
+-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ fallback: "user" }) })
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "user" }) })
+@@ -402,2 +402,2 @@
+-    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
+     expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
 index 348bb24..4c97382 100644
 --- a/packages/opencode/test/permission/auto.test.ts

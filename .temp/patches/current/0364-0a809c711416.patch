@@ -29,7 +29,7 @@ index 8b15632c3..22161b587 100644
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
 @@ -43,5 +43,6 @@
-     import("./migration/20260422130633_request_usage_tracking"),
+     import("./migration/20261009114905_session_request_usage"),
      import("./migration/20260723100000_normalize_global_session_path"),
      import("./migration/20260725100000_migrate_review_agent"),
 +    import("./migration/20260726100000_session_goal"),
@@ -63,7 +63,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session
  import { Session } from "@/session/session"
 +import { SessionGoal } from "@/session/goal"
  import { MessageV2 } from "@/session/message-v2"
- import { SessionRequestUsage } from "@/session/request-usage"
+ import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
  import { SessionPrompt } from "@/session/prompt"
 @@ -76,6 +77,19 @@
  export const PermissionResponsePayload = Schema.Struct({
@@ -95,7 +95,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session
  
  export const SessionApi = HttpApi.make("session")
 @@ -470,6 +486,47 @@
-           error: [HttpApiError.BadRequest, ApiNotFoundError, HttpApiError.NotFound],
+           error: [HttpApiError.BadRequest, ApiNotFoundError],
          }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.assistants", summary: "List assistant usage" })),
        )
 +      .add(
@@ -139,7 +139,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session
 +          }),
 +        ),
 +      )
- .annotateMerge(
+       .annotateMerge(
          OpenApi.annotations({
            title: "session",
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
@@ -152,7 +152,7 @@ index 23e871453..7a8b5695f 100644
  import { Session } from "@/session/session"
 +import { SessionGoal } from "@/session/goal"
  import { MessageV2 } from "@/session/message-v2"
- import { SessionRequestUsage } from "@/session/request-usage"
+ import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
  import { SessionPrompt } from "@/session/prompt"
 @@ -27,6 +28,7 @@
    CommandPayload,
@@ -171,7 +171,7 @@ index 23e871453..7a8b5695f 100644
      const events = yield* EventV2Bridge.Service
      const scope = yield* Scope.Scope
 @@ -496,6 +499,45 @@
-     return rows.map(mapAssistant)
+     return yield* usageSvc.assistants(ctx.params)
    })
  
 +  // #364：goal handler：读取当前 session 的持久化 goal
@@ -193,11 +193,11 @@ index 23e871453..7a8b5695f 100644
 +    payload: typeof GoalSetPayload.Type
 +  }) {
 +    yield* requireSession(ctx.params.sessionID)
-+    const goal = yield* goalSvc.set(ctx.params.sessionID, {
++    const goal = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.set(ctx.params.sessionID, {
 +      objective: ctx.payload.objective,
 +      status: ctx.payload.status,
 +      tokenBudget: ctx.payload.tokenBudget,
-+    }).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
++    })).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
 +    // [local-smark] GoalError→400 映射保持错误面契约：校验失败不伪装成 5xx
 +    return { goal }
 +  })
@@ -209,11 +209,11 @@ index 23e871453..7a8b5695f 100644
 +    params: { sessionID: SessionID }
 +  }) {
 +    yield* requireSession(ctx.params.sessionID)
-+    const cleared = yield* goalSvc.clear(ctx.params.sessionID)
++    const cleared = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.clear(ctx.params.sessionID))
 +    return { cleared }
 +  })
 +
-   return handlers
+     return handlers
        .handle("list", list)
        .handle("status", status)
 @@ -527,5 +565,9 @@
@@ -347,7 +347,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
                  }).pipe(
                    Effect.provideService(Plugin.Service, plugin),
                    Effect.provideService(Permission.Service, permission),
-@@ -1833,6 +1890,19 @@
+@@ -1700,7 +1757,20 @@
              }
  
              if (result === "stop") return "break" as const
@@ -365,6 +365,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 +              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
 +            }
              if (result === "compact") {
+               nearOverflowNotified = false
                // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
                // 执行 compaction，不留可重放标记给下一轮 loop
 @@ -2131,6 +2201,7 @@
@@ -575,9 +576,9 @@ index b681362e8..0fc963627 100644
    ...featureDefinitions,
    ...SessionTodo.Event.Definitions,
 +  ...SessionGoal.Event.Definitions,
- )
- 
- export const Definitions = Event.inventory(
+   // 两种运行时共用的审查观察事件属于过渡协议；旧 Asked/Replied 仍只进入兼容清单。
+   PermissionV1.Event.ReviewStarted,
+   PermissionV1.Event.ReviewCompleted,
 @@ -66,6 +68,7 @@
    ...InstallationEvent.Definitions,
    ...featureDefinitions,
@@ -656,10 +657,11 @@ index 8a4231da6..52841ca60 100644
            break
          }
          case "session.updated": {
-@@ -971,6 +1002,17 @@
+@@ -1067,7 +1098,18 @@
               sdk.client.session.diff({ sessionID }),
               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
-              sdk.client.session.status({ workspace: project.workspace.current() }),
+              sdk.client.session.status({ workspace: project.workspace.current() })
+                 .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
             ])
 +            // #364：goal fetch：非致命，失败不影响 session sync
 +            // SDK 未重新生成，使用 as any 绕过方法不存在检查
@@ -921,21 +923,22 @@ index 0000000000000000000000000000000000000000..07c2746c33b2b8662d067a3a72d8d8e0
 +    })
 +  },
 +} satisfies DatabaseMigration.Migration
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da907914eee4
 --- /dev/null
-+++ b/packages/opencode/src/session/goal.ts
-@@ -0,0 +1,311 @@
++++ b/packages/core/src/session/goal.ts
+@@ -0,0 +1,315 @@
 +import { ulid } from "ulid"
-+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-+import { Database } from "@opencode-ai/core/database/database"
-+import { SessionID } from "./schema"
-+import { SessionGoalTable } from "@opencode-ai/core/session/goal.sql"
-+import { SessionGoal as SessionGoalSchema } from "@opencode-ai/schema/session-goal"
++import { makeGlobalNode } from "../effect/app-node"
++import { Database } from "../database/database"
++import { SessionID } from "@opencode-ai/schema/session-id"
++import { SessionGoalTable } from "./goal.sql"
++import { Goal, Status, Event } from "@opencode-ai/schema/session-goal"
 +import { eq } from "drizzle-orm"
 +import { Effect, Layer, Context, Schema, Option } from "effect"
-+import { EventV2Bridge } from "@/event-v2-bridge"
++import { EventV2 } from "../event"
++import { SessionStore } from "./store"
 +
 +// #364：goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
 +// 防止超长 objective 污染上下文或触发 provider 请求体过大
@@ -943,15 +946,8 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +
 +// #364：goal 状态：只有 active 会触发自动续跑；
 +// paused/blocked/complete 均为停止态，loop 正常退出不续跑
-+// [local-smark] 状态机：active → paused/blocked（用户干预）→ active（恢复）；
-+// exhausted/complete 为终态——只有显式 set 新 objective 才能回到 active。
-+export const Status = SessionGoalSchema.Status
-+export type Status = SessionGoalSchema.Status
-+
-+export const Goal = SessionGoalSchema.Goal
-+export type Goal = SessionGoalSchema.Goal
-+
-+export const Event = SessionGoalSchema.Event
++// V1 与原生 runner 共用同一行状态，不增加第二套目标或预算状态机。
++export { Status, Goal, Event }
 +
 +export interface SetInput {
 +  // objective 缺省时仅更新 status/budget，要求已有 goal 存在
@@ -983,8 +979,9 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +const layer = Layer.effect(
 +  Service,
 +  Effect.gen(function* () {
-+    const events = yield* EventV2Bridge.Service
-+    const { db } = yield* Database.Service
++    const events = yield* EventV2.Service
++    const db = (yield* Database.Service).db
++    const sessions = yield* SessionStore.Service
 +
 +    // 从 DB row 映射为 API 层 Goal 对象；
 +    // status 从 string 强转为 Status 联合类型（DB CHECK 约束保证合法）
@@ -1009,6 +1006,17 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +        .pipe(Effect.orDie)
 +      // row 为 undefined 时返回 None，否则映射为 Goal
 +      return row ? Option.some(fromRow(row)) : Option.none()
++    })
++
++    // 目标归属取持久 Session，而非当前请求目录；两代运行时共享同一事件通路。
++    const publish = Effect.fn("SessionGoal.publish")(function* (sessionID: SessionID, goal?: Goal) {
++      const session = yield* sessions.get(sessionID)
++      if (!session) return
++      if (goal) {
++        yield* events.publish(Event.Updated, { sessionID, goal }, { location: session.location })
++        return
++      }
++      yield* events.publish(Event.Cleared, { sessionID }, { location: session.location })
 +    })
 +
 +    // set：upsert 语义。有 objective → 新建或更新 objective；
@@ -1061,7 +1069,7 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +          .get()
 +          .pipe(Effect.orDie)
 +        const goal = fromRow(row!)
-+        yield* events.publish(Event.Updated, { sessionID, goal })
++        yield* publish(sessionID, goal)
 +        return goal
 +      }
 +
@@ -1095,7 +1103,7 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +        .get()
 +        .pipe(Effect.orDie)
 +      const goal = fromRow(row!)
-+      yield* events.publish(Event.Updated, { sessionID, goal })
++      yield* publish(sessionID, goal)
 +      return goal
 +    })
 +
@@ -1114,14 +1122,12 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +        .where(eq(SessionGoalTable.session_id, sessionID))
 +        .run()
 +        .pipe(Effect.orDie)
-+      yield* events.publish(Event.Cleared, { sessionID })
++      yield* publish(sessionID)
 +      return true
 +    })
 +
 +    // 仅在 goal 为 active 时会计费，非 active 直接跳过
-+    // [local-smark] 计费累加：token/time 以增量方式写入（单 writer 串行化保证并发安全）；
-+    // tokensUsed 达到 tokenBudget 时 status 自动置 exhausted，续跑循环据此停止；
-+    // status 非 active 时调用方应跳过计费（本函数不重复校验，调用点已保证）。
++    // 预算用于展示和续跑提示，保留原语义，不自动改状态或提前结束执行。
 +    const accountUsage = Effect.fn("SessionGoal.accountUsage")(function* (
 +      sessionID: SessionID,
 +      tokenDelta: number,
@@ -1153,7 +1159,7 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +        .get()
 +        .pipe(Effect.orDie)
 +      if (updatedRow) {
-+        yield* events.publish(Event.Updated, { sessionID, goal: fromRow(updatedRow) })
++        yield* publish(sessionID, fromRow(updatedRow))
 +      }
 +    })
 +
@@ -1161,9 +1167,9 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +  }),
 +)
 +
-+// [local-smark] LayerNode 装配：deps 提供 EventV2Bridge（goal.updated 事件发布）与 Database（goal 表）；
-+// 编译期由 LayerNode.group 解析依赖，测试可用 Layer.mock(SessionGoal.Service) 替换。
-+export const node = LayerNode.make({ service: Service, layer, deps: [EventV2Bridge.node, Database.node] })
++// 存储服务按 Session ID 全局共享；目录仅在发布通知时由持久 Session 定位。
++// 两代工具及 runner 注入同一服务，V1 入口只保留导出路径。
++export const node = makeGlobalNode({ service: Service, layer, deps: [EventV2.node, Database.node, SessionStore.node] })
 +
 +export * as SessionGoal from "./goal"
 +
@@ -1238,6 +1244,13 @@ index 0000000000000000000000000000000000000000..976b7ea7e9a5c30c52bcce008c86da90
 +function escapeXml(text: string): string {
 +  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 +}
+diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/session/goal.ts
+@@ -0,0 +1,2 @@
++export * from "@opencode-ai/core/session/goal"
++export * as SessionGoal from "./goal"
 diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..fe1aab155cd48a797ae1635b08b64ffc5be18aac
@@ -1823,10 +1836,10 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
 index 3afdf03a0..1d28b547b 100644
 --- a/packages/core/src/database/schema.gen.ts
 +++ b/packages/core/src/database/schema.gen.ts
-@@ -278,6 +278,10 @@
-       yield* tx.run(`CREATE INDEX \`request_usage_assistant_session_request_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`request_id\`);`)
-       yield* tx.run(`CREATE INDEX \`request_usage_assistant_session_root_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`root_request_id\`);`)
-       yield* tx.run(`CREATE INDEX \`request_usage_assistant_session_status_updated_idx\` ON \`request_usage_assistant\` (\`session_id\`,\`status\`,\`time_updated\`);`)
+@@ -341,6 +341,10 @@
+       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
+       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
+       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
 +      // #364：session goal 表——持久化会话目标、状态与用量。
 +      // session_id 主键 → 一个 session 最多一个 current goal；FK cascade 随 session 删除清理。
 +      yield* tx.run(`CREATE TABLE \`session_goal\` (\`session_id\` text NOT NULL, \`id\` text NOT NULL, \`objective\` text NOT NULL, \`status\` text NOT NULL, \`token_budget\` integer, \`tokens_used\` integer DEFAULT 0 NOT NULL, \`time_used_seconds\` integer DEFAULT 0 NOT NULL, \`time_created\` integer NOT NULL, \`time_updated\` integer NOT NULL, CONSTRAINT \`session_goal_pk\` PRIMARY KEY(\`session_id\`), CONSTRAINT \`fk_session_goal_session_id\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE);`)
@@ -1835,6 +1848,427 @@ index 3afdf03a0..1d28b547b 100644
    },
  } satisfies Omit<DatabaseMigration.Migration, "id">
 
+diff --git a/packages/core/src/config/experimental.ts b/packages/core/src/config/experimental.ts
+--- a/packages/core/src/config/experimental.ts
++++ b/packages/core/src/config/experimental.ts
+@@ -2,6 +2,7 @@
+ 
+ import { Schema } from "effect"
+ import { Catalog } from "../catalog"
++import { NonNegativeInt } from "../schema"
+ import { Policy as PolicyV2 } from "../policy"
+ 
+ // Each core domain exports the policy actions it supports. Adding an action to
+@@ -15,4 +16,7 @@
+ 
+ export class Experimental extends Schema.Class<Experimental>("ConfigV2.Experimental")({
+   policies: Policy.pipe(Schema.Array, Schema.optional),
++  // 两代 runner 使用相同开关与自动续跑上限，默认保持关闭。
++  goals: Schema.optional(Schema.Boolean),
++  goal_max_turns: Schema.optional(NonNegativeInt),
+ }) {}
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -68,7 +68,11 @@
+     plugins: info.plugin?.map((plugin) =>
+       typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
+     ),
+-    experimental: info.experimental?.policies && { policies: info.experimental.policies },
++    experimental: info.experimental && {
++      policies: info.experimental.policies,
++      goals: info.experimental.goals,
++      goal_max_turns: info.experimental.goal_max_turns,
++    },
+     providers: providers(info.provider),
+   }
+ }
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/goal.ts
+@@ -0,0 +1,42 @@
++export * as GoalTool from "./goal"
++
++import { ToolFailure } from "@opencode-ai/llm"
++import { Effect, Layer, Schema } from "effect"
++import { Config } from "../config"
++import { makeLocationNode } from "../effect/app-node"
++import { SessionGoal } from "../session/goal"
++import { ToolRegistry } from "./registry"
++import { Tool } from "./tool"
++import { Tools } from "./tools"
++
++const layer = Layer.effectDiscard(Effect.gen(function* () {
++  const config = yield* Config.Service
++  const entries = yield* config.entries()
++  if (Config.latest(entries, "experimental")?.goals !== true) return
++  const tools = yield* Tools.Service
++  const goals = yield* SessionGoal.Service
++  yield* tools.register({
++    goal: Tool.make({
++      description: "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user.",
++      input: Schema.Struct({ status: Schema.Literals(["complete", "blocked"]) }),
++      output: SessionGoal.Goal,
++      // 原生工具直接调用共享目标服务，不通过 V1 ctx.extra 或旧执行循环。
++      execute: (input, context) => goals.set(context.sessionID, input).pipe(
++        Effect.mapError((error) => new ToolFailure({ message: error.message })),
++      ),
++      toModelOutput: ({ output }) => [{
++        type: "text",
++        text: output.status === "complete"
++          ? "Goal marked as complete. The session loop will end after this turn."
++          : "Goal marked as blocked. The session loop will end after this turn. The user can resume the goal later.",
++      }],
++    }),
++  }).pipe(Effect.orDie)
++}))
++
++// 注册归 Location，持久 Goal 仍归全局 Session-ID 存储服务。
++export const node = makeLocationNode({
++  name: "tool/goal",
++  layer,
++  deps: [Config.node, ToolRegistry.node, SessionGoal.node],
++})
+diff --git a/packages/core/src/tool/builtins.ts b/packages/core/src/tool/builtins.ts
+--- a/packages/core/src/tool/builtins.ts
++++ b/packages/core/src/tool/builtins.ts
+@@ -6,6 +6,7 @@
+ import { ApplyPatchTool } from "./apply-patch"
+ import { EditTool } from "./edit"
+ import { GlobTool } from "./glob"
++import { GoalTool } from "./goal"
+ import { GrepTool } from "./grep"
+ import { QuestionTool } from "./question"
+ import { ReadTool } from "./read"
+@@ -36,6 +37,7 @@
+     BashTool.node,
+     EditTool.node,
+     GlobTool.node,
++    GoalTool.node,
+     GrepTool.node,
+     QuestionTool.node,
+     ReadTool.node,
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -31,6 +31,7 @@
+ import { SessionCompaction } from "../compaction"
+ import { SessionEvent } from "../event"
+ import { SessionHistory } from "../history"
++import { SessionGoal } from "../goal"
+ import { SessionInput } from "../input"
+ import { SessionMessage } from "../message"
+ import { SessionInputTable } from "../sql"
+@@ -107,6 +108,7 @@
+     const tools = yield* ToolRegistry.Service
+     const models = yield* SessionRunnerModel.Service
+     const store = yield* SessionStore.Service
++    const goals = yield* SessionGoal.Service
+     const location = yield* Location.Service
+     const systemContext = yield* SystemContextRegistry.Service
+     const skillGuidance = yield* SkillGuidance.Service
+@@ -180,10 +182,14 @@
+         concurrency: "unbounded",
+       }).pipe(Effect.map(SystemContext.combine))
+ 
++    // 仅当前 drain 持有待注入目标；不新增调度器或崩溃后自动恢复。
++    type GoalContinuation = { goal?: SessionGoal.Goal; turns: number }
++
+     const runTurnAttempt = Effect.fn("SessionRunner.runTurn")(function* (
+       sessionID: SessionSchema.ID,
+       promotion: SessionInput.Delivery | undefined,
+       step: number,
++      continuation: GoalContinuation,
+       recoverOverflow?: typeof compaction.compactAfterOverflow,
+     ) {
+       const session = yield* getSession(sessionID)
+@@ -206,7 +212,22 @@
+               promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
+               promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
+             }
+-            if (promoted > 0) currentStep = 1
++            if (promoted > 0) {
++              currentStep = 1
++              continuation.goal = undefined
++            }
+           }
++          // 新用户输入优先；合成续跑保留当前步数额度，并由原历史投影持久化。
++          if (continuation.goal) {
++            const goal = yield* goals.get(session.id)
++            continuation.goal = undefined
++            if (Option.isSome(goal) && goal.value.status === "active") {
++              yield* events.publish(SessionEvent.Synthetic, {
++                sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
++                text: SessionGoal.continuationPrompt(goal.value),
++              })
++              continuation.turns++
++            }
++          }
+         })).pipe(Effect.onExit((promotionExit) => Effect.gen(function* () {
+           const promoted = yield* db.select({ id: SessionInputTable.id, seq: SessionInputTable.promoted_seq }).from(SessionInputTable)
+@@ -327,6 +348,7 @@
+       const withPublication = Semaphore.makeUnsafe(1).withPermit
+       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
+         withPublication(publisher.publish(event, outputPaths))
++      const startedAt = DateTime.toEpochMillis(yield* DateTime.now)
+       let overflowFailure: ProviderErrorEvent | undefined
+       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
+         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
+@@ -487,11 +509,21 @@
+           }
+           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
+             return yield* Effect.failCause(settled.cause)
++          if (stepSettlement && !publisher.hasProviderError()) {
++            // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
++            const tokens = stepSettlement.tokens
++            const seconds = Math.max(0, Math.floor((DateTime.toEpochMillis(yield* DateTime.now) - startedAt) / 1000))
++            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(Effect.ignore)
++          }
+           if (publisher.hasActiveAssistant() && !stepSettlement) {
+             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
+             yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))
+             // 只补消息和账本终态；raw EOF 的成功返回及原 continuation 契约保持。
+           }
+-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
++          return {
++            needsContinuation: !publisher.hasProviderError() && needsContinuation,
++            canContinueGoal: !!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown"),
++            step: currentStep,
++          }
+         }),
+       )
+@@ -500,9 +532,10 @@
+       sessionID: SessionSchema.ID,
+       promotion: SessionInput.Delivery | undefined,
+       step: number,
+-    ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
++      continuation: GoalContinuation,
++    ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly canContinueGoal: boolean; readonly step: number }, RunError>
+ 
+-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
+-      return yield* runTurnAttempt(sessionID, promotion, step).pipe(
++    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, continuation) {
++      return yield* runTurnAttempt(sessionID, promotion, step, continuation).pipe(
+         Effect.catchDefect(
+           Effect.fnUntraced(function* (defect) {
+@@ -510,15 +543,15 @@
+             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
+               return yield* Effect.die("Post-compaction provider attempt cannot recover another overflow")
+             yield* Effect.yieldNow
+-            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
++            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, continuation)
+           }),
+         ),
+       )
+     })
+ 
+-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
+-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow).pipe(
++    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, continuation) {
++      return yield* runTurnAttempt(sessionID, promotion, step, continuation, compaction.compactAfterOverflow).pipe(
+         Effect.catchDefect(
+           Effect.fnUntraced(function* (defect) {
+             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
+             yield* Effect.yieldNow
+@@ -525,7 +559,7 @@
+             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
+-              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
+-            return yield* runTurn(sessionID, undefined, defect.transition.step)
++              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, continuation)
++            return yield* runTurn(sessionID, undefined, defect.transition.step, continuation)
+           }),
+         ),
+       )
+     })
+@@ -539,15 +572,31 @@
+       if (!input.force && !hasSteer && !hasQueue) return
+       yield* failInterruptedTools(input.sessionID)
+       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
++      const continuation: GoalContinuation = { turns: 0 }
+       let shouldRun = input.force || hasSteer || hasQueue
+       while (shouldRun) {
+         let needsContinuation = true
+         let step = 1
+         while (needsContinuation) {
+-          const result = yield* runTurn(input.sessionID, promotion, step)
++          const result = yield* runTurn(input.sessionID, promotion, step, continuation)
+           needsContinuation = result.needsContinuation
+           step = result.step + 1
+           promotion = "steer"
+           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
++          if (!needsContinuation && result.canContinueGoal && !(yield* SessionInput.hasPending(db, input.sessionID, "queue"))) {
++            const settings = Config.latest(configuration, "experimental")
++            const session = yield* getSession(input.sessionID)
++            const agent = yield* agents.select(session.agent)
++            if (settings?.goals === true && continuation.turns < (settings.goal_max_turns ?? 10) &&
++              !session.parentID && agent.id !== "decide" && result.step < (agent.info?.steps ?? Infinity)) {
++              const goal = yield* goals.get(input.sessionID)
++              if (Option.isSome(goal) && goal.value.status === "active") {
++                continuation.goal = goal.value
++                needsContinuation = true
++                // 下个安全边界也检查 queue，避免候选 Goal 抢占刚到达的用户输入。
++                promotion = "queue"
++              }
++            }
++          }
+         }
+         shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")
+@@ -571,6 +622,7 @@
+     ToolRegistry.node,
+     SessionRunnerModel.node,
+     SessionStore.node,
++    SessionGoal.node,
+     Location.node,
+     SystemContextRegistry.node,
+     SkillGuidance.node,
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -29,6 +29,8 @@
+ import { Snapshot } from "@opencode-ai/core/snapshot"
+ import { ContextSnapshotDecodeError } from "@opencode-ai/core/session/error"
+ import { SessionEvent } from "@opencode-ai/core/session/event"
++import { SessionGoal } from "@opencode-ai/core/session/goal"
++import { GoalTool } from "@opencode-ai/core/tool/goal"
+ import { SessionInput } from "@opencode-ai/core/session/input"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
+ import { Prompt } from "@opencode-ai/core/session/prompt"
+@@ -48,6 +50,7 @@
+ import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
+ import { AgentV2 } from "@opencode-ai/core/agent"
+ import { Config } from "@opencode-ai/core/config"
++import { ConfigExperimental } from "@opencode-ai/core/config/experimental"
+ import { ConfigCompaction } from "@opencode-ai/core/config/compaction"
+ import { Tool } from "@opencode-ai/core/tool/tool"
+ import {
+@@ -64,6 +67,6 @@
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { Location } from "@opencode-ai/core/location"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
++import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Stream } from "effect"
+ import { TestClock } from "effect/testing"
+ import { asc, eq } from "drizzle-orm"
+@@ -257,7 +260,7 @@
+       ]),
+   }),
+ )
+-const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
++const runnerLayer = (configuration = config) => AppNodeBuilder.build(SessionRunnerLLM.node, [
+   [Snapshot.node, Snapshot.noopLayer],
+   [LayerNodePlatform.llmClient, client],
+   [SessionRunnerModel.node, models],
+@@ -267,7 +270,7 @@
+   [ReferenceGuidance.node, referenceGuidance],
+   [PermissionV2.node, permission],
+-  [Config.node, config],
++  [Config.node, configuration],
+ ])
+-const execution = Layer.effect(
++const execution = (configuration = config) => Layer.effect(
+   SessionExecution.Service,
+   Effect.gen(function* () {
+@@ -282,9 +285,9 @@
+       interrupt: coordinator.interrupt,
+     })
+   }),
+-).pipe(Layer.provide(runnerLayer))
+-const it = testEffect(
++).pipe(Layer.provide(runnerLayer(configuration)))
++const testLayer = (configuration = config) =>
+   AppNodeBuilder.build(
+     LayerNode.group([
+       Database.node,
+       EventV2.node,
+@@ -296,6 +299,8 @@
+       AgentV2.node,
+       ToolRegistry.node,
+       ToolRegistry.toolsNode,
++      SessionGoal.node,
++      GoalTool.node,
+       echoNode,
+       Catalog.node,
+       SessionRunnerModel.node,
+@@ -318,10 +323,10 @@
+       [ReferenceGuidance.node, referenceGuidance],
+       [Snapshot.node, Snapshot.noopLayer],
+-      [SessionExecution.node, execution],
+-      [Config.node, config],
++      [SessionExecution.node, execution(configuration)],
++      [Config.node, configuration],
+     ],
+-  ),
+-)
++  )
++const it = testEffect(testLayer())
+ const sessionID = SessionV2.ID.make("ses_runner_test")
+ const otherSessionID = SessionV2.ID.make("ses_runner_other")
+ 
+@@ -651,6 +656,63 @@
+     ])
+   })
+ 
++const goalConfig = Layer.succeed(Config.Service, Config.Service.of({
++  entries: () => Effect.succeed([new Config.Document({
++    type: "document",
++    info: new Config.Info({ experimental: new ConfigExperimental.Experimental({ goals: true, goal_max_turns: 2 }) }),
++  })]),
++}))
++const goalTests = testEffect(testLayer(goalConfig))
++
++goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
++  Effect.gen(function* () {
++    yield* setup
++    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
++    const session = yield* SessionV2.Service
++    const goals = yield* SessionGoal.Service
++    yield* goals.set(sessionID, { objective: "Finish the native task", tokenBudget: 1 })
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queued input" }), delivery: "queue", resume: false })
++    const normal = [
++      LLMEvent.stepStart({ index: 0 }),
++      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { inputTokens: 2, nonCachedInputTokens: 2, outputTokens: 1 } }),
++      LLMEvent.finish({ reason: "stop" }),
++    ]
++    responses = [normal, normal, normal, normal]
++    requests.length = 0
++    yield* session.resume(sessionID)
++    // 已排队输入先提升；随后恰好两次合成续跑，预算仅记录，不提前截断。
++    expect(requests).toHaveLength(4)
++    expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
++    expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
++    expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
++    const active = yield* goals.get(sessionID)
++    expect(Option.getOrThrow(active).status).toBe("active")
++    expect(Option.getOrThrow(active).tokensUsed).toBe(12)
++
++    responses = [[
++      LLMEvent.stepStart({ index: 0 }),
++      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { status: "complete" } }),
++      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++      LLMEvent.finish({ reason: "tool-calls" }),
++    ], normal]
++    requests.length = 0
++    yield* session.resume(sessionID)
++    // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
++    expect(requests).toHaveLength(2)
++    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("complete")
++
++    yield* goals.set(sessionID, { status: "active" })
++    responses = undefined
++    response = []
++    requests.length = 0
++    yield* session.resume(sessionID)
++    // 无 step-finish 的 EOF 不能被当作正常完成后再自动续跑。
++    expect(requests).toHaveLength(1)
++    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
++  }),
++)
++
+ describe("SessionRunnerLLM", () => {
+   it.effect("bounds active provider streams by total timeout and respects explicit timeout or false", () =>
+     Effect.gen(function* () {
 diff --git a/packages/opencode/test/session/tools.test.ts b/packages/opencode/test/session/tools.test.ts
 --- a/packages/opencode/test/session/tools.test.ts
 +++ b/packages/opencode/test/session/tools.test.ts

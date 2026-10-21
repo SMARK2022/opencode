@@ -862,16 +862,13 @@ new file mode 100644
 diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
 --- a/packages/core/src/cross-spawn-spawner.ts
 +++ b/packages/core/src/cross-spawn-spawner.ts
-@@ -245,15 +245,29 @@ export const make = Effect.gen(function* () {
+@@ -245,15 +245,26 @@ export const make = Effect.gen(function* () {
      out: ChildProcess.StdoutConfig,
      err: ChildProcess.StderrConfig,
    ) => {
 -    let stdout = proc.stdout
-+    // 急切缓冲（写入与订阅时序解耦）：spawn 建柄后立即把主 stdout/stderr pipe 进
-+    // PassThrough（与 extra-fd 输出同款模式）。惰性 fromReadable 下快退子进程
-+    // 在订阅前写入并退出会丢管道数据（macOS CI shell basic 红 + Windows 探针
-+    // 复现）；立即 pipe 让读取端自 spawn 时刻持有数据，订阅延迟只推迟消费
-+    // 时刻、不再影响输出保真。
++    // 与 extra-fd 相同，建柄时立即接入 PassThrough，保留快退写手在订阅前的输出字节。
++    // tap 仍受背压约束；不承诺 chunk 划分、跨 fd 全序或大输出未消费仍能等待退出。
 +    const tapOutput = (node: NodeChildProcess.ChildProcess["stdout"]) => {
 +      if (!node) return
 +      const tap = new PassThrough()
@@ -900,32 +897,27 @@ diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-
 diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/core/test/effect/cross-spawn-spawner.test.ts
 --- a/packages/core/test/effect/cross-spawn-spawner.test.ts
 +++ b/packages/core/test/effect/cross-spawn-spawner.test.ts
-@@ -198,7 +198,9 @@ describe("cross-spawn spawner", () => {
-     fx.effect(
-       "captures stdout via .all when no stderr",
-       Effect.gen(function* () {
--        const handle = yield* ChildProcess.make("echo", ["hello from stdout"])
-+        // #590：js() 写手替代 echo：Windows 无 echo.exe，cross-spawn 回退 cmd 包装会对
-+        // 参数加引号，输出含字面引号使断言平台分叉；node 写 stdout 字节确定。
-+        const handle = yield* js('process.stdout.write("hello from stdout")')
-         const all = yield* decodeByteStream(handle.all)
-         expect(all).toBe("hello from stdout")
-       }),
-@@ -214,6 +216,23 @@ describe("cross-spawn spawner", () => {
+@@ -215,6 +215,29 @@ describe("cross-spawn spawner", () => {
      )
    })
  
 +  describe("output retention across subscription timing", () => {
-+    // #590 INV-01：快退写手 + exit 后订阅是「写入↔订阅」窗口的最对抗性排序；
-+    // 惰性订阅下该形态实测确定性丢失输出，急切缓冲后必须完整保留。
-+    // fx.live（实时钟）+ 显式 30s 预算：packages/core 裸跑无 canonical --timeout。
++    // 只运行百字节级自然退出写手，先观察退出再消费，两条 fd 分别验证首尾空白与 CR/LF。
++    // 局部收集原始字节，不让现有 trim 解码 helper 掩盖输出损失，也不放大全量输出背压主张。
 +    fx.live(
-+      "retains fast-exit stdout when subscription happens after exit",
++      "retains fast-exit stdout and stderr bytes when subscription happens after exit",
 +      Effect.gen(function* () {
 +        for (let attempt = 0; attempt < 10; attempt++) {
-+          const handle = yield* js(`process.stdout.write('instant-${attempt}')`)
-+          yield* handle.exitCode
-+          expect(yield* decodeByteStream(handle.stdout)).toBe(`instant-${attempt}`)
++          const stdout = ` \r\ninstant-${attempt} 中\t\nend \r`
++          const stderr = `\t err-${attempt}\r\n `
++          const handle = yield* ChildProcess.make(process.execPath, ["-e",
++            `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)})`,
++          ])
++          expect(yield* handle.exitCode).toBe(ChildProcessSpawner.ExitCode(0))
++          const out = yield* Stream.runCollect(handle.stdout)
++          const err = yield* Stream.runCollect(handle.stderr)
++          expect(Buffer.concat(out)).toEqual(Buffer.from(stdout))
++          expect(Buffer.concat(err)).toEqual(Buffer.from(stderr))
 +        }
 +      }),
 +      30_000,
@@ -939,14 +931,12 @@ diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/co
 diff --git a/packages/opencode/test/lib/effect.ts b/packages/opencode/test/lib/effect.ts
 --- a/packages/opencode/test/lib/effect.ts
 +++ b/packages/opencode/test/lib/effect.ts
-@@ -33,6 +33,12 @@ function instanceArgs<E, R>(
+@@ -33,6 +33,10 @@ function instanceArgs<E, R>(
  
  const body = <A, E, R>(value: Body<A, E, R>) => Effect.suspend(() => (typeof value === "function" ? value() : value))
  
-+// 集成级（真实 fs/git/HTTP/socket，live/instance 注册）测试的默认 bun 预算，
-+// 与 canonical runner（package.json `bun test --timeout 30000`）一字不差：
-+// 超时契约内化到注册 seam，裸 bun test / IDE 调用不再落回 5s 默认值，
-+// 把"主机慢"误判为行为失败。显式传入的 number | TestOptions 优先于该默认。
++// live/instance 的裸调用沿 canonical runner 使用 30s，避免 IDE 默认为 5s 产生负载假失败。
++// 显式 number/TestOptions 整体优先；不重定义 TestClock、skip 或 shared memoMap 的执行方式。
 +const defaultLiveTimeout = { timeout: 30_000 } as const
 +
  type Runner = <A, E, R, E2>(value: Body<A, E, R | Scope.Scope>, layer: Layer.Layer<R, E2>) => Promise<A>
@@ -987,22 +977,18 @@ diff --git a/packages/opencode/test/lib/effect.ts b/packages/opencode/test/lib/e
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -124,6 +124,14 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
+@@ -124,6 +124,10 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
  // #315：短会话用例在 Windows CI 上冷启动开销大；win32 放宽到 15s，其他平台保持 3s 快速反馈。
  const shortSessionTimeout = process.platform === "win32" ? 15_000 : 3_000
  
-+// #590：负载敏感集成用例的平台化内层预算（先例：shortSessionTimeout）：
-+// 本机退化态实测 pwsh 冷启 + fsmonitor 后台占用使固定 5s 轮询预算顶格（对照实验
-+// 证明与代码版本无关）；预算只放宽等待时长，不改变任何断言，且必须严格小于
-+// 所属用例的注册硬顶（win32 12s<30s / 其余 5s<15s，两平台均成立）。
-+// heavyLoopBudget/snapshotMatrixBudget 裁记：目标对应用例注册已是 30_000/120_000，
-+// 均不低于源预算（win32 30s/90s），无需重设。
++// 审查取消的内层观察保留平台余量，所属用例显式设置 Windows 30s / 其他平台 15s 硬顶。
++// 已有队列 30s 与 Snapshot 120s 不收紧，单次等待小于硬顶也不代表顺序等待总量必然满足。
 +const reviewPollBudget = process.platform === "win32" ? "12 seconds" : "5 seconds"
 +
  function shortShellDelayCommand() {
    // Windows 的默认 shell 会把 `sleep 0.2` 解析成 PowerShell 命令，CI 冷启动时足以吃掉 3s 用例预算。
    // 这里使用测试进程已依赖的 PATH 内 `bun` 执行短延迟脚本，避免 PowerShell 对引号路径需要 `&` 的差异。
-@@ -2599,6 +2607,8 @@ it.instance(
+@@ -2962,6 +2966,8 @@ it.instance(
            if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
          }),
          "shell auto review never started",
@@ -1011,7 +997,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        )
        const reviewID = reviewing.state.status === "running" ? reviewing.state.metadata?.autoReview?.reviewID : undefined
        expect(typeof reviewID).toBe("string")
-@@ -2608,6 +2618,7 @@ it.instance(
+@@ -2971,6 +2977,7 @@ it.instance(
            return (yield* sessions.children(chat.id)).find((item) => item.agent === "permission-reviewer")
          }),
          "reviewer child session never started",
@@ -1019,22 +1005,22 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        )
        yield* pollWithTimeout(
          Effect.gen(function* () {
-@@ -2617,12 +2628,13 @@ it.instance(
+@@ -2980,11 +2987,12 @@ it.instance(
            )
          }),
          "reviewer child assistant never started",
 +        reviewPollBudget,
        )
  
-       // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
+-      // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
++      // 取消完成后才释放 reviewer 回复，验证迟到决定不能落盘。
        yield* prompt.cancel(chat.id)
        gate.resolve()
--      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds")
-+      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", reviewPollBudget)
-       expect(Exit.isSuccess(exit)).toBe(true)
+-      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
++      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", reviewPollBudget).pipe(Effect.ignore)
  
        const shell = yield* pollWithTimeout(
-@@ -2633,6 +2645,7 @@ it.instance(
+@@ -2995,6 +3003,7 @@ it.instance(
            return part?.state.status === "error" ? part : undefined
          }),
          "shell tool never recorded the review cancellation",
@@ -1042,7 +1028,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        )
        expect(shell.state.status).toBe("error")
        if (shell.state.status !== "error") return
-@@ -2654,6 +2667,7 @@ it.instance(
+@@ -3016,6 +3025,7 @@ it.instance(
            return assistants.every((msg) => msg.info.time.completed) ? messages : undefined
          }),
          "reviewer child assistant remained active after cancellation",
@@ -1050,6 +1036,16 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        )
        const reviewerParts = reviewerMessages.flatMap((msg) => msg.parts)
        // #216：reviewer 的 permission_review_decision 不得在 cancel 后完成——中止须阻止延迟到达的审查决策
+@@ -3035,7 +3045,8 @@ it.instance(
+     }),
+   { git: true },
+-  15_000,
++  // 显式注册预算不会被默认 live/instance 预算覆盖；仅为本取消用例保留平台余量。
++  process.platform === "win32" ? 30_000 : 15_000,
+ )
+ 
+ it.instance("failed subtask preserves metadata on error tool state", () =>
+   Effect.gen(function* () {
 
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts

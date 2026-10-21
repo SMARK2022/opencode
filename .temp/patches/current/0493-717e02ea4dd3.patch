@@ -81,7 +81,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd/db.ts
 --- a/packages/opencode/src/cli/cmd/db.ts
 +++ b/packages/opencode/src/cli/cmd/db.ts
-@@ -4,6 +4,302 @@ import { Database } from "@opencode-ai/core/database/database"
+@@ -4,6 +4,306 @@ import { Database } from "@opencode-ai/core/database/database"
  import { Effect } from "effect"
  import { sql } from "drizzle-orm"
  import { effectCmd } from "../effect-cmd"
@@ -165,16 +165,21 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +  console.log(JSON.stringify(value, null, 2))
 +}
 +
-+async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.PreparedMaintenance) {
++function maintain(database: Database.Interface, prepared: ColdStorage.PreparedMaintenance, runtime: ColdStorage.MaintenanceRuntime = { checkpoint: async () => {} }) {
++  // CLI 与 worker 共用 cold 算法，SQL 批次预约同一连接，文件 lease/checkpoint 不占用连接。
++  return ColdStorage.maintain(database.sync, prepared, { ...runtime, run: (body) => Effect.runPromise(Database.withSync(database, body)) })
++}
++
++async function runOffline(db: Database.Interface, prepared: ColdStorage.PreparedMaintenance) {
 +  if (prepared.type === "immediate") {
-+    if (prepared.request.operation !== "vacuum") return ColdStorage.maintain(db, prepared)
++    if (prepared.request.operation !== "vacuum") return maintain(db, prepared)
 +    const existing = await ServerLock.findNonterminalMaintenanceTask()
 +    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
 +    // vacuum 没有可恢复 cursor，但仍持有同一 maintenance lease，防止与 daemon/offline task 并行写入。
 +    // pseudo taskID 只标识 lease owner，不创建会误导 status/resume 的持久 task record。
 +    const lease = await ServerLock.acquireMaintenanceLease({ taskID: `vacuum_${randomUUID()}`, dbPath: Database.path() })
 +    try {
-+      return await ColdStorage.maintain(db, prepared, { lease, checkpoint: async () => {} })
++      return await maintain(db, prepared, { lease, checkpoint: async () => {} })
 +    } finally {
 +      await lease.release()
 +    }
@@ -186,7 +191,7 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +  const lease = await ServerLock.acquireMaintenanceLease(prepared.task)
 +  try {
 +    await ServerLock.writeMaintenanceTask(prepared.task)
-+    return await ColdStorage.maintain(db, prepared, {
++    return await maintain(db, prepared, {
 +      task: prepared.task,
 +      lease,
 +      checkpoint: (task) => ServerLock.writeMaintenanceTask(task),
@@ -198,7 +203,7 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +
 +// 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
 +// 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
-+async function executeMaintenance(db: ColdStorage.TxOrDb, request: ColdStorage.MaintenanceRequest) {
++async function executeMaintenance(db: Database.Interface, request: ColdStorage.MaintenanceRequest) {
 +  const lock = await liveDaemon()
 +  if (lock) {
 +    const body = await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
@@ -215,7 +220,7 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +
 +// resume 从持久 record 恢复 operation/args/cursor，用户不能借同一 taskID 改写 scope 或 batchSize。
 +// live daemon 负责 active lifecycle；offline 域则获取同一文件 lease 并同步执行到 terminal checkpoint。
-+async function executeResume(db: ColdStorage.TxOrDb, taskID: string) {
++async function executeResume(db: Database.Interface, taskID: string) {
 +  const lock = await liveDaemon()
 +  if (lock) {
 +    printMaintenance(
@@ -235,7 +240,7 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +  if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Task is not resumable" })
 +  const lease = await ServerLock.acquireMaintenanceLease(task)
 +  try {
-+    const result = await ColdStorage.maintain(db, prepared, {
++    const result = await maintain(db, prepared, {
 +      task,
 +      lease,
 +      checkpoint: (next) => ServerLock.writeMaintenanceTask(next),
@@ -247,9 +252,8 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +}
 +
 +const maintenanceDB = Effect.fn("Cli.db.maintenanceDB")(function* () {
-+  // 维护命令直接使用与运行时相同的原生连接（sync drizzle），不建立第二数据源。
-+  const { sync } = yield* Database.Service
-+  return sync as ColdStorage.TxOrDb
++  // 显式传递所属 Layer；并存的数据库实例不会通过最后一次初始化互相覆盖。
++  return yield* Database.Service
 +})
 +
 +// compress 默认只改变满足 30 天或 compact boundary 的白名单字段；--session 只是缩小 owner scope。
@@ -324,7 +328,7 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +        )
 +        return
 +      }
-+      printMaintenance(ColdStorage.status(db))
++      printMaintenance(await Effect.runPromise(Database.withSync(db, ColdStorage.status)))
 +    })
 +  }),
 +})
@@ -411,14 +415,14 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
  import path from "path"
 -import { rename, rm } from "fs/promises"
 +import { mkdir, readdir, rename, rm } from "fs/promises"
- import { randomUUID } from "crypto"
+ import { createHash, randomUUID } from "crypto"
 +import { readFileSync } from "fs"
 +// #493：maintenance task record 由 core 的 runtime parser 白名单重建，lease 与 checkpoint 共享合同。
 +import { parseMaintenanceTask, type MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
  import { Global } from "@opencode-ai/core/global"
  import { InstallationChannel } from "@opencode-ai/core/installation/version"
  import { Database } from "@opencode-ai/core/database/database"
-@@ -22,6 +25,10 @@ export type ServerLock = {
+@@ -39,5 +42,9 @@ export type ServerLock = {
  // 只服务 CLI/TUI 的 stop/status，不进入公共 HTTP API、OpenAPI 或 SDK
  export const CONTROL_SHUTDOWN_PATH = "/shutdown"
  export const CONTROL_STATUS_PATH = "/status"
@@ -426,10 +430,9 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 +export const CONTROL_MAINTENANCE_PATH = "/maintenance"
 +export const CONTROL_MAINTENANCE_STATUS_PATH = "/maintenance/status"
 +export const CONTROL_MAINTENANCE_RESUME_PATH = "/maintenance/resume"
- // #259：header 名是 CLI 与 daemon 两侧的契约常量——集中定义避免字符串漂移
  export const CONTROL_TOKEN_HEADER = "x-opencode-daemon-token"
  
-@@ -32,6 +39,21 @@ export class ExistingLiveServerError extends Error {
+@@ -48,6 +55,21 @@ export class ExistingLiveServerError extends Error {
    }
  }
  
@@ -448,7 +451,7 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 +  }
 +}
 +
- // 可覆盖以用于测试；undefined 表示使用默认路径
+ // 测试覆盖只影响发现文件；不改写 Global 路径或打开临时数据库连接。
  let _lockPath: string | undefined
  export function _setLockPath(p: string | undefined) {
 @@ -124,4 +146,270 @@ export async function ping(port: number, init?: Pick<RequestInit, "headers">) {
@@ -726,16 +729,16 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -13,6 +13,8 @@ import { Effect } from "effect"
+@@ -9,6 +9,8 @@ import { Effect } from "effect"
  import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
  import { Database } from "@opencode-ai/core/database/database"
  import { ServerLock } from "@/cli/tui/server-lock"
 +// #493：daemon maintenance 全部 SQL 位于 core ColdStorage；worker 只装配生命周期。
 +import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
- import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
+ import { EventClients } from "@opencode-ai/server/event-clients"
  import { SessionActivity } from "@/session/activity"
- import { DisposedReason, Event as ServerEvent } from "@/server/event"
-@@ -27,6 +29,23 @@ let onUncaughtException: (error: Error) => void = (_error: Error) => {}
+ import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
+@@ -25,6 +27,23 @@ let onUncaughtException: (error: Error) => void = (_error: Error) => {}
  process.on("unhandledRejection", onUnhandledRejection)
  process.on("uncaughtException", onUncaughtException)
  
@@ -756,11 +759,11 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +  return { status: 500, message: error instanceof Error ? error.message : String(error) }
 +}
 +
- // 守护进程模式：由 index.ts 旁路启动
- // worker 角色：仅 daemon 生命周期（#165 禁用 RPC-thread）
+ const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
+ // 共享 daemon 是唯一生产入口；线程 RPC 不再持有数据库或转发事件。
  
-@@ -80,6 +99,8 @@ if (isDaemon) {
-   // #235：daemon 结构化日志——stdout 在非 print-logs 时被 launcher 丢弃，语义与 Log.init 一致
+@@ -34,6 +53,8 @@ if (isDaemon) {
+   // 非print-logs启动时stdout由launcher丢弃；生命周期消息仍携带结构化原因。
    const log = {
      info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
 +    // #493：maintenance 失败走结构化 error 日志——与 info 同构，便于 launcher/测试侧统一解析。
@@ -768,10 +771,19 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
    }
    // printLogs 判定与 daemon.ts launcher 端（argv 决定 stdio + env 透传）保持语义一致：
    // worker 端再看 argv||env。若仅经 env 注入 OPENCODE_PRINT_LOGS=1 而不带 --print-logs
-@@ -117,9 +138,136 @@ if (isDaemon) {
+@@ -67,9 +88,145 @@ if (isDaemon) {
  
-   // 优雅关闭：清锁、停 HTTP、关库，避免陈旧锁残留
+   // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
    
++  async function maintain(prepared: ColdStorage.PreparedMaintenance, runtime: ColdStorage.MaintenanceRuntime = { checkpoint: async () => {} }) {
++    const database = await AppRuntime.runPromise(Database.Service)
++    // 每批只预约本 runtime 的同一连接；文件 checkpoint 期间释放预约，普通会话仍可继续。
++    return ColdStorage.maintain(database.sync, prepared, {
++      ...runtime,
++      run: (body) => Effect.runPromise(Database.withSync(database, body)),
++    })
++  }
++
 +  // runMaintenance 在返回 202 前登记 activeMaintenance，使 startup/idle timer 从第一刻就看到活跃任务。
 +  // task-backed operation 必须先获得跨进程 lease；新 task 可注入已获取 lease，resume/recovery 在此获取。
 +  // task promise 只在 terminal/interrupted checkpoint 后释放 lease 和 active 标记，daemon 不会提前退出。
@@ -787,7 +799,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +    const controller = new AbortController()
 +    const promise = (async () => {
 +      try {
-+        await ColdStorage.maintain(Database.client(), prepared, {
++        await maintain(prepared, {
 +          task,
 +          lease,
 +          signal: controller.signal,
@@ -824,12 +836,12 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +        const pseudo = { taskID: `vacuum_${crypto.randomUUID()}`, dbPath: Database.path() }
 +        const lease = await ServerLock.acquireMaintenanceLease(pseudo)
 +        try {
-+          return await ColdStorage.maintain(Database.client(), prepared, { lease, checkpoint: async () => {} })
++          return await maintain(prepared, { lease, checkpoint: async () => {} })
 +        } finally {
 +          await lease.release()
 +        }
 +      }
-+      return await ColdStorage.maintain(Database.client(), prepared)
++      return await maintain(prepared)
 +    }
 +    const existing = await ServerLock.findNonterminalMaintenanceTask()
 +    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
@@ -886,12 +898,12 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +    await runMaintenance(prepared, task)
 +  }
 +
-   async function gracefulShutdown(reason = "unknown") {
+   async function gracefulShutdown(exitCode = 0, reason = "unknown") {
      if (shutdownInProgress) return
      shutdownInProgress = true
 +    // #493：graceful shutdown 先阻止新 maintenance，再 abort 当前 task，并等待其批次结束和 interrupted checkpoint。
 +    // recovery promise 可能在第一次 active 检查后才登记任务，所以等待后必须再次检查并 abort 该 race。
-+    // Database.close 与 daemon lock 清理发生在 maintenance/instance/server 全部停止后，避免替代进程过早接管 SQLite。
++    // maintenance 先停，随后既有 runtime finalizer checkpoint/close，最后才释放 daemon lock。
 +    maintenanceShutdownRequested = true
 +    if (activeMaintenance) {
 +      activeMaintenance.controller.abort()
@@ -902,13 +914,24 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +      activeMaintenance.controller.abort()
 +      await activeMaintenance.promise.catch(() => undefined)
 +    }
-     // #235：关闭前取消全部退出保护——避免关闭过程中 timer 再次触发递归关闭
      cancelIdleTimer("shutdown")
      cancelStartupIdleTimer("shutdown")
-@@ -234,6 +382,62 @@ if (isDaemon) {
-       if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
-       // #259：token 不匹配时 401——即使端口被猜到也无法伪造 stop 请求
-         return new Response("unauthorized", { status: 401 })
+     cancelLauncherWatcher("shutdown")
+@@ -159,6 +316,9 @@ if (isDaemon) {
+   // #235：活跃判定统一收敛——SSE client 或 session runner 任一活跃即阻止退出
++  // #493：maintenance 与 SSE/session runner 同属 daemon liveness；任一存在都禁止 startup/regular idle shutdown。
++  // startup 在启动 timer 前已 await recovery 注册 activeMaintenance，因此这里不需要临时恢复标志。
++  // 所有 launcher/startup/idle timer 复用该 predicate，避免各自遗漏新的后台工作类型。
+   function isActive() {
+-    return sseClients > 0 || SessionActivity.count() > 0
++    return sseClients > 0 || SessionActivity.count() > 0 || activeMaintenance !== undefined
+   }
+ 
+   function cancelIdleTimer(reason: string) {
+@@ -315,6 +475,62 @@ if (isDaemon) {
+         if (!lockToken || request.headers.get(ServerLock.CONTROL_TOKEN_HEADER) !== lockToken)
+           return new Response("unauthorized", { status: 401 })
+         const url = new URL(request.url)
 +      // #493：maintenance start 是 daemon 私有控制面，不进入 public HTTP/OpenAPI/SDK。
 +      // handler 只解析 JSON、调用共同 dispatcher 并返回 task/report，不能复制 eligibility 或 SQL。
 +      // task-backed response 只暴露 identity/status/createdAt，不把 payload、cursor 内部对象或 lock token 回传。
@@ -965,40 +988,21 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +            return Response.json({ error: mapped.message }, { status: mapped.status })
 +          })
 +      }
-       if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH) {
-         // #259：SSE 客户数与会话活跃度来自 worker 既有状态——只读快照，不触发任何清理
-         return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
-@@ -258,8 +462,11 @@ if (isDaemon) {
-   setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
- 
-   // #235：活跃判定统一收敛——SSE client 或 session runner 任一活跃即阻止退出
-+  // #493：maintenance 与 SSE/session runner 同属 daemon liveness；任一存在都禁止 startup/regular idle shutdown。
-+  // startup 在启动 timer 前已 await recovery 注册 activeMaintenance，因此这里不需要临时恢复标志。
-+  // 所有 launcher/startup/idle timer 复用该 predicate，避免各自遗漏新的后台工作类型。
-   function isActive() {
--    return sseClients > 0 || SessionActivity.count() > 0
-+    return sseClients > 0 || SessionActivity.count() > 0 || activeMaintenance !== undefined
-   }
- 
-   function cancelIdleTimer(reason: string) {
-@@ -391,6 +598,17 @@ if (isDaemon) {
-     armIdleTimer()
-   })
- 
-+  // #493：startup 前 await maintenance recovery——activeMaintenance 登记后 idle 判定从第一刻生效。
-+  // #493：maintenance recovery 先于任何 instance 加载运行——经全局 node memoMap 打开本进程
-+  // 唯一的原生连接（OPENCODE_DB 即 lock.dbPath），使 Database.client() 从启动起可用；
-+  // 后续 instance runtime 复用同一 memoMap 连接，不产生第二个数据源。
-+  await AppRuntime.runPromise(Database.Service).catch((error) => {
-+    log.error("maintenance database init failed", { error: String(error) })
-+  })
-+  maintenanceRecoveryPromise = recoverInterruptedMaintenance().catch((error) => {
-+    log.error("maintenance recovery failed", { error: String(error) })
-+  })
-+  await maintenanceRecoveryPromise
-   // #235：启动即注册两段保护——startup idle 与 launcher watcher 并行
-   maybeScheduleStartupIdleShutdown()
-   startLauncherWatcher()
+         if (request.method === "GET" && url.pathname === ServerLock.CONTROL_STATUS_PATH)
+           return Response.json({ tuiClients: sseClients, sessionActivity: SessionActivity.count() })
+         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+@@ -330,6 +546,11 @@ if (isDaemon) {
+     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
++    // 先恢复持久任务并登记 activeMaintenance，再让既有 idle/launcher 判定观察它。
++    maintenanceRecoveryPromise = recoverInterruptedMaintenance().catch((error) => {
++      log.error("maintenance recovery failed", { error: String(error) })
++    })
++    await maintenanceRecoveryPromise
+     maybeScheduleStartupIdleShutdown()
+     startLauncherWatcher()
+     // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。
+     setTimeout(() => void AppRuntime.runPromise(Effect.gen(function* () {
+       const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
 
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 new file mode 100644
@@ -2361,20 +2365,11 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { LLMEvent, Usage } from "@opencode-ai/llm"
  import { ProviderV2 } from "@opencode-ai/core/provider"
-@@ -2172,7 +2177,9 @@ describe("session.compaction.process", () => {
- 
-         // #251：双条目锁定 active window 语义——prior summary 与本轮 tail 都在，
-         // 已总结 head 与未纳入 tail 的新消息都必须缺席
--        expect(captured).toContain("<previous-summary>")
-+        // #493：V2 core compaction 模板统一使用 <prior-summary> 标签（同文件 L1991 用例已同步），
-+        // 本断言修正陈旧 tag，内容断言不变。
-+        expect(captured).toContain("<prior-summary>")
-         expect(captured).toContain("PREVIOUS SUMMARY")
-         // #464：Evidence Handoff 是 synthetic 公开附录，不得回流进下一轮 summary prompt。
-         expect(captured).not.toContain("## Evidence Handoff")
-@@ -3012,3 +3019,98 @@ describe("SessionNs.getUsage", () => {
-     { git: true },
-   )
+@@ -2759,5 +2764,110 @@ describe("SessionNs.getUsage", () => {
+     expect(result.tokens.input).toBe(500)
+     expect(result.tokens.cache.read).toBe(200)
+     expect(result.tokens.cache.write).toBe(300)
+   })
  })
 +
 +describe("ColdStorage compact eligibility", () => {
@@ -2385,6 +2380,16 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 +      // 所有 tool output 都真实超过 4 KiB，断言只比较 eligibility 而不被门槛 false negative 干扰。
 +      // marker/summary 由现有 compaction helper 生成，测试不复制 production completed-boundary SQL。
 +      const ssn = yield* SessionNs.Service
++      // 沿用真实 projector 写入完整 tool 终态；四组样本只改变输出及所属 session。
++      const addCompletedToolPart = (input: { sessionID: SessionID; messageID: MessageID; tool: string; output: string }) => ssn.updatePart({
++        id: PartID.ascending(), type: "tool",
++        sessionID: input.sessionID, messageID: input.messageID,
++        tool: input.tool, callID: crypto.randomUUID(),
++        state: {
++          status: "completed", input: {}, output: input.output,
++          title: input.tool, metadata: {}, time: { start: 1, end: 2 },
++        },
++      })
 +      const test = yield* TestInstance
 +      // #493：eligibility/freeze 走同一同步 drizzle client（Database.Service.sync），与运行时同连接。
 +      const { sync } = yield* Database.Service
@@ -2478,10 +2483,10 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 @@ -15,6 +15,8 @@ import path from "path"
  import { fileURLToPath } from "url"
  import { tmpdir } from "../../fixture/fixture"
- import * as ServerLockModule from "../../../src/cli/tui/server-lock"
+ import { ServerLock } from "../../../src/cli/tui/server-lock"
 +// #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
 +import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
- import * as Win32Module from "@opencode-ai/tui/terminal-win32"
+ import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
  
  const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
 @@ -682,4 +684,171 @@ describe("daemon lifecycle", () => {
@@ -2496,9 +2501,9 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +      // 第一段锁定 live owner 不能被第二任务抢占；release 后手工构造 dead owner 覆盖 crash reclaim。
 +      // dead reclaim 必须让新 lease assertOwned 成功，而不是仅删除旧目录后留下未发布窗口。
 +      // 该测试使用显式 dbPath，不触碰开发者 daemon lock/DB，也不依赖平台 advisory lock 实现。
-+      const first = await ServerLockModule.acquireMaintenanceLease({ taskID: "dbm_live", dbPath })
-+      await expect(ServerLockModule.acquireMaintenanceLease({ taskID: "dbm_competing", dbPath })).rejects.toBeInstanceOf(
-+        ServerLockModule.MaintenanceBusyError,
++      const first = await ServerLock.acquireMaintenanceLease({ taskID: "dbm_live", dbPath })
++      await expect(ServerLock.acquireMaintenanceLease({ taskID: "dbm_competing", dbPath })).rejects.toBeInstanceOf(
++        ServerLock.MaintenanceBusyError,
 +      )
 +      await first.release()
 +      const lockDir = path.join(`${dbPath}.maintenance`, "lock")
@@ -2513,7 +2518,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +          startedAt: 1,
 +        }),
 +      )
-+      const recovered = await ServerLockModule.acquireMaintenanceLease({ taskID: "dbm_recovered", dbPath })
++      const recovered = await ServerLock.acquireMaintenanceLease({ taskID: "dbm_recovered", dbPath })
 +      recovered.assertOwned()
 +      await recovered.release()
 +      // record 放在当前 DB root 却声明另一个 dbPath 时必须拒绝，防止 resume 锁错数据库后执行当前连接。
@@ -2539,8 +2544,8 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +          updatedAt: now,
 +        }),
 +      )
-+      await expect(ServerLockModule.readMaintenanceTask("dbm_wrong-path", dbPath)).rejects.toBeInstanceOf(
-+        ServerLockModule.MaintenanceLeaseError,
++      await expect(ServerLock.readMaintenanceTask("dbm_wrong-path", dbPath)).rejects.toBeInstanceOf(
++        ServerLock.MaintenanceLeaseError,
 +      )
 +    },
 +    10_000,
@@ -2559,9 +2564,9 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +
 +      try {
 +        if (!lock.controlPort) throw new Error("missing control port")
-+        const start = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_PATH}`, {
++        const start = await fetch(`http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_MAINTENANCE_PATH}`, {
 +          method: "POST",
-+          headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
++          headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
 +          body: JSON.stringify({ operation: "compress", olderThanMs: 0, batchSize: 1 }),
 +        })
 +        expect(start.status).toBe(202)
@@ -2586,8 +2591,8 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +        const deadline = Date.now() + 10_000
 +        while (Date.now() < deadline) {
 +          const response = await fetch(
-+            `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${started.taskID}`,
-+            { headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token } },
++            `http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${started.taskID}`,
++            { headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token } },
 +          )
 +          const body: unknown = await response.json()
 +          if (typeof body !== "object" || body === null || !("status" in body) || typeof body.status !== "string") {
@@ -2599,7 +2604,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +        }
 +        expect(terminal?.status).toBe("completed")
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -2632,7 +2637,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +        createdAt: Date.now(),
 +        updatedAt: Date.now(),
 +      }
-+      await ServerLockModule.writeMaintenanceTask(task)
++      await ServerLock.writeMaintenanceTask(task)
 +      const { proc } = await spawnDaemon(lockPath, {
 +        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
 +        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
@@ -2642,14 +2647,14 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +        const deadline = Date.now() + 10_000
 +        let recovered: MaintenanceTask | undefined
 +        while (Date.now() < deadline) {
-+          recovered = await ServerLockModule.readMaintenanceTask(task.taskID, dbPath)
++          recovered = await ServerLock.readMaintenanceTask(task.taskID, dbPath)
 +          if (recovered?.status === "completed" || recovered?.status === "failed") break
 +          await Bun.sleep(50)
 +        }
 +        if (recovered?.status === "failed") throw new Error(`startup recovery failed: ${recovered.error ?? "unknown"}`)
 +        expect(recovered?.status).toBe("completed")
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -4311,65 +4316,58 @@ diff --git a/packages/core/src/database/database.ts b/packages/core/src/database
  import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
  import { layer as sqliteLayer } from "#sqlite"
 +import { Sqlite } from "./sqlite"
- import { Context, Effect, Layer } from "effect"
+ import { Cause, Context, Effect, Layer } from "effect"
  import { Global } from "../global"
  import { Flag } from "../flag/flag"
-@@ -14,10 +15,16 @@ import { makeGlobalNode } from "../effect/app-node"
+@@ -14,6 +15,8 @@ import { makeGlobalNode } from "../effect/app-node"
  const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
- // 模块级引用：close() 需要在 Effect Layer 外执行 TRUNCATE 检查点
- let dbRef: DatabaseShape | undefined
-+// #493：同步 client 引用——daemon 控制面的 cold maintenance 在 Layer 外运行，
-+// 经 client() 复用同一原生连接，不另建第二数据源。
-+let syncRef: Sqlite.DrizzleClient | undefined
  type DatabaseShape = Effect.Success<typeof makeDatabase>
  
  export interface Interface {
    db: DatabaseShape
-+  // #493：同一原生连接上的同步 drizzle 客户端——供冷存储等事务内同步维护代码复用；
-+  // 两个 facade 共享同一 Sqlite 连接，不构成第二数据源。
++  // 同一 Layer 原生连接的同步 facade，不注册模块级最后连接或另建数据库。
 +  sync: Sqlite.DrizzleClient
  }
- 
- export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
-@@ -26,6 +33,8 @@ const layer = Layer.effect(
+@@ -24,6 +27,7 @@ const layer = (filename: string) => Layer.effect(
    Service,
    Effect.gen(function* () {
      const db = yield* makeDatabase
-+    // #493：同步 drizzle 来自同一 #sqlite 层的 Drizzle 服务（同一原生连接）
 +    const sync = yield* Sqlite.Drizzle
  
      // busy_timeout 必须最先设置，确保后续 PRAGMA 在锁争用时能等待
      yield* db.run("PRAGMA busy_timeout = 30000")
-@@ -57,7 +66,8 @@ const layer = Layer.effect(
-     yield* DatabaseMigration.apply(db)
- 
-     dbRef = db
+@@ -59,7 +63,7 @@ const layer = (filename: string) => Layer.effect(
+     // 上层 finalizer 先于依赖连接释放执行，保留 checkpoint-before-close 顺序。
+     // 条件恢复仍保留 query error 类型；仅在 finalizer 边界转为 defect，剩余失败不能伪装成功。
+     yield* Effect.addFinalizer(() => checkpoint(db).pipe(Effect.orDie))
 -    return { db }
-+    syncRef = sync
 +    return { db, sync }
    }).pipe(Effect.orDie),
  )
  
-@@ -90,4 +100,11 @@ export function close() {
-   }
- }
- 
-+// #493：daemon maintenance（worker 控制面/offline CLI 共用）在 Effect Layer 之外运行；
-+// 未初始化时硬失败，禁止静默回退到新连接。
-+export function client() {
-+  if (!syncRef) throw new Error("Database has not been initialized in this process")
-+  return syncRef
+@@ -78,6 +82,13 @@ export function checkpoint(db: DatabaseShape) {
++// 同步事务复用 Effect 驱动的连接预约；不跨 await 持有连接，也不重复开启 Effect SQL 事务。
++export function withSync<A>(database: Interface, body: (sync: Sqlite.DrizzleClient) => A) {
++  return Effect.scoped(Effect.andThen(database.db.$client.reserve, Effect.sync(() => body(database.sync)))).pipe(
++    Effect.orDie,
++  )
 +}
 +
- export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })
+ export function layerFromPath(filename: string) {
+   return layer(filename).pipe(Layer.provide(sqliteLayer({ filename })))
+ }
+ 
+ export function path() {
+   if (Flag.OPENCODE_DB) {
 
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -46,5 +46,7 @@ export const migrations = (
+@@ -46,6 +46,8 @@ export const migrations = (
      import("./migration/20260726100000_session_goal"),
      import("./migration/20260812100000_goal_continue_on_error"),
      import("./migration/20260901100000_session_goal_integrity"),
+     import("./migration/20261009114905_session_request_usage"),
 +    // #493：cold_storage 表 + message/part.cold_ref 引用列
 +    import("./migration/20260717035626_cold_storage"),
    ])
@@ -4609,6 +4607,8 @@ new file mode 100644
 +  task?: MaintenanceTask
 +  lease?: { assertOwned(): void }
 +  signal?: AbortSignal
++  // Effect 宿主按 SQL 段预约同一连接；独占同步 fixture 可直接执行，checkpoint 不在预约内。
++  run?: <A>(body: () => A) => Promise<A>
 +  checkpoint(task: MaintenanceTask): Promise<void>
 +}
 +
@@ -6253,10 +6253,8 @@ new file mode 100644
 +// pageCount 只读取 SQLite pragma 并验证返回形状，vacuum report 不依赖 driver 的 unchecked row cast。
 +// 该指标表示物理 page 数，不冒充 payload logical bytes；两种收益在 CLI 输出中保持独立。
 +function pageCount(db: TxOrDb) {
-+  // #493：$client 仅存在于基础 Db；事务句柄不参与 vacuum 统计路径。
-+  const client = (db as Db).$client
-+  if (!client) return 0
-+  const row: unknown = client.query("PRAGMA page_count").get()
++  // 通过 Drizzle 公共执行面读取，Bun.query 与 Node.prepare 的原生差异留在各自 driver。
++  const row: unknown = db.get(sql`PRAGMA page_count`)
 +  return isRecord(row) && typeof row.page_count === "number" ? row.page_count : 0
 +}
 +
@@ -6328,7 +6326,8 @@ new file mode 100644
 +  prepared: PreparedMaintenance,
 +  runtime: MaintenanceRuntime = { checkpoint: async () => {} },
 +): Promise<MaintenanceResult> {
-+  if (prepared.type === "immediate") {
++  const run = runtime.run ?? (async <A>(body: () => A) => body())
++  if (prepared.type === "immediate") return run(() => {
 +    if (prepared.request.operation === "status") return { type: "status", report: status(db) }
 +    if (prepared.request.operation === "verify") return { type: "verify", report: verify(db, prepared.request) }
 +    if (prepared.request.operation === "cleanup") return { type: "cleanup", report: cleanup(db, prepared.request) }
@@ -6339,10 +6338,9 @@ new file mode 100644
 +    if (!runtime.lease) throw new ValidationError({ message: "vacuum requires a maintenance lease" })
 +    runtime.lease.assertOwned()
 +    const pagesBefore = pageCount(db)
-+    const vacuumClient = (db as Db).$client
-+    if (vacuumClient) vacuumClient.run("VACUUM")
++    db.run(sql`VACUUM`)
 +    return { type: "vacuum", pagesBefore, pagesAfter: pageCount(db) }
-+  }
++  })
 +
 +  const preparedTask = taskRequest(prepared, runtime)
 +  const task = structuredClone(preparedTask.task)
@@ -6389,7 +6387,7 @@ new file mode 100644
 +        const cursor = task.cursor
 +        if (!cursor || !("owner" in cursor)) throw new ValidationError({ message: "Invalid owner maintenance cursor" })
 +        if (cursor.owner === "message") {
-+          const outcome = db.transaction(
++          const outcome = await run(() => db.transaction(
 +            (db) => {
 +              const rows = cold
 +                ? nextMessageRows(db, request, cursor.lastID, true, request.batchSize)
@@ -6414,7 +6412,7 @@ new file mode 100644
 +              }
 +            },
 +            { behavior: "immediate" },
-+          )
++          ))
 +          if (outcome.empty) {
 +            task.cursor = { owner: "part", lastID: "" }
 +            await checkpoint()
@@ -6426,7 +6424,7 @@ new file mode 100644
 +          task.rawBytes += outcome.rawBytes
 +          task.compressedBytes += outcome.compressedBytes
 +        } else {
-+          const outcome = db.transaction(
++          const outcome = await run(() => db.transaction(
 +            (db) => {
 +              const rows = cold
 +                ? nextPartRows(db, request, cursor.lastID, true, request.batchSize)
@@ -6451,7 +6449,7 @@ new file mode 100644
 +              }
 +            },
 +            { behavior: "immediate" },
-+          )
++          ))
 +          if (outcome.empty) done = true
 +          else {
 +            task.cursor = outcome.cursor
@@ -6466,7 +6464,7 @@ new file mode 100644
 +        if (!cursor || !("stage" in cursor)) {
 +          throw new ValidationError({ message: "Invalid payload maintenance cursor" })
 +        }
-+        const outcome = db.transaction(
++        const outcome = await run(() => db.transaction(
 +          (db) => {
 +            const rows = db
 +              .select()
@@ -6508,7 +6506,7 @@ new file mode 100644
 +            }
 +          },
 +          { behavior: "immediate" },
-+        )
++        ))
 +        if (outcome.empty) done = true
 +        else {
 +          task.cursor = outcome.cursor
@@ -6712,8 +6710,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  import { Database } from "@opencode-ai/core/database/database"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { NotFoundError } from "@/storage/storage"
--import { and, desc, eq, gte, inArray, lt, or } from "drizzle-orm"
-+import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
+ import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm"
 +import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 +import { Option } from "effect"
  import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
@@ -6835,13 +6832,15 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  
 -function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
 -  const ids = rows.map((row) => row.id)
-+function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
++function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[]) {
 +  // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
 +  // 任一 payload corruption 使整个 hydrate 抛错，禁止同一 page 混合完整对象与占位对象。
-+  const restoredRows = ColdStorage.thawMessageRows(sync, rows)
-+  const ids = restoredRows.map((row) => row.id)
-   const partByMessage = new Map<string, Part[]>()
-   return Effect.gen(function* () {
+-  const partByMessage = new Map<string, Part[]>()
+-  return Effect.gen(function* () {
++  return Effect.gen(function* () {
++    const restoredRows = yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))
++    const ids = restoredRows.map((row) => row.id)
++    const partByMessage = new Map<string, Part[]>()
      if (ids.length > 0) {
 @@ -153,16 +244,17 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
          .orderBy(PartTable.message_id, PartTable.id)
@@ -6849,7 +6848,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
          .pipe(Effect.orDie)
 -      for (const row of partRows) {
 -        const next = part(row)
-+      const restoredParts = ColdStorage.thawPartRows(sync, partRows)
++      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, partRows))
 +      for (const row of restoredParts) {
 +        const next = partFromRestored(row)
          const list = partByMessage.get(row.message_id)
@@ -6865,7 +6864,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
        parts: partByMessage.get(row.id) ?? [],
      }))
    })
-@@ -514,7 +606,14 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+@@ -507,5 +599,12 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
    includeHidden?: boolean
    fromMessageID?: MessageID
  }) {
@@ -6879,17 +6878,15 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +    return { items, more: false }
 +  }
    const before = input.before ? cursor.decode(input.before) : undefined
-   // fromMessageID 裁剪：MessageID 单调递增（见 message-v2.ts ascending），
-   // gte(id, fromMessageID) 等价于"该消息及之后的所有消息"，与 revert.ts 中
 @@ -548,7 +647,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
- 
    const more = rows.length > input.limit
    const slice = more ? rows.slice(0, input.limit) : rows
--  const items = yield* hydrate(db, slice)
-+  const items = yield* hydrate(db, sync, slice)
-   items.reverse()
- // Hidden messages remain persisted for audit/recovery, but are removed from
- // normal prompt replay and visible history. Each reason names the workflow that
+   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
+   // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
+-  const items = (yield* hydrate(db, slice)).map((item) =>
++  const items = (yield* hydrate(db, sync, slice)).map((item) =>
+     input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
+   )
 @@ -573,6 +672,74 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
    }
  })
@@ -6963,7 +6960,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +}
 +
  // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
- export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
+ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
    // includeHidden 默认 false：正常流不返回被撤销隐藏的消息和 part
 @@ -606,7 +773,7 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean })
  
@@ -6980,7 +6977,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
        .pipe(Effect.orDie)
 -    return rows.map(part)
 +    // #493：直接读也走 cold-aware decoder——thaw 后按业务 Schema 复核差异字段。
-+    return ColdStorage.thawPartRows(sync, rows).map(partFromRestored)
++    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored))
 +  })
 +}
 +
@@ -7050,7 +7047,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +      .limit(input.limit)
 +      .all()
 +      .pipe(Effect.orDie)
-+    return ColdStorage.thawPartRows(sync, rows).map(partFromRestored).reverse()
++    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored).reverse())
    })
  }
  
@@ -7067,7 +7064,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +  // #493：单条读取也走 cold-aware decoder（decodeMessageRow seam）
    return {
 -    info: info(row),
-+    info: info(sync, row),
++    info: yield* Database.withSync({ db, sync }, () => info(sync, row)),
      parts: yield* parts(input.messageID),
    }
  })
@@ -7125,32 +7122,54 @@ diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.
      events.Deleted,
      events.MessageUpdated,
 
+diff --git a/packages/schema/src/event-manifest.ts b/packages/schema/src/event-manifest.ts
+--- a/packages/schema/src/event-manifest.ts
++++ b/packages/schema/src/event-manifest.ts
+@@ -58,4 +58,5 @@ const featureDefinitions = Event.inventory(
+ export const ServerDefinitions = Event.inventory(
+-  ...foundationDefinitions,
++  // raw clone 是 V1 持久投影的内部事件，不扩张当前 Protocol/SDK Next 的公开事件面。
++  ...foundationDefinitions.filter((definition) => definition !== SessionV1.Event.Forked),
+   ...featureDefinitions,
+   ...SessionTodo.Event.Definitions,
+
 diff --git a/packages/schema/test/event-manifest.test.ts b/packages/schema/test/event-manifest.test.ts
 --- a/packages/schema/test/event-manifest.test.ts
 +++ b/packages/schema/test/event-manifest.test.ts
 @@ -10,9 +10,10 @@ import { WorkspaceEvent } from "../src/workspace-event"
  describe("public event manifest", () => {
    test("owns the complete public event surface", () => {
-     expect(EventManifest.ServerDefinitions.length).toBe(60)
--    expect(EventManifest.Definitions.length).toBe(95)
-+    expect(EventManifest.Definitions.length).toBe(96)
+     expect(EventManifest.ServerDefinitions.length).toBe(68)
+-    expect(EventManifest.Definitions.length).toBe(99)
++    expect(EventManifest.Definitions.length).toBe(100)
      expect(SessionV1.Event.Definitions).toEqual([
        SessionV1.Event.Created,
 +      SessionV1.Event.Forked,
        SessionV1.Event.Updated,
        SessionV1.Event.Deleted,
        SessionV1.Event.MessageUpdated,
-@@ -24,8 +25,8 @@ describe("public event manifest", () => {
+@@ -24,5 +25,5 @@ describe("public event manifest", () => {
        SessionV1.Event.Diff,
        SessionV1.Event.Error,
      ])
--    expect(EventManifest.Latest.size).toBe(95)
--    expect(EventManifest.Durable.size).toBe(35)
-+    expect(EventManifest.Latest.size).toBe(96)
-+    expect(EventManifest.Durable.size).toBe(36)
-   })
- 
-   test("uses canonical definitions for current public events", () => {
+-    expect(EventManifest.Latest.size).toBe(99)
+-    expect(EventManifest.Durable.size).toBe(39)
++    expect(EventManifest.Latest.size).toBe(100)
++    expect(EventManifest.Durable.size).toBe(40)
+@@ -29,3 +30,4 @@ describe("public event manifest", () => {
+     // V1 展示事件只扩展兼容通道，不能进入当前协议或变成逐 tick 的持久事件。
+     expect(EventManifest.ServerDefinitions.some((event) => event.type === "message.part.progress")).toBe(false)
+     expect(EventManifest.Durable.has("message.part.progress")).toBe(false)
++    expect(EventManifest.ServerDefinitions.some((event) => event.type === "session.forked")).toBe(false)
+@@ -46,7 +48,7 @@ describe("public event manifest", () => {
+     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
+     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
+     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
+-    expect(EventManifest.Definitions.slice(47, 51)).toEqual([
++    expect(EventManifest.Definitions.slice(48, 52)).toEqual([
+       SessionV1.Event.PartDelta,
+       SessionV1.Event.PartProgress,
+       SessionV1.Event.Diff,
 
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
 --- a/packages/opencode/src/session/session.ts
@@ -7235,7 +7254,7 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 -        messageID: row.message_id,
 -      } as SessionV1.Part
 +      // #493：direct read 与批量 hydrate 共享 cold-aware decoder——corruption 必须失败而不是返回占位。
-+      return MessageV2.decodePartRow(sync, row)
++      return yield* Database.withSync(database, () => MessageV2.decodePartRow(sync, row))
      })
  
      const create = Effect.fn("Session.create")(function* (input?: {
@@ -7261,7 +7280,7 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 +      const { sync } = database
 +      // #493：source→target 映射在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
 +      // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
-+      const raw = MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID })
++      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
 +      const messageMap = raw.messages.map((row) => ({ sourceID: row.id, targetID: MessageID.ascending() }))
 +      const partMap = raw.parts.map((row) => ({ sourceID: row.id, targetID: PartID.ascending() }))
 +      yield* events
@@ -7361,22 +7380,30 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
  
              if (
 
-diff --git a/packages/opencode/src/session/request-usage.ts b/packages/opencode/src/session/request-usage.ts
---- a/packages/opencode/src/session/request-usage.ts
-+++ b/packages/opencode/src/session/request-usage.ts
-@@ -307,11 +307,9 @@ const layer = Layer.effect(
-     const recordAssistant: Interface["recordAssistant"] = Effect.fn("RequestUsage.recordAssistant")(function* (input) {
+diff --git a/packages/core/src/session/request-usage.ts b/packages/core/src/session/request-usage.ts
+--- a/packages/core/src/session/request-usage.ts
++++ b/packages/core/src/session/request-usage.ts
+@@ -3,7 +3,7 @@ import { Database } from "../database/database"
+ import { Context, Effect, Layer, Schema } from "effect"
+ import { optional } from "../schema"
+ import { SessionV1, MessageID } from "../v1/session"
+-import { and, desc, eq, lt } from "drizzle-orm"
++import { and, desc, eq, lt, sql } from "drizzle-orm"
+ import { RequestUsageTable, RequestUsageAssistantTable } from "./request-usage.sql"
+ import { PartTable } from "./sql"
+ import type { SessionSchema } from "./schema"
+@@ -248,10 +248,11 @@ const layer = Layer.effect(
+       yield* db.transaction(() => Effect.gen(function* () {
        const assistant = input.assistant
        const now = Date.now()
--      // V2 中 MessageV2.parts 返回 Effect，需要 yield*
--            // V2 中 MessageV2.parts 返回 Effect，需要 yield* 解包
--      const parts = yield* MessageV2.parts(input.assistant.id)
--      // 累加所有 step-finish parts 的 token 统计
--            // 累加所有 step-finish parts 的 token 统计：输入、输出、推理、缓存
-+      // #493：统计只消费 step-finish 的 token/cost 热字段，不为同一 assistant 的 tool/reasoning 预热。
-+      // 专用查询以 JSON discriminator 在 SQL 侧过滤；step-finish 不在冷字段白名单。
-+      const parts = yield* MessageV2.stepFinishParts(input.assistant.id)
-       const stepTotals = parts.reduce(
-         (acc, part) => {
-           if (part.type !== "step-finish") return acc
+-      // V1 parts 只在此持久化适配边界解码；不把数据库 JSON 断言成新执行模型。
++      // 账本只解码 step-finish 热字段，不读取或预热同助手的工具、推理及文件冷 payload。
+       // 原生 V2 已传入单步快照，不读取 V1 parts，也不桥接旧 runner。
+       const parts = input.usage ? [] : (yield* db.select().from(PartTable)
+-        .where(and(eq(PartTable.message_id, assistant.id), eq(PartTable.session_id, input.sessionID)))
++        .where(and(eq(PartTable.message_id, assistant.id), eq(PartTable.session_id, input.sessionID),
++          sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
+         .all().pipe(Effect.orDie)).map(row => Schema.decodeUnknownSync(SessionV1.Part)({
+           ...row.data, id: row.id, sessionID: row.session_id, messageID: row.message_id,
+         }))
 

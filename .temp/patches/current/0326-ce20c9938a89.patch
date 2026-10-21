@@ -1,30 +1,16 @@
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -23,6 +23,11 @@ on:
-       # #156：保留 tip setup-bun 路径触发，工具链变更必重建
-       - ".github/actions/setup-bun/action.yml"
-       - "packages/opencode/**"
-+      - "packages/core/**"
+@@ -27,6 +27,11 @@ on:
+       - "packages/core/**"
++      # 构建依赖迁移后仍保留既有owner范围，并补齐源要求的SDK、插件及构建入口。
 +      - "packages/plugin/**"
 +      - "packages/script/**"
 +      - "packages/sdk/js/**"
 +      - "packages/ui/**"
-       - "package.json"
-       - "bun.lock"
-       # #156：install 变更触发重建，保证 release 脚本同步
-
-
-diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
---- a/packages/opencode/script/build.ts
-+++ b/packages/opencode/script/build.ts
-@@ -18,6 +18,8 @@ const require = createRequire(import.meta.url)
- 
- process.chdir(dir)
- 
-+// CI（build-opencode.yml）的触发路径需覆盖本脚本构建的全部 workspace 依赖包，
-+// 否则 core/plugin/sdk/ui 变更不会触发 CLI 重建，release 产物会滞后于源码。
- const generated = await import("./generate.ts")
- 
- import { Script } from "@opencode-ai/script"
+       - "packages/tui/**"
+       - "packages/llm/**"
+       - "packages/schema/**"
+       - "packages/protocol/**"
+       - "packages/server/**"
 

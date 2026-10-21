@@ -493,7 +493,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 
 --- a/packages/opencode/src/cli/cmd/stats-charts.ts
 +++ b/packages/opencode/src/cli/cmd/stats-charts.ts
-@@ -1,434 +1,443 @@
+@@ -1,450 +1,457 @@
 -
 -import { formatNumber } from "../format"
 -import type { DailyUsage, StatsReport, UsageGroup, TokenTotals } from "./stats-data"
@@ -662,7 +662,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 -// #174：input/output/cache 层与分列绑定
 -export const layersFromTokenParts = (): ChartLayer[] => [
 -  { id: "input", label: "Input", color: "cyan", value: (d) => d.tokens.input },
--  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output },
+-  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output + d.tokens.reasoning },
 -  { id: "cacheRead", label: "Cache Read", color: "blue", value: (d) => d.tokens.cache.read },
 -  { id: "cacheWrite", label: "Cache Write", color: "magenta", value: (d) => d.tokens.cache.write },
 -]
@@ -683,13 +683,17 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 -// #174：renderRoundedLineChart 服务时间线折线，不承担 heatmap 命令
 -export const renderRoundedLineChart = (input: { title?: string; series: ChartSeries[]; width?: number; height?: number }) => {
 -  const w = input.width ?? Math.min(60, statsContentWidth())
--  const series = input.series[0]
--  if (!series || series.points.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
--  const m = maxY(series.points)
+-  const series = input.series.filter((item) => item.points.length > 0)
+-  if (series.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
+-  const m = Math.max(...series.map((item) => maxY(item.points)))
 -  const lines = input.title ? [input.title] : []
--  for (const p of series.points.slice(-w)) {
--    const n = Math.round((p.y / m) * 20)
--    lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
+-  // 多序列共用刻度并保留身份，预测上下界和各工具趋势不能静默退成第一条。
+-  for (const item of series) {
+-    if (series.length > 1) lines.push(fitVisible(item.label || item.id, w))
+-    for (const p of item.points) {
+-      const n = Math.round((p.y / m) * 20)
+-      lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
+-    }
 -  }
 -  return lines
 -}
@@ -698,9 +702,14 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 -// #174：堆叠按层输出分量，缺层不插值
 -export const renderStackedAreaChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[]; width?: number }) => {
 -  const lines = input.title ? [input.title] : []
--  for (const d of input.daily.slice(-30)) {
--    const parts = input.layers.map((l) => `${l.label[0] || "?"}:${formatNumber(l.value(d))}`)
--    lines.push(`${fitVisible(d.label, 8)} ${parts.join(" ")}`)
+-  const width = Math.max(1, input.width ?? Math.min(40, statsContentWidth() - 12))
+-  const max = Math.max(1, ...input.daily.map((day) => input.layers.reduce((sum, layer) => sum + layer.value(day), 0)))
+-  // 同一时间轴和总量刻度呈现组成，图例保留每个分量的名字。
+-  lines.push(input.layers.map((layer, index) => `${"█▓▒░"[index % 4]} ${layer.label}`).join("  "))
+-  for (const d of input.daily) {
+-    const stack = input.layers.map((layer, index) => bar(layer.value(d) / max * width, width, "█▓▒░"[index % 4])).join("")
+-    const parts = input.layers.map((layer) => `${layer.label}:${formatNumber(layer.value(d))}`)
+-    lines.push(`${fitVisible(d.label, 8)} ${stack} ${parts.join(" ")}`)
 -  }
 -  return lines.length ? lines : ["(empty stack)"]
 -}
@@ -718,24 +727,31 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 -  width?: number
 -  formatter?: (n: number) => string
 -}) => {
--  // week x weekday density — NOT a line/timeline projection
 -  const lines = input.title ? [paint(input.title, "cyan", undefined, true)] : []
--  const byKey = new Map(input.points.map((p) => [`${p.day}-${p.dow}`, p.value]))
--  const vals = input.points.map((p) => p.value)
--  const hi = Math.max(1, ...vals, 0)
--  lines.push("    Mo Tu We Th Fr Sa Su")
--  const days = [...new Set(input.points.map((p) => p.day))].sort((a, b) => a - b).slice(-12)
--  for (const day of days) {
--    let row = fitVisible(String(day).slice(-4), 4)
--// #174：热力一周七列固定顺序
+-  const points = input.points.toSorted((a, b) => a.day - b.day)
+-  const hi = Math.max(1, ...points.map((point) => point.value))
+-  const weeks = new Map<number, { label: string; values: Map<number, number> }>()
+-  // 本地周一作为行键，保留完整请求区间；毫秒尾数不能作为可读日期。
+-  for (const point of points) {
+-    const monday = new Date(point.day)
+-    monday.setDate(monday.getDate() - point.dow)
+-    monday.setHours(0, 0, 0, 0)
+-    const week = weeks.get(monday.getTime()) ?? { label: `${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`, values: new Map<number, number>() }
+-    week.values.set(point.dow, point.value)
+-    weeks.set(monday.getTime(), week)
+-  }
+-  if (points.length) lines.push(`${points[0].label ?? ""} .. ${points.at(-1)?.label ?? ""}`)
+-  lines.push("       Mo Tu We Th Fr Sa Su")
+-  for (const week of weeks.values()) {
+-    let row = week.label
 -    for (let dow = 0; dow < 7; dow++) {
--      const v = byKey.get(`${day}-${dow}`) ?? 0
+-      const v = week.values.get(dow) ?? 0
 -      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
 -      row += `  ${DENSITY[idx]}`
 -    }
 -    lines.push(row)
 -  }
--  if (days.length === 0) lines.push("(empty heatmap)")
+-  if (points.length === 0) lines.push("(empty heatmap)")
 -  return lines
 -}
 -
@@ -954,12 +970,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 +// #174：BOLD 可选强调
 +const BOLD = "\x1b[1m"
 +// #174：COLORS 映射终端色。
-+// [local-smark] R6 前景色契约：系列色采用终端语义 bright ANSI 槽位（94/92/91/93/96/95），
-+// 明暗由终端主题决定，避免历史普通 ANSI 在深色 profile 中过暗、在浅色终端失去对比；
-+// white/gray 仍走默认前景与暗灰，正文对比度由用户主题负责
++// R6 系列色使用终端 bright 槽位，正文使用默认前景，保留用户主题的对比度。
 +const COLORS: Record<string, string> = {
 +  red: "\x1b[91m", green: "\x1b[92m", blue: "\x1b[94m", yellow: "\x1b[93m",
-+  magenta: "\x1b[95m", cyan: "\x1b[96m", white: "\x1b[37m", gray: "\x1b[90m",
++  magenta: "\x1b[95m", cyan: "\x1b[96m", white: "\x1b[39m", gray: "\x1b[90m",
 +}
 +// #174：DENSITY 供热力/矩阵相对强度
 +// #174：密度字符只编码相对强度
@@ -1048,13 +1062,13 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 +// #174：paint 在 never/非 TTY 去颜色码
 +// #174：非 TTY 或 never 时去 ANSI
 +export const paint = (text: string, color?: ChartColor, ctx?: unknown, bold?: boolean) => {
-+  // R6 输出门控唯一 owner：renderContext 解析的模式在此消费。never 强制去色；
-+  // always 强制着色（无视 NO_COLOR/TTY）；auto/未传回退 isTTY。
-+  const mode = (ctx as { color?: string } | undefined)?.color
++  // 输出端消费同一模式裁决；省略context的片段也遵守NO_COLOR，always仍可显式开启。
++  const mode = (ctx as { color?: string } | undefined)?.color ?? renderContext().color
 +  if (mode === "never") return stripAnsi(text)
 +  if (mode !== "always" && !process.stdout.isTTY) return stripAnsi(text)
 +  const pref = (bold ? BOLD : "") + (color ? COLORS[color] || "" : "")
-+  return pref ? pref + text + RESET : text
++  // foreground不会自行清除dim/bold；片段起点先复位强度，防止继承上一个样式。
++  return pref ? "\x1b[22m\x1b[39m" + pref + text + RESET : text
 +}
 +
 +// #181：序列 sparkline，窄宽时由调用方关闭
@@ -1105,7 +1119,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 +// #174：input/output/cache 层与分列绑定
 +export const layersFromTokenParts = (): ChartLayer[] => [
 +  { id: "input", label: "Input", color: "cyan", value: (d) => d.tokens.input },
-+  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output },
++  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output + d.tokens.reasoning },
 +  { id: "cacheRead", label: "Cache Read", color: "blue", value: (d) => d.tokens.cache.read },
 +  { id: "cacheWrite", label: "Cache Write", color: "magenta", value: (d) => d.tokens.cache.write },
 +]
@@ -1126,13 +1140,17 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 +// #174：renderRoundedLineChart 服务时间线折线，不承担 heatmap 命令
 +export const renderRoundedLineChart = (input: { title?: string; series: ChartSeries[]; width?: number; height?: number }) => {
 +  const w = input.width ?? Math.min(60, statsContentWidth())
-+  const series = input.series[0]
-+  if (!series || series.points.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
-+  const m = maxY(series.points)
++  const series = input.series.filter((item) => item.points.length > 0)
++  if (series.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
++  const m = Math.max(...series.map((item) => maxY(item.points)))
 +  const lines = input.title ? [input.title] : []
-+  for (const p of series.points.slice(-w)) {
-+    const n = Math.round((p.y / m) * 20)
-+    lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
++  // 多序列共用刻度并保留身份，预测上下界和各工具趋势不能静默退成第一条。
++  for (const item of series) {
++    if (series.length > 1) lines.push(fitVisible(item.label || item.id, w))
++    for (const p of item.points) {
++      const n = Math.round((p.y / m) * 20)
++      lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
++    }
 +  }
 +  return lines
 +}
@@ -1141,9 +1159,14 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 +// #174：堆叠按层输出分量，缺层不插值
 +export const renderStackedAreaChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[]; width?: number }) => {
 +  const lines = input.title ? [input.title] : []
-+  for (const d of input.daily.slice(-30)) {
-+    const parts = input.layers.map((l) => `${l.label[0] || "?"}:${formatNumber(l.value(d))}`)
-+    lines.push(`${fitVisible(d.label, 8)} ${parts.join(" ")}`)
++  const width = Math.max(1, input.width ?? Math.min(40, statsContentWidth() - 12))
++  const max = Math.max(1, ...input.daily.map((day) => input.layers.reduce((sum, layer) => sum + layer.value(day), 0)))
++  // 同一时间轴和总量刻度呈现组成，图例保留每个分量的名字。
++  lines.push(input.layers.map((layer, index) => `${"█▓▒░"[index % 4]} ${layer.label}`).join("  "))
++  for (const d of input.daily) {
++    const stack = input.layers.map((layer, index) => bar(layer.value(d) / max * width, width, "█▓▒░"[index % 4])).join("")
++    const parts = input.layers.map((layer) => `${layer.label}:${formatNumber(layer.value(d))}`)
++    lines.push(`${fitVisible(d.label, 8)} ${stack} ${parts.join(" ")}`)
 +  }
 +  return lines.length ? lines : ["(empty stack)"]
 +}
@@ -1161,24 +1184,31 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 +  width?: number
 +  formatter?: (n: number) => string
 +}) => {
-+  // week x weekday density — NOT a line/timeline projection
 +  const lines = input.title ? [paint(input.title, "cyan", renderContext(input.color), true)] : []
-+  const byKey = new Map(input.points.map((p) => [`${p.day}-${p.dow}`, p.value]))
-+  const vals = input.points.map((p) => p.value)
-+  const hi = Math.max(1, ...vals, 0)
-+  lines.push("    Mo Tu We Th Fr Sa Su")
-+  const days = [...new Set(input.points.map((p) => p.day))].sort((a, b) => a - b).slice(-12)
-+  for (const day of days) {
-+    let row = fitVisible(String(day).slice(-4), 4)
-+// #174：热力一周七列固定顺序
++  const points = input.points.toSorted((a, b) => a.day - b.day)
++  const hi = Math.max(1, ...points.map((point) => point.value))
++  const weeks = new Map<number, { label: string; values: Map<number, number> }>()
++  // 本地周一作为行键，保留完整请求区间；毫秒尾数不能作为可读日期。
++  for (const point of points) {
++    const monday = new Date(point.day)
++    monday.setDate(monday.getDate() - point.dow)
++    monday.setHours(0, 0, 0, 0)
++    const week = weeks.get(monday.getTime()) ?? { label: `${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`, values: new Map<number, number>() }
++    week.values.set(point.dow, point.value)
++    weeks.set(monday.getTime(), week)
++  }
++  if (points.length) lines.push(`${points[0].label ?? ""} .. ${points.at(-1)?.label ?? ""}`)
++  lines.push("       Mo Tu We Th Fr Sa Su")
++  for (const week of weeks.values()) {
++    let row = week.label
 +    for (let dow = 0; dow < 7; dow++) {
-+      const v = byKey.get(`${day}-${dow}`) ?? 0
++      const v = week.values.get(dow) ?? 0
 +      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
 +      row += `  ${DENSITY[idx]}`
 +    }
 +    lines.push(row)
 +  }
-+  if (days.length === 0) lines.push("(empty heatmap)")
++  if (points.length === 0) lines.push("(empty heatmap)")
 +  return lines
 +}
 +
@@ -1376,7 +1406,7 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -1,378 +1,507 @@
+@@ -1,495 +1,626 @@
 -import { describe, expect, test } from "bun:test"
 -import { fitVisible, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
 -import { renderBreakdown, renderDashboard } from "../../src/cli/cmd/stats-render"
@@ -1384,6 +1414,56 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 -
 -// #176：CJK 显示列宽与 breakdown 冒烟
 -describe("stats render width (#176)", () => {
+-  test("cost sorting selects groups before limiting without changing token defaults", async () => {
+-    const { renderModels, renderProviders, renderCosts } = await import("../../src/cli/cmd/stats-render")
+-    const { emptyComponents } = await import("../../src/cli/cmd/stats-data")
+-    // #177：token 榜首成本低，显式 cost 必须在限行前选出高成本行
+-    const groups = [
+-      { id: "token-heavy", tokens: 100, cost: 1, calls: 1 },
+-      { id: "cost-heavy", tokens: 10, cost: 9, calls: 20 },
+-    ].map((group) => ({
+-      id: group.id,
+-      label: group.id,
+-      tokens: { input: group.tokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: group.tokens },
+-      components: emptyComponents(),
+-      cost: group.cost,
+-      requests: 1,
+-      assistantCalls: group.calls,
+-      errors: 0,
+-      aborted: 0,
+-      durationMs: 0,
+-      sessions: 1,
+-      providers: [],
+-      models: [],
+-    }))
+-    const report = {
+-      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 2, totalTools: 0, days: 1,
+-      dateRange: { earliest: 0, latest: 0 },
+-      total: {
+-        ...groups[0],
+-        tokens: { input: 110, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 110 },
+-        cost: 10,
+-        requests: 2,
+-        assistantCalls: 2,
+-      },
+-      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups,
+-      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
+-      tokensPerSession: 110, medianTokensPerSession: 110,
+-    } satisfies StatsReport
+-    for (const render of [renderModels, renderProviders, renderBreakdown, renderCosts]) {
+-      for (const metric of ["tokens", "cost"] as const) {
+-        for (const sort of [undefined, "tokens", "cost", "calls"] as const) {
+-          const text = render(report, { sort, metric, limit: 1, color: "never" })
+-          expect(text).toContain(sort === "cost" || sort === "calls" ? "cost-heavy" : "token-heavy")
+-          // 排名限行只约束榜单；后续完整费用瀑布仍应展示其他供应商。
+-          expect(text.split("\n").slice(0, 4).join("\n")).not.toContain(sort === "cost" || sort === "calls" ? "token-heavy" : "cost-heavy")
+-        }
+-      }
+-    }
+-    expect(groups.map((group) => group.id)).toEqual(["token-heavy", "cost-heavy"])
+-  })
+-
 -  test("counts CJK glyphs as two columns", () => {
 -    expect(visibleLength("中文")).toBe(4)
 -    expect(visibleLength("abc")).toBe(3)
@@ -1706,8 +1786,11 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 -    const text = renderDashboard(report as any, { limit: 5 })
 -    expect(text).toContain("Daily activity")
 -    expect(text).toContain("Token components")
+-    expect(text).toMatch(/Input[^\n]*total=100 peak=90/)
 -    expect(text).toContain("Cost & health")
 -    expect(text).toContain("Session size distribution")
+-    expect(text).toContain("p90=120.0K p99=120.0K")
+-    expect(text).toContain("top-10=")
 -    expect(text).toContain("Top sessions by tokens")
 -    expect(text).toContain("big")
 -    expect(text).toMatch(/cost trend/)
@@ -1717,6 +1800,55 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 -    expect(text).toMatch(/Input\s+[\u2581-\u2588]+/)
 -    expect(text).toContain("Cache hit (%): 25")
 -    expect(text).not.toContain("Model activity rows")
+-    for (const columns of [58, 80]) {
+-      const previous = process.stdout.columns
+-      Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns })
+-      try {
+-        const lines = renderDashboard({ ...report, tokenPartSeries: [{ id: "output", label: "Output + Reasoning", total: 1_000_000, points: [{ day: 1, label: "d1", value: 1_000_000 }] }] }).split("\n")
+-        const index = lines.findIndex((line) => line.includes("Output + Reasoning"))
+-        expect(index).toBeGreaterThanOrEqual(0)
+-        expect(lines[index].length).toBeLessThanOrEqual(columns)
+-        expect(lines[index + 1].length).toBeLessThanOrEqual(columns)
+-        expect(lines.slice(index, index + 2).join(" ")).toContain("total=1.0M peak=1.0M")
+-      } finally {
+-        Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
+-      }
+-    }
+-  })
+-
+-  test("keeps cross-day session tokens on local usage weekdays", () => {
+-    // #182：同一会话周一、周二各用 100 token，周二续聊不能搬走周一用量
+-    const monday = new Date(2026, 3, 27).getTime()
+-    const tuesday = new Date(2026, 3, 28).getTime()
+-    // 此用例检查日期和权重，固定窄屏使独立行断言不受宽屏多列排版影响。
+-    const text = (() => {
+-      const width = process.stdout.columns
+-      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
+-      try { return renderDashboard({
+-      ...report,
+-      totalSessions: 1,
+-      sessionsWithUsage: 1,
+-      dateRange: { earliest: monday, latest: tuesday },
+-      daily: [
+-        { ...report.daily[0], day: monday, label: "04-27" },
+-        { ...report.daily[1], day: tuesday, label: "04-28" },
+-      ],
+-      sessions: [{ ...report.sessions[0], ...report.total, requests: 100, created: monday, updated: new Date(2026, 3, 28, 9).getTime() }, { ...report.sessions[1], requests: 1, updated: new Date(2026, 3, 28, 15).getTime() }],
+-      }) } finally {
+-        Object.defineProperty(process.stdout, "columns", { configurable: true, value: width })
+-      }
+-    })()
+-    const lines = text.split("\n")
+-    const start = lines.indexOf("Day of week share")
+-    expect(start).toBeGreaterThanOrEqual(0)
+-    expect(lines.slice(start + 1, start + 8).map((line) => Number(line.split(" ").at(-1)))).toEqual([100, 100, 0, 0, 0, 0, 0])
+-    // 日历必须能定位周起点，小时图必须按本地请求量而非会话数计权。
+-    const calendar = lines.indexOf("Calendar activity")
+-    expect(lines[calendar + 1]).toContain("M T W T F S S")
+-    expect(lines[calendar + 2]).toContain("04-27")
+-    const hour = lines[lines.indexOf("Hour of day") + 1]
+-    expect(hour?.[11]).toBe("█")
+-    expect(hour?.[17]).toBe("·")
 -  })
 -
 -  test("abort and error rate comes from report totals", () => {
@@ -1753,16 +1885,81 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 -      tokensPerSession: 25, medianTokensPerSession: 25,
 -    } as unknown as StatsReport
 -    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
+-    const large = renderDashboard({ ...report, models: report.models.map((model) => ({ ...model, tokens: { ...model.tokens, total: 1_000_000_000 } })) }, { limit: 5 })
+-    expect(large).toContain("1.0B")
+-    expect(large).toContain("200.0M")
+-    // 在真实 58 列输入下检查表头和数据行，而不是只断言趋势列隐藏。
+-    const previous = process.stdout.columns
+-    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
+-    try {
+-      const lines = renderDashboard(report, { limit: 5 }).split("\n")
+-      const start = lines.indexOf("▸ Top models")
+-      expect(start).toBeGreaterThanOrEqual(0)
+-      expect(lines[start + 1].length).toBeLessThanOrEqual(58)
+-      expect(lines[start + 2].length).toBeLessThanOrEqual(58)
+-    } finally {
+-      Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
+-    }
 -  })
 -})
 +import { describe, expect, test } from "bun:test"
 +import { fitVisible, paint, renderContext, renderHeatmap, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
-+import { renderBreakdown, renderCosts, renderDashboard, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
-+import { renderInsights } from "../../src/cli/cmd/stats-insights"
++import { renderBreakdown, renderCharts, renderCosts, renderDashboard, renderHeatmapPage, renderModels, renderOverview, renderProviders, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
++import { renderForecast, renderInsights } from "../../src/cli/cmd/stats-insights"
 +import type { StatsReport } from "../../src/cli/cmd/stats-data"
 +
 +// #176：CJK 显示列宽与 breakdown 冒烟
 +describe("stats render width (#176)", () => {
++  test("cost sorting selects groups before limiting without changing token defaults", async () => {
++    const { renderModels, renderProviders, renderCosts } = await import("../../src/cli/cmd/stats-render")
++    const { emptyComponents } = await import("../../src/cli/cmd/stats-data")
++    // #177：token 榜首成本低，显式 cost 必须在限行前选出高成本行
++    const groups = [
++      { id: "token-heavy", tokens: 100, cost: 1, calls: 1 },
++      { id: "cost-heavy", tokens: 10, cost: 9, calls: 20 },
++    ].map((group) => ({
++      id: group.id,
++      label: group.id,
++      tokens: { input: group.tokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: group.tokens },
++      components: emptyComponents(),
++      cost: group.cost,
++      requests: 1,
++      assistantCalls: group.calls,
++      errors: 0,
++      aborted: 0,
++      durationMs: 0,
++      sessions: 1,
++      providers: [],
++      models: [],
++    }))
++    const report = {
++      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 2, totalTools: 0, days: 1,
++      dateRange: { earliest: 0, latest: 0 },
++      total: {
++        ...groups[0],
++        tokens: { input: 110, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 110 },
++        cost: 10,
++        requests: 2,
++        assistantCalls: 2,
++      },
++      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups,
++      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
++      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
++      tokensPerSession: 110, medianTokensPerSession: 110,
++    } satisfies StatsReport
++    for (const render of [renderModels, renderProviders, renderBreakdown, renderCosts]) {
++      for (const metric of ["tokens", "cost"] as const) {
++        for (const sort of [undefined, "tokens", "cost", "calls"] as const) {
++          const text = render(report, { sort, metric, limit: 1, color: "never" })
++          expect(text).toContain(sort === "cost" || sort === "calls" ? "cost-heavy" : "token-heavy")
++          // 排名限行只约束榜单；后续完整费用瀑布仍应展示其他供应商。
++          expect(text.split("\n").slice(0, 4).join("\n")).not.toContain(sort === "cost" || sort === "calls" ? "token-heavy" : "cost-heavy")
++        }
++      }
++    }
++    expect(groups.map((group) => group.id)).toEqual(["token-heavy", "cost-heavy"])
++  })
++
 +  test("counts CJK glyphs as two columns", () => {
 +    expect(visibleLength("中文")).toBe(4)
 +    expect(visibleLength("abc")).toBe(3)
@@ -2085,8 +2282,11 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +    const text = renderDashboard(report as any, { limit: 5 })
 +    expect(text).toContain("Daily activity")
 +    expect(text).toContain("Token components")
++    expect(text).toMatch(/Input[^\n]*total=100 peak=90/)
 +    expect(text).toContain("Cost & health")
 +    expect(text).toContain("Session size distribution")
++    expect(text).toContain("p90=120.0K p99=120.0K")
++    expect(text).toContain("top-10=")
 +    expect(text).toContain("Top sessions by tokens")
 +    expect(text).toContain("big")
 +    expect(text).toMatch(/cost trend/)
@@ -2096,6 +2296,55 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +    expect(text).toMatch(/Input\s+[\u2581-\u2588]+/)
 +    expect(text).toContain("Cache hit (%): 25")
 +    expect(text).not.toContain("Model activity rows")
++    for (const columns of [58, 80]) {
++      const previous = process.stdout.columns
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns })
++      try {
++        const lines = renderDashboard({ ...report, tokenPartSeries: [{ id: "output", label: "Output + Reasoning", total: 1_000_000, points: [{ day: 1, label: "d1", value: 1_000_000 }] }] }).split("\n")
++        const index = lines.findIndex((line) => line.includes("Output + Reasoning"))
++        expect(index).toBeGreaterThanOrEqual(0)
++        expect(lines[index].length).toBeLessThanOrEqual(columns)
++        expect(lines[index + 1].length).toBeLessThanOrEqual(columns)
++        expect(lines.slice(index, index + 2).join(" ")).toContain("total=1.0M peak=1.0M")
++      } finally {
++        Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
++      }
++    }
++  })
++
++  test("keeps cross-day session tokens on local usage weekdays", () => {
++    // #182：同一会话周一、周二各用 100 token，周二续聊不能搬走周一用量
++    const monday = new Date(2026, 3, 27).getTime()
++    const tuesday = new Date(2026, 3, 28).getTime()
++    // 此用例检查日期和权重，固定窄屏使独立行断言不受宽屏多列排版影响。
++    const text = (() => {
++      const width = process.stdout.columns
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
++      try { return renderDashboard({
++      ...report,
++      totalSessions: 1,
++      sessionsWithUsage: 1,
++      dateRange: { earliest: monday, latest: tuesday },
++      daily: [
++        { ...report.daily[0], day: monday, label: "04-27" },
++        { ...report.daily[1], day: tuesday, label: "04-28" },
++      ],
++      sessions: [{ ...report.sessions[0], ...report.total, requests: 100, created: monday, updated: new Date(2026, 3, 28, 9).getTime() }, { ...report.sessions[1], requests: 1, updated: new Date(2026, 3, 28, 15).getTime() }],
++      }) } finally {
++        Object.defineProperty(process.stdout, "columns", { configurable: true, value: width })
++      }
++    })()
++    const lines = text.split("\n")
++    const start = lines.indexOf("Day of week share")
++    expect(start).toBeGreaterThanOrEqual(0)
++    expect(lines.slice(start + 1, start + 8).map((line) => Number(line.split(" ").at(-1)))).toEqual([100, 100, 0, 0, 0, 0, 0])
++    // 日历必须能定位周起点，小时图必须按本地请求量而非会话数计权。
++    const calendar = lines.indexOf("Calendar activity")
++    expect(lines[calendar + 1]).toContain("M T W T F S S")
++    expect(lines[calendar + 2]).toContain("04-27")
++    const hour = lines[lines.indexOf("Hour of day") + 1]
++    expect(hour?.[11]).toBe("█")
++    expect(hour?.[17]).toBe("·")
 +  })
 +
 +  test("abort and error rate comes from report totals", () => {
@@ -2132,19 +2381,33 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +      tokensPerSession: 25, medianTokensPerSession: 25,
 +    } as unknown as StatsReport
 +    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
++    const large = renderDashboard({ ...report, models: report.models.map((model) => ({ ...model, tokens: { ...model.tokens, total: 1_000_000_000 } })) }, { limit: 5 })
++    expect(large).toContain("1.0B")
++    expect(large).toContain("200.0M")
++    // 在真实 58 列输入下检查表头和数据行，而不是只断言趋势列隐藏。
++    const previous = process.stdout.columns
++    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
++    try {
++      const lines = renderDashboard(report, { limit: 5 }).split("\n")
++      const start = lines.indexOf("▸ Top models")
++      expect(start).toBeGreaterThanOrEqual(0)
++      expect(lines[start + 1].length).toBeLessThanOrEqual(58)
++      expect(lines[start + 2].length).toBeLessThanOrEqual(58)
++    } finally {
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
++    }
 +  })
 +})
 +
-+  // ── R6 前景契约适配（源 0428 测试在目标架构上的落地）──
-+  // 源测试基建适配：COLUMNS 环境隔离，保证宽度相关渲染的确定性。
++  // 固定真实宽度owner，环境变量COLUMNS不会改变process.stdout.columns。
 +  const withColumns = (cols: number, fn: () => void) => {
-+    const prev = process.env.COLUMNS
-+    process.env.COLUMNS = String(cols)
++    const prev = Object.getOwnPropertyDescriptor(process.stdout, "columns")
++    Object.defineProperty(process.stdout, "columns", { configurable: true, value: cols })
 +    try {
 +      fn()
 +    } finally {
-+      if (prev === undefined) delete process.env.COLUMNS
-+      else process.env.COLUMNS = prev
++      if (prev) Object.defineProperty(process.stdout, "columns", prev)
++      else Reflect.deleteProperty(process.stdout, "columns")
 +    }
 +  }
 +  // 空报告构造：全空集合 + 零总量，R6 空态前景/背景安全契约的输入。
@@ -2161,25 +2424,26 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +  const concreteBackgroundAnsi = (s: string) => s.match(/\x1b\[(?:4[0-7]|10[0-7])m|\x1b\[48;(?:2|5)[^\x1b]*/g) ?? []
 +
 +  test("emits the R6 bright ANSI palette contract", () => {
-+    // R6 bright 槽位（91-96）经由 paint() 的 TTY 分支验证。目标 stats-charts 的
-+    // chart 渲染是纯文本路径（无 ANSI/dim 状态面），paint 的 TTY gate 是唯一
-+    // 颜色输出 seam；测试以 isTTY 桩显式开启该分支。
++    // 直接检查发射的槽位与强度复位；纯文本图元不恢复已不存在的Canvas状态机。
 +    const desc = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
 +    try {
 +      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
-+      expect(paint("x", "blue")).toContain("\x1b[94m")
-+      expect(paint("x", "green")).toContain("\x1b[92m")
-+      expect(paint("x", "yellow")).toContain("\x1b[93m")
-+      expect(paint("x", "red")).toContain("\x1b[91m")
-+      expect(paint("x", "magenta")).toContain("\x1b[95m")
-+      expect(paint("x", "cyan")).toContain("\x1b[96m")
++      const ctx = renderContext("always")
++      expect(paint("x", "blue", ctx)).toContain("\x1b[94m")
++      expect(paint("x", "green", ctx)).toContain("\x1b[92m")
++      expect(paint("x", "yellow", ctx)).toContain("\x1b[93m")
++      expect(paint("x", "red", ctx)).toContain("\x1b[91m")
++      expect(paint("x", "magenta", ctx)).toContain("\x1b[95m")
++      expect(paint("x", "cyan", ctx)).toContain("\x1b[96m")
++      expect(paint("x", "white", ctx)).toBe("\x1b[22m\x1b[39m\x1b[39mx\x1b[0m")
 +      // bright 前景不得携带 SGR dim（2）——dim 仅属于网格/低优先级结构。
 +      for (const color of ["blue", "green", "yellow", "red", "magenta", "cyan"] as const) {
-+        expect(paint("x", color)).not.toMatch(/\x1b\[2(?:;|m)/)
++        expect(paint("x", color, ctx)).toStartWith("\x1b[22m\x1b[39m")
++        expect(paint("x", color, ctx)).not.toMatch(/\x1b\[2(?:;|m)/)
 +      }
 +    } finally {
 +      if (desc) Object.defineProperty(process.stdout, "isTTY", desc)
-+      else delete (process.stdout as any).isTTY
++      else Reflect.deleteProperty(process.stdout, "isTTY")
 +    }
 +  })
 +
@@ -2187,19 +2451,19 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +    // 空报告彩色输出不得含 24-bit RGB 前景或具体背景色。
 +    withColumns(120, () => {
 +      const input = emptyReport()
++      const renders = [renderDashboard, renderOverview, renderModels, renderProviders, renderTimeline, renderSessions, renderCharts, renderHeatmapPage, renderCosts, renderTokens, renderInsights, renderForecast]
 +      const outputs = [
-+        renderDashboard(input, { color: "always" }),
-+        ...(["model", "provider", "agent", "source", "project", "tool", "status"] as const).map((by) => renderBreakdown(input, { color: "always", by })),
-+        renderTimeline(input, { color: "always" }),
-+        renderSessions(input, { color: "always" }),
-+        renderInsights(input, { color: "always" }),
++        ...renders.map((render) => ({ colored: render(input, { color: "always" }), plain: render(input, { color: "never" }) })),
++        ...(["model", "provider", "agent", "source", "project", "tool", "status"] as const).map((by) => ({ colored: renderBreakdown(input, { color: "always", by }), plain: renderBreakdown(input, { color: "never", by }) })),
 +      ]
 +      for (const output of outputs) {
-+        expect(output).not.toContain("\x1b[38;2;")
-+        expect(concreteBackgroundAnsi(output)).toEqual([])
++        expect(output.colored).not.toContain("\x1b[38;2;")
++        expect(concreteBackgroundAnsi(output.colored)).toEqual([])
++        // 不能两侧都剥色，否则never泄漏会被等价断言掩盖。
++        expect(output.plain).not.toContain("\x1b[")
++        expect(stripAnsi(output.colored)).toBe(output.plain)
++        for (const line of output.colored.split("\n")) expect(visibleLength(line)).toBeLessThanOrEqual(120)
 +      }
-+      expect(stripAnsi(renderDashboard(input, { color: "always" }))).toBe(stripAnsi(renderDashboard(input, { color: "never" })))
-+      expect(stripAnsi(renderInsights(input, { color: "always" }))).toBe(stripAnsi(renderInsights(input, { color: "never" })))
 +    })
 +  })
 +
@@ -2227,6 +2491,8 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +      Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
 +      delete process.env.NO_COLOR
 +      expect(renderContext("auto").color).toBe("never")
++      expect(paint("x", "red", renderContext("always"))).toContain("\x1b[91m")
++      expect(paint("\x1b[31mx\x1b[0m", "red", renderContext("never"))).toBe("x")
 +      // 端到端：paint 必须消费 renderContext 的裁决——NO_COLOR=1 + isTTY=true 时
 +      // paint 输出不得携带 ANSI（对回归可失败的输出面断言，非仅模式字段）。
 +      Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
@@ -2252,12 +2518,12 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +      expect(tokensNoColor).not.toMatch(/\x1b\[/)
 +      delete process.env.NO_COLOR
 +      const dashAlways = renderDashboard(emptyReport(), { color: "always" })
-+      expect(dashAlways).toMatch(/\x1b\[96m/)
++      expect(dashAlways).toMatch(/\x1b\[95m/)
 +      const heatNever = renderHeatmap({ title: "hm", points: [], color: "never" })
 +      expect(heatNever.join("\n")).not.toMatch(/\x1b\[/)
 +    } finally {
 +      if (ttyDesc) Object.defineProperty(process.stdout, "isTTY", ttyDesc)
-+      else delete (process.stdout as any).isTTY
++      else Reflect.deleteProperty(process.stdout, "isTTY")
 +      if (originalNoColor === undefined) delete process.env.NO_COLOR
 +      else process.env.NO_COLOR = originalNoColor
 +    }
@@ -2267,7 +2533,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -11,6 +11,7 @@ import {
+@@ -14,6 +14,7 @@ import {
    modelProviderMatrix,
    paint,
    renderCallout,
@@ -2275,29 +2541,38 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
    renderEmptyState,
    renderHeatmap,
    renderMatrix,
-@@ -56,8 +57,9 @@ export const limitRows = <T,>(rows: T[], limit?: number) => {
- }
+@@ -44,9 +45,6 @@
+ // #174：auto 非 TTY=never
+ // #174：color=auto 在非 TTY 视为 never，避免管道脏码
+ // #174：auto 在非 TTY 降为 never 防管道脏码
+-export const useColor = (mode?: ColorMode) => {
+-  if (mode === "always") return true
+-  if (mode === "never") return false
+-  return Boolean(process.stdout.isTTY)
+-}
++// 公开查询与实际发射点使用同一NO_COLOR裁决，避免字段正确但输出漏色。
++export const useColor = (mode?: ColorMode) => renderContext(mode).color !== "never"
  
+@@ -61,6 +59,7 @@
  // #174：header 固定展示关键汇总
 -const header = (report: StatsReport, title: string) => [
 -  paint(title, "cyan", undefined, true),
-+const header = (report: StatsReport, title: string, color?: string) => [
-+  // R6 输出门控：标题发射点消费 renderContext 裁决（never/NO_COLOR 去色）。
-+  paint(title, "cyan", renderContext(color), true),
++const header = (report: StatsReport, title: string, color?: ColorMode) => [
++  // R6标题采用magenta，辅助标题保留cyan；同一模式决定每个页面的ANSI输出。
++  paint(title, "magenta", renderContext(color), true),
    `sessions=${report.totalSessions} cost=${formatNumber(report.total.cost)} tokens=${formatNumber(report.total.tokens.total)} days=${report.days}`,
    "-".repeat(Math.min(60, statsContentWidth())),
  ]
-@@ -362,7 +364,7 @@ const renderInsightsCallout = (report: StatsReport) => {
+@@ -415,7 +414,7 @@
  
  export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) => {
    // #182：分区仪表盘：activity / tokens / cost / tops / sessions / insights
 -  const lines: string[] = [...header(report, "stats dashboard")]
 +  const lines: string[] = [...header(report, "stats dashboard", options.color)]
    lines.push(...renderSectionDivider("Daily activity"))
-   // #182：tip 文本 UI 无真实多列 activity，统一纵向堆叠三件套
-   lines.push(...renderCalendarActivity(report))
-@@ -418,7 +420,7 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
- 
+   // 宽屏复用现有多列布局；窄屏保留完整内容，避免固定分栏裁掉日期。
+   const activity = [renderCalendarActivity(report), renderHourOfDayStrip(report), renderDayOfWeekShare(report)]
+@@ -477,7 +476,7 @@
  export const renderOverview = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats overview"),
@@ -2305,35 +2580,32 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      `messages=${report.totalMessages} tools=${report.totalTools} medianTokens/session=${formatNumber(report.medianTokensPerSession)}`,
      "tools:",
      ...limitRows(report.toolUsage, options.limit).map((t) => `  ${fitVisible(t.id, 24)} ${t.count}`),
-@@ -427,7 +429,7 @@ export const renderOverview = (report: StatsReport, options: StatsRenderOptions
- // #174：models 页按 metric 选 cost 或 tokens
+   ].join("\n")
+@@ -486,6 +485,6 @@
  export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats models"),
 +    ...header(report, "stats models", options.color),
      ...renderRankBars({
-       rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
-     }),
-@@ -436,7 +438,7 @@ export const renderModels = (report: StatsReport, options: StatsRenderOptions =
- // #174：providers 页数据源独立
+       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
+       rows: limitRows(
+@@ -501,6 +500,6 @@
  export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats providers"),
 +    ...header(report, "stats providers", options.color),
      ...renderRankBars({
-       rows: limitRows(report.providers, options.limit).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
-     }),
-@@ -448,7 +450,7 @@ export const renderProviders = (report: StatsReport, options: StatsRenderOptions
- // #174：renderTimeline 服务时间线折线，不承担 heatmap 命令
+       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
+       rows: limitRows(
+@@ -519,6 +518,6 @@
  export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats timeline"),
 +    ...header(report, "stats timeline", options.color),
      ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
      ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
-   ].join("\n")
-@@ -467,7 +469,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
-     return b.cost - a.cost
+     // 每日结局与时长来自同一报告，保留错误/中止集中日期的诊断能力。
+@@ -537,6 +536,6 @@
    })
    return [
 -    ...header(report, "stats sessions"),
@@ -2341,8 +2613,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)} avg=${Math.round(s.durationMs / Math.max(1, s.requests))}ms`),
    ].join("\n")
  }
-@@ -473,7 +475,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
- // #177：charts 页附加 tool context 时间序列
+@@ -546,7 +545,7 @@
  export const renderCharts = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats charts"),
@@ -2350,8 +2621,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      // #177：charts 主路径组合 tool context 时间序列
      ...((report.toolSeries?.length ?? 0) > 0
        ? renderRoundedLineChart({
-@@ -498,7 +500,7 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
- // #174：matrix 构造 provider×model 交叉表
+           // #177：固定标题供测试与 UI 契约锁定
+@@ -575,7 +574,7 @@
    const matrix = modelProviderMatrix(report)
    return [
 -    ...header(report, "stats heatmap"),
@@ -2359,22 +2630,23 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      ...renderHeatmap({ title: "Daily tokens", points: dailyTokenPoints(report), color: options.color }),
      ...renderHeatmap({ title: "Daily cost", points: dailyCostPoints(report), color: options.color }),
      ...renderMatrix({ title: "provider x model", ...matrix }),
-@@ -508,7 +510,7 @@ export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptio
- // #174：costs 强制 cost
+   ].join("\n")
+@@ -585,7 +584,7 @@
  export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats costs"),
 +    ...header(report, "stats costs", options.color),
-     ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.cost })) }),
-     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
-   ].join("\n")
-@@ -517,7 +519,7 @@ export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {
- // #174：tokens 页先打印 cache 读写分列
+     ...renderRankBars({
+       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
+       rows: limitRows(
+         options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
+@@ -602,7 +601,7 @@
  export const renderTokens = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats tokens"),
 +    ...header(report, "stats tokens", options.color),
-     `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
+     `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output + report.total.tokens.reasoning)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
      ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
-   ].join("\n")
+     ...renderStackedAreaChart({ title: "Input / output / cache over time", daily: report.daily, layers: layersFromTokenParts() }),
+     ...renderPercentStack({ title: "Token share", columns: report.daily.map((day) => ({ label: day.label, parts: layersFromTokenParts().map((layer) => ({ label: layer.label, value: layer.value(day) })) })) }),
 

@@ -643,7 +643,7 @@ new file mode 100644
 diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
 --- a/packages/opencode/src/lsp/lsp.ts
 +++ b/packages/opencode/src/lsp/lsp.ts
-@@ -1,6 +1,10 @@
+@@ -1,6 +1,11 @@
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { EventV2Bridge } from "@/event-v2-bridge"
@@ -651,6 +651,7 @@ diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
 +import { SessionID } from "@/session/schema"
 +import { EffectBridge } from "@/effect/bridge"
 +import { GlobalBus, type GlobalEvent } from "@/bus/global"
++import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
  import * as LSPClient from "./client"
  import path from "path"
  import { pathToFileURL, fileURLToPath } from "url"
@@ -733,12 +734,15 @@ diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
  
      const state = yield* InstanceState.make<State>(
        Effect.fn("LSP.state")(function* (ctx) {
-@@ -203,13 +236,22 @@ const layer = Layer.effect(
+@@ -203,13 +236,25 @@ const layer = Layer.effect(
            servers,
            broken: new Set(),
            spawning: new Map(),
-+          // #499：claim 变化经 EventV2Bridge 发布——TUI 重拉作用域化 status。
-+          updated: events.publish(Event.Updated, {}) as Effect.Effect<void>,
++          // 退休可能由其他目录或全局删除回调触发，通知仍绑定被退休 State 的实例与 Workspace。
++          updated: events.publish(Event.Updated, {}).pipe(
++            Effect.provideService(InstanceRef, ctx),
++            Effect.provideService(WorkspaceRef, yield* WorkspaceRef),
++          ) as Effect.Effect<void>,
 +          tokens: new Map(),
 +          bridgeOwners: new Map(),
 +          closed: false,
@@ -809,7 +813,7 @@ diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
  
 -          const existing = s.clients.find((x) => x.root === root && x.serverID === server.id)
 +          // #499：initialize 是 root 可消失的异步边界；注册前复验，避免消费已不可能使用的 client。
-+          if (!(await Effect.runPromise(fs.existsSafe(root)))) {
++          if (!(await bridge.promise(fs.existsSafe(root)))) {
 +            await client.shutdown()
 +            return undefined
 +          }
@@ -1098,7 +1102,7 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
 +    const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
  
      const state = yield* InstanceState.make(
-       Effect.fn("SessionRunState.state")(function* (ctx) {
+       Effect.fn("SessionRunState.state")(function* () {
          const scope = yield* Scope.Scope
 -        const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
 +        // #499：InstanceState 只保留 identity-checked owned 集合供 dispose；
@@ -1166,36 +1170,38 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
        if (existing?.busy) yield* busyError(sessionID)
        // revert 进行中也视为 busy——阻止 compact/deleteMessage 等操作与 revert 并发
        if (data.reverting.has(sessionID)) yield* busyError(sessionID)
-@@ -122,7 +143,7 @@ const layer = Layer.effect(
+@@ -122,8 +143,7 @@ const layer = Layer.effect(
  
      const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-       const data = yield* InstanceState.get(state)
+-      const data = yield* InstanceState.get(state)
 -      const existing = data.runners.get(sessionID)
 +      const existing = runners.get(sessionID)
+       const jobs = yield* background.list()
        if (!existing) {
          // 无 runner 时仍需取消可能残留的 background jobs
-         yield* Effect.all([cancelBackgroundJobs(background, sessionID), status.set(sessionID, { type: "idle" })], {
-@@ -146,8 +167,21 @@ const layer = Layer.effect(
+         yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), status.set(sessionID, { type: "idle" })], {
+@@ -142,15 +167,21 @@ const layer = Layer.effect(
+     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
+       sessionID: SessionID,
+       onInterrupt: Effect.Effect<SessionV1.WithParts>,
+       work: Effect.Effect<SessionV1.WithParts>,
      ) {
-       // #152：runner 生命周期计入 SessionActivity，供 worker 空闲判定
-       const end = SessionActivity.begin(`session:${sessionID}`)
-+      // #499：只有真正 admitted 的工作才进入 LSP per-Session claim；提交者的
-+      // Instance/Workspace refs 绑定到 work，ShellThenRun 移交保留原目录语义。
++      // queued work 由旧 shell fiber 启动时仍使用提交方的实例，只有真正执行才刷新 LSP generation。
 +      const refs = { instance: yield* InstanceRef, workspace: yield* WorkspaceRef }
-+      const tracked = Effect.gen(function* () {
-+        yield* lsp.init()
-+        return yield* work
-+      }).pipe(
-+        LSP.withSession(sessionID, sessions.get(sessionID).pipe(Effect.asVoid, Effect.orDie)),
-+        // attachWith 非 dual 形态——pipe 内显式传参。
-+        (effect) => attachWith(effect, refs),
-+      )
-+      // #499：ensureRunning 保证 work 与 runner 生命周期一致；end 在退出时归还
-+      // daemon 索引槽位，防止陈旧 finalizer 取消被接管的 runner。
-       return yield* (yield* runner(sessionID, onInterrupt))
--        .ensureRunning(work)
-+        .ensureRunning(tracked)
-         .pipe(Effect.ensuring(Effect.sync(end)))
+       // 登记实际 work 而非等待者，排队或取消等待不提前释放活动标记。
+       const tracked = Effect.acquireUseRelease(
+         Effect.sync(() => SessionActivity.begin(`session:${sessionID}`)),
+-        () => work,
++        () =>
++          Effect.gen(function* () {
++            yield* lsp.init()
++            return yield* work
++          }).pipe(LSP.withSession(sessionID, sessions.get(sessionID).pipe(Effect.asVoid, Effect.orDie))),
+         (end) => Effect.sync(end),
+       )
+       const current = yield* runner(sessionID, onInterrupt)
+-      return yield* current.ensureRunning(tracked)
++      return yield* current.ensureRunning(attachWith(tracked, refs))
      })
  
 @@ -248,6 +282,10 @@ function busyError(sessionID: SessionID) {
@@ -1214,8 +1220,9 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -1,11 +1,23 @@
+@@ -1,11 +1,24 @@
  import { describe, expect, spyOn } from "bun:test"
++import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 +import fs from "node:fs/promises"
  import path from "path"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -1239,7 +1246,7 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
  import * as LSPServer from "@/lsp/server"
  import * as VscodeBridge from "@/ide/vscode-bridge"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-@@ -27,6 +39,215 @@ const disabledDownloadIt = testEffect(
+@@ -27,6 +39,217 @@ const disabledDownloadIt = testEffect(
    Layer.mergeAll(lspLayer({ disableLspDownload: true }), LayerNode.compile(CrossSpawnSpawner.node)),
  )
  
@@ -1261,7 +1268,9 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
 +const fakeConfig = { lsp: { fake: { command: [process.execPath, fakeServerPath], extensions: [".repro"] } } }
 +// #499：不覆盖 typescript 条目——config 覆盖会替换 spawn 闭包使 spyOn 失效；
 +// builtin Typescript 的 spawn 由测试直接拦截并返回受控 fake 进程。
-+const typescriptOnly = {}
++const typescriptOnly = {
++  lsp: { eslint: { disabled: true }, oxlint: { disabled: true }, biome: { disabled: true } },
++} satisfies Partial<ConfigV1.Info>
 +const touchAs = (lsp: LSP.Interface, sessionID: SessionID, file: string) =>
 +  Effect.gen(function* () {
 +    yield* lsp.init()
@@ -1486,8 +1495,8 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { Ripgrep } from "@opencode-ai/core/ripgrep"
  import { Format } from "../../src/format"
--import { TestInstance } from "../fixture/fixture"
-+import { TestInstance, provideInstance, tmpdirScoped } from "../fixture/fixture"
+-import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
++import { provideInstance, provideTmpdirInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 +// #499：LSP admission 目录追踪——并发 caller 共享一次 init 的断言载体。
 +import { InstanceState } from "@/effect/instance-state"
 +// #499：跨目录提交/控制面测试需要直接操作 InstanceRef。
@@ -1588,7 +1597,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      expect(lspDirectories.slice(offset)).toEqual([target])
      }),
    { git: true },
-     // Windows 负载下 shell+loop 往返超过 10s；与其他测试的 30s 对齐
+   // Windows冷启动还包含Git与LLM测试服务，保留完整断言并使用有界集成预算。
 
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
@@ -1606,24 +1615,21 @@ diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/ge
 diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
 --- a/packages/tui/src/context/event.ts
 +++ b/packages/tui/src/context/event.ts
-@@ -69,6 +69,12 @@ export function useEvent() {
- 
-       // #164/#165：单次投递前做 project/global 作用域判定
-       const currentProject = project.project()
-+      // #499：lsp.updated 只表示"当前 route 需要重拉"，不携带可渲染状态；跨 Project
-+      // 放行后仍由 SyncProvider 按 active Session 请求和过滤，不能在这里丢失通知。
-+      if (event.payload.type === "lsp.updated") {
-+        handler(event.payload, { directory: event.directory, workspace: event.workspace })
-+        return
-+      }
-       if (
-         !shouldDeliverScopedEvent(
-           { directory: event.directory, project: (event as { project?: string }).project },
+@@ -65,7 +65,8 @@ export function useEvent() {
+       // 重连通知始终投递，其余事件只在一次主分发前检查项目归属。
+-      if (event.payload.type !== "server.connected" && !shouldDeliverScopedEvent(
++      // LSP 通知只触发当前 route 重拉；跨项目投递不携带可直接渲染的状态。
++      if (event.payload.type !== "server.connected" && event.payload.type !== "lsp.updated" && !shouldDeliverScopedEvent(
+         { directory: event.directory, project: (event as { project?: string }).project },
+         project.project(),
+       )) return
+       handler(event.payload, { directory: event.directory, workspace: event.workspace })
+     })
 
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -23,13 +23,15 @@ import type {
+@@ -23,14 +23,16 @@ import type {
  } from "@opencode-ai/sdk/v2"
  import { createStore, produce, reconcile } from "solid-js/store"
  import { useProject } from "./project"
@@ -1634,6 +1640,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
  import { useTuiStartup } from "./runtime"
  import { createSimpleContext } from "./helper"
  import { useExit } from "./exit"
+ import { useEpilogue } from "./epilogue"
  import { useArgs } from "./args"
 -import { batch, onCleanup, onMount } from "solid-js"
 +import { batch, createEffect, onCleanup, onMount } from "solid-js"
@@ -1690,7 +1697,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
          case "vcs.branch.updated": {
            if (workspace === project.workspace.current()) {
 @@ -943,7 +971,8 @@ export const {
-             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+             ...(args.continue ? [] : [sessionListPromise]),
              consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
              sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
 -            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
@@ -1699,16 +1706,12 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
              sdk.client.experimental.resource
                .list({ workspace })
-@@ -975,7 +1004,14 @@ export const {
+@@ -975,7 +1004,10 @@ export const {
          })
      }
  
-+    // #499：route 与 Session snapshot 都是 reactive 输入。Session 列表在 bootstrap 后到达时，
-+
-+    // 当前 route 会自动补做一次正确目录/Workspace 的 LSP 请求。
-+
++    // route 与 Session 快照都参与依赖追踪，bootstrap 列表到达后自动补拉正确作用域。
 +    createEffect(() => void refreshLsp())
-+
 +
      onMount(() => {
        void bootstrap()

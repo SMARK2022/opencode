@@ -12,17 +12,33 @@ Content-Transfer-Encoding: 8bit
 
 同步根 README、21 份多语言 README 及 VS Code README 的版本引用；IDE 扩展保持独立版本。逐文件校验 24 个文件均只有版本替换，未混入提示词、计划文档或第三方改动。
 
-适配说明：source 是 24 文件 90 hunk 的 1.15.13→1.15.14 版本字面同步。目标谱系裁定（#287/#284/#396/#440/#465/0527/0573 先例链）：README 族（root+docs/readme 21 译本+vscode）的 SMARK 徽章/安装命令/TIP 段从未在目标物化（纯上游形态）；CLI 版本权威由 packages/opencode/package.json 版本合同承载（现 1.18.44-smark，#465 槽位），1.15.x 回写被 //version-note 注释禁止且升至 1.18.45 属无授权发布行为（0573 裁定）——89 hunk 全部悬空裁记。唯一活落点：CONTEXT.md:231 域语言头的 fork 版本字面 v1.15.13-smark→v1.15.14-smark（0573 同形单行落地，源版本链的域语言锚点）。
+适配说明：source的24文件90hunk只有版本字面同步。目标CLI manifest/lock与现有README、IDE配对已经采用1.18.44-smark，保留该版本及v1.18.32迁移基线，不回写1.15或改变独立扩展版本。原固定安装意图落实到实际中英文根README，明确把目标版本传给fork installer；保留上游安装选项及其他翻译正文，不再改不存在的CONTEXT旧版本前像。
 
-diff --git a/CONTEXT.md b/CONTEXT.md
---- a/CONTEXT.md
-+++ b/CONTEXT.md
-@@ -228,7 +228,7 @@ Before stabilizing the client API:
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -78,8 +78,9 @@
+ # 直接安装 (支持版本指定)
+ curl -fsSL https://opencode.ai/install | bash
  
- # opencode (SMARK fork)
+-# 指定版本安装
+-OPENCODE_VERSION=1.18.44 curl -fsSL https://opencode.ai/install | bash
++# 固定SMARK CLI版本，与packages/opencode/package.json保持一致
++curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
++  bash -s -- --version 1.18.44-smark
  
--The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.13-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
-+The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.14-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
+ # 软件包管理器
+ npm i -g opencode-ai@latest        # 也可使用 bun/pnpm/yarn
+diff --git a/README.en.md b/README.en.md
+--- a/README.en.md
++++ b/README.en.md
+@@ -55,5 +55,9 @@
+ # YOLO
+ curl -fsSL https://opencode.ai/install | bash
  
- ## Language
- 
++# 固定SMARK CLI版本，与packages/opencode/package.json保持一致
++curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
++  bash -s -- --version 1.18.44-smark
++
+ # Package managers
+ npm i -g opencode-ai@latest        # or bun/pnpm/yarn

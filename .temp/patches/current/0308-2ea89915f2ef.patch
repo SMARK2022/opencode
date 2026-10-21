@@ -201,4 +201,28 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
          .pipe(Effect.forkChild)
        yield* waitForBusy(chat.id)
  
+@@ -3314,9 +3320,10 @@
+       if (Exit.isSuccess(exit)) {
+         expect(exit.value.info.role).toBe("assistant")
+         expect(exit.value.parts.some((part) => part.type === "text" && part.text === "after-shell")).toBe(true)
+       }
+       expect(yield* llm.calls).toBe(1)
+     }),
+   { git: true },
+-  10_000,
++  // Windows冷启动还包含Git与LLM测试服务，保留完整断言并使用有界集成预算。
++  30_000,
+ )
+@@ -3353,9 +3360,10 @@
+       if (Exit.isSuccess(ea) && Exit.isSuccess(eb)) {
+         expect(ea.value.info.id).toBe(eb.value.info.id)
+         expect(ea.value.info.role).toBe("assistant")
+       }
+       expect(yield* llm.calls).toBe(1)
+     }),
+   { git: true },
+-  10_000,
++  // 两个等待者仍须共享同一结果，延长预算不改变并发排队契约。
++  30_000,
+ )
 

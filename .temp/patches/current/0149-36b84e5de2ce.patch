@@ -5,46 +5,15 @@ Subject: [PATCH] =?UTF-8?q?feat:=201.14.42=20=E5=AF=B9macOS=E5=AE=8C?=
  =?UTF-8?q?=E6=95=B4=E8=BF=9B=E8=A1=8Ctest=E9=97=AE=E9=A2=98=E4=BF=AE?=
  =?UTF-8?q?=E6=AD=A3=20=E6=9B=B4=E6=96=B0=E6=B5=8B=E8=AF=95=E7=94=A8?=
 
-diff --git a/packages/opencode/src/effect/runner.ts b/packages/opencode/src/effect/runner.ts
-index 9c2060a96e..8cc506bcea 100644
---- a/packages/opencode/src/effect/runner.ts
-+++ b/packages/opencode/src/effect/runner.ts
-@@ -111,7 +111,8 @@ export const make = <A, E = never>(
-       yield* Deferred.succeed(shell.cancelled, undefined).pipe(Effect.asVoid)
-       // 非阻塞中断：fork 到 scope 中执行，避免等待 fiber 终止
-       // Effect.exit 确保中断不抛出异常到调用链，forkIn 将其隔离到 scope
--      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
-+      // #149：await interrupt，避免 shell 取消竞态
-+      yield* Fiber.interrupt(shell.fiber).pipe(Effect.exit, Effect.asVoid)
-     })
- 
-   const ensureRunning = (work: Effect.Effect<A, E>) =>
-@@ -178,8 +179,9 @@ export const make = <A, E = never>(
-         return [
-           Effect.gen(function* () {
-             // 先 fail done 唤醒等待者，再非阻塞中断 fiber
--            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
--            yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.forkIn(scope), Effect.asVoid)
-+            // #149：先中断 fiber 再 fail done，避免未 settle 的工具输出被抢先收口
-+            yield* Fiber.interrupt(st.run.fiber)
-+            yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
-             yield* idleIfCurrent()
-           }),
-           { _tag: "Idle" } as const,
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 index 8588258363..17e3cc6342 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -27,6 +27,9 @@ import { EventV2Bridge } from "@/event-v2-bridge"
- import { Database } from "@opencode-ai/core/database/database"
- import { Usage, type LLMEvent } from "@opencode-ai/llm"
- 
+@@ -34,1 +34,4 @@
 +// #149：取消时给 bash 等工具完成截断/complete 的宽限
 +const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
 +
  const DOOM_LOOP_THRESHOLD = 3
- export type Result = "compact" | "stop" | "continue"
- 
 @@ -605,6 +608,15 @@ const layer = Layer.effect(
        })
  
@@ -61,42 +30,20 @@ index 8588258363..17e3cc6342 100644
          // #139：中断时跳过慢 git snapshot，优先完成终端态清理
          if (ctx.snapshot && !aborted) {
            const patch = yield* snapshot.patch(ctx.snapshot)
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index b8b2097566..9ae2df11c6 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -185,29 +185,8 @@ const layer = Layer.effect(
-       assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
-       yield* sessions.updateMessage(assistant)
- 
--      // 将 pending/running 状态的工具部件标记为 error
--      // running 工具记录 interrupted 元数据，便于后续诊断中断原因
--      yield* Effect.forEach(
--        match.value.parts,
--        (part) => {
--          if (part.type !== "tool") return Effect.void
--          if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
--          return sessions.updatePart({
--            ...part,
--            state: {
--              status: "error",
--              input: part.state.input,
--              error: "Tool execution aborted",
--              metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
--              time: {
--                start: part.state.status === "running" ? part.state.time.start : now,
--                end: now,
--              },
--            },
--          } satisfies SessionV1.ToolPart).pipe(Effect.asVoid)
--        },
--        { discard: true },
--      )
-+      // #149：不在此强制写 tool error；各工具 cancel handler（如 bash 截断）负责收口，避免竞态
-+
-     })
- 
-     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
+diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
+--- a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
++++ b/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap
+@@ -27,6 +27,10 @@
+     "compress_output": {
+       "description": "Whether this shell call may compress repetitive output before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
+       "type": "boolean",
+     },
++    "description": {
++      "description": "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
++      "type": "string",
++    },
+     "timeout": {
+       "description": "Optional timeout in milliseconds",
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/public.ts b/packages/opencode/src/server/routes/instance/httpapi/public.ts
 index 2a7266c511..e3fbe16e8a 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/public.ts

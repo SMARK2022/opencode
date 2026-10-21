@@ -7,8 +7,8 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 适配：worker 的 fixture 契约（markPluginDependenciesReady）、日志边界（observability 迁移后
-不初始化以独占 stdout）、raw 装配（canonical webHandler seam）、requestUsage（SDK v2 未生成，
-经同一 app.fetch 原始 GET + x-opencode-directory）、Database core 路径；测试三 hunk 锚点重写
+不初始化以独占 stdout）、raw 装配（canonical webHandler seam）、requestUsage（既有 SDK consumer）、
+scoped router/runtime 清理；测试三 hunk 锚点重写
 （目标 serverPathParity 单行形态 + no-reply 块含上游新增注释行）。
 diff --git a/docs/plans/promptasync-teardown-race.md b/docs/plans/promptasync-teardown-race.md
 new file mode 100644
@@ -472,7 +472,7 @@ diff --git a/packages/opencode/test/server/httpapi-promptasync-worker.ts b/packa
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/server/httpapi-promptasync-worker.ts
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,269 @@
 +import { mkdir, rm } from "node:fs/promises"
 +import path from "node:path"
 +import { createOpencodeClient } from "@opencode-ai/sdk/v2"
@@ -612,7 +612,7 @@ new file mode 100644
 +
 +async function runScenario(input: { path: ServerPath; directory: string }): Promise<PromptAsyncWorkerResult> {
 +  const { pollWithTimeout } = await import("../lib/effect")
-+  // #494：保留 app 引用——requestUsage 经同一 app.fetch 原始直读（SDK v2 未生成该路由）。
++  // Message 与 usage 均走既有 SDK 和同一 app，不新增另一条持久化观察路径。
 +  const app = await createApp(input.path)
 +  const sdk = createClient(app, input.directory)
 +  // 先执行同步 noReply，再执行 async noReply，与原 parity 场景保持相同的 accepted-operation 顺序。
@@ -645,18 +645,10 @@ new file mode 100644
 +          message.parts.some((part) => part.type === "text" && part.text === "async hello"),
 +        )
 +        if (!asyncMessage) return undefined
-+        // #494：目标 SDK v2 尚未暴露 requestUsage 路由——与 httpapi-session.test 同款原始 GET
-+        // + x-opencode-directory 直读公共端点（经同一 app.fetch 保持同源路由判定）；
-+        // status==="completed" 判定语义不变。
-+        const usageResponse = await app.fetch(
-+          new Request(`http://localhost/session/${sessionID}/request_usage/${asyncMessage.info.id}`, {
-+            headers: { "x-opencode-directory": input.directory },
-+          }),
-+        )
-+        const requestUsage = {
-+          response: { status: usageResponse.status },
-+          data: (await usageResponse.json().catch(() => undefined)) as { status?: string } | undefined,
-+        }
++        const requestUsage = await sdk.session.requestUsage.get({
++          sessionID,
++          requestID: asyncMessage.info.id,
++        })
 +        // 未生成或仍为 running 的 usage 继续等待，HTTP 错误不能被转换成成功结果。
 +        if (requestUsage.response.status !== 200 || !requestUsage.data || requestUsage.data.status !== "completed") {
 +          return undefined
@@ -699,7 +691,7 @@ new file mode 100644
 +async function main(): Promise<PromptAsyncWorkerResult> {
 +  const root = path.dirname(dbPath)
 +  let directory: string | undefined
-+  let closeDatabase: (() => void) | undefined
++  let closeDatabase: (() => Promise<void>) | undefined
 +  let disposeProject: (() => Promise<void>) | undefined
 +  try {
 +    await mkdir(root, { recursive: true })
@@ -717,9 +709,13 @@ new file mode 100644
 +    directory = project.path
 +    disposeProject = () => project[Symbol.asyncDispose]()
 +    await initializeSource()
-+    // 只在环境边界完成后加载生产 Database，避免模块级 Flag 缓存错误路径。
-+    const { Database } = await import("@opencode-ai/core/database/database")
-+    closeDatabase = () => Database.close()
++    // 环境边界完成后才加载资源 owner；先释放 router，再由 runtime finalizer checkpoint/close 同一数据库。
++    const { HttpApiApp } = await import("../../src/server/routes/instance/httpapi/server")
++    const { AppRuntime } = await import("../../src/effect/app-runtime")
++    closeDatabase = async () => {
++      await HttpApiApp.webHandler().dispose()
++      await AppRuntime.dispose()
++    }
 +    return await runScenario({ path: serverPath, directory })
 +  } finally {
 +    // public terminal state 已观察后再释放 instance，避免 teardown 重新与 promptAsync fork 竞争。
@@ -728,7 +724,7 @@ new file mode 100644
 +      const { disposeInstance } = await import("../../src/effect/instance-registry")
 +      await disposeInstance(directory)
 +    }
-+    closeDatabase?.()
++    await closeDatabase?.()
 +    await disposeProject?.()
 +    // 子进程拥有整个临时根目录；移除它可避免 Windows WAL/SHM 文件泄漏到后续测试。
 +    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined)

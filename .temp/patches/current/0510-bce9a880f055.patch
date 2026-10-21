@@ -658,35 +658,134 @@ index 89487c00e..4da86e472 100644
    test("aborts a Windows process tree before resolving", async () => {
      if (process.platform !== "win32") return
 
-diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-index df4578fa0..9ee7bd086 100644
---- a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-+++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-@@ -497,14 +497,23 @@ test("keeps the constrained Prompt extension bar on one row across active states
-       () => undefined,
-       async (_prompt, _route, app, context) => {
-         // 断言最终字符帧而非复制 Yoga 算法，确保 flex 收缩和 renderer 换行都走生产路径。
-+        // #510：renderOnce 后完整 drain（microtask/nextTick/setTimeout(0)）——Bun.sleep 会阻塞
-+        // event loop，让 async 事件（如 worker 响应）在轮询间隙饿死；5s 墙钟只是诊断上界。
-+        const FRAME_WAIT_DEADLINE_MS = 5_000
-         const waitForFrame = async (predicate: (frame: string) => boolean) => {
--          for (let index = 0; index < 200; index++) {
-+          const start = Date.now()
-+          let frame = ""
-+          let passes = 0
-+          while (Date.now() - start < FRAME_WAIT_DEADLINE_MS) {
-+            passes++
-             await app.renderOnce()
--            const frame = app.captureCharFrame()
-+            frame = app.captureCharFrame()
-             if (predicate(frame)) return frame
--            await Bun.sleep(10)
-+            await Promise.resolve()
-+            await new Promise((resolve) => process.nextTick(resolve))
-+            await new Promise((resolve) => setTimeout(resolve, 0))
-           }
--          throw new Error("Prompt footer frame did not settle")
-+          throw new Error(`Prompt footer frame did not settle after ${Date.now() - start}ms (${passes} passes)`)
-         }
-         // #491：行数统计基于 trim 后非空行——纯空白行是 renderer 留白，不构成“扩展栏”证据。
-         const extensionRows = (frame: string) => {
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -6,5 +6,5 @@
+ import { testRender, useRenderer } from "@opentui/solid"
+ import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+-import { onCleanup } from "solid-js"
++import { createEffect, onCleanup } from "solid-js"
+ import type { AssistantMessage, Part, UserMessage } from "@opencode-ai/sdk/v2"
+ import { tmpdir } from "../../fixture/fixture"
+@@ -27,5 +27,5 @@
+ import { RouteProvider, useRoute } from "../../../src/context/route"
+ import { SDKProvider } from "../../../src/context/sdk"
+-import { SyncProvider } from "../../../src/context/sync"
++import { SyncProvider, useSync } from "../../../src/context/sync"
+ import { ThemeProvider } from "../../../src/context/theme"
+ import { TuiConfigProvider } from "../../../src/config"
+@@ -38,3 +38,2 @@
+ import { ToastProvider } from "../../../src/ui/toast"
+-import { wait } from "../../cli/cmd/tui/sync-fixture"
+ 
+@@ -514,6 +513,9 @@
+     if (scenario === "bounded" || scenario === "show") {
+       if (scenario === "show") {
++        // visibility=true 不预设 disclosure；原 #481 契约要求用户先展开局部 run。
++        await frame("▼ 展开查看完整推理")
++        await clickVisibleText(app, "▼ 展开查看完整推理")
+         expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
+         await clickVisibleText(app, "▲ 收起推理")
+       }
+       const value = await frame("10 segments", "short thought 2", "▼ 展开查看完整推理")
+@@ -554,3 +556,3 @@
+     }, { maxPasses: 400 })
+-  }, { width: 110, height: 48 }, {}, { thinking_mode: scenario === "show" ? "show" : "hide" })
++  }, { width: 110, height: 48 }, {}, { thinking_visibility: true })
+ })
+@@ -590,8 +592,16 @@
+ // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
+ async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {
+-  for (let pass = 0; pass < options.maxPasses; pass++) {
++  const start = Date.now()
++  let passes = 0
++  let frame = ""
++  while (Date.now() - start < 5_000) {
++    passes++
+     await app.renderOnce()
+-    if (await predicate(app.captureCharFrame())) return
++    frame = app.captureCharFrame()
++    if (await predicate(frame)) return
++    await Promise.resolve()
++    await new Promise((resolve) => process.nextTick(resolve))
++    await new Promise((resolve) => setTimeout(resolve, 0))
+   }
+-  throw new Error(`Expected session frame did not appear:\n${app.captureCharFrame()}`)
++  throw new Error(`Expected session frame did not appear after ${Date.now() - start}ms (${passes} passes, prior budget ${options.maxPasses}):\n${frame}`)
+ }
+@@ -626,8 +636,17 @@
+-  const observed: { route?: ReturnType<typeof useRoute> } = {}
+-  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} />, {
+-    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen",
++  const messageIDs = messages.map((message) => message.info.id)
++  const observed: { route?: ReturnType<typeof useRoute>; syncReady: boolean } = { syncReady: false }
++  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
++    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen", useThread: false,
+   })
+   try {
+-    await wait(() => Boolean(observed.route))
++    // 根挂载不代表 Session transcript 已入库；单循环成功即退出，不留下并行 loser 绘制。
++    const syncDeadline = Date.now() + 10_000
++    while (!observed.syncReady) {
++      if (Date.now() >= syncDeadline) throw new Error(`session sync data missing: ${sessionID}, ${messageIDs.join(",")}`)
++      await app.renderOnce()
++      await Promise.resolve()
++      await new Promise((resolve) => process.nextTick(resolve))
++      await new Promise((resolve) => setTimeout(resolve, 0))
++    }
+     if (!observed.route) throw new Error("review route was not mounted")
+     await run(app, observed.route, events.emit)
+@@ -641,4 +660,6 @@ function ReviewHarness(props: {
+   fetch: typeof globalThis.fetch
+   events: ReturnType<typeof createEventSource>["source"]
++  messageIDs: string[]
++  onSyncReady: () => void
+   observe: (route: ReturnType<typeof useRoute>) => void
+ }) {
+@@ -659,5 +680,5 @@ function ReviewHarness(props: {
+                     <ThemeProvider mode="dark"><LocalProvider><PromptStashProvider><DialogProvider>
+                       <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider>
+-                        <ReviewProbe observe={props.observe} />
++                        <ReviewProbe observe={props.observe} messageIDs={props.messageIDs} onSyncReady={props.onSyncReady} />
+                       </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider>
+                     </DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
+@@ -675,4 +696,14 @@
+-function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void }) {
++function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void; messageIDs: string[]; onSyncReady: () => void }) {
++  const sync = useSync()
+   props.observe(useRoute())
++  let fired = false
++  // 观察公开 store 的初始 Session 消息/part 数组，子会话仅在真实导航后由既有路径加载。
++  createEffect(() => {
++    if (fired || !sync.session.get(sessionID)) return
++    const infos = sync.data.message[sessionID]
++    if (!infos || props.messageIDs.some((id) => !infos.some((info) => info.id === id) || sync.data.part[id] === undefined)) return
++    fired = true
++    props.onSyncReady()
++  })
+   return <Session />
+ }
+@@ -823,10 +854,12 @@
+-    // 首个可见正文帧已带入口，不能等到跨过五行后才切换裁剪模式。
++    // #481：首个短正文没有虚假 overflow；先点短正文也不能预写后续 expanded。
+     const initial = await frame("short stream thought")
+-    expect(initial).toContain("▼ 展开查看完整推理")
+-    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(1)
++    expect(initial).not.toContain("▼ 展开查看完整推理")
++    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(0)
++    // 再增长仍受共享五行预算，不能以短内容点击绕过默认收缩。
++    await clickVisibleText(app, "short stream thought")
+     emit({ directory, project: "proj_test", payload: { id: "evt_default_grow", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: suffix } } })
+     const grown = await frame("second stream line")
+-    expect(grown).toContain("▼ 展开查看完整推理")
+-    if (scenario === "long") expect(grown).not.toContain("STREAM_TAIL")
++    if (scenario === "short") expect(grown).not.toContain("▼ 展开查看完整推理")
++    if (scenario === "long") expect(await frame("▼ 展开查看完整推理")).not.toContain("STREAM_TAIL")
+     const body = app.renderer.root.findDescendantById(`text-${source.id}`)
+     expect(body?.parent?.parent?.height).toBeLessThanOrEqual(5)
+@@ -850,3 +883,3 @@
+     expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
+-  }, { width: 80, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
++  }, { width: 80, height: 48 }, {}, { thinking_visibility: true, sidebar: "hide" })
+ })

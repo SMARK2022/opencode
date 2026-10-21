@@ -16,7 +16,7 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/tui/test/cli/tui/event-single-delivery.test.ts b/packages/tui/test/cli/tui/event-single-delivery.test.ts
 --- a/packages/tui/test/cli/tui/event-single-delivery.test.ts
 +++ b/packages/tui/test/cli/tui/event-single-delivery.test.ts
-@@ -18,5 +18,18 @@ describe("shouldDeliverScopedEvent", () => {
+@@ -18,5 +18,20 @@ describe("shouldDeliverScopedEvent", () => {
    test("delivers unscoped events once (no double-path)", () => {
      // #164：无 project 字段时放行一次
      expect(shouldDeliverScopedEvent({ directory: "/workspace" }, "proj-a")).toBe(true)
@@ -24,6 +24,8 @@ diff --git a/packages/tui/test/cli/tui/event-single-delivery.test.ts b/packages/
 +
 +  // #572：对齐 #570 的 active Session admission 合同——project 分支是唯一跨 Project 兑底位置
 +  test("admits mismatched-project events only through the active session branch", () => {
++    // global 事件不受 Project 或活动会话冲突限制，不能落入后面的隔离分支。
++    expect(shouldDeliverScopedEvent({ directory: "global", project: "proj-b", sessionID: "sess-2" }, "proj-a", "sess-1")).toBe(true)
 +    // #572：project 不匹配时唯一放行路径是活动会话 ID 与事件 sessionID 严格相等
 +    expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b", sessionID: "sess-1" }, "proj-a", "sess-1")).toBe(true)
 +    // #572：sessionID 不匹配或缺失时保持 Project 隔离，不因活动会话存在而放宽

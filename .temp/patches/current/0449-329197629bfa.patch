@@ -550,29 +550,35 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index ab8b1eef2..852078a5d 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2959,15 +2959,12 @@ function Shell(props: ToolProps) {
-           preview={
-             shellCanCollapse() && !showContextOutput() ? (
-               // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
--              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
-+              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, "", previewText(output(), 10)].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
+@@ -2819,4 +2819,5 @@ function Shell(props: ToolProps) {
+       <Match when={stringValue(props.metadata.output) !== undefined}>
+         <BlockTool
+-          title={title()}
++          // 无 workdir 时也提供上下文标题，移除正文标签后仍保留 returned to model 标识。
++          title={title() ?? (showContextOutput() ? "# Shell" : undefined)}
+           part={props.part}
+@@ -2829,5 +2830,5 @@ function Shell(props: ToolProps) {
+             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
+-              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
+-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
++              // 保留现有预览预算；非空输出才加入分隔行，空输出不制造额外空白。
++              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, limited() ? "" : undefined, limited() ? previewText(limited(), 10, maxChars()) : undefined].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
              ) : undefined
            }
-         >
-           <box gap={1}>
-             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
--            <Show when={showContextOutput()}>
--              <text fg={theme.info}>Model context output</text>
--            </Show>
+@@ -2837,7 +2838,3 @@ function Shell(props: ToolProps) {
                <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
              </Show>
+-            {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
+-            <Show when={showContextOutput() && contextOutputAvailable()}>
+-              <text fg={theme.info}>Model context output</text>
+-            </Show>
              <Show when={output()}>
 diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
 new file mode 100644
 index 000000000..8e054a99a
 --- /dev/null
 +++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +import { describe, expect, test } from "bun:test"
 +import { readFileSync } from "node:fs"
 +import path from "path"
@@ -597,7 +603,34 @@ index 000000000..8e054a99a
 +    const shellBody = sessionSource.slice(shellStart, shellStart + 6000)
 +    expect(shellBody).toContain("gap={1}")
 +    // 折叠预览的 join 数组必须显式承载空行元素，filter 只剔除 undefined 不剔除空串。
-+    expect(shellBody).toContain(`"", previewText(output(), 10)]`)
++    expect(shellBody).toContain(`limited() ? "" : undefined`)
++    expect(shellBody).toContain(`filter((x): x is string => x !== undefined)`)
 +  })
 +})
 \ No newline at end of file
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -522,5 +522,9 @@
+       )
+       const shell = testSetup!
+       const diagnostic = findVisibleText(shell.captureCharFrame().split("\n"), visible)
+       expect(diagnostic).toBeDefined()
++      // 实际生产组件在普通/上下文视图中都只留一行分隔，不靠源码中的 gap 字样判定。
++      const command = findVisibleText(shell.captureCharFrame().split("\n"), "$ failed command")
++      expect(command).toBeDefined()
++      expect((diagnostic?.y ?? -1) - (command?.y ?? -1)).toBe(2)
+       expect(shell.captureCharFrame()).not.toContain('reason="exit"')
+@@ -532,7 +536,11 @@
+       await shell.renderOnce()
+       await shell.renderOnce()
+       const context = shell.captureCharFrame()
+-      expect(context).toContain("Model context output")
++      expect(context).not.toContain("Model context output")
++      expect(context).toContain("returned to model")
++      const contextCommand = findVisibleText(context.split("\n"), "$ failed command")
++      const contextOutput = findVisibleText(context.split("\n"), visible)
++      expect((contextOutput?.y ?? -1) - (contextCommand?.y ?? -1)).toBe(2)
+       expect(context.split(visible)).toHaveLength(2)
+       expect(context).toContain(notice)
+       expect(context).not.toContain("<bash_high_signal_excerpt>")

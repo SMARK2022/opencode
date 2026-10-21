@@ -56,9 +56,9 @@ diff --git a/docs/opencode-sandbox-windows-design.md b/docs/opencode-sandbox-win
  
  ### Reviewer boundary
  
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
 @@ -64,32 +64,19 @@
    return Effect.gen(function* () {
      // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
@@ -110,7 +110,7 @@ diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/pe
 -function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
 -  if (metadata.action_kind !== "tool") return false
 -  if (metadata.tool === "read") return metadata.operation === "read"
--  // #210：write 需 content 字符串证据——空内容写入与路径型请求不可区分时不授权，content 存在才让 reviewer 判断写入意图
+-  // 空字符串也是有效写入负载；缺少content的纯路径请求才继续人工审批。
 -  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
 -  if (metadata.tool === "edit") {
 -    return (
@@ -135,9 +135,9 @@ diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/pe
  function errorMessage(error: unknown) {
    if (error instanceof Error) return error.message
    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -206,20 +206,42 @@
    patterns: readonly string[]
    metadata: Readonly<Record<string, unknown>>
@@ -212,6 +212,56 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
      return { level: "cautious", reason: "file deletion requires explicit approval" }
    }
  }
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -118,6 +118,8 @@
+                 yield* permission.assert({
+                   action: "edit",
+                   resources: [...new Set(targets.map(({ target }) => target.resource))],
++                  // 分类使用已解析的文件操作，普通更新允许时删除仍进入谨慎审查。
++                  metadata: { files: targets.map(({ hunk, target }) => ({ type: hunk.type, relativePath: target.resource })) },
+                   save: ["*"],
+                   sessionID: context.sessionID,
+                   agent: context.agent,
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -187,6 +187,12 @@
+                 expect(assertions).toMatchObject([
+                   { sessionID, action: "edit", resources: ["nested/new.txt", "update.txt", "remove.txt"], save: ["*"] },
+                 ])
++                // 真实leaf交付每个操作类型，不能把混合patch中的删除当作general更新。
++                expect(assertions[0]?.metadata?.files).toEqual([
++                  { type: "add", relativePath: "nested/new.txt" },
++                  { type: "update", relativePath: "update.txt" },
++                  { type: "delete", relativePath: "remove.txt" },
++                ])
+                 expect(readsBeforeEditApproval).toBe(0)
+                 expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/new.txt"), "utf8"))).toBe(
+                   "created\n",
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -391,6 +391,6 @@
+     expect(reviewText).not.toContain("PRIVATE REASONING")
+     expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
+-    // 外部目录复用同一shell预检，不再为相同命令调用第二次模型。
++    // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
+     expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+-    expect(reviewRequests).toHaveLength(1)
++    expect(reviewRequests).toHaveLength(2)
+     reviewSettings = new Config.Info({ approvals_reviewer: "user" })
+@@ -455,6 +455,7 @@
+     expect(reviewRequests).toHaveLength(reviews + 2)
+     expect(reviewRequests.at(-1)?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")).toContain('"operation": "write"')
++    // 仅含路径的外部访问也进入同一reviewer，结果来自审查而非general直接放行。
+     const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
+-    expect(pathOnly.effect).toBe("ask")
+-    yield* service.reply({ requestID: pathOnly.id, reply: "reject" })
++    expect(pathOnly.effect).toBe("allow")
++    expect(reviewRequests).toHaveLength(reviews + 3)
+     // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts

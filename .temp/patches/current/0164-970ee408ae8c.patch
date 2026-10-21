@@ -44,24 +44,13 @@ index 1111111111..2222222222 100644
      return sdk.event.on("event", (event) => {
        if (event.payload.type === "sync") {
          return
-@@ -47,6 +63,17 @@
-       // #132：server.connected 始终投递，支撑重连恢复
-       if ((event.payload as { type?: string }).type === "server.connected") {
-         handler(event.payload, { directory: event.directory, workspace: event.workspace })
-+        return
-+      }
-+
-+      // #164/#165：单次投递前做 project/global 作用域判定
-+      const currentProject = project.project()
-+      if (
-+        !shouldDeliverScopedEvent(
-+          { directory: event.directory, project: (event as { project?: string }).project },
-+          currentProject,
-+        )
-+      ) {
-         return
-       }
- 
+@@ -48,1 +64,6 @@
++      // 重连通知始终投递，其余事件只在一次主分发前检查项目归属。
++      if (event.payload.type !== "server.connected" && !shouldDeliverScopedEvent(
++        { directory: event.directory, project: (event as { project?: string }).project },
++        project.project(),
++      )) return
+       handler(event.payload, { directory: event.directory, workspace: event.workspace })
 diff --git a/packages/tui/test/cli/tui/event-single-delivery.test.ts b/packages/tui/test/cli/tui/event-single-delivery.test.ts
 new file mode 100644
 index 0000000000..2222222222

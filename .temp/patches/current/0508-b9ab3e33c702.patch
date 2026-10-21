@@ -497,7 +497,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 index 0aaad66ca..ce90ef6e7 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -920,8 +920,12 @@ export function stepFinishParts(messageID: MessageID) {
+@@ -900,8 +900,12 @@ export function stepFinishParts(messageID: MessageID) {
    })
  }
  
@@ -512,7 +512,7 @@ index 0aaad66ca..ce90ef6e7 100644
  export function previousAssistantToolTail(input: {
    sessionID: SessionID
    before: { id: MessageID; time: number }
-@@ -930,38 +934,38 @@ export function previousAssistantToolTail(input: {
+@@ -910,38 +914,38 @@ export function previousAssistantToolTail(input: {
    return Effect.gen(function* () {
      if (input.limit <= 0) return []
      const { db, sync } = yield* Database.Service
@@ -569,13 +569,19 @@ index 0aaad66ca..ce90ef6e7 100644
            sql`json_extract(${PartTable.data}, '$.state.status') != 'pending'`,
            sql`json_type(${PartTable.data}, '$.hidden') is null`,
          ),
+@@ -949,3 +953,4 @@ export function previousAssistantToolTail(input: {
+-      .orderBy(desc(PartTable.id))
++      // 导入 part 的 ID 可跨消息逆序；先沿既有消息时间/ID，再取消息内末尾。
++      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id), desc(PartTable.id))
+       .limit(input.limit)
+       .all()
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 index 10ecf1ce2..11be770ce 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -34,6 +34,7 @@ import { Usage, type LLMEvent } from "@opencode-ai/llm"
- // "unbounded"），不串行累加。
+@@ -36,6 +36,7 @@ import { Usage, type LLMEvent } from "@opencode-ai/llm"
+ // 500ms升级窗口后给并行工具2秒结算宽限；输出消费及finalizer仍由原owner收尾。
  const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
  
 +// 产品合同「最近三次脱扣」：同 tool + 同 input + 全 error 的窗口长度；与测试矩阵阈值绑定。
@@ -612,7 +618,7 @@ index 10ecf1ce2..11be770ce 100644
 +            Effect.provideService(Database.Service, database),
 +          )
 +          const currentTools = parts.filter(
-+            (part) => part.type === "tool" && part.state.status !== "pending",
++            (part) => part.type === "tool" && !part.hidden && part.state.status !== "pending",
 +          )
 +          const preceding = yield* MessageV2.previousAssistantToolTail({
 +            sessionID: ctx.sessionID,
@@ -703,10 +709,12 @@ index 10ecf1ce2..11be770ce 100644
              return
            }
  
-@@ -586,36 +583,7 @@ const layer = Layer.effect(
+@@ -586,36 +583,8 @@ const layer = Layer.effect(
              if (!toolCall && value.result.type === "error") return
              if (value.result.type === "error") {
-               yield* failToolCall(value.id, value.result.value)
+-              yield* failToolCall(value.id, value.result.value)
++              // 已完成或已收尾的重复事件没有新失败，不能再次触发权限询问。
++              if (!(yield* failToolCall(value.id, value.result.value))) return
 -              // [local-smark] consecutive-error breaker：同一工具跨 turn 连续 error 后
 -              // 注入 doom_loop permission ask，让模型意识到需要改变策略。
 -              // 消息边界感知：同一 assistant message 内的并行 error 只计 1 次——
@@ -762,7 +770,8 @@ index 10ecf1ce2..11be770ce 100644
 @@ -656,30 +613,7 @@ const layer = Layer.effect(
              const errToolCallExit = yield* readToolCall(value.id).pipe(Effect.exit)
              const errToolCall = Exit.isSuccess(errToolCallExit) ? errToolCallExit.value : undefined
-             yield* failToolCall(value.id, value.error ?? new Error(value.message))
+-            yield* failToolCall(value.id, value.error ?? new Error(value.message))
++            if (!(yield* failToolCall(value.id, value.error ?? new Error(value.message)))) return
 -            const toolName = errToolCall?.part.tool ?? "unknown"
 -            const errMap = consecutiveErrorMap.get(ctx.sessionID) ?? {}
 -            const entry = errMap[toolName] ?? { count: 0, lastMessageID: "" }
@@ -815,7 +824,7 @@ index 58b8c1642..63ebbd429 100644
          })
 +        // #508：跨多个 visible assistant 各 1 tool：limit=2 必须返回 2 条（单 previous-assistant 只会得到 1）。
 +        const midAssistantID = yield* addAssistant(sessionID, userID)
-+        const midPartID = PartID.ascending()
++        const midPartID = PartID.make("prt_00000000000000000000000000")
 +        yield* session.updatePart({
 +          id: midPartID,
 +          sessionID,
@@ -849,8 +858,8 @@ index 58b8c1642..63ebbd429 100644
 -        expect(ColdStorage.status(sync).coldOwners).toBe(2)
 +        expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
 +        expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
-+        // freeze 的 previous tools 仍在 cold 统计内；具体 pack 数随 cold layout 可变，至少保留有界 thaw 不爆表。
-+        expect(ColdStorage.status(sync).coldOwners).toBeGreaterThanOrEqual(2)
++        // 五个 frozen owner 只恢复 previous 的两个；mid 未冻结，后一次查询不能再 thaw 其它 owner。
++        expect(ColdStorage.status(sync).coldOwners).toBe(3)
 +
 +        const two = yield* MessageV2.previousAssistantToolTail({
 +          sessionID,

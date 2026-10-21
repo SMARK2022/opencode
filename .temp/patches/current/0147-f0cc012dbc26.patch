@@ -20,69 +20,22 @@ index f1a33ab4e6..bda01af5bd 100644
          enterpriseUrl: Schema.optional(Schema.String).annotate({
            description: "GitHub Enterprise URL for copilot authentication",
          }),
-diff --git a/packages/core/src/v1/config/provider-options.ts b/packages/core/src/v1/config/provider-options.ts
-index 6bf0bd9e1a..1a1a06b2d3 100644
---- a/packages/core/src/v1/config/provider-options.ts
-+++ b/packages/core/src/v1/config/provider-options.ts
-@@ -69,7 +69,8 @@ const anthropic: Lowerer = {
-         ...headers(options.headers),
-       }),
-       body: body(options.body),
--      settings: omit(options, ["apiKey", "authToken", "baseURL", "headers", "body"]),
-+      // #147：version 只给 claudecode fetch 身份用，不得泄漏进 anthropic settings
-+        settings: omit(options, ["apiKey", "authToken", "baseURL", "headers", "body", "version"]),
-     }
-   },
-   request(options) {
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 index 6f4c71f5a3..48ab530927 100644
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "crypto"
- // --- 常量与基础配置 ---
- // Claude Code 版本号和指纹盐值，用于计费头和请求签名
- // Claude Code CLI 版本号
--export const VERSION = "2.1.117"
-+export const VERSION = "2.1.117" // #147：默认 Claude Code 版本，可被 options.version 覆盖
- // 指纹计算盐值，与 Claude Code 官方一致
- // 指纹盐值：与 Claude Code 官方二进制一致，修改会导致计费头校验失败
- const SALT = "59cf53e54c78"
-@@ -69,12 +69,13 @@ export function computeFingerprint(messageText: string, version: string): string
- }
- 
- // 构建计费头块：cch 保持 00000，避免完整 body hash 污染最早 system 前缀
+@@ -43,1 +43,1 @@
 -export function buildBillingHeaderBlock(fp: string) {
 +export function buildBillingHeaderBlock(fp: string, version = VERSION) {
-   return {
-     type: "text" as const,
-     text: [
-       `x-anthropic-billing-header:`,
+@@ -48,1 +48,2 @@
 -      ` cc_version=${VERSION}.${fp};`,
 +      // #147：billing cc_version 必须与 UA/指纹 version 同源
 +      ` cc_version=${version}.${fp};`,
-       ` cc_entrypoint=cli;`, // 入口标识：CLI 方式调用
-       ` cch=00000;`,
-     ].join(""),
-@@ -83,7 +84,7 @@ export function buildBillingHeaderBlock(fp: string) {
- 
- // buildSystemBlocks 已禁用：不再注入伪造的系统块
- // export function buildSystemBlocks(fp: string) {
--//   return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
-+//   return [buildBillingHeaderBlock(fp, version), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
- // }
- 
- // 构建用户元数据 JSON，包含设备 ID、账号 UUID 和会话 ID
-@@ -97,7 +98,9 @@ export function buildMetadataUserId(opts: { deviceId: string; sessionId: string;
- 
- // 构建请求头，包含 Anthropic 版本、beta 特性和 Bearer 认证
- // 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
+@@ -66,1 +67,3 @@
 -export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
 +export function buildRequestHeaders(opts: { sessionId: string; modelId: string; version?: string }): Record<string, string> {
 +  // #147：UA 版本与 billing/指纹共用 override
 +  const version = opts.version ?? VERSION
-   // beta 特性列表，重新启用 redact-thinking 隐藏思考内容，按模型动态添加 context-1m
-   const betas = [
-     "claude-code-20250219",
 @@ -121,7 +124,7 @@ export function buildRequestHeaders(opts: { sessionId: string; modelId: string }
      "anthropic-version": "2023-06-01",
      "anthropic-beta": betas.join(","),
@@ -92,10 +45,7 @@ index 6f4c71f5a3..48ab530927 100644
      "x-claude-code-session-id": opts.sessionId,
    }
  }
-@@ -262,8 +265,10 @@ export function patchCch(bodyStr: string): string {
- // --- Fetch 拦截与重写包装器 ---
- // 创建 Claude Code 风格的 fetch 包装器
- // 拦截 /v1/messages 请求，合并 system 块、metadata、动态 thinking 和 cch
+@@ -95,5 +98,7 @@
 -export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
 +export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key"; version?: string }) {
    const { session, token, authMode } = opts
@@ -104,33 +54,23 @@ index 6f4c71f5a3..48ab530927 100644
  
    return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
      const url = typeof input === "string" ? input : input.toString()
-@@ -291,10 +296,11 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
-     })()
- 
-     // 计算消息指纹，用于计费头和 CCH 签名
--    const fp = computeFingerprint(firstUserText, VERSION)
-+    const fp = computeFingerprint(firstUserText, version)
- 
-     // 2. 合并 System Blocks：仅注入计费头块，保留原始 system
--    let newSystem: any[] = [buildBillingHeaderBlock(fp)]
-+    // #147：billing 必须与 fingerprint/UA 共用 version override
-+    let newSystem: any[] = [buildBillingHeaderBlock(fp, version)]
-     // 原始 system 可能是数组或字符串，两种形式都需合并到计费头之后
-     if (originalBody.system) {
-       if (Array.isArray(originalBody.system)) {
+@@ -114,4 +119,4 @@
+-    const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", VERSION)
++    const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", version)
+     // 数组的缓存属性和附加字段原样保留，字符串包括空串也转换为 text block。
+     const system: unknown = originalBody.system
+-    const newSystem: unknown[] = [buildBillingHeaderBlock(fp),
++    const newSystem: unknown[] = [buildBillingHeaderBlock(fp, version),
 @@ -367,7 +373,7 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
      const finalBodyStr = JSON.stringify(patchedBody)
  
-     // 7. 处理请求头与鉴权
+     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
 -    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
 +    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId, version })
      const requestHeaders = new Headers(init?.headers)
  
      for (const [key, value] of Object.entries(customHeaders)) {
-@@ -394,7 +400,12 @@ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: st
- 
- // --- Provider 暴露点 ---
- // 创建 Claude Code 提供者配置，返回 baseURL、fetch 和 headers
+@@ -219,1 +224,6 @@
 -export function createClaudeCodeProvider(token: string, baseUrl: string, authMode: "bearer" | "x-api-key") {
 +export function createClaudeCodeProvider(
 +  token: string,
@@ -138,9 +78,6 @@ index 6f4c71f5a3..48ab530927 100644
 +  authMode: "bearer" | "x-api-key",
 +  opts?: { version?: string },
 +) {
-   const session = getSession()
- 
-   return {
 @@ -403,6 +414,8 @@ export function createClaudeCodeProvider(token: string, baseUrl: string, authMod
        session,
        token,
@@ -163,15 +100,234 @@ index 0d87c5d2d3..9ae7d21415 100644
          },
          async getModel(sdk: any, modelID: string) {
            return sdk.languageModel(modelID)
-@@ -1484,7 +1484,10 @@ const layer = Layer.effect(
-         for (const [providerID, provider] of configProviders) {
-           // 支持从现有提供者类型继承模型和默认值
+@@ -1524,2 +1524,5 @@
            const baseType = provider.extends
 -          const existing = baseType ? database[baseType] : database[providerID]
 +          // #147：extends claudecode 缺库条目时回退 anthropic 目录
 +          const existing = baseType
 +            ? database[baseType] ?? (baseType === "claudecode" ? database["anthropic"] : undefined)
 +            : database[providerID]
-           // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
-           const inheritedModels = existing
-             ? Object.fromEntries(
+diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/config/plugin/provider.ts
+--- a/packages/core/src/config/plugin/provider.ts
++++ b/packages/core/src/config/plugin/provider.ts
+@@ -80,7 +80,9 @@
+             const overrides = [...(configured.get(id) ?? []), item]
+             configured.set(id, overrides)
+             const baseType = overrides.findLast((layer) => layer.extends !== undefined)?.extends
+-            const base = baseType === undefined ? undefined : catalog.provider.get(baseType)
++            // #147：缺少 claudecode 目录时继承 Anthropic 模型，派生身份仍由原配置决定。
++            const base = baseType === undefined ? undefined :
++              catalog.provider.get(baseType) ?? (baseType === "claudecode" ? catalog.provider.get(ProviderV2.ID.anthropic) : undefined)
+             // 删除派生记录前复制基础以支持 self extends；Draft.get 不投影，空 native 占位接纳基础 API，request 保持模型原值。
+             const copy = base && baseType !== undefined ? { provider: structuredClone(base.provider), models: [...base.models.values()].map((model) => ({
+               ...structuredClone(model), api: structuredClone(model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 ? { ...base.provider.api, id: model.api.id } : model.api),
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -142,6 +142,7 @@
+         ...(claudecode ? {
+           // 标记来自已验证的 Catalog 继承；保持真实 provider ID，校准与历史匹配不能改成父 ID。
+           claudeCode: true,
++          version: model.api.settings?.version,
+           betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
+           system: body.system,
+           metadata: body.metadata,
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -506,7 +506,11 @@
+   return messages
+ })
+ 
+-const anthropicOptions = (request: LLMRequest) => request.providerOptions?.anthropic
++const anthropicOptions = (request: LLMRequest) => {
++  const options = request.providerOptions?.anthropic
++  // #147：版本只用于指纹、计费与 UA，缺省保持源版本。
++  return Object.assign({}, options, { version: typeof options?.version === "string" ? options.version : "2.1.117" })
++}
+ const isClaudeCode = (request: LLMRequest) => request.model.provider === "claudecode" || anthropicOptions(request)?.claudeCode === true
+ 
+ const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
+@@ -609,11 +613,12 @@
+   const billing = claudecode ? (() => {
++    const version = anthropicOptions(request).version
+     // 首 user 的首 text 采样与源 helper 一致，短消息缺失位置补字符零。
+     const firstUserText = messages.find((message) => message.role === "user")?.content.find((block) => block.type === "text")?.text ?? ""
+     const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
+-    const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
++    const fp = createHash("sha256").update(`59cf53e54c78${chars}${version}`, "utf8").digest("hex").slice(0, 3)
+     // 三位版本后缀和五位占位保持源 wire 契约，不添加身份或缓存断点。
+-    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;` }]
++    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=${version}.${fp}; cc_entrypoint=cli; cch=00000;` }]
+   })() : []
+   return {
+     // 只恢复 billing，20 撤销的两段身份没有任何新消费者。
+     system: claudecode ? [...billing, ...(system ?? []), ...retainedSystem] : system,
+@@ -951,7 +956,7 @@
+           ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
+         ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(","),
+         "x-app": "cli",
+-        "user-agent": "claude-cli/2.1.117 (external, cli)",
++        "user-agent": `claude-cli/${anthropicOptions(request).version} (external, cli)`,
+         // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。
+         "x-claude-code-session-id": claudeCodeSession.sessionId,
+       } : {}),
+diff --git a/packages/core/test/config/provider-options.test.ts b/packages/core/test/config/provider-options.test.ts
+--- a/packages/core/test/config/provider-options.test.ts
++++ b/packages/core/test/config/provider-options.test.ts
+@@ -58,21 +58,23 @@
+   test("lowers Anthropic provider and request options", () => {
+     const lowerer = ConfigProviderOptionsV1.get("@ai-sdk/anthropic")
+ 
+     expect(
+       lowerer.provider({
+         apiKey: "secret",
+         authToken: "token",
+         baseURL: "https://anthropic.example",
+         headers: { "x-test": "1" },
+         body: { beta: true },
+         generateId: "custom",
++        version: "2.1.200",
+       }),
+     ).toEqual({
+       url: "https://anthropic.example",
+       headers: { "x-api-key": "secret", Authorization: "Bearer token", "x-test": "1" },
+       body: { beta: true },
+-      settings: { generateId: "custom" },
++      settings: { generateId: "custom", version: "2.1.200" },
+     })
++    expect(lowerer.provider({}).settings).not.toHaveProperty("version")
+     expect(
+       lowerer.request({
+         effort: "high",
+diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/config/provider.test.ts
+--- a/packages/core/test/config/provider.test.ts
++++ b/packages/core/test/config/provider.test.ts
+@@ -69,29 +69,35 @@
+   it.effect("preserves configured API keys through availability and native authentication", () =>
+-    Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
++    Effect.forEach([undefined, "2.1.200"], (version) => Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
+       Effect.gen(function* () {
+         const catalog = yield* Catalog.Service
+         const integrations = yield* Integration.Service
+         // 同时覆盖未决 SDK 与显式 SDK 的继承配置，空连接不能掩盖凭据缺失。
+-        const providers = [ProviderV2.ID.anthropic, ProviderV2.ID.make("claudecode"), ProviderV2.ID.make("explicit-anthropic"), ProviderV2.ID.make("explicit-claudecode")]
++        const providers = [
++          ProviderV2.ID.anthropic,
++          ...(cc === undefined ? [] : [ProviderV2.ID.make("claudecode")]),
++          ProviderV2.ID.make("explicit-anthropic"), ProviderV2.ID.make("explicit-claudecode"), ProviderV2.ID.make("cubence"),
++        ]
+         const id = ModelV2.ID.make("configured")
+         // 与 models.dev 一样保留无连接的 Integration，不能靠无认证记录绕过 available。
+         yield* integrations.transform((draft) => {
+           for (const provider of providers) draft.update(Integration.ID.make(provider), (value) => { value.name = provider })
+         })
+         yield* catalog.transform((draft) => {
+-          for (const provider of providers) {
++          draft.provider.remove(ProviderV2.ID.make("claudecode"))
++          for (const provider of providers.filter((provider) => provider !== "cubence")) {
+             draft.provider.update(provider, (value) => {
+               value.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: "https://configured.test/v1", settings: {} }
+             })
+             draft.model.update(provider, id, (value) => {
+               value.api.id = ModelV2.ID.make("claude-sonnet-4-5")
+               value.limit = { context: 200_000, output: 8192 }
+               value.cost = [{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }]
+             })
+           }
+         })
+         const info = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({
+-          provider: Object.fromEntries(providers.map((provider, index) => [provider, {
+-            ...(index < 2 ? {} : { extends: providers[index - 2], npm: "@ai-sdk/anthropic" }), options: { apiKey: "configured-key" },
++          provider: Object.fromEntries(providers.map((provider) => [provider, {
++            ...(provider.startsWith("explicit-") ? { extends: provider.slice("explicit-".length), npm: "@ai-sdk/anthropic" } : provider === "cubence" ? { extends: "claudecode" } : {}),
++            options: { apiKey: "configured-key", version },
+           }])),
+         }))
+@@ -98,7 +104,15 @@
+         yield* addPlugin(Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) }))
++        if (cc === undefined) expect(yield* catalog.provider.get(ProviderV2.ID.make("claudecode"))).toBeUndefined()
+         const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
+         for (const provider of providers) {
++          const claudecode = ["claudecode", "explicit-claudecode", "cubence"].includes(provider)
++          const inherited = required(yield* catalog.model.get(provider, id))
++          expect(inherited.id).toBe(id)
++          expect(inherited.providerID).toBe(provider)
++          expect(inherited.api).toMatchObject({ id: "claude-sonnet-4-5", type: "aisdk", package: "@ai-sdk/anthropic" })
++          expect(inherited.api.settings?.version).toBe(version)
++          expect(ProviderV2.isClaudeCode(inherited)).toBe(claudecode)
+           expect((yield* integrations.get(Integration.ID.make(provider)))?.connections).toEqual([])
+           expect((yield* catalog.model.available()).some((model) => model.providerID === provider && model.id === id)).toBe(true)
+           const selection = yield* resolver.resolve(SessionSchema.Info.make({
+             id: SessionSchema.ID.make("ses_config_key"), projectID: ProjectV2.ID.global, title: "test", cost: 0,
+@@ -108,17 +122,25 @@
+           const selected = selection.model
++          expect(selected.id).toBe(ModelID.make("claude-sonnet-4-5"))
++          expect(selected.provider).toBe(ProviderID.make(provider))
++          expect(selected.route.id).toBe("anthropic-messages")
++          expect(selected.route.defaults.providerOptions?.anthropic?.version).toBe(claudecode ? version : undefined)
+           expect(selection.pricing).toEqual([{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }])
+-          const input = LLM.request({ model: selected, prompt: "hello", cache: "none", http: { ...selected.route.defaults.http, headers: selected.route.defaults.headers } })
++          const input = LLM.request({ model: selected, prompt: "hello", cache: "none", providerOptions: selected.route.defaults.providerOptions, http: { ...selected.route.defaults.http, headers: selected.route.defaults.headers } })
+           const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input).pipe(Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))))
+           const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
+           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+-          const claudecode = provider === "claudecode" || provider === "explicit-claudecode"
+           expect(web.headers.get(claudecode ? "authorization" : "x-api-key")).toBe(claudecode ? `Bearer ${cc ?? "configured-key"}` : "configured-key")
+           expect(web.headers.has(claudecode ? "x-api-key" : "authorization")).toBe(false)
+           // 检查真正编码的请求，内部可用性信号不能成为发送给模型的密钥正文。
+           const body = yield* Effect.promise(() => web.text())
+           expect(body).not.toContain("configured-key")
+           expect(body).not.toContain("fallback-key")
++          expect(body).not.toContain('"version":')
++          if (claudecode) {
++            expect(body).toContain(`cc_version=${version ?? "2.1.117"}.`)
++            expect(web.headers.get("user-agent")).toBe(`claude-cli/${version ?? "2.1.117"} (external, cli)`)
++          }
+         }
+       }),
+-    )),
++    ))),
+   )
+diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
+--- a/packages/llm/test/provider/anthropic-messages.test.ts
++++ b/packages/llm/test/provider/anthropic-messages.test.ts
+@@ -931,7 +931,7 @@
+   it.effect("preserves raw ClaudeCode system and fixed zero CCH on the wire", () =>
+-    Effect.gen(function* () {
++    Effect.forEach([undefined, "2.1.200"], (version) => Effect.gen(function* () {
+       const route = AnthropicMessages.route.with({ provider: "claudecode" })
+       // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
+       for (const raw of ["原始字符串", [
+         { type: "text", text: "原始数组", cache_control: { type: "ephemeral", ttl: "5m" }, source: "retained" },
+         { type: "text", text: "第二块", cache_control: { type: "ephemeral", ttl: "1h" }, source: "second" },
+@@ -941,7 +941,7 @@
+             system: "Session system", messages: [Message.user([{ type: "text", text: "abcdefghijklmnopqrstuv", cache: new CacheHint({ type: "ephemeral" }) }])],
+             // 四工具的优先级在所有 system 之前，history 只能领取 system 之后的剩余预算。
+             tools: ["t1", "t2", "t3", "t4"].slice(0, count).map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, cache: new CacheHint({ type: "ephemeral" }) })),
+-            providerOptions: { anthropic: { system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
++            providerOptions: { anthropic: { version, system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
+             http: { body: { extra: "中文 cch=00000;" } },
+           })
+           const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input)
+@@ -964,15 +964,17 @@
+           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+           const text = yield* Effect.promise(() => web.text())
+           // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
+-          const fp = createHash("sha256").update("59cf53e54c78ehu2.1.117").digest("hex").slice(0, 3)
+-          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=`
++          const fp = createHash("sha256").update(`59cf53e54c78ehu${version ?? "2.1.117"}`).digest("hex").slice(0, 3)
++          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=${version ?? "2.1.117"}.${fp}; cc_entrypoint=cli; cch=`
+           // 断言真实发包前缀固定五位零；raw/cache/metadata 的既有矩阵继续执行。
+           expect(text.startsWith(`${prefix}00000;`)).toBe(true)
+           expect(text).toContain("中文 cch=00000;")
+           expect(text).not.toContain("You are Claude Code")
+           expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
++          expect(web.headers.get("user-agent")).toBe(`claude-cli/${version ?? "2.1.117"} (external, cli)`)
++          expect(text).not.toContain('"version":')
+         }
+       }
+-    }),
++    })),
+   )
+ })

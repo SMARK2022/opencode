@@ -24,10 +24,7 @@ diff --git a/packages/core/src/v1/config/provider.ts b/packages/core/src/v1/conf
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -52,6 +52,35 @@ function apiUrl({ npm, api }: { npm: string; api?: string }): string {
-   return api ?? SDK_DEFAULT_API_URL[npm] ?? ""
- }
- 
+@@ -40,3 +40,32 @@
 +// #168：归一化 provider 请求头；剥离非 string / 原 UA 后再写入权威 User-Agent
 +// #168：供 resolveSDK / request / native 共用，禁止复制第二套解析
 +export function requestHeaders(options: Readonly<Record<string, unknown>>) {
@@ -74,7 +71,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
  
          const key = Hash.fast(
            JSON.stringify({
-@@ -1946,6 +1982,18 @@ for (const [id, provider] of configProviders) {
+@@ -1978,5 +2014,17 @@ for (const [id, provider] of configProviders) {
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
  
@@ -90,13 +87,12 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +            opts.headers = headers
 +          }
 +
-           // #83：customFetch 仅鉴权透传；默认走 NetworkProxy.fetch 主路由
-           // #83：provider 请求 purpose=provider，区别于基础设施和 npm
+           // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
            const res = await (
 diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
 --- a/packages/opencode/src/session/llm/request.ts
 +++ b/packages/opencode/src/session/llm/request.ts
-@@ -7,7 +7,7 @@ import { Permission } from "@/permission"
+@@ -7,8 +7,8 @@ import { Permission } from "@/permission"
  import { ToolSelection } from "@/tool/selection"
  import type { Agent } from "@/agent/agent"
  import type { MessageV2 } from "../message-v2"
@@ -104,6 +100,7 @@ diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/sr
 +import { Provider } from "@/provider/provider"
  import { ProviderTransform } from "@/provider/transform"
  import { SystemPrompt } from "../system"
+ import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
  import { InstallationVersion } from "@opencode-ai/core/installation/version"
 @@ -205,5 +205,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Prep
              "User-Agent": USER_AGENT,
@@ -123,17 +120,11 @@ diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/open
  import { ProviderTransform } from "@/provider/transform"
  import { errorMessage } from "@/util/error"
  import { isRecord } from "@/util/record"
-@@ -103,7 +103,9 @@ export function stream(input: StreamInput): StreamResult {
-     topK: input.topK,
-     maxOutputTokens: input.maxOutputTokens,
-     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
+@@ -112,1 +112,3 @@ export function stream(input: StreamInput): StreamResult {
 -    headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
 +    // #168：native 与 AI-SDK 共用 requestHeaders，避免 header-ua 只在一侧生效
 +    // #168：配置头在前、prepared headers 在后：模型/插件仍可覆盖，但配置 UA 不被默认 UA 无条件碾压需由 request 侧保证
 +    headers: { ...Provider.requestHeaders(input.provider.options), ...input.headers },
-   })
-   const stream = Stream.scoped(
-     Stream.unwrap(
 diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
 --- a/packages/opencode/test/provider/provider.test.ts
 +++ b/packages/opencode/test/provider/provider.test.ts
@@ -254,3 +245,41 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +
    it.instance(
      "sends temperature, tokens, and reasoning options for openai-compatible models",
+diff --git a/packages/core/src/v1/config/provider-options.ts b/packages/core/src/v1/config/provider-options.ts
+--- a/packages/core/src/v1/config/provider-options.ts
++++ b/packages/core/src/v1/config/provider-options.ts
+@@ -17,4 +17,14 @@
+ export function get(packageName?: string): Lowerer {
+   const key = packageName ?? ""
+-  return Object.hasOwn(lowerers, key) ? lowerers[key]! : raw
++  const lowerer = Object.hasOwn(lowerers, key) ? lowerers[key]! : raw
++  return {
++    request: lowerer.request,
++    provider(options) {
++      // 简写属于请求头，迁移时不能留在 API body/settings；显式任意大小写 UA 仍优先。
++      const result = lowerer.provider(omit(options, ["header-ua"]))
++      const userAgent = options["header-ua"]
++      if (typeof userAgent !== "string" || Object.keys(result.headers ?? {}).some((name) => name.toLowerCase() === "user-agent")) return result
++      return { ...result, headers: { ...result.headers, "User-Agent": userAgent } }
++    },
++  }
+ }
+diff --git a/packages/core/test/config/provider-options.test.ts b/packages/core/test/config/provider-options.test.ts
+--- a/packages/core/test/config/provider-options.test.ts
++++ b/packages/core/test/config/provider-options.test.ts
+@@ -4,2 +4,15 @@
+ describe("ConfigProviderOptionsV1", () => {
++  test("preserves header-ua across provider lowering and explicit header precedence", () => {
++    // 即时与延迟 SDK 迁移共用 lowerer，各协议都必须保留简写且不泄露为 API 设置。
++    for (const name of ["@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/google", "@ai-sdk/azure", "@ai-sdk/amazon-bedrock", "@ai-sdk/openai-compatible"]) {
++      const lowerer = ConfigProviderOptionsV1.get(name)
++      const shortcut = lowerer.provider({ "header-ua": "configured-agent" })
++      expect(new Headers(shortcut.headers).get("user-agent")).toBe("configured-agent")
++      expect(shortcut.settings).not.toHaveProperty("header-ua")
++      // 大小写不同的显式字段仍覆盖简写，保留其余配置头。
++      const explicit = lowerer.provider({ "header-ua": "shortcut", headers: { "uSeR-aGeNt": "explicit-agent", "x-custom": "kept" } })
++      expect(new Headers(explicit.headers).get("user-agent")).toBe("explicit-agent")
++    }
++  })
++
+   test("keeps raw provider and request options unchanged", () => {

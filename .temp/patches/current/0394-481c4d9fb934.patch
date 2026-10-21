@@ -120,14 +120,12 @@ index 0000000000000000000000000000000000000000..25a3fe19afd54bcecbac4e99abd855c4
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -28,7 +28,10 @@ import { Database } from "@opencode-ai/core/database/database"
- import { Usage, type LLMEvent } from "@opencode-ai/llm"
+@@ -33,7 +33,8 @@
+ import { Token } from "@opencode-ai/core/util/token"
  
  // #149：取消时给 bash 等工具完成截断/complete 的宽限
 -const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
-+// bounded kill（shell.ts 的 timeoutOrElse 500ms）后，tool 最多 500ms kill + ~500ms
-+// output drain = 1s。2s 给 ~100% 安全边际。settle 是 per-tool 并行（concurrency:
-+// "unbounded"），不串行累加。
++// 500ms升级窗口后给并行工具2秒结算宽限；输出消费及finalizer仍由原owner收尾。
 +const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
  
  const DOOM_LOOP_THRESHOLD = 3
@@ -135,48 +133,16 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -329,23 +329,35 @@
-       yield* lock.withPermits(1)(
-         Effect.gen(function* () {
-           yield* Effect.logInfo("cancel", { "session.id": sessionID })
-+          // 在中断 runner 前快照待终态化的 assistant 消息 ID，
-+          // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀
-+          const pendingIds = new Set(
-+            (yield* sessions.messages({ sessionID }).pipe(
-+              Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
-+            )).filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
-+          )
-           yield* state.cancel(sessionID)
-           // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
-           // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
-           // #71/#153：cancel 时中止未完成 assistant
--          yield* abortPendingAssistants(sessionID).pipe(Effect.ignore)
-+          yield* abortPendingAssistants(sessionID, pendingIds).pipe(Effect.ignore)
-         }),
-       )
-     })
- 
-     // #216：显式类型标注使 abortPendingAssistants 可在 abortChildren 中递归自引用
--    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-+    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<string>) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<string>) {
-      // #153：cancel 必须覆盖全部可见未完成 assistant，而非仅 findMessage 命中的第一条
-      // sessions.messages 返回 chronological 顺序且默认过滤 hidden，取消只需覆盖可见项
-      const visible = yield* sessions.messages({ sessionID })
-+      // 只终态化 cancel 开始前已存在的消息，不触碰 cancel 后新建的消息
--      const pending = visible.filter(
--        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
--          msg.info.role === "assistant" && !msg.info.time.completed,
--      )
-+      const pending = visible.filter(
-+        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
-+          msg.info.role === "assistant" &&
-+          !msg.info.time.completed &&
-+          // pendingIds 存在时只收 cancel 前已存在的消息，防止误杀 cancel 后新建的命令
-+          (!pendingIds || pendingIds.has(msg.info.id)),
-+      )
-      // #216：递归中止子会话——auto-review 创建的 permission-reviewer 子会话也需终态化
-+      // 子会话递归时不传 pendingIds——子会话无用户输入竞态
-      const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
+@@ -798,7 +798,8 @@
+                 extendEnv: true,
+                 env: { ...shellEnv.env, TERM: "dumb" },
+                 stdin: "ignore",
+-                forceKillAfter: "3 seconds",
++                // 手工shell与工具取消共用底层升级机制，仍等待退出和输出收尾。
++                forceKillAfter: "500 millis",
+               })
+               const handle = yield* spawner.spawn(cmd)
+               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
 diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/session/run-state.ts
 --- a/packages/opencode/src/session/run-state.ts
 +++ b/packages/opencode/src/session/run-state.ts
@@ -187,66 +153,70 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
 -      yield* cancelBackgroundJobs(background, sessionID)
        const data = yield* InstanceState.get(state)
        const existing = data.runners.get(sessionID)
++      const jobs = yield* background.list()
        if (!existing) {
 -        yield* status.set(sessionID, { type: "idle" })
 +        // 无 runner 时仍需取消可能残留的 background jobs
-+        yield* Effect.all([cancelBackgroundJobs(background, sessionID), status.set(sessionID, { type: "idle" })], {
++        yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), status.set(sessionID, { type: "idle" })], {
 +          concurrency: "unbounded",
 +          discard: true,
 +        })
          return
        }
 -      yield* existing.cancel
-+      // 并行取消 background jobs 和 runner fiber，避免串行等待。
-+      // 两者操作独立的 resource（BackgroundJob 服务 vs runner fiber），都幂等。
-+      yield* Effect.all([cancelBackgroundJobs(background, sessionID), existing.cancel], {
++      // 先固定本次jobs再并行取消，不能在runner发布idle后扫描新命令的作业。
++      yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), existing.cancel], {
 +        concurrency: "unbounded",
 +        discard: true,
 +      })
      })
  
      const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
+@@ -158,8 +166,8 @@
+ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (
+   background: BackgroundJob.Interface,
+   sessionID: SessionID,
++  jobs: ReadonlyArray<BackgroundJob.Info>,
+ ) {
+-  const jobs = yield* background.list()
+   const pending = new Set<string>([sessionID])
+   const cancelled = new Set<string>()
+   const matches = (job: BackgroundJob.Info) => {
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1067,11 +1067,31 @@ export const ShellTool = Tool.define(
+@@ -698,11 +698,12 @@ export const ShellTool = Tool.define(
  
            if (exit.kind === "abort") {
              aborted = true
 -            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
-+            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
-+            // forceKillAfter 在 Unix 上是 no-op：只限制信号发送，不限制退出等待。
-+            // timeoutOrElse 包裹整个 kill 实现 SIGTERM→500ms→SIGKILL 序列；
-+            // orElse 加 Effect.ignore：进程可能恰好退出，SIGKILL 抛 ESRCH 无害。
-+            yield* handle.kill().pipe(
-+              Effect.timeoutOrElse({
-+                duration: "500 millis",
-+                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
-+              }),
-+              Effect.orDie,
-+            )
++            // 底层已把退出等待纳入forceKillAfter，复用它而不叠加第二套超时与吞错。
++            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
            }
            if (exit.kind === "timeout") {
              expired = true
 -            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
-+            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
-+            // forceKillAfter 在 Unix 上是 no-op：只限制信号发送，不限制退出等待。
-+            // timeoutOrElse 包裹整个 kill 实现 SIGTERM→500ms→SIGKILL 序列；
-+            // orElse 加 Effect.ignore：进程可能恰好退出，SIGKILL 抛 ESRCH 无害。
-+            yield* handle.kill().pipe(
-+              Effect.timeoutOrElse({
-+                duration: "500 millis",
-+                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
-+              }),
-+              Effect.orDie,
-+            )
++            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
            }
  
            // #291：子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -267,7 +267,8 @@
+                 env: Shell.utf8Environment(),
+                 stdin: "ignore",
+                 detached: process.platform !== "win32",
+-                forceKillAfter: Duration.seconds(3),
++                // 原生Bash scope退出同样按500ms升级，清理仍归现有AppProcess/spawner。
++                forceKillAfter: Duration.millis(500),
+               })
+               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
+               // 原文由现有 ToolOutputStore capture 保留，leaf 只产出模型窗口，不发布托管路径或自行做通用截断。
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3722,3 +3722,50 @@ it.instance(
+@@ -4205,3 +4205,56 @@ it.instance(
    { git: true },
    15_000,
  )
@@ -267,7 +237,10 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      yield* llm.wait(1)
 +
 +      // 取消当前 agent loop（fork 让 cancel 在后台执行）
-+      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++      const cancelling = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++      const status = yield* SessionStatus.Service
++      // 等旧runner释放后才能创建新轮，不能把ensureRunning的join误当新模型执行。
++      yield* pollWithTimeout(status.get(chat.id).pipe(Effect.map((value) => value.type === "idle" ? true : undefined)), "Old runner did not release")
 +
 +      // 立即提交新命令——在 cancel 的 abortPendingAssistants 执行前
 +      yield* llm.push(reply().text("second response").stop().item())
@@ -276,7 +249,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +
 +      // 等待第二个 loop 完成
 +      const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("10 seconds"))
-+      expect(Exit.isSuccess(exit2 ?? Exit.void)).toBe(true)
++      expect(Exit.isSuccess(exit2)).toBe(true)
 +
 +      // 验证第二个 assistant 消息没有被 abort
 +      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
@@ -288,6 +261,9 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +        // 关键断言：新命令的 assistant 不应有 AbortedError
 +        expect(lastAssistant.info.error?.name).not.toBe("MessageAbortedError")
 +      }
++      expect(lastAssistant?.parts.some((part) => part.type === "text" && part.text === "second response")).toBe(true)
++      expect(yield* llm.calls).toBe(2)
++      yield* Fiber.join(cancelling)
 +
 +      // 清理第一个 fiber
 +      yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore)

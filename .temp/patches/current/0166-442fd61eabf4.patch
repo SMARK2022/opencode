@@ -28,61 +28,7 @@ diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybin
 diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
 --- a/packages/tui/src/routes/session/context-usage.tsx
 +++ b/packages/tui/src/routes/session/context-usage.tsx
-@@ -1,11 +1,13 @@
- import { createEffect, createMemo, createResource, For, Show } from "solid-js"
--import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
-+import { useRenderer, useTerminalDimensions } from "@opentui/solid"
- import { useDialog } from "../../ui/dialog"
-+import { useBindings } from "../../keymap"
- import { useLocal } from "../../context/local"
- import { useProject } from "../../context/project"
- import { useSync } from "../../context/sync"
- import { createThrottledSignal } from "../../util/signal"
- import { useTheme } from "../../context/theme"
-+import { useTuiConfig } from "../../config"
- import { TextAttributes } from "@opentui/core"
- import { Locale } from "../../util/locale"
- import {
-@@ -261,6 +263,8 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
-   const project = useProject()
-   const dimensions = useTerminalDimensions()
-   const dialog = useDialog()
-+  // #166：关闭键从 tuiConfig.keybinds 读取，支持用户覆盖
-+  const tuiConfig = useTuiConfig()
-   const { theme } = useTheme()
-   useRenderer()
- 
-@@ -296,17 +300,22 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
-   // #125：双参 createResource 让 input 成为响应式 source
-   const [data] = createResource(input, computeContextData)
- 
--  // 键盘处理：escape 或 Ctrl+C 关闭面板；对话框打开时不拦截按键
--  useKeyboard((evt) => {
--    if (dialog.stack.length > 0) return
--    // V2 TUI 由 keymap 统一管理应用级退出键绑定，此处仅响应 escape 和 Ctrl+C
--    if (evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
--      props.onClose()
--      // 阻止冒泡：防止退出键被上层 keymap 二次处理导致重复关闭
--      evt.preventDefault()
--      evt.stopPropagation()
--    }
--  })
-+  // #166：命名 command + useBindings，避免 raw keyboard 与全局 keymap 双路径
-+  useBindings(() => ({
-+    commands: [
-+      {
-+        name: "session.context.close",
-+        title: "Close context usage",
-+        category: "Session",
-+        run: () => {
-+          // #166：上层 dialog 打开时不关闭面板，避免抢 escape
-+          if (dialog.stack.length > 0) return
-+          props.onClose()
-+        },
-+      },
-+    ],
-+    bindings: tuiConfig.keybinds.get("session.context.close"),
-+  }))
- 
-   return (
-     <box
+@@ -318,1 +318,2 @@
+-    bindings: () => tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
++    // 新关闭命令仍由既有 layer 消费，保留应用退出键在面板内仅关闭的语义。
++    bindings: () => [...tuiConfig.keybinds.gather("app_exit", ["app.exit"]), ...tuiConfig.keybinds.get("session.context.close")],

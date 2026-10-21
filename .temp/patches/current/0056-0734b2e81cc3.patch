@@ -55,10 +55,11 @@ diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugi
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -193,6 +193,29 @@
+@@ -194,7 +194,30 @@
    })
  
    try {
+     const sharedServices = HttpApiApp.createSharedServices()
 +    // 先完成预热再发布监听，已安装的 fatal/shutdown 闭包仍负责预热失败时的 token/scope 清理。
 +    await AppRuntime.runPromise(Effect.gen(function* () {
 +      const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
@@ -84,10 +85,10 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +    ))
      // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
      // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
-     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients })
-@@ -204,1 +227,2 @@
+     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
+@@ -205,1 +228,2 @@
 +      // 外部网络选项完整运输，cors/mdnsDomain 与共享客户端计数不因内部预热而丢失。
-       externalServer = await Server.listen({ ...network, eventClients })
+       externalServer = await Server.listen({ ...network, eventClients, sharedServices })
 diff --git a/packages/opencode/src/installation/index.ts b/packages/opencode/src/installation/index.ts
 --- a/packages/opencode/src/installation/index.ts
 +++ b/packages/opencode/src/installation/index.ts

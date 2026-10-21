@@ -617,7 +617,7 @@ index 87b0251ac..e44645dd6 100644
    }
  }
 @@ -288,37 +339,59 @@ function daemonElection() {
-   return Flock.acquire("opencode.server", { dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
+   return Flock.acquire(`opencode.server:${ServerLock.placement()}`, { dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
  }
  
 -// #535：online polling 只接受同一 taskID 的 durable terminal；failed/interrupted 不能进入 vacuum。
@@ -716,7 +716,7 @@ index 87b0251ac..e44645dd6 100644
 @@ -512,6 +591,17 @@ async function executeCompression(
      const compressed = await executeMaintenance(db, input.request, { output: false, lock: null })
      const task = taskResult(compressed.result)
-     const report = ColdStorage.status(db)
+     const report = await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 +    // #549：低于噪声地板时不跑 SQL VACUUM，但保持 compress-vacuum 复合 shape（pageCount 自报）。
 +    // pagesBefore==pagesAfter 表示逻辑跳过而非 vacuum 失败，脚本仍可解析同一 type。
 +    if (freelistMetrics(report).reusable < RECLAIM_NOISE_BYTES) {
@@ -734,7 +734,7 @@ index 87b0251ac..e44645dd6 100644
 @@ -530,9 +620,9 @@ async function executeCompression(
        return
      }
-     const report = ColdStorage.status(db)
+     const report = await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 -    const reusable = report.freelistPages * report.pageSize
 -    // completed task 只证明 logical compression；只有非零 freelist 才值得向用户请求物理回收授权。
 -    if (reusable === 0) return
@@ -747,7 +747,7 @@ index 87b0251ac..e44645dd6 100644
 @@ -746,6 +836,11 @@ const VacuumCommand = effectCmd({
        const report = lock
          ? parseStatus(await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operation: "status" }) }, false))
-         : ColdStorage.status(db)
+         : await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 +      // #549：human freelist=0 不跑 VACUUM；machine 路径仍走上方 executeMaintenance。
 +      if (freelistMetrics(report).reusable === 0) {
 +        UI.println(`${UI.Style.TEXT_DIM}○ No reusable pages to reclaim.${UI.Style.TEXT_NORMAL}`)
@@ -829,7 +829,7 @@ index b0df2aef2..eb04a80a7 100644
      }
      const contender = (async () => {
        // contender 只拿同 key 选主锁；30s 等待窗口内任何提前成功都是发布边界波漏。
-       await using _ = await Flock.acquire("opencode.server", { dir: electionDir, timeoutMs: 30_000 })
+       await using _ = await Flock.acquire(`opencode.server:${path.join(tmp.path, "tui-server.json")}`, { dir: electionDir, timeoutMs: 30_000 })
 +      acquired = true
        return "acquired" as const
      })()
@@ -856,7 +856,7 @@ index b0df2aef2..eb04a80a7 100644
      const cli = runPty(["db", "compress", "--older-than", "0ms", "--batch-size", "5"], isolatedEnv(tmp.path))
      answerPrompt(cli.proc, "Reclaim", "y")
      // 页面收益使用 pre-status pageSize 与 vacuum page counts，禁止把它伪装成主文件 stat。
-@@ -211,13 +249,276 @@ describe("database maintenance CLI", () => {
+@@ -211,13 +249,279 @@ describe("database maintenance CLI", () => {
      const standalone = runPty(["db", "vacuum", "--yes"], isolatedEnv(tmp.path))
      expect(await waitForExit(standalone.proc, standalone.exited)).toBe(0)
      const standaloneOutput = standalone.output()
@@ -921,6 +921,9 @@ index b0df2aef2..eb04a80a7 100644
 +    // \\r 分帧保留原始帧边界；strip-ansi 后仍可按 owners+elapsed 识别进度帧。
 +    const frames = raw.split("\r").filter((frame) => frame.includes("owners") && frame.includes("elapsed"))
 +    expect(frames.length).toBeGreaterThan(1)
++    const last = frames[frames.length - 1]
++    expect(last).toMatch(/owners/)
++    expect(last).toMatch(/elapsed/)
 +    // 清行序列应出现在进度写入中。
 +    expect(raw).toContain("\x1b[K")
 +  }, 30_000)

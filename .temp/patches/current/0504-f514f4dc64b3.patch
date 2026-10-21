@@ -756,27 +756,28 @@ index 43e685260..a41c27c66 100644
 +++ b/packages/tui/src/routes/session/context-usage.tsx
 @@ -204,6 +204,7 @@ function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategor
  
- // 分类标记符：用不同 Unicode 符号区分系统提示、指令、技能、工具、消息、自由空间
+ // 符号补充颜色辨识；输入与工具定义共享颜色时仍须有不同标记。
  function categoryMarker(name: string) {
 +  // 新 mass 类别必须有独立 marker，否则列表与网格图例无法区分 Attachments/Unaccounted。
    if (name === "System prompt") return "◆"
    if (name === "Instructions") return "◇"
    if (name === "Skills") return "●"
-@@ -211,8 +212,10 @@ function categoryMarker(name: string) {
-   if (name === "Input Messages") return "▰"
-   // ▾/▴ 区分工具结果与工具调用，便于扫读 Conversation 组
-   if (name === "Tool results") return "▾"
+@@ -255,7 +256,10 @@ function categoryMarker(name: string) {
+   if (name === "User Messages") return "▰"
+   if (name === "Tool Results") return "▾"
 +  if (name === "Attachments") return "▣"
-   if (name === "Output Messages") return "▱"
-   if (name === "Tool calls") return "▴"
+   if (name === "Assistant Messages") return "▱"
+   if (name === "Tool Calls") return "▴"
++  if (name === "Pending") return "◌"
 +  if (name === "Unaccounted") return "×"
    if (name === "Free space") return "·"
    return "×"
  }
-@@ -292,24 +295,28 @@ function CategoryList(props: { data: ContextUsageData }) {
+@@ -292,24 +296,29 @@ function CategoryList(props: { data: ContextUsageData }) {
    const labelWidth = 20
+   // 数值列只截断展示文本，超窗口百分比仍保留大于 100% 的实际估算。
    const valueWidth = 14
-   // 分类分组：Prompt 组含系统提示/指令/技能/工具定义；Conversation 组含输入/输出消息；Window 组含自由空间/预留/缓冲区
+   // 无 provider reserve 时整项不存在，按分类过滤而非补一个看似有测量依据的零值。
 +  // tokens===0 不进列表，避免 Attachments 等零值噪音；网格 weights 仍可含零（waterline 为 no-op）。
    const groups = createMemo(() => [
      {
@@ -790,14 +791,13 @@ index 43e685260..a41c27c66 100644
      },
      {
        title: "Conversation",
--      // Conversation 组锁定四类名称，与 computeContextData 分桶一致
 -      categories: props.data.categories.filter((item) =>
--        ["Input Messages", "Tool results", "Output Messages", "Tool calls"].includes(item.name),
-+      // Conversation 组锁定五类名称；Attachments 进入网格与列表的独立桶
+-        ["User Messages", "Tool Results", "Assistant Messages", "Tool Calls"].includes(item.name),
++      // 附件与待上传结果等额拆桶，列表与网格使用同一组类别。
 +      categories: props.data.categories.filter(
 +        (item) =>
 +          item.tokens > 0 &&
-+          ["Input Messages", "Tool results", "Attachments", "Output Messages", "Tool calls"].includes(item.name),
++          ["User Messages", "Tool Results", "Attachments", "Assistant Messages", "Tool Calls", "Pending"].includes(item.name),
        ),
      },
      {
@@ -814,23 +814,23 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 index dd5399e18..f0a112a06 100644
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -1111,77 +1111,63 @@ function gridSize(contextLimit: number, columns?: number, rows?: number) {
+@@ -1058,78 +1058,63 @@ function gridSize(contextLimit: number, columns?: number, rows?: number) {
    }
  }
  
--// 上下文网格：将 token 分类映射为字符网格行，自由空间和压缩缓冲区分别填充
+-// 网格是有损采样：小于半格的分类可无符号，右侧整数明细仍保留它，不能从符号数还原 token。
 +// 上下文网格：累积水位线（waterline）分配席位——整数刻度被谁的累积区间跨过格子就归谁。
 +// 分母用 Σ weights（非 contextLimit），保证 Σ counts === total，且不把舍入误差整段倒给 Free。
  export function contextGrid(categories: ContextCategory[], contextLimit: number, options?: { columns?: number; rows?: number }) {
    const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
    const total = gridW * gridH
    const cells: GridSquare[] = []
--  // 压缩缓冲区放在网格尾部，单独计算其格子数
+-  // buffer 从尾部分配，避免前面的大额 reserve 抢走安全缓冲的最后一格。
 -  const tail = categories.find((category) => category.name === "Autocompact buffer")
 -  const body = categories.filter((category) => category.name !== "Autocompact buffer")
 -
 -  const countFor = (category: ContextCategory, remaining: number) => {
--    // 按比例计算格子数，非延迟分类在占比 ≥0.5 时至少占 1 格
+-    // 小分类只在超过半格时可见，不能每项强占一格并让许多 tiny 工具淹没实际窗口比例。
 -    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
 -    let count = Math.round(exact)
 -    if (category.tokens > 0 && !category.isDeferred && count === 0 && exact >= 0.5) count = 1
@@ -840,9 +840,10 @@ index dd5399e18..f0a112a06 100644
 -    }
 -  }
 -
--  // 缓冲区优先分配尾部格子：保证压缩缓冲区在网格末尾可视化，与自由空间区分
+-  // reserve/free 与其他分类共享 bodyLimit，先扣除尾部容量才能避免大额 reserve 吞掉压缩缓冲。
 -  const tailCount = tail ? countFor(tail, total).count : 0
 -  const bodyLimit = total - tailCount
+-  // 剩余容量约束每次分配，即使估算超过窗口也不会渲染无限格子。
 -  // #125：先算各 body 分类格子数，余数并入 Free space 原位
 -  const counts = body.map((_) => 0)
 -  let remaining = bodyLimit
@@ -860,7 +861,7 @@ index dd5399e18..f0a112a06 100644
 -    const count = counts[ci]
 -    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
 -    for (let k = 0; k < count; k++) {
--      // 格子饱满度 = 比例余量，用于选择填充字符
+-      // 超窗口估算的余量仍夹在 [0,1]，否则饱满度会越过已定义的两档填充符号。
 -      const fullness = Math.max(0, Math.min(1, exact - k))
 +  // 负 token 不参与水位：max(0,·) 钳制保证 Σ weights 与累积区间单调不减。
 +  const weights = categories.map((category) => Math.max(0, category.tokens))
@@ -893,7 +894,7 @@ index dd5399e18..f0a112a06 100644
      }
    }
 -
--  // 尾部填充压缩缓冲区格子
+-  // 尾部饱满度使用 tail 自身比例而非总 used，安全缓冲不会因消息增长被画成消息占用。
 -  if (tail) {
 -    const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
 -    while (cells.length < total) {
@@ -907,7 +908,7 @@ index dd5399e18..f0a112a06 100644
 -    }
 -  }
 -
-   // 按行宽切分为二维网格
+   // 只切已有有限 cells，最后一行不足列宽也不增加虚构 used token。
    const rows: GridSquare[][] = []
    for (let i = 0; i < cells.length; i += gridW) rows.push(cells.slice(i, i + gridW))
    return rows
@@ -931,115 +932,151 @@ index dd5399e18..f0a112a06 100644
 +}
 +
 +
- // 计算上下文使用数据：汇总消息、指令、技能、工具定义的 token 分类与网格
- function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
-   const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
-@@ -1289,8 +1275,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     // 服务端细分：toolInput 记调用，toolOutput 记结果
-     toolCallTokens = Math.round(bd.messages.toolInput / ratio)
-     toolResultTokens = Math.round(bd.messages.toolOutput / ratio)
--    // 附件用视觉估算 tokens，不混入文本 chars/ratio 桶
--    inputMessageTokens = Math.round(bd.messages.userText / ratio) + msg.details.attachments
-+    // 附件 tokens 不混入文本 chars/ratio 桶——由 Attachments 独立桶承载并进入网格 weights
-+    inputMessageTokens = Math.round(bd.messages.userText / ratio)
-     outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning) / ratio)
-   } else {
-     skillTokens = estimate(skillListing, ratio)
-@@ -1303,8 +1289,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-     toolCallTokens = msg.details.toolCalls
-     toolResultTokens = msg.details.toolResults
--    // 本地重建：工具结果/调用从输入输出中拆出
--    inputMessageTokens = msg.details.userText + msg.details.attachments
-+    // 本地重建路径同样把附件交给独立桶，两条路径的网格 weights 不分叉
-+    inputMessageTokens = msg.details.userText
-     outputMessageTokens = msg.details.assistantText + msg.details.reasoning + msg.details.compactionSummary
-   }
-   // bd 路径：instructions 直接用服务端细分字符/ratio，禁止再与 system 双计
-@@ -1345,32 +1331,46 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-       }))
-     }
-   }
--  // used 代数：输入 + 工具结果 + 输出 + 工具调用
--  const messageTotal = inputMessageTokens + toolResultTokens + outputMessageTokens + toolCallTokens
-+  // used 代数：输入 + 工具结果 + 输出 + 工具调用 + 附件（附件已拆独立桶，但仍占用窗口）
-+  const messageTotal = inputMessageTokens + toolResultTokens + outputMessageTokens + toolCallTokens + msg.details.attachments
-   const window = windowDetails(input, modelInfo.model)
-   // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息
+ // 窗口分类使用裁剪结果；确认消费独立交给 usageTotals，不能从字符估算的 used 反算计费用量。
+ export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
+   // filter 接受新到旧的序列，源数组仍保持原顺序，不能原位 reverse 改掉 Sync 的消息顺序。
+@@ -1207,41 +1192,52 @@ export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
+-  const userMessageTokens = messageDetails.userText + messageDetails.attachments
++  const userMessageTokens = messageDetails.userText
+   const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
+   // 源消息分类已区分工具入参与返回；部件归助手不能把工具结果并入助手正文，工具定义也只归广告开销。
+   const toolCallTokens = messageDetails.toolCalls
+-  const toolResultTokens = messageDetails.toolResults
+-  // 四桶只重组同一份冻结整数，直接相加才能保留拆分前 used；逐桶重估会引入额外舍入误差。
+-  const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens
++  const pendingTokens = acc.breakdown?.pending ?? 0
++  const toolResultTokens = messageDetails.toolResults - pendingTokens
++  // 附件与 pending 等额拆出，详情仍保留原口径；不重新按字符估算或把同一 pending 计两次。
++  const messageTotal = userMessageTokens + toolResultTokens + assistantMessageTokens + toolCallTokens + messageDetails.attachments + pendingTokens
+   const window = windowDetails(input, windowModel, maxTokens)
+   // used 包含上传输入与本 step 输出；free、模型预留和压缩缓冲不计入消费。
+   // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
    const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
-   // 自由空间 = 可用输入 - 已用（无模型限制时为 0）
-   const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
+-  // 超出 usable 时自由空间归零，但 used 保留真实估算，不能为了百分比好看裁掉超额载荷。
+-  const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
++  // Free 与顶栏消费同一当前窗口；显式请求零值不借历史估算，旧 transcript 仍保留原重建路径。
++  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
++  const totalTokens = stepWindowTokens > 0 || input.session?.request ? stepWindowTokens : used
++  const free = maxTokens ? Math.max(0, window.usableInput - totalTokens) : 0
  
 -  const categories: ContextCategory[] = [
--    { name: "System prompt", tokens: envTokens, color: "primary" },
--    { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
--    { name: "Skills", tokens: skillTokens, color: "success" },
--  // 049 source 语义：Tool definitions 与 Input Messages 需视觉区分（secondary，非同色 warning）
--    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
--    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
--    // Conversation 组细分为四桶：工具结果/调用单独可见
--    { name: "Tool results", tokens: toolResultTokens, color: "warning" },
--    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
--    { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
--    // 自由空间和缓冲区标记为延迟计算，网格中按比例填充
--    { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
--    ...(window.providerReserve > 0
--      ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
--      : []),
--    { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
--  ]
-+  const categories: ContextCategory[] = (() => {
-+    // 权重向量顺序钉死：全部 used mass（含 Attachments）连续且位于 Free/reserve/buffer 之前。
-+    // category.tokens 保持 accounting 真值；gap>0 才插入 Unaccounted，gap<=0 禁止扣减 used 桶。
-+    const usedCategories: ContextCategory[] = [
-+      { name: "System prompt", tokens: envTokens, color: "primary" },
-+      { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
-+      { name: "Skills", tokens: skillTokens, color: "success" },
-+      // 049 source 语义：Tool definitions 与 Input Messages 需视觉区分（secondary，非同色 warning）
-+      { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-+      { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
-+      // Conversation 组细分：工具结果/调用单独可见；Attachments 独立成桶进入网格 weights
-+      { name: "Tool results", tokens: toolResultTokens, color: "warning" },
-+      { name: "Attachments", tokens: msg.details.attachments, color: "warning" },
-+      { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
-+      { name: "Tool calls", tokens: toolCallTokens, color: "accent" },
-+    ]
-+    // Window 段永远在 used mass 之后，保证水位先淹没真实占用再画 Free/reserve/buffer。
-+    const windowCategories: ContextCategory[] = [
-+      { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
-+      ...(window.providerReserve > 0
-+        ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
-+        : []),
-+      { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
-+    ]
-+    const painted = [...usedCategories, ...windowCategories].reduce((sum, category) => sum + category.tokens, 0)
-+    // gap>0：欠账 mass 用 Unaccounted 补到 contextLimit，禁止静默增大 Free。
-+    // gap<=0（含超窗）：不改写任何 accounting 桶的 tokens，waterline 分母允许 > contextLimit。
-+    const gap = maxTokens > 0 ? maxTokens - painted : 0
-+    const unaccounted: ContextCategory[] = gap > 0 ? [{ name: "Unaccounted", tokens: gap, color: "textMuted" }] : []
-+    // Unaccounted 插在 Free 之前，避免把未知 mass 画成“空闲”。
-+    return [...usedCategories, ...unaccounted, ...windowCategories]
-+  })()
++  const usedCategories: ContextCategory[] = [
+     { name: "System prompt", tokens: envTokens, color: "primary" },
+     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
+     { name: "Skills", tokens: skillTokens, color: "success" },
+     // 工具定义与输入消息分别用 secondary/warning，保留两种分类的视觉辨识。
+     { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
+     { name: "User Messages", tokens: userMessageTokens, color: "warning" },
+     { name: "Tool Results", tokens: toolResultTokens, color: "warning" },
++    { name: "Attachments", tokens: messageDetails.attachments, color: "warning" },
+     { name: "Assistant Messages", tokens: assistantMessageTokens, color: "accent" },
+     { name: "Tool Calls", tokens: toolCallTokens, color: "accent" },
+-    // free 非零也不能进入 used；isDeferred 只影响网格可见性门槛，不改变百分比分子。
++    { name: "Pending", tokens: pendingTokens, color: "warning" },
++  ]
++  // used mass 保持连续且位于所有 Window 类别之前，Autocompact 只在渲染时贴尾。
++  const windowCategories: ContextCategory[] = [
+     { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
+     ...(window.providerReserve > 0
+       ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
+       : []),
+     { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
+   ]
++  const painted = [...usedCategories, ...windowCategories].reduce((sum, category) => sum + category.tokens, 0)
++  // 分类欠账补在 Free 之前；超窗不扣减任何真实分类，席位按整体 mass 归一化。
++  const gap = maxTokens > 0 ? maxTokens - painted : 0
++  const unaccounted: ContextCategory[] = gap > 0 ? [{ name: "Unaccounted", tokens: gap, color: "textMuted" }] : []
++  const categories = [...usedCategories, ...unaccounted, ...windowCategories]
  
-   // #136：主 total = 最近 step 上下文窗口；footer 的 details.usage 仍是会话累计
-   // #136：step 窗口优先于 used 重建，对齐模型当前上下文占用
+   // 返回脱离流式 proxy 的数值与字符串，resize 消费同一轮完成的估算结果。
+   // 首包前没有助手时仍使用服务端准备值；旧历史无统计时保留分类估算。
+-  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
+   return {
+     model: [input.session?.request?.model?.providerID ?? modelInfo.providerID, input.session?.request?.model?.modelID ?? modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
+-    totalTokens: stepWindowTokens > 0 ? stepWindowTokens : used,
++    totalTokens,
+     maxTokens,
+     // #136：percentage 与 totalTokens 同源窗口，避免主柱与百分比分叉
+-    percentage: maxTokens ? (stepWindowTokens > 0 ? stepWindowTokens : used) / maxTokens : 0,
++    percentage: maxTokens ? totalTokens / maxTokens : 0,
 
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 index e027cc15a..c215dd7da 100644
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -3,7 +3,7 @@ import { createMemo, createRoot } from "solid-js"
- import { createStore } from "solid-js/store"
- import { describe, expect, test } from "bun:test"
- import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
--import { computeContextData, filterCompactedMessages } from "../src/util/context-usage"
-+import { computeContextData, contextGrid, filterCompactedMessages, type ContextCategory } from "../src/util/context-usage"
- import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey } from "../src/routes/session/context-usage"
+@@ -12,5 +12,5 @@
+ import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
+-import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
++import { computeContextData, contextGrid, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput, type ContextCategory } from "../src/util/context-usage"
+ import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
+ import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
  
- // 测试用 Provider：上下文 20k、输入 19.9k、输出 100，用于验证窗口与缓冲区计算
-@@ -688,3 +688,187 @@ test("snapshot tracks streaming tool input deltas", () => {
-     // totalTokens 取自活跃 assistantA 的 step（17000 input + 600 output），不受 queued user 影响
-     expect(data.totalTokens).toBe(17_600)
+@@ -330,3 +330,3 @@ test("confirmed allocation composes input history and live output on the panel path", async () => {
+       messages: [user("1"), assistant("2", "1")], parts: { "1": [text("1", "short")], "2": [text("2", "abcdefghijkl"), finish] },
+-      session, providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
++      session, providers: [provider], config: { compaction: { reserved: 0 } }, paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
+     }
+@@ -338,5 +338,22 @@ test("confirmed allocation composes input history and live output on the panel path", async () => {
+     expect(data.details.messages).toMatchObject({ assistantText: 182, reasoning: 74, toolCalls: 16, attachments: 40 })
+     expect(data.details.usage).toMatchObject({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, total: 9850, cost: 3 })
++    // 分类少于已确认窗口的 40 tokens 归 Unaccounted，不能借 Free 隐藏；附件拆桶不改总额。
++    expect(data.categories.find((item) => item.name === "Attachments")?.tokens).toBe(40)
++    expect(data.categories.find((item) => item.name === "Unaccounted")?.tokens).toBe(40)
++    expect(data.categories.filter((item) => !item.isDeferred).reduce((sum, item) => sum + item.tokens, 0)).toBe(600)
++    const waiting = await computeContextData({ ...input,
++      session: { ...session, request: { ...request, stepInput: 500 } },
++      parts: { "2": [text("2", "abcdefghijkl"), finish, {
++        id: "tail", sessionID: "s", messageID: "2", type: "tool", callID: "tail", tool: "read",
++        state: { status: "completed", input: {}, output: "x".repeat(400), title: "read", metadata: {}, time: { start: 1, end: 2 } },
++      }] },
++    })
++    // finish 后的 100 tokens 只进入 Pending；详情仍保留既有合并口径 28 + 100。
++    expect(waiting.categories.find((item) => item.name === "Pending")?.tokens).toBe(100)
++    expect(waiting.categories.find((item) => item.name === "Tool Results")?.tokens).toBe(28)
++    expect(waiting.details.messages.toolResults).toBe(128)
++    expect(waiting.totalTokens).toBe(700)
++    expect(waiting.categories.filter((item) => !item.isDeferred).reduce((sum, item) => sum + item.tokens, 0)).toBe(700)
+     const native = await computeContextData({ ...input,
+       messages: input.messages.map((message) => message.role === "assistant"
+         ? { ...message, tokens: finish.tokens, inputEstimate: request.inputEstimate } : message),
+@@ -359,4 +376,4 @@
+         inputEstimate: { input: 0, bodyChars: 0, confirmed: false, inputBreakdown: zeroBreakdown } } },
+     })
+-    expect(zero.categories.filter((item) => !item.isDeferred).map((item) => item.tokens)).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
++    expect(zero.categories.filter((item) => !item.isDeferred).map((item) => item.tokens)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+     expect(zero.details.usage.total).toBe(9850)
+@@ -628,3 +645,3 @@
+     expect(data.categories.find((item) => item.name === "Tool Calls")?.tokens).toBe(4)
+-    expect(data.categories.slice(4, 8).map(item => item.name)).toEqual(["User Messages", "Tool Results", "Assistant Messages", "Tool Calls"])
++    expect(data.categories.slice(4, 10).map(item => item.name)).toEqual(["User Messages", "Tool Results", "Attachments", "Assistant Messages", "Tool Calls", "Pending"])
+     // 有 input 上限时缓冲抵消 provider reserve；小输出限额不能替代下一轮输入余量。
+@@ -1122,3 +1139,3 @@
+-    expect(legacy.categories.slice(4, 8).map(item => [item.name, item.tokens])).toEqual([
+-      ["User Messages", 4000], ["Tool Results", 1000], ["Assistant Messages", 4600], ["Tool Calls", 1000],
++    expect(legacy.categories.slice(4, 10).map(item => [item.name, item.tokens])).toEqual([
++      ["User Messages", 4000], ["Tool Results", 1000], ["Attachments", 0], ["Assistant Messages", 4600], ["Tool Calls", 1000], ["Pending", 0],
+     ])
+@@ -1141,3 +1158,3 @@
+       toolDefinitions: [{ name: "a", text: "abcd" }, { name: "b", text: "abcdefgh" }] })
+-    expect(native.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([4000, 500, 0, 2500, 4000, 1000, 4000, 1000])
++    expect(native.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([4000, 500, 0, 2500, 4000, 1000, 0, 4000, 1000, 0])
+     expect(native.totalTokens).toBe(17000)
+@@ -1187,4 +1204,4 @@
+     // 服务端明确的零细分必须压过本地非空文件和定义，否则旧估值会在已清空窗口中残留。
+-    expect(cleared.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
++    expect(cleared.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+     expect(cleared.details.messages).toEqual({ userText: 0, assistantText: 0, reasoning: 0, toolCalls: 0, toolResults: 0, attachments: 0, compactionSummary: 0 })
+     expect(cleared.details.instructions).toEqual([{ path: "a", tokens: 0 }, { path: "b", tokens: 0 }])
+@@ -1212,5 +1229,6 @@
+     expect(data.details.messages.userText).toBe(800)
+     expect(data.details.messages.attachments).toBe(1200)
+-    expect(data.categories.find(item => item.name === "User Messages")?.tokens).toBe(2000)
++    expect(data.categories.find(item => item.name === "User Messages")?.tokens).toBe(800)
++    expect(data.categories.find(item => item.name === "Attachments")?.tokens).toBe(1200)
+     expect(data.totalTokens).toBe(2000)
+     expect(data.details.usage).toMatchObject({ input: 1600, cacheRead: 200, cacheWrite: 200 })
+@@ -1237,3 +1255,169 @@
+     expect(unchanged.details.messages.userText).toBe(data.details.messages.userText)
    })
 +
 +  // 网格 seat：累积水位线（waterline）——整数刻度被谁的累积区间跨过，格子就归谁。
@@ -1128,19 +1165,9 @@ index e027cc15a..c215dd7da 100644
 +    // INV-03：attachments 已计入 used 却无色块时 Free 会吞席；必须出现 Attachments 类别与格子。
 +    const messages = [user("1"), assistant("2", "1")]
 +    const parts: Record<string, Part[]> = {
-+      "1": [
-+        {
-+          id: "att",
-+          sessionID: "s",
-+          messageID: "1",
-+          type: "file",
-+          time: { created: 1 },
-+          mime: "image/png",
-+          url: `data:image/png;base64,${"x".repeat(150_000)}`,
-+          state: { status: "completed" },
-+        } as unknown as Part,
-+      ],
++      "1": [text("1", "hello")],
 +      "2": [
++        text("2", "world"),
 +        {
 +          id: "sf",
 +          sessionID: "s",
@@ -1171,16 +1198,8 @@ index e027cc15a..c215dd7da 100644
 +    const data = await computeContextData({
 +      messages,
 +      parts,
-+      // 附件色块需要 attachment 能力为 true 的 provider；顶层 fixture 为 false（其余字段一致）
-+      providers: [
-+        {
-+          ...provider,
-+          models: {
-+            model: { ...provider.models["model"], capabilities: { ...provider.models["model"].capabilities, attachment: true } },
-+          },
-+        },
-+      ],
-+      config: {},
++      providers: [provider],
++      config: { compaction: { reserved: 0 } },
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
@@ -1225,3 +1244,4 @@ index e027cc15a..c215dd7da 100644
 +    expect(tail.every((c) => c.categoryName === "Autocompact buffer")).toBe(true)
 +    expect(flat.filter((c) => c.categoryName === "Autocompact buffer")).toHaveLength(20)
 +  })
+ })

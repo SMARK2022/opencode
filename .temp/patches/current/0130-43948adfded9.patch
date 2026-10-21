@@ -5,10 +5,10 @@ Subject: [PATCH] =?UTF-8?q?feat(shell):=20=E6=9B=B4=E6=96=B0PowerShell?=
  =?UTF-8?q?=E8=BE=93=E5=87=BA=E5=A4=84=E7=90=86=EF=BC=8C=E7=A1=AE=E4=BF=9D?=
  =?UTF-8?q?=E5=8E=9F=E7=94=9Fstderr=E5=AD=97=E8=8A=82=E4=BF=9D=E6=8C=81?=
 
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
 index 475a5a3e44..144f16e046 100644
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
 @@ -1420,7 +1420,17 @@ function transformPowerShellClixml(text: string): string | null {
  }
  
@@ -27,18 +27,13 @@ index 475a5a3e44..144f16e046 100644
    if (!isPurePowerShellClixmlBlock(block)) return null
  
    // #129：去掉可选 #< CLIXML 头
-@@ -1439,9 +1449,10 @@ function decodePowerShellClixmlBlock(block: string): string | null {
+@@ -1042,5 +1052,5 @@
+   plain = plain.trimEnd()
  
    if (!plain) return null
- 
 -  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
 +  return plain
  }
- 
-+
- // #129：仅解码结构纯净的 XML 块，避免吞掉夹杂的真实命令输出
- function isPurePowerShellClixmlBlock(block: string) {
-   const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
 @@ -1971,7 +1982,8 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
  export function normalizePowerShellOutput(text: string) {
    let changed = false
@@ -53,47 +48,23 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index f37611786d..079ca5915a 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -14,7 +14,7 @@ import { Config } from "@/config/config"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- import { Shell } from "@opencode-ai/core/shell"
- import { ShellID } from "./shell/id"
--import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
-+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
- 
- import * as Truncate from "./truncate"
- import { Plugin } from "@/plugin"
-@@ -363,7 +363,8 @@ function psUtf8(command: string) {
-     "& {",
-     command,
-     // #129：*&1 合并全部流到 stdout（#130 将收窄 stderr）
--    "} *>&1",
-+    // #130：stderr 保持原生，避免 PS 先按错误代码页解码
-+    "} 3>&1 4>&1 5>&1 6>&1",
-     "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-   ].join(String.fromCharCode(10))
- }
-@@ -801,13 +802,19 @@ export const ShellTool = Tool.define(
-       }
-       if (aborted) meta.push("User aborted the command")
+@@ -17,1 +17,1 @@
+-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+@@ -624,1 +624,3 @@
        const raw = list.map((item) => item.text).join("")
-+      // #130：Windows PowerShell 先 normalize CLIXML 为纯文本
-+      // #130：仅 Win+PS 做 CLIXML plain normalize
-+      const normalized =
-+        process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
-       // 压缩可见输出：启用时移除冗余行，保留关键诊断信息
--      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
-+      // #130：压缩输入为 normalize 后文本
-+      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
-       diag.end()
-       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
-       if (end.cut) cut = true
-       if (!file && (end.cut || compressed.stats.applied)) {
--        file = yield* trunc.write(raw)
-+        // #130：落盘使用 normalize 后的全文
-+        file = yield* trunc.write(normalized)
-       }
- 
-       let output = end.text
++      // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
++      const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
+@@ -627,1 +629,1 @@
+-      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput }, input.command)
++      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -192,1 +192,2 @@
+-    "} *>&1",
++    // stderr 必须保持原生字节，避免 PowerShell 按控制台编码提前解释 CP936。
++    "} 3>&1 4>&1 5>&1 6>&1",
 diff --git a/packages/opencode/test/util/text-decoding.test.ts b/packages/opencode/test/util/text-decoding.test.ts
 index de3bc73e94..ba4cc07cf7 100644
 --- a/packages/opencode/test/util/text-decoding.test.ts
@@ -219,3 +190,53 @@ index c0716cdd5b..61510aa362 100644
 +    )
 +  }
 +})
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -21,1 +21,1 @@
+-import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
+@@ -313,3 +313,4 @@
+               const output = text || "(no output)"
++              const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
+               // 传真实调用 command，不使用描述或重新解析执行命令。
+-              const compressed = compressVisibleOutput(output, { enabled }, input.command)
++              const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -460,3 +460,34 @@
+               }), LayerNode.compile(AppProcess.node), shell, false, undefined, encoding)
+             }
++            const rawError = Buffer.from([0xbe, 0xaf, 0xb8, 0xe6, 0x3a, 0x20, 0x44, 0x4f, 0x4d, 0xca, 0xc7, 0xc4, 0xda, 0xb2, 0xbf, 0xd7, 0xa8, 0xd3, 0xc3, 0x20, 0x41, 0x50, 0x49, 0x0a])
++            const errorCommand = `$bytes = [byte[]](${Array.from(rawError)}); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)`
++            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++              const settled = yield* settleTool(registry, call({ command: errorCommand, compress_output: false }))
++              const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++              expect(settled.result.type).toBe("content")
++              expect(text).toContain("警告: DOM是内部专用 API")
++              expect(text).not.toContain("\uFFFD")
++              expect(settled.output?.structured).toMatchObject({ exit: 0, truncated: false, compression: { compressed: false } })
++              const retained = settled.outputPaths?.[0]
++              if (!retained) throw new Error("expected retained CP936 stderr")
++              expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(rawError)
++              expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [errorCommand], save: [errorCommand] })
++            }), LayerNode.compile(AppProcess.node), shell)
++            const rawClixml = Buffer.from('BEFORE\n#< CLIXML\n<Objs>\n<S N="Message">VISIBLE_MESSAGE</S>\n</Objs>\nAFTER\n')
++            const clixmlCommand = `$bytes = [byte[]](${Array.from(rawClixml)}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)`
++            for (const mode of ["enabled", "parameter", "config"] as const) {
++              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++                const settled = yield* settleTool(registry, call({ command: clixmlCommand, compress_output: mode !== "parameter" }))
++                const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++                expect(settled.result.type).toBe("content")
++                expect(settled.output?.structured).toMatchObject({ exit: 0, truncated: false, compression: { compressed: false } })
++                expect(text).toContain("BEFORE\nVISIBLE_MESSAGE\nAFTER\n")
++                expect(text).not.toMatch(/<Obj\b|<Objs\b|CLIXML/)
++                expect(text).not.toContain("high-entropy powershell-clixml")
++                const retained = settled.outputPaths?.[0]
++                if (!retained) throw new Error("expected retained original CLIXML")
++                expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(rawClixml)
++                expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [clixmlCommand], save: [clixmlCommand] })
++              }), LayerNode.compile(AppProcess.node), shell, mode === "config" ? false : undefined, undefined, "auto")
++            }
+           }

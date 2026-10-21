@@ -207,10 +207,10 @@ index 0000000000000000000000000000000000000000..aa5d71af297f5bc63825049ce0f954d5
 +### 复核确认的非回归边界（详见改动 B / section 9 R3）
 +
 +`&>`/`&>>`、`>&2`、`>& /dev/tcp`、`2>/dev/null`（改动 B）、`scp $F`/`scp *.gz`（section 9 R3）均维持 general 或由 raw 层捕获，无回归。
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index 7553a08a9..6a8f56eb7 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -328,12 +328,15 @@
      if (decision.level === "dangerous" || decision.level === "cautious") return decision
    }

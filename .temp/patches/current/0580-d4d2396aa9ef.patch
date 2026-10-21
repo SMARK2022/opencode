@@ -8,9 +8,9 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-TUI Message 数组按 (time.created ASC, SQLite BINARY UTF-8 id ASC) 维护：ID 回绕或任意 caller ID 下插入/更新经 chronology 二分命中；hidden 删除改用同一 chronology key 定位（原纯 ID 二分在有序数组上 found=false，隐藏消息永久残留）；tie-break 统一为码元序（等价 BINARY），snapshot 排序与插入定位不再分歧。
+TUI Message 数组按 (time.created ASC, SQLite BINARY UTF-8 id ASC) 维护，snapshot排序与插入/更新共用chronology比较器；保留目标按ID删除及实时hydration合并，避免ID回绕或任意caller ID导致错位和窗口误淘汰。
 
-适配说明：目标 fork 线已含 messageKey chronology 插入与按 ID 线性 remove（等价上游 #40994 主修复）——source 的 messageByID 派生索引及 H5/H6/H7/H8 索引生命周期裁记（目标 remove 为 findIndex 线性，正确性不依赖索引）；真实残差为①hidden 分支纯 ID 二分（本补丁改 messageKey）与②compareMessage localeCompare 与 messageKey 码元序分歧（本补丁统一码元序）；三个测试用例完整落地（mount(handler, tmp.path) 形态、hidden 事件按运行时字段 as 收窄）。
+适配说明：目标hidden/remove已经按ID查找，保留其正确性及hydration证据，不复制source索引生命周期。普通事件的拼接key改为与snapshot同一数字时间/UTF-8 BINARY比较器；保留三个行为用例并覆盖时间位数和非BMP边界，SDK原生hidden类型直接使用，V2持久seq顺序不变。
 
 
 diff --git a/docs/plans/tui-message-id-rollover-ordering-repair.md b/docs/plans/tui-message-id-rollover-ordering-repair.md
@@ -509,34 +509,44 @@ new file mode 100644
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -112,7 +112,9 @@ function search<T>(items: T[], target: string, key: (item: T) => string) {
+@@ -113,7 +113,20 @@
  }
  
  function compareMessage(a: Message, b: Message) {
 -  return a.time.created - b.time.created || a.id.localeCompare(b.id)
-+  // 与 messageKey 二分同一码元序（等价 SQLite BINARY 的 UTF-8 字节序）：
-+  // localeCompare 会让 snapshot 排序与插入定位在同一毫秒 tie 上分歧，产生重复或错位。
-+  return a.time.created - b.time.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
++  // 与SQL分页同序；caller ID不局限于ASCII，不能以locale或UTF-16码元序代替UTF-8 BINARY。
++  return a.time.created - b.time.created || Buffer.compare(Buffer.from(a.id, "utf8"), Buffer.from(b.id, "utf8"))
  }
  
- const messageKey = (message: Message) => message.time.created + message.id
-@@ -782,7 +784,9 @@ export const {
-           if ((info as Record<string, unknown>).hidden) {
-             const messages = store.message[info.sessionID]
-             if (messages) {
--              const result = search(messages, info.id, (m) => m.id)
-+              // 0580：数组按 messageKey chronology 有序；hidden 定位必须用同一 key——
-+              // 纯 ID 搜索在 ID 回绕/任意 caller ID 下 found=false，隐藏消息永远无法移除。
-+              const result = search(messages, messageKey(info), messageKey)
-               if (result.found) {
-                 setStore(
-                   "message",
+-const messageKey = (message: Message) => message.time.created + message.id
++// snapshot与事件二分共用比较器，时间必须按数字比较，不能拼成长度变化的字符串key。
++function searchMessage(items: Message[], target: Message) {
++  let left = 0
++  let right = items.length - 1
++  while (left <= right) {
++    const middle = Math.floor((left + right) / 2)
++    const order = compareMessage(items[middle], target)
++    if (order === 0) return { found: true, index: middle }
++    if (order < 0) left = middle + 1
++    else right = middle - 1
++  }
++  return { found: false, index: left }
++}
+@@ -894,4 +907,4 @@
+-          const result = search(messages, messageKey(event.properties.info), messageKey)
++          const result = searchMessage(messages, event.properties.info)
+           if (result.found) {
+             setStore("message", event.properties.info.sessionID, result.index, reconcile(event.properties.info))
+             break
 
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
-@@ -3,7 +3,7 @@ import { describe, expect, spyOn, test } from "bun:test"
+@@ -3,10 +3,10 @@ import { describe, expect, spyOn, test } from "bun:test"
  import { testRender } from "@opentui/solid"
+ import { EventV2 } from "@opencode-ai/core/event"
+ import { SessionSchema } from "@opencode-ai/core/session/schema"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
  import { tmpdir } from "../../../fixture/fixture"
  import { directory, json, mount, wait, worktree } from "./sync-fixture"
 -import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
@@ -544,7 +554,7 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
  import type { TuiSlotPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
  import type { JSX } from "solid-js"
  import { createBuiltinPlugins } from "../../../../src/feature-plugins/builtins"
-@@ -846,8 +846,156 @@ describe("tui sync", () => {
+@@ -846,8 +846,160 @@ describe("tui sync", () => {
        app.renderer.destroy()
      }
    })
@@ -594,11 +604,11 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 +        expect.objectContaining({ agent: "updated" }),
 +      ])
 +
-+      // 目标 SDK 类型面暂无 hidden 字段；reducer 按运行时字段消费，as 收窄不绕过行为。
-+      emit(messageEvent({ ...target, hidden: { time: 301, reason: "undo" } } as unknown as Message))
++      // 使用SDK已有hidden形状，删除按ID定位，不能让回绕后的消息留在窗口里。
++      emit(messageEvent({ ...target, hidden: { time: 301, reason: "undo" } }))
 +      emit(branchEvent("rollover-hidden"))
 +      await wait(() => sync.data.vcs?.branch === "rollover-hidden")
-+      // hidden 必须经 chronology 定位命中回绕后的 lexical-low ID；纯 ID 搜索会永久残留。
++      // hidden保留目标ID定位，与chronology插入互不争夺删除责任。
 +      expect(sync.data.message.ses_1?.some((message) => message.id === target.id)).toBe(false)
 +    } finally {
 +      app.renderer.destroy()
@@ -614,10 +624,10 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 +      // 不走 HTTP snapshot：首条 event 必须创建数组并保持 chronology 插入序。
 +      // 后续 ID 故意形成 m,z,a,y，证明公开 caller ID 既非全局升序也非单次旋转数组。
 +      const messages = [
-+        userMessage("msg_m", 1),
-+        userMessage("msg_z", 2),
-+        userMessage("msg_a", 3),
-+        userMessage("msg_y", 4),
++        userMessage("msg_m", 8),
++        userMessage("msg_z", 9),
++        userMessage("msg_a", 10),
++        userMessage("msg_y", 11),
 +      ]
 +      for (const message of messages) emit(messageEvent(message))
 +      emit(branchEvent("arbitrary-created"))
@@ -648,11 +658,13 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 +    // 两条 time.created 相同，确保测试只对 tie-break 敏感，不让时间主键掩盖 collation 分歧。
 +    const upper = userMessage("msg_B", 100)
 +    const lower = userMessage("msg_a", 100)
++    const bmp = userMessage("msg_\ue000", 100)
++    const nonBmp = userMessage("msg_\u{10000}", 100)
 +    const { app, emit, sync } = await mount((url) => {
 +      if (url.pathname === "/session/ses_1")
 +        return json({ id: "ses_1", time: { created: 1, updated: 1 }, directory })
 +      if (url.pathname === "/session/ses_1/message" || url.pathname === "/session/ses_1/messages")
-+        return json([upper, lower].map((info) => ({ info, parts: [] })))
++        return json([upper, lower, bmp, nonBmp].map((info) => ({ info, parts: [] })))
 +      if (url.pathname === "/session/ses_1/todo") return json([])
 +      if (url.pathname === "/session/ses_1/diff") return json([])
 +      if (url.pathname === "/session/status") return json({})
@@ -660,22 +672,24 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 +
 +    try {
 +      await sync.session.sync("ses_1", { force: true })
-+      // 快照排序即目标排序；B<a 是本补丁统一码元序（等价 BINARY）的断言面。
-+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a"])
++      // 字面expected独立规定UTF-8顺序，非BMP必须在U+E000之后，不能复用生产比较器生成答案。
++      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a", "msg_\ue000", "msg_\u{10000}"])
 +
 +      emit(messageEvent({ ...upper, agent: "binary-updated" }))
 +      emit(branchEvent("binary-updated"))
 +      await wait(() => sync.data.vcs?.branch === "binary-updated")
 +      // update 必须命中 snapshot 原位；locale 顺序不一致会在末尾插入第二条 msg_B。
-+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a"])
++      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_B", "msg_a", "msg_\ue000", "msg_\u{10000}"])
 +      expect(sync.data.message.ses_1?.[0]).toMatchObject({ agent: "binary-updated" })
 +
-+      emit(messageEvent({ ...upper, hidden: { time: 101, reason: "undo" } } as unknown as Message))
++      emit(messageEvent({ ...upper, hidden: { time: 101, reason: "undo" } }))
 +      emit(branchEvent("binary-hidden"))
 +      await wait(() => sync.data.vcs?.branch === "binary-hidden")
-+      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_a"])
++      expect(sync.data.message.ses_1?.map((message) => message.id)).toEqual(["msg_a", "msg_\ue000", "msg_\u{10000}"])
 +
 +      emit(messageRemovedEvent(lower.id))
++      emit(messageRemovedEvent(bmp.id))
++      emit(messageRemovedEvent(nonBmp.id))
 +      emit(branchEvent("binary-removed"))
 +      await wait(() => sync.data.vcs?.branch === "binary-removed")
 +      // explicit remove 复用同一 ID 线性定位，证明 BINARY chronology 前提未被绕过。

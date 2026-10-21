@@ -473,14 +473,12 @@ diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-
 index 093a6b4f65db2bd811ba330751d319ef3957cabe..53ef1a8405cb1195c07d7c106fc5a7be43892bdc 100644
 --- a/packages/core/src/cross-spawn-spawner.ts
 +++ b/packages/core/src/cross-spawn-spawner.ts
-@@ -282,16 +282,24 @@ export const make = Effect.gen(function* () {
+@@ -281,16 +281,22 @@ export const make = Effect.gen(function* () {
        const proc = launch(command.command, command.args, opts)
        let end = false
        let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
-+      // exit 信号与 stdio 排干解耦（INV-06）：'close' 要等输出流读完，而 tap 背压下
-+      // 消费者提前停止会使流暂停在数据中段、'close' 永不触发——kill/exitCode/scope
-+      // finalizer 三处 await 将无限挂起。进程死亡（'exit'）即完成信号；'close' 兜底
-+      // 经同一幂等闭包，仅在 exit 缺席时生效，exit 后到达为 no-op。
++      // 生命周期按进程死亡完成，不能等待背压下未排干的stdio；kill/exitCode/finalizer共用此信号。
++      // close仍进入同一个幂等闭包，exit完成后不再重复结算，输出tap继续由原owner排干。
 +      const completeSignal = (args: readonly [code: number | null, signal: NodeJS.Signals | null]) => {
 +        if (end) return
 +        end = true
@@ -505,16 +503,13 @@ diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/co
 index f45cc69040a3b8efcdb53da1cabb7b168c998770..cb8a3e7fc42ac2dd488152e8c95e1b7eac9d04bf 100644
 --- a/packages/core/test/effect/cross-spawn-spawner.test.ts
 +++ b/packages/core/test/effect/cross-spawn-spawner.test.ts
-@@ -234,6 +234,41 @@ describe("cross-spawn spawner", () => {
+@@ -238,6 +238,42 @@ describe("cross-spawn spawner", () => {
      )
    })
  
 +  describe("exit signal decoupled from stdio drain", () => {
-+    // INV-06：消费者停止读取且输出超过 tap 缓冲时，kill 后 'close'（= exit + stdio 排干）
-+    // 不会到来；kill/exitCode/scope finalizer 必须由进程死亡（'exit'）驱动、有界完成。
-+    // INV-07：exit 完成后 tap 缓冲仍可读取开头字节——保真语义不回归。
-+    // 显式 20s 预算：修复前该形态确定性挂死（scope finalizer 同源等待），
-+    // 预算把挂死转化为可诊断的红而不是冻结运行器。
++    // 大输出无人消费形成背压，杀掉本测试写手后生命周期必须完成，不能等close排干。
++    // 20s是测试预算，不能强制释放旧态finalizer；只在已修复后态运行此用例。
 +    fx.live(
 +      "resolves kill and exitCode when backpressured output is never drained",
 +      Effect.gen(function* () {
@@ -527,6 +522,10 @@ index f45cc69040a3b8efcdb53da1cabb7b168c998770..cb8a3e7fc42ac2dd488152e8c95e1b7e
 +          }),
 +          Effect.orDie,
 +        )
++        // 信号退出可为typed错误，Windows可为数值码；两者都必须在排干前结算而非挂起。
++        yield* Effect.exit(handle.exitCode)
++        expect(yield* handle.isRunning).toBe(false)
++        // 退出信号不能销毁保留的tap，随后仍应读到写手的前部数据。
 +        const chunks: string[] = []
 +        yield* Stream.runForEach(Stream.decodeText(handle.stdout), (bytes) =>
 +          Effect.sync(() => {

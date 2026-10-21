@@ -16,10 +16,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index c651fc7..6716084 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -20,7 +20,7 @@ const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import
- // #259：daemon stop 是用户可见的 CLI 行为，测试必须从真实入口验证
- const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
- 
+@@ -24,4 +24,4 @@
 -const DAEMON_START_TIMEOUT_MS = 15_000
 +const DAEMON_START_TIMEOUT_MS = 30_000
  const POLL_INTERVAL_MS = 100
@@ -51,35 +48,16 @@ index a30fc14..5e19f76 100644
            .pipe(Effect.forkChild)
          yield* waitForBusy(chat.id)
  
-diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index 0112e00..d654058 100644
---- a/packages/tui/src/routes/session/index.tsx
-+++ b/packages/tui/src/routes/session/index.tsx
-@@ -2361,6 +2361,9 @@ function openAutoReviewFromToolChrome(
-   navigate: ReturnType<typeof useRoute>["navigate"],
-   renderer: ReturnType<typeof useRenderer>,
-   evt: TuiMouseEvent | undefined,
-+  // inline 标记只由 InlineTool 传入：inline 工具在部分 OpenTUI hit-grid 状态下
-+  // 会把 review 文本报告成上一行内部 text，父卡片兜底必须放宽这一坐标校验。
-+  options?: { inline?: boolean },
- ) {
-   // #293：OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
-   // root + 1 这类布局猜测；父卡片兜底必须再经过行坐标校验，因为标题、
-@@ -2375,7 +2378,7 @@ function openAutoReviewFromToolChrome(
-   if (!match) return false
-   if (match.direct) {
-     if (evt.y !== match.row.screenY - 1) return false
--  } else if (evt.y !== match.row.screenY && (review.tool === "bash" || evt.y !== match.row.screenY - 1)) return false
-+  } else if (evt.y !== match.row.screenY && (review.tool === "bash" || !options?.inline || evt.y !== match.row.screenY - 1)) return false
-   return openAutoReviewSession(review, navigate, renderer, evt)
- }
- 
-@@ -2554,7 +2557,7 @@ function InlineTool(props: {
-       onMouseOut={() => setHover(false)}
-       onMouseUp={(evt?: TuiMouseEvent) => {
-         // #292：review 行 mouseup 可能冒泡到父 InlineTool，兜底打开 reviewer 子会话
--        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt)) return
-+        if (openAutoReviewFromToolChrome(review(), navigate, renderer, evt, { inline: true })) return
-         if (renderer.getSelection()?.getSelectedText()) return
-         if (failed()) {
-           setErrorExpanded((value) => !value)
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -409,7 +409,7 @@
+ async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+   const lines = app.captureCharFrame().split("\n")
+   const y = lines.findIndex((line) => line.includes(text))
+-  expect(y).toBeGreaterThanOrEqual(0)
++  if (y < 0) throw new Error(`missing clickable text ${JSON.stringify(text)}:\n${lines.join("\n")}`)
+   const x = lines[y].indexOf(text)
+-  expect(x).toBeGreaterThanOrEqual(0)
++  if (x < 0) throw new Error(`missing clickable text column ${JSON.stringify(text)}:\n${lines[y]}`)
+   // 文本锚点跟随布局变化；当前mockMouse使用零基行号，列坐标进入标签内部。

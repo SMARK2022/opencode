@@ -8,18 +8,27 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-48add250a0 的依赖 bump 覆盖了 package.json/bun.lock，但 closure verifier 的
+48add250a0 的依赖 bump 覆盖了 package.json/bun.lock，本项同步版本维护与验证消费至 smark.6。
+目标已由根catalog/override/冻结锁消费SMARK发布包；现有升级器和构建入口动态读取版本。
+旧provenance四文件未落地，本项扩展既有维护用例的.6参数，不把artifact smoke当远端tag或源码授权证明。
 
 diff --git a/packages/opencode/script/smoke-opentui-artifact.ts b/packages/opencode/script/smoke-opentui-artifact.ts
 --- a/packages/opencode/script/smoke-opentui-artifact.ts
 +++ b/packages/opencode/script/smoke-opentui-artifact.ts
-@@ -1,5 +1,8 @@
+@@ -1,5 +1,6 @@
  #!/usr/bin/env bun
 -
-+// #565：源补丁把 provenance/closure 校验面（opentui-provenance.ts、source-revision.json、
-+// verify-opentui-closure.ts、provenance.test 四文件 tag 字面量）同步至 smark.6；目标运行时为
-+// registry @opentui 0.4.5（0489/0512/0516/0560/0563 SUPERSEDED_BY_REGISTRY 裁定），四文件在目标
-+// 无 base 且从未创建，版本同步语义由本 smoke 脚本与 opentui-required CI job 的等价质量面承担。
++// 发布版本由catalog与冻结锁决定，本smoke仅验证产物行为，不替代远端tag或源码授权校验。
++
  import fs from "node:fs/promises"
  import path from "node:path"
  import os from "node:os"
+
+diff --git a/packages/opencode/test/script/upgrade-opentui.test.ts b/packages/opencode/test/script/upgrade-opentui.test.ts
+--- a/packages/opencode/test/script/upgrade-opentui.test.ts
++++ b/packages/opencode/test/script/upgrade-opentui.test.ts
+@@ -6,2 +6,2 @@
+-// 已发布版本沿同一升级路径验证，不为.5另造分支或修改thirdparty源码。
+-test.each(["0.4.3-smark.1", "0.4.3-smark.2", "0.4.3-smark.4", "0.4.3-smark.5"])("upgrade-opentui preserves release %s and thirdparty boundary", async (version) => {
++// 新release沿既有11包闭包与退出fork用例验证，避免维护校验仍停留在前一版本。
++test.each(["0.4.3-smark.1", "0.4.3-smark.2", "0.4.3-smark.4", "0.4.3-smark.5", "0.4.3-smark.6"])("upgrade-opentui preserves release %s and thirdparty boundary", async (version) => {

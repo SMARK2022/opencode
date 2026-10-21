@@ -8,88 +8,71 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E4=BC=9A=E8=AF=9D?=
  =?UTF-8?q?=E6=B5=8B=E8=AF=95=E7=94=A8=E4=BE=8B?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-融合适配：目标 #194 已以 TokenEstimate/estimateUploadInput 承载 summary 输入估算（更强路径，保留）；
-本 patch 补足源 0456 缺失语义——assistant msg 的 inputBreakdown 细分与 processor 流式交接（防压缩期间 TUI 闪零）。AttachmentToken 由 core re-home 为 TokenEstimate，无需 import。
-diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
---- a/packages/opencode/src/session/compaction.ts
-+++ b/packages/opencode/src/session/compaction.ts
-@@ -543,6 +543,28 @@
-         attachments: compactionEstimate.attachments,
-         history: selected.head,
-         model,
-       }).inputTokens
-+      // #456：pending 细分与 processor 交接——summary 请求绕过 prompt.ts，流式期间不能闪回 0。
-+      const rawMessagesText = JSON.stringify(compactionMessages)
-+      // userText/assistantText 按估算文本拆分；attachments 用 rawChars 表达未计入文本的附件体量。
-+      const inputBreakdown = {
-+        system: 0,
-+        instructions: 0,
-+        skills: 0,
-+        tools: 0,
-+        messages: {
-+          userText: nextPrompt.length,
-+          // userText 只含本次 summary prompt；其余估算文本归入 assistantText。
-+          assistantText: Math.max(0, compactionEstimate.attachments.textChars + compactionEstimate.text.length - nextPrompt.length),
-+          reasoning: 0,
-+          toolInput: 0,
-+          toolOutput: 0,
-+          attachments: compactionEstimate.attachments.rawChars,
-+          total: rawMessagesText.length,
-+          // total 以序列化请求体长度为准，与 inputChars 同源。
-+        },
-+        // 附件仅在存在时给出 media 细分，避免空对象污染序列化形态。
-+        ...(compactionEstimate.attachments.count > 0 ? { media: compactionEstimate.attachments } : {}),
-+      }
-       const ctx = yield* InstanceState.context
-       const msg: SessionV1.Assistant = {
-@@ -568,5 +590,6 @@
-         // #194：inputChars/inputTokens 供 TUI pending 展示——与 prompt.ts 对齐
-         inputChars: JSON.stringify(compactionMessages).length,
-         inputTokens: estimatedInput,
-+        inputBreakdown,
-         modelID: model.id,
-         providerID: model.providerID,
-@@ -581,3 +604,6 @@
-       })
-+      // processor 把该快照复制进 step-start/step-finish，与 prompt.ts 主路径同构。
-+      processor.inputChars = rawMessagesText.length
-+      processor.inputBreakdown = inputBreakdown
-       const result = yield* processor.process({
-         user: userMessage,
+目标共享processor已在onRequestPrepared持久化inputEstimate及breakdown，并交接到step-start/finish。
+复用实际请求体、密度校准和确认用量分离，保留源摘要pending语义，不恢复无消费者的旧字段或第二套估算。
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 index ac1f7afc18c60d5430847ef684a4226f4bf9104a..247db46c9ac5c7a0bc3a18a80a525410f782cb66 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -875,6 +901,35 @@
-     }),
-   )
- 
-+  it.instance(
+@@ -1067,3 +1067,64 @@
++  itCompaction.instance(
 +    "stores pending input estimate on summary assistant before streaming",
 +    Effect.gen(function* () {
 +      const ssn = yield* SessionNs.Service
 +      const session = yield* ssn.create({})
 +      const msg = yield* createUserMessage(session.id, "hello")
 +      const msgs = yield* ssn.messages({ sessionID: session.id })
-+
-+      yield* SessionCompaction.use.process({
-+        parentID: msg.id,
-+        messages: msgs,
-+        sessionID: session.id,
-+        auto: false,
++      const prepared = yield* Deferred.make<void>()
++      const release = yield* Deferred.make<void>()
++      const fiber = yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
++        .pipe(
++          withCompaction({
++            llm: Layer.succeed(LLM.Service, LLM.Service.of({
++              stream: (input) => Stream.unwrap(
++                (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
++                  Effect.andThen(Deferred.succeed(prepared, undefined)),
++                  Effect.andThen(Deferred.await(release)),
++                  Effect.as(Stream.concat(
++                    Stream.make(LLMEvent.stepStart({ index: 0 })),
++                    reply("summary")(input),
++                  )),
++                ),
++              ),
++            })),
++          }),
++          Effect.forkChild,
++        )
++      // 准备回调提交后仍阻塞首个流事件，数据库快照必须已包含摘要请求的估算。
++      yield* Deferred.await(prepared).pipe(Effect.timeout("5 seconds"))
++      const snapshot = yield* Effect.gen(function* () {
++        const pending = (yield* ssn.messages({ sessionID: session.id })).find((item) => item.info.role === "assistant" && item.info.summary)
++        if (!pending || pending.info.role !== "assistant" || !pending.info.inputEstimate) return yield* Effect.die("Missing pending summary estimate")
++        const estimate = pending.info.inputEstimate
++        expect(estimate.input).toBeGreaterThan(0)
++        expect(estimate.bodyChars).toBeGreaterThan(0)
++        expect(estimate.inputBreakdown?.messages.total).toBeGreaterThan(0)
++        // provisional 快照只供展示；确认 tokens 和账本不能提前计入估算。
++        expect(pending.info.tokens.input).toBe(0)
++        expect(estimate.confirmed).toBe(false)
++        return estimate
++      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)))
++      yield* Fiber.join(fiber)
++      const summary = (yield* ssn.messages({ sessionID: session.id })).find((item) => item.info.role === "assistant" && item.info.summary)
++      if (!summary || summary.info.role !== "assistant") return yield* Effect.die("Missing completed summary")
++      // 流式部件沿同一准备快照交接，不能恢复旧inputChars/inputBreakdown可变旁路。
++      expect(summary.parts.find((part) => part.type === "step-start")).toMatchObject({
++        inputChars: snapshot.bodyChars,
++        inputTokens: snapshot.input,
++        inputBreakdown: snapshot.inputBreakdown,
 +      })
-+
-+      const summary = (yield* ssn.messages({ sessionID: session.id })).find(
-+        (item) => item.info.role === "assistant" && item.info.summary,
-+      )
-+
-+      expect(summary?.info.role).toBe("assistant")
-+      if (summary?.info.role !== "assistant") return
-+      // 三个断言分别锁 pending 估算的三个落点：tokens、字符数、组件细分。
-+      expect(summary.info.inputTokens).toBeGreaterThan(0)
-+      expect(summary.info.inputChars).toBeGreaterThan(0)
-+      // breakdown.total>0 证明 summary 消息携带了完整请求体口径，而非 0 占位。
-+      expect(summary.info.inputBreakdown?.messages.total).toBeGreaterThan(0)
++      expect(summary.parts.find((part) => part.type === "step-finish")).toMatchObject({ inputChars: snapshot.bodyChars, inputBreakdown: snapshot.inputBreakdown })
++      expect(summary.info.inputEstimate).toMatchObject({ ...snapshot, confirmed: true })
++      expect(summary.info.tokens.input).toBe(1)
++      // 同一次provider确认只结算一次，pending展示不得增加摘要账单。
++      const ledger = yield* SessionRequestUsage.Service
++      expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({
++        source: "system_compaction", assistantCount: 1, stepCount: 1, tokens: { input: 1, output: 1, total: 2 },
++      })
 +    }),
 +  )
 +

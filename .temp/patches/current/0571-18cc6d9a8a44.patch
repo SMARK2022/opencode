@@ -1033,7 +1033,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 diff --git a/packages/tui/src/terminal-win32.ts b/packages/tui/src/terminal-win32.ts
 --- a/packages/tui/src/terminal-win32.ts
 +++ b/packages/tui/src/terminal-win32.ts
-@@ -81,10 +81,10 @@ export function win32FlushInputBuffer() {
+@@ -81,10 +81,8 @@ export function win32FlushInputBuffer() {
   * exactly why Ctrl+C reaches it. SetConsoleMode depends on a stdin handle hence
   * checks isTTY; FreeConsole operates on the process attachment and does not.
   *
@@ -1041,10 +1041,8 @@ diff --git a/packages/tui/src/terminal-win32.ts b/packages/tui/src/terminal-win3
 - * In the default mode worker logs go to a file (log.ts init print=false uses
 - * createWriteStream), so they are unaffected; only --print-logs debug mode writes
 - * to stderr, which is why worker.ts gates this call behind !printLogs.
-+ * Console-backed stdio handles become invalid. The Windows daemon launcher must
-+ * bind stdout and stderr to non-console pipes before Bun starts; those HANDLEs
-+ * survive this detach, including dependency/runtime writes that bypass Log.
-+ * --print-logs skips detach to preserve the shared-console Ctrl+C contract.
++ * console标准句柄会失效；launcher须在Bun启动前绑定双pipe，使绕过Log的依赖写入也不会命中被复用HANDLE。
++ * --print-logs跳过detach以保留共享console的Ctrl+C传播；两种模式的标准流仍通过同一安全pipe消费。
   */
  export function win32DetachConsole() {
    if (process.platform !== "win32") return
@@ -1070,8 +1068,8 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc6103b5cf24e 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -2066,6 +2066,150 @@ describe("daemon lifecycle", () => {
-     expect(() => Win32Module.win32DetachConsole()).not.toThrow()
+@@ -1337,6 +1337,150 @@ describe("daemon lifecycle", () => {
+     expect(() => win32DetachConsole()).not.toThrow()
    })
  
 +  test.skipIf(process.platform !== "win32")(
@@ -1080,7 +1078,7 @@ index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc610
 +      await using tmp = await tmpdir()
 +      const marker = path.join(tmp.path, "stdio-after-free-console.json")
 +      const worker = path.join(tmp.path, "stdio-after-free-console.ts")
-+      // 真实 _spawn 必须走 PowerShell adapter；替换 _setSpawn 会绕过本次损坏发生的 HANDLE owner。
++      // 必须调用真实DaemonProcess.spawn；替换整个adapter会绕过本次损坏发生的HANDLE owner。
 +      // AllocConsole 只固定“先有 console、再 detach”的前置条件，不替代 launcher 对 stdio pipe 的责任。
 +      await Bun.write(
 +        worker,
@@ -1105,7 +1103,7 @@ index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc610
 +        `,
 +      )
 +
-+      const proc = await _spawn([process.execPath, worker], {
++      const proc = await DaemonProcess.spawn([process.execPath, worker], {
 +        env: { ...process.env, DAEMON_STDIO_MARKER: marker },
 +        stdin: "ignore",
 +        stdout: "ignore",
@@ -1175,8 +1173,8 @@ index 703fbb49ef491e48de3d0851cbbf362630968d03..830b631cf53e1109825cc9ba81cfc610
 +          process.execPath,
 +          "-e",
 +          `
-+            const { _spawn } = await import(${JSON.stringify(new URL("../../../src/cli/cmd/tui.ts", import.meta.url).href)})
-+            const proc = await _spawn([process.execPath, ${JSON.stringify(worker)}], {
++            const { DaemonProcess } = await import(${JSON.stringify(new URL("../../../src/cli/cmd/tui.ts", import.meta.url).href)})
++            const proc = await DaemonProcess.spawn([process.execPath, ${JSON.stringify(worker)}], {
 +              env: { ...process.env, OPENCODE_PRINT_LOGS: "1" },
 +              stdin: "ignore",
 +              stdout: "inherit",

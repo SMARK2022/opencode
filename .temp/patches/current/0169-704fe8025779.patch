@@ -6,9 +6,8 @@ Subject: [PATCH] feat(codex): Codex TUI headers + unconditional configured UA (#
 diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
 --- a/packages/opencode/src/plugin/openai/codex.ts
 +++ b/packages/opencode/src/plugin/openai/codex.ts
-@@ -1,9 +1,7 @@
- import { // #83：codex 请求经 NetworkProxy
- NetworkProxy } from "@opencode-ai/core/network-proxy"
+@@ -1,8 +1,6 @@
+ import { NetworkProxy } from "@opencode-ai/core/network-proxy"
  import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 -import { InstallationVersion } from "@opencode-ai/core/installation/version"
  import { OAUTH_DUMMY_KEY } from "../../auth"
@@ -40,19 +39,21 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
  const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"])
  const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
  
-@@ -109,7 +124,7 @@ interface CodexAuthPluginOptions {
+@@ -118,8 +133,8 @@ interface CodexAuthPluginOptions {
  async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
-   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, { purpose: "plugin", 
+   const response = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
      method: "POST",
+     purpose: "plugin",
 -    headers: { "Content-Type": "application/x-www-form-urlencoded" },
 +    headers: CODEX_FORM_HEADERS,
      body: new URLSearchParams({
        grant_type: "authorization_code",
        code,
-@@ -127,7 +142,7 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
+@@ -137,8 +152,8 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
  async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promise<TokenResponse> {
-   const response = await NetworkProxy.fetch(`${issuer}/oauth/token`, { purpose: "plugin", 
+   const response = await NetworkProxy.fetch(`${issuer}/oauth/token`, {
      method: "POST",
+     purpose: "plugin",
 -    headers: { "Content-Type": "application/x-www-form-urlencoded" },
 +    headers: CODEX_FORM_HEADERS,
      body: new URLSearchParams({
@@ -83,10 +84,11 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
              const requestInit = {
                ...init,
                body: init?.body,
-@@ -465,10 +488,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -476,11 +499,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
            authorize: async () => {
-             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, { purpose: "plugin", 
+             const deviceResponse = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
                method: "POST",
+               purpose: "plugin",
 -              headers: {
 -                "Content-Type": "application/json",
 -                "User-Agent": `opencode/${InstallationVersion}`,
@@ -96,10 +98,11 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
                body: JSON.stringify({ client_id: CLIENT_ID }),
              })
  
-@@ -489,10 +510,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -501,11 +522,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                  while (true) {
-                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, { purpose: "plugin", 
+                   const response = await NetworkProxy.fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
                      method: "POST",
+                     purpose: "plugin",
 -                    headers: {
 -                      "Content-Type": "application/json",
 -                      "User-Agent": `opencode/${InstallationVersion}`,
@@ -109,10 +112,11 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
                      body: JSON.stringify({
                        device_auth_id: deviceData.device_auth_id,
                        user_code: deviceData.user_code,
-@@ -507,7 +526,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -520,8 +539,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
  
-                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, { purpose: "plugin", 
+                     const tokenResponse = await NetworkProxy.fetch(`${ISSUER}/oauth/token`, {
                        method: "POST",
+                       purpose: "plugin",
 -                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
 +                      headers: CODEX_FORM_HEADERS,
                        body: new URLSearchParams({
@@ -154,11 +158,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
 --- a/packages/opencode/test/plugin/codex.test.ts
 +++ b/packages/opencode/test/plugin/codex.test.ts
-@@ -1,8 +1,10 @@
- import { describe, expect, test } from "bun:test"
- import { createServer, type IncomingMessage } from "node:http"
- import { type AddressInfo } from "node:net"
- import { WebSocketServer } from "ws"
+@@ -7,4 +7,6 @@
  import {
 +  CODEX_HEADERS,
 +  CODEX_USER_AGENT,
@@ -287,3 +287,50 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 +
   it.instance(
     "sends the parent session header for opencode providers",
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -100,3 +100,7 @@
+   const tools = nativeTools(input.tools, input)
++  // 与 SDK 的最终发送策略一致，配置 UA 在插件合并之后落实且不产生大小写重复头。
++  const headers = new Headers({ ...Provider.requestHeaders(input.provider.options), ...input.headers })
++  const userAgent = Provider.requestUserAgent(input.provider.options)
++  if (userAgent) headers.set("User-Agent", userAgent)
+   const request = LLMNative.request({
+     model: input.model,
+@@ -112,3 +116,2 @@
+-    // #168：native 与 AI-SDK 共用 requestHeaders，避免 header-ua 只在一侧生效
+-    // #168：配置头在前、prepared headers 在后：模型/插件仍可覆盖，但配置 UA 不被默认 UA 无条件碾压需由 request 侧保证
+-    headers: { ...Provider.requestHeaders(input.provider.options), ...input.headers },
++    // 其他模型/插件头保留原合并结果，只将配置 UA 的优先级对齐本项。
++    headers: Object.fromEntries(headers),
+diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/opencode/test/session/llm-native.test.ts
+--- a/packages/opencode/test/session/llm-native.test.ts
++++ b/packages/opencode/test/session/llm-native.test.ts
+@@ -565,4 +565,6 @@
+       const llmClient = {
+         prepare: () => Effect.die("unused"),
+-        stream: () =>
+-          Stream.fromIterable([
++        stream: (request) => {
++          // 实际 native 交付边界不得把配置身份替换为插件预设 UA。
++          expect(new Headers(request.model.route.defaults.headers).get("user-agent")).toBe("configured-agent")
++          return Stream.fromIterable([
+@@ -572,7 +574,8 @@
+-          ]),
++          ])
++        },
+         generate: () => Effect.die("unused"),
+       } as LLMClientShape
+       const native = LLMNativeRuntime.stream({
+         model: baseModel,
+-        provider: providerInfo,
++        provider: { ...providerInfo, options: { ...providerInfo.options, headers: { "User-Agent": "configured-agent" } } },
+         auth: undefined,
+@@ -579,5 +582,5 @@
+         llmClient,
+         messages: [],
+         tools: { lookup },
+-        headers: {},
++        headers: { "user-agent": "codex-tui" },
+         abort: new AbortController().signal,

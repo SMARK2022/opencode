@@ -5,14 +5,12 @@ Subject: [PATCH] =?UTF-8?q?feat(powerShell):=20=E6=B7=BB=E5=8A=A0=E5=AF=B9?=
  =?UTF-8?q?PowerShell=20CLIXML=E8=BE=93=E5=87=BA=E7=9A=84=E8=A7=A3?=
  =?UTF-8?q?=E7=A0=81=E5=92=8C=E8=A7=84=E8=8C=83=E5=8C=96=E5=8A=9F=E8=83=BD?=
 
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
 index 3eadf40afa..475a5a3e44 100644
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -1370,25 +1370,71 @@ export function shouldCompressOutput(text: string) {
- // CLIXML 解码器：将 PowerShell 的 CLIXML XML 格式解码为纯文本
- // CLIXML 是 PowerShell 的 XML 错误序列化格式，将终端彩色文本包装在 <Objs><S S="...">_xHHHH_</S></Objs> 中
- // 返回解码后的多行文本（包装在 <high-entropy powershell-clixml> 标签中），非 CLIXML 输入返回 null
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -966,15 +966,143 @@
+-// 保留源 CLIXML 节点提取与转义规则，ANSI 清洗复用现有实现。
 +// #129：CLIXML 标准头与 <Objs> 块匹配
 +const POWER_SHELL_CLIXML_HEADER_RE = /^\s*#<\s*CLIXML(?:\r?\n|$)/i
 +// #129：匹配可选头 + 完整 <Objs>…</Objs>
@@ -46,9 +44,9 @@ index 3eadf40afa..475a5a3e44 100644
 + * Returns decoded multi-line text wrapped in `<high-entropy powershell-clixml>`
 + * if the input is recognized CLIXML, or null otherwise.
 + */
- function transformPowerShellClixml(text: string): string | null {
+-function transformPowerShellClixml(text: string) {
++function transformPowerShellClixml(text: string) {
 -  const trimmed = text.trimStart()
--  // CLIXML 前缀检查：必须以 <Objs 开头才是 CLIXML 格式
 -  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
 +  // #129：按块替换纯 CLIXML，混合 stdout 块保持原样
 +  // #129：整段扫描所有 CLIXML 块并替换
@@ -60,15 +58,14 @@ index 3eadf40afa..475a5a3e44 100644
 +    changed = true
 +    return decoded
 +  })
- 
--  // 提取 <S S="...">text</S> 节点中的文本内容
 -  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
 -  const parts: string[] = []
 -  let match: RegExpExecArray | null
 -  while ((match = decoded.exec(text)) !== null) {
--    parts.push(clixmlDecodeHexEscapes(match[1]))
+-    parts.push(match[1].replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))))
 -  }
 +  // #129：无变更返回 null 让压缩走默认路径
++  // 合法 CLIXML 的解码不受压缩收益支配，短消息同样保留可见正文。
 +  return changed ? next : null
 +}
 +
@@ -81,28 +78,29 @@ index 3eadf40afa..475a5a3e44 100644
 +
 +  const parts = extractPowerShellClixmlText(body)
 +  // #129：无可见节点则不认作 CLIXML
-   if (parts.length === 0) return null
- 
--  let plain = parts.join("")
--  // 清除 ANSI 控制序列：CLIXML 解码后可能残留终端颜色码
+-  if (parts.length === 0) return null
+-  const plain = stripAnsi(parts.join("")).replace(/\r\n/g, "\n").trimEnd()
+-  if (!plain) return null
+-  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
+-}
++  if (parts.length === 0) return null
++
 +  let plain = parts.join("\n")
 +  // #129：清 ANSI 颜色残留
-   plain = plain.replace(ANSI_GLOBAL_RE, "")
--  // 统一换行符：将 \r\n 转换为 \n
--  plain = plain.replace(/\r\n/g, "\n")
++  plain = stripAnsi(plain)
 +  // #129：统一 \r\n / \r 为 \n
 +  plain = plain.replace(/\r\n?/g, "\n")
-   plain = plain.trimEnd()
- 
-   if (!plain) return null
-@@ -1396,6 +1442,73 @@ function transformPowerShellClixml(text: string): string | null {
-   return `<high-entropy powershell-clixml>${plain}</high-entropy>`
- }
- 
++  plain = plain.trimEnd()
++
++  if (!plain) return null
++  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
++}
++
 +// #129：仅解码结构纯净的 XML 块，避免吞掉夹杂的真实命令输出
 +function isPurePowerShellClixmlBlock(block: string) {
 +  const body = block.replace(POWER_SHELL_CLIXML_HEADER_RE, "")
-+  const lines = body.split(/\r?\n/)
++  // 已识别文本节点内的换行是正文，只检查节点外是否夹杂真实stdout。
++  const lines = body.replace(POWER_SHELL_CLIXML_TEXT_NODE_RE, "").split(/\r?\n/)
 +  let sawXml = false
 +
 +  for (const line of lines) {
@@ -166,13 +164,11 @@ index 3eadf40afa..475a5a3e44 100644
 +  })
 +}
 +
- // 十六进制转义解码：PowerShell CLIXML 使用 _xHHHH_ 格式编码 Unicode 字符
- function clixmlDecodeHexEscapes(value: string): string {
-   return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => {
-@@ -1851,6 +1964,22 @@ function renderDiagnosticContexts(contexts: DiagnosticContext[], config: Compres
-  * 只返回当前可见输出中没有出现的高信号错误上下文。
-  * 优化：只在命令失败或有致命错误时才输出诊断信息，避免成功时的 token 浪费。
-  */
++// PowerShell 使用 UTF-16 码元转义，保持原始码元顺序即可还原代理对。
++function clixmlDecodeHexEscapes(value: string) {
++  return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
++}
+@@ -1435,1 +1555,17 @@
 +/**
 + * #129：把纯 CLIXML 块还原为可见纯文本，保留周围 stdout。
 + * 混合块不碰，避免丢失真实命令输出。
@@ -190,78 +186,35 @@ index 3eadf40afa..475a5a3e44 100644
 +}
 +
  export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
-   const config = configOf(options.config)
- 
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
 index 96775a61af..f37611786d 100644
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -347,12 +347,23 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
- 
- // PowerShell UTF-8 包装：强制 Console I/O 为 UTF-8（无 BOM），并把退出码透传给外层
- // 使用 UTF8Encoding($false) 避免 BOM；$OutputEncoding 与 Console 输出一致
-+// #129：UTF-8 控制台 + 信息流并入 stdout（*>&1），减少 CLIXML 噪声
- function psUtf8(command: string) {
-   return [
-     "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
-     "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -185,5 +185,12 @@
      "$OutputEncoding = [Console]::OutputEncoding",
-+    // #129：关掉进度条噪声
 +    "$ProgressPreference = 'SilentlyContinue'",
-+    // #129：信息/警告/调试流继续输出
 +    "$InformationPreference = 'Continue'",
 +    "$WarningPreference = 'Continue'",
 +    "$VerbosePreference = 'Continue'",
 +    "$DebugPreference = 'Continue'",
 +    "& {",
      command,
-+    // #129：*&1 合并全部流到 stdout（#130 将收窄 stderr）
 +    "} *>&1",
+     // 换行隔开用户尾注释；仅透传实际 native exit，不把 cmdlet 的空值变成退出码。
      "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-   ].join(String.fromCharCode(10))
- }
-@@ -377,13 +388,26 @@ function psEncoded(command: string) {
- 
- function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
-   if (process.platform === "win32" && Shell.ps(shell)) {
--    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", // 使用 -EncodedCommand 传递 UTF-16LE base64 编码，确保中文正确输出
--    "-EncodedCommand", psEncoded(command)], {
--      cwd,
--      env,
--      stdin: "ignore",
--      detached: false,
--    })
-+    // #129：-OutputFormat Text 降低 CLIXML 序列化概率
-+    return ChildProcess.make(
-+      shell,
-+      [
-+        "-NoLogo",
-+        "-NoProfile",
-+        "-NonInteractive",
-+        "-OutputFormat",
-+        "Text",
-+        // 使用 -EncodedCommand 传递 UTF-16LE base64 编码，确保中文正确输出
-+        "-EncodedCommand",
-+        psEncoded(command),
-+      ],
-+      {
-+        cwd,
-+        env,
-+        stdin: "ignore",
-+        detached: false,
-+      },
-+    )
-   }
- 
-   return ChildProcess.make(command, [], {
+   ].join("\n")
+@@ -192,1 +199,2 @@
+-    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
++    // 显式文本格式降低 PowerShell 信息流被序列化为 CLIXML 的概率。
++    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
 new file mode 100644
 index 0000000000..25be38545e
 --- /dev/null
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,96 @@
 +import { describe, expect, test } from "bun:test"
-+import { compressVisibleOutput, normalizePowerShellOutput } from "../../src/tool/bash-compress"
++import { compressVisibleOutput, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
 +
 +// #129：CLIXML 纯块解码与混合块保留
 +describe("tool.bash-compress", () => {
@@ -310,6 +263,9 @@ index 0000000000..25be38545e
 +    expect(result.text).not.toContain("ForegroundColor")
 +    expect(result.text).not.toContain("H:\\FRCheck\\scripts\\deploy.ps1")
 +    expect(result.text.match(/============================================================/g)?.length).toBeGreaterThanOrEqual(2)
++    // XML文本节点允许多行正文，不能被误判为节点外的混合输出。
++    const multiline = '<Objs><S S="Output">first\nsecond</S></Objs>'
++    expect(compressVisibleOutput(multiline).text).toContain("first\nsecond")
 +  })
 +
 +  // #129：未闭合/混合 <Objs> 内夹 stdout 时 pure 判定失败，不得吞路径

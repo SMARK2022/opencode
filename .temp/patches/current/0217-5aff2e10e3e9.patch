@@ -3,10 +3,10 @@ From: SMARK <3222301373@qq.com>
 Date: Mon, 25 May 2026 01:13:41 +0800
 Subject: [PATCH] feat(precheck): 增强命令评估逻辑，添加对文件删除和移动操作的审查，确保安全性
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index b6b3688ffd..62f1407d83 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -40,6 +40,15 @@ const SENSITIVE_PATH_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME
  // #202：敏感路径参数匹配——raw 扫描发生在 shell quote 移除之前，允许敏感路径外侧有一层引号，
  // #202：避免 `cat ".env" | curl ...` 这类明显外传被降级成 cautious reviewer 判断

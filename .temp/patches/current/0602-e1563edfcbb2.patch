@@ -8,7 +8,7 @@ Subject: [PATCH] =?UTF-8?q?fix(tool):=20diff=20=E9=97=A8=E6=8E=A7=E6=8C=89?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 
-适配说明：file-diff.ts 六子 hunk 与 plan 文档原样落地（preimage blob 与 state 0600 精确匹配，0591 产物未被动过）；测试 import hunk 按目标 import 区重写（parsePatch 紧随 fs、file-diff import 在 ApplyPatchTool 前）；测试 describe 块插 toolDiffMessages 前（行号 ~+55）。语义零改写。
+适配说明：七个生产hunk迁至Core唯一diff owner，V1只同步两个新常量的转导出；保留source预算探测、产物直测、合法标记、显式计数和全部五个测试。按目标实际注释重锚，不提前621，不改变编辑落盘、授权、摘要摄入或消费者结构。
 
 
 diff --git a/docs/plans/tool-diff-edit-budget-gate-repair.md b/docs/plans/tool-diff-edit-budget-gate-repair.md
@@ -403,56 +403,37 @@ new file mode 100644
 +| --- | --- | --- |
 +| 1（R2 实现） | APPROVE | "No blocking findings." / "**APPROVE** — implementation audit round 1 of 3 for canonical plan `docs/plans/tool-diff-edit-budget-gate-repair.md` Revision R2. The actual working-tree diff (2 files + the plan) maps hunk-for-hunk to the approved R2 design with no material decision living only in chat, no unauthorized fallback, no weakened assertion, and every §18 verification command independently reproduced green. Approval covers only this exact diff against R2; any substantive change requires a fresh full-scope audit." 审计方独立复跑全部验证：66/0、87/0、25/0、6/0、tsgo clean；NB：①成功路径双跑（同被 D≤2000 界住，质量注记）；②产物界前向瞬时分配（计划轮已接受）；③短行域收窄（已披露风险+用户开放决策）；④§23 E/C 算术偏差（本版已按审计重算口径校正）；拒绝的推测：jsdiff 版本漂移/timeout 硬界/恶意 filePath/TUI 端到端需求 | 行政性记录：置 Status: verified；依 NB④ 校正 §23 E/C 数字（非实质性，不清空 verdict）；invocation ref: task ses_f9cbe88c4ffenT00bXmJTWyCd9 |
 
-diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
---- a/packages/opencode/src/tool/file-diff.ts
-+++ b/packages/opencode/src/tool/file-diff.ts
+diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-diff.ts
+--- a/packages/core/src/tool/file-diff.ts
++++ b/packages/core/src/tool/file-diff.ts
 @@ -1,5 +1,5 @@
  import { createHash } from "crypto"
 -import { createTwoFilesPatch } from "diff"
 +import { createTwoFilesPatch, diffLines } from "diff"
  
- // [local-smark] 工具元数据 diff 的唯一生成 seam（apply_patch/edit/write 三工具共用）。
- // 背景事故（2026-08-27）：apply_patch 删除 ~200MB ELF 二进制时，全文行 diff 产生了
-@@ -10,9 +10,16 @@ import { createTwoFilesPatch } from "diff"
- // snapshot/index.ts 的 git diffFull 路径（binary -> 计数 0/0）与本规则语义对齐。
- export const BINARY_SCAN_CHARS = 8192
- 
--// 中段界同时是计算界与产物界：行级 diff 产物体积 ≈ 差异中段体积，64KiB 中段保证
--// Myers 亚秒级且单文件 patch ≤ ~256KB 量级（中段 + hunk 上下文开销）。
+ // V1三工具与原生V2 Edit/ApplyPatch共用表示owner，避免另一执行路径重新生成全文diff。
+ // source事故涉及二进制巨型metadata和大中段Myers耗时；三路表示保留变更事实与计数，不改变写盘。
+@@ -11,2 +11,5 @@
+-// 超限差异中段跳过Myers；公共上下文仍可能很长，不承诺固定运行时间或总字节界。
 -export const MAX_DIFF_MIDDLE_CHARS = 64 * 1024
-+// 计算预算（R2 门B 判据之一）：jsdiff 行级 Myers 的成本由编辑距离 D 驱动（对角剪枝下
-+// 约 O((N+M)+D²)），中段体积只是无关代理变量——2026-09-02 precheck.ts 事故里 D=36 的
-+// 小改因中段 >64KiB 被误判超限。maxEditLength 探测在 D≤K 内必然完成、超出则同步返回
-+// undefined 立即放弃，界住算力而不猜测。K=2000：兼容既有 fixture（D=4000/16000 仍走
-+// 标记），abort 工作量按 K² 增长，事故输入实测亚秒级（apply_patch.test 切片 5）。
++// 计算预算按编辑距离而非跨度；2000兼容原大重写切片，耗尽由jsdiff原生返回undefined。
 +export const MAX_DIFF_EDIT_LINES = 2000
 +
-+// 产物界（R2 门B 判据之二）：对最终 patch 直接度量，取代旧的“输入中段”承诺。编辑距离
-+// 界不住单行长度（minified 文件 D=2 但单行 >64KiB），只有对产物本身量体积才是精确界。
++// 小编辑距离仍可能产生巨行diff，必须独立量最终JS字符长度，不把它说成UTF-8字节界。
 +export const MAX_DIFF_PATCH_CHARS = 64 * 1024
- 
- // SummaryCache 聚合把逐轮 patch 永久拼接（事故：216MB user message 行）。摄入界只
- // 降级 patch 文本、计数照常累加，以此免疫已入库的 legacy 巨型 tool metadata。
-@@ -27,8 +34,9 @@ function isBinaryText(text: string) {
-   return window.includes("\u0000")
- }
- 
+@@ -26,5 +29,5 @@
 -// 按行裁剪公共前/后缀，返回中段行数组。与 jsdiff 内部的前置剪枝同语义，只用于预算
 -// 判定；行语义（无尾换行/CRLF）不完全一致时估计偏保守——只会更早触发重写标记，不会放行超限。
-+// 按行裁剪公共前/后缀，返回中段行数组。R2 起职责收缩为“标记计数口径”——不再参与
-+// 门控判定（判据移交编辑距离预算与产物直测）；行语义（无尾换行/CRLF）不完全一致时
-+// 估计偏保守，只会让标记更早出现，不会放行超限产物。
++// 裁公共头尾只为标记的显式中段计数，不再参与预算或产物门控。
++// 这里的无尾换行/CRLF行口径可能不同于jsdiff，不用于推断精确编辑距离。
  function trimCommonLines(oldText: string, newText: string) {
    const oldLines = oldText.split("\n")
    const newLines = newText.split("\n")
-@@ -47,14 +55,20 @@ function binaryMarker(filePath: string, oldText: string, newText: string): Rende
-   // 二进制行级 diff 不可读、无人工审计价值（正是 407MB 事故的构成物）；审计记录 =
-   // 变更事实 + 度量 + sha256 身份对，完整内容由工作树与 git snapshot 持有。
-   // 计数 0/0 与 snapshot git 路径的 binary 语义对齐。
-+  // R2 合法化：正文行加空格前缀成为 context 行 + 合法 hunk range，任意 unified
-+  // 消费者（TUI Diff renderable/权限预览）零特判解析；保留大写 "Binary file" 措辞
-+  // 是 apply_patch.test.ts 钉死断言的兼容承诺。
+@@ -43,13 +46,17 @@
+   // 二进制用变更事实、字符度量和生产内容身份代替乱码行diff，完整内容仍在工作树/快照中。
+   // 计数0/0沿用Snapshot二进制语义，不影响实际文件变更或恢复。
    return {
++    // 合法context hunk让现有渲染器直接解析；保留Binary file词形及0/0重扫语义。
      patch: [
        `Index: ${filePath}`,
        "===================================================================",
@@ -470,17 +451,14 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
      ].join("\n"),
      additions: 0,
      deletions: 0,
-@@ -62,17 +76,20 @@ function binaryMarker(filePath: string, oldText: string, newText: string): Rende
+@@ -57,17 +64,17 @@
  }
  
  function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], oldText: string, newText: string): RenderedFileDiff {
 -  // 超限中段：跳过 Myers 与行级产物。行数取中段口径（与正常路径"变更行"计数语义
 -  // 连续）；chars 与 sha256 是全文件身份，保证内容可追溯（用户否决"截断丢内容"）。
-+  // 超限中段：跳过行级产物。行数取中段口径（此时中段≈真实变更行，计数语义连续，
-+  // INV-08）；chars 与 sha256 是全文件身份，保证内容可追溯（用户否决“截断丢内容”）。
-+  // R2 合法化：与 binary 标记同构——context 行前缀 + 合法 range，parsePatch 可解析
-+  // （旧版裸 `old:` 行是 TUI “Error parsing diff” 红字的直接根因）；正文行不以
-+  // +/- 开头，计数重扫天然 0/0（真实计数由显式字段携带）。
++  // 预算耗尽或产物超界只降级展示，显式中段计数及完整内容身份继续保留。
++  // 正文使用context前缀和合法range，普通解析器无需特判，重扫0/0不覆盖显式计数。
    return {
      patch: [
        `Index: ${filePath}`,
@@ -497,17 +475,15 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
      ].join("\n"),
      additions: newMid.length,
      deletions: oldMid.length,
-@@ -81,11 +98,16 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
+@@ -76,11 +83,14 @@
  
  export function renderFileDiff(filePath: string, oldText: string, newText: string): RenderedFileDiff {
    if (isBinaryText(oldText) || isBinaryText(newText)) return binaryMarker(filePath, oldText, newText)
 -  const { oldMid, newMid } = trimCommonLines(oldText, newText)
 -  if (oldMid.join("\n").length + newMid.join("\n").length > MAX_DIFF_MIDDLE_CHARS) {
-+  // 门B（R2）：带预算的真实计算取代中段体积猜测。探测即主路径计算本身（jsdiff 原生
-+  // maxEditLength，预算耗尽同步返回 undefined），不是失败后备路径。
++  // 直接用jsdiff原生预算探测；跨度大但改动小的文本仍走真实行级diff。
 +  const probe = diffLines(oldText, newText, { maxEditLength: MAX_DIFF_EDIT_LINES })
-+  // 探测成功 ⇒ 这一次 createTwoFilesPatch 在相同输入上必然同样在预算内完成（确定性
-+  // 同算法双跑，成本只差常数因子），且输出与既有正常路径逐字节一致（零格式漂移）。
++  // 探测成功才使用原生成器以保留正常格式；编辑距离不能替代独立的产物长度检查。
 +  const patch = probe === undefined ? undefined : createTwoFilesPatch(filePath, filePath, oldText, newText)
 +  if (patch === undefined || patch.length > MAX_DIFF_PATCH_CHARS) {
 +    const { oldMid, newMid } = trimCommonLines(oldText, newText)
@@ -517,16 +493,25 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
    // 计数从生成产物单遍推导（INV-08 单一权威），调用方不再跑第二遍 diffLines。
    const stats = countPatchStats(patch)
    return { patch, ...stats }
-@@ -97,7 +119,7 @@ export function renderFileDiff(filePath: string, oldText: string, newText: strin
- // hunk 标记按 "@@" 前缀识别而非要求 range 后缀：既有写入方除 unified "@@ -a +b @@" 外，
- // legacy 摘要 fixture 还使用裸 "@@" 头（summary-tool-diff 契约）；正文行在 unified 中
- // 总以 +/-/空格开头，不会以 "@@" 误触。
--// rewrite 标记的 "@@ rewrite @@" 之后的正文行不以 "+"/"-" 开头，天然不计数（计数由显式字段携带）。
-+// rewrite/binary 标记正文行是空格前缀的 context 行，天然不计数（计数由显式字段携带）。
+@@ -89,5 +99,5 @@
+ // 首个hunk前的---/+++是文件头，进入后同形前缀是内容；SQL注释等不能被误当文件头丢计数。
+-// 接受legacy裸@@头；rewrite标记的计数由显式字段携带，其正文不含增删前缀。
++// 接受legacy裸@@头；合法binary/rewrite正文是context行，0/0重扫不替代显式计数。
  export function countPatchStats(patch: string) {
    let additions = 0
    let deletions = 0
 
+diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
+--- a/packages/opencode/src/tool/file-diff.ts
++++ b/packages/opencode/src/tool/file-diff.ts
+@@ -2,5 +2,6 @@
+ export {
+   BINARY_SCAN_CHARS,
+-  MAX_DIFF_MIDDLE_CHARS,
++  MAX_DIFF_EDIT_LINES,
++  MAX_DIFF_PATCH_CHARS,
+   MAX_MERGED_PATCH_CHARS,
+   countPatchStats,
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts

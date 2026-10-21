@@ -204,6 +204,16 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
          }
        }
  
+@@ -507,2 +552,9 @@
++      // PowerShell 错误恢复可能只留下命令前缀；权限必须审查完整输入，不能据残缺 AST 建议自动放行。
++      if (ps && root.hasError) {
++        scan.patterns.clear()
++        scan.patterns.add(root.text.trim())
++        scan.always.clear()
++      }
++
+       return scan
+     })
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
@@ -387,9 +397,10 @@ new file mode 100644
 diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
 --- a/packages/core/src/shell.ts
 +++ b/packages/core/src/shell.ts
-@@ -8,6 +8,8 @@
+@@ -9,7 +9,9 @@
  import { Flag } from "./flag/flag"
  import { FSUtil } from "./fs-util"
+ import { lazy } from "./util/lazy"
  import { which } from "./util/which"
 +// 共享纯文本沿既有 txt loader 内嵌；Core 不从 Opencode 的工具模板反向加载运行时。
 +import GIT_SAFETY from "./git-safety.txt"

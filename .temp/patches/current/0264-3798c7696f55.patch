@@ -47,10 +47,10 @@ index 74d66ef41..de5053549 100644
    }),
    // #196：strict 为 true 时即使 precheck 判定 allow 也强制经过 reviewer。
    strict: Schema.optional(Schema.Boolean).annotate({ description: "Route even low-risk precheck allows through reviewer." }),
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
 index 7ad0e0039..835d9846c 100644
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
 @@ -40,7 +40,8 @@ export interface ReviewInput {
    readonly precheck: { readonly level: PermissionPrecheck.Level; readonly reason: string }
  }
@@ -113,6 +113,35 @@ index 7ad0e0039..835d9846c 100644
            return { action: "deny", reason: reviewerFailureMessage(error), source: "reviewer", reviewID } satisfies Decision
          },
          onSuccess: (reviewed) => {
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -204,5 +204,7 @@
+-      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, tool: input.source, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
++      // 显式人工模式不调用reviewer；其余基础设施失败按同一fallback配置处理。
++      const reviewerDisabled = Config.latest(entries, "approvals_reviewer") === "user"
++      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, tool: input.source, strict: options.strict, reviewerFailureFallback: reviewerDisabled ? "user" : options.fallback ?? "user" }, reviewerDisabled ? undefined : {
+         review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
+       }, (review) => events.publish(PermissionV1.Event.ReviewStarted, {
+         sessionID: input.sessionID,
+         reviewID: review.reviewID,
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -439,8 +439,13 @@
+     malformed = true
++    // 默认基础设施失败留给人工审批，显式deny仍终止；两者都不能直接执行工具。
++    const defaultFallback = yield* service.ask({ ...edit, metadata: { diff: "malformed" } })
++    expect(defaultFallback.effect).toBe("ask")
++    yield* service.reply({ requestID: defaultFallback.id, reply: "reject" })
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
+     expect(yield* service.ask({ ...edit, metadata: { diff: "malformed" } })).toMatchObject({ effect: "deny" })
+     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "user" }) })
+     const fallback = yield* service.ask(edit)
+     expect(fallback.effect).toBe("ask")
+     yield* service.reply({ requestID: fallback.id, reply: "reject" })
+     malformed = false
+     assessment = { ...assessment, outcome: "allow", risk_level: "critical" }
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
 index 8e0b2a61a..587042ad0 100644
 --- a/packages/opencode/src/permission/index.ts
@@ -154,7 +183,7 @@ index 64393fe8e..0985e882b 100644
  
          const run = Effect.gen(function* () {
            const request = new ReviewerRequest({
-@@ -233,24 +235,29 @@
+@@ -233,22 +235,29 @@
  
          // #209：错误时标记工具审查失败——fallback=user 标记 fallback_user，超时标记 timed_out，其他标记 failed，使 UI 能展示失败原因
          return yield* run.pipe(
@@ -176,9 +205,7 @@ index 64393fe8e..0985e882b 100644
 +                Effect.catch(() => Effect.void),
 +                Effect.catchDefect(() => Effect.void),
                )
--              // `fallback: "user"` is deliberately narrow: disabled reviewer already
--              // means normal user routing, while all other failures become an explicit
--              // fallback signal for PermissionAuto. Default behavior is fail-closed.
+-              // 显式禁用沿用人工路由，其余失败仅按用户配置回退，默认仍拒绝执行。
 -              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
 +              // #264：reviewer 失败默认转为显式 fallback 信号，让 PermissionAuto 复用普通 ask 路径
 +              if (fallbackToUser && !(error instanceof ReviewerDisabled)) {
@@ -199,6 +226,22 @@ index 64393fe8e..0985e882b 100644
        )
      }
    }),
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1955,7 +1955,11 @@
+   "auto permission reviewer fails closed after one malformed protocol retry",
+   () =>
+     Effect.gen(function* () {
+-      const { llm } = yield* useServerConfig(providerCfg)
++      // 本用例锁定显式deny的协议耗尽路径，默认人工回退由权限集成测试覆盖。
++      const { llm } = yield* useServerConfig((url) => ({
++        ...providerCfg(url),
++        permission: { auto_review: { fallback: "deny" } },
++      }))
+       const permissions = yield* Permission.Service
+       const sessions = yield* Session.Service
+       const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
 index 3cc9af28c..67397c9ac 100644
 --- a/packages/opencode/test/permission/auto.test.ts

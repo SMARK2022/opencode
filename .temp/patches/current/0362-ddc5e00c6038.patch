@@ -32,6 +32,95 @@ index bcd30edbc..51625b214 100644
          showToast({
            variant: "success",
            icon: "circle-check",
+diff --git a/packages/app/src/components/settings-v2/providers.tsx b/packages/app/src/components/settings-v2/providers.tsx
+--- a/packages/app/src/components/settings-v2/providers.tsx
++++ b/packages/app/src/components/settings-v2/providers.tsx
+@@ -128,7 +128,7 @@
+     await serverSdk()
+       .client.auth.remove({ providerID })
+       .then(async () => {
+-        await serverSdk().client.global.dispose()
++        // 认证入口负责刷新 Provider，断开连接不应取消其他运行中的会话。
+         showToast({
+           variant: "success",
+           icon: "circle-check",
+diff --git a/packages/app/src/utils/server-compat.ts b/packages/app/src/utils/server-compat.ts
+--- a/packages/app/src/utils/server-compat.ts
++++ b/packages/app/src/utils/server-compat.ts
+@@ -400,7 +400,6 @@
+           await legacy(value.location).auth.set({
+             providerID: value.integrationID,
+             auth: { type: "api", key: value.key },
+           })
+-          await legacy(value.location).instance.dispose()
+-          await input.legacy().instance.dispose()
++          // V1 认证入口已刷新 Provider 缓存，保留实例及正在运行的会话。
+         },
+@@ -431,8 +430,7 @@
+             { providerID: value.integrationID, method, code: value.code },
+             { throwOnError: true },
+           )
+-          await legacy(value.location).instance.dispose()
+-          await input.legacy().instance.dispose()
++          // OAuth 完成同样由服务端刷新，不能通过销毁实例刷新凭据。
+         },
+         status: async (value: Parameters<ServerApi["integration"]["oauth"]["status"]>[0]) => {
+           const method = Number(value.attemptID.split(":").at(-1))
+@@ -439,9 +437,8 @@
+           await legacy(value.location).provider.oauth.callback(
+             { providerID: value.integrationID, method },
+             { throwOnError: true },
+           )
+-          await legacy(value.location).instance.dispose()
+-          await input.legacy().instance.dispose()
++          // 自动回调轮询完成后仅返回状态，不额外中断会话。
+           return located(
+             { status: "complete" as const, time: { created: Date.now(), expires: Date.now() } },
+             value.location,
+diff --git a/packages/app/src/utils/server-compat.test.ts b/packages/app/src/utils/server-compat.test.ts
+--- a/packages/app/src/utils/server-compat.test.ts
++++ b/packages/app/src/utils/server-compat.test.ts
+@@ -200,17 +200,14 @@
+-  test("disposes the V1 instance after connecting a provider", async () => {
++  test("connects a V1 provider without disposing running sessions", async () => {
+     const { api, requests } = setup("v1")
+ 
+     await api.integration.connect.key({
+       integrationID: "openrouter",
+       key: "secret",
+       location: { directory: "/repo" },
+     })
+ 
+     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+       "/auth/openrouter",
+-      "/instance/dispose",
+-      "/instance/dispose",
+     ])
+-    expect(requests[1]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
+-    expect(requests[2]!.headers.get("x-opencode-directory")).toBeNull()
++    expect(requests[0]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
+   })
+@@ -218,18 +215,15 @@
+-  test("disposes the V1 instance after completing provider OAuth", async () => {
++  test("completes V1 provider OAuth without disposing running sessions", async () => {
+     const { api, requests } = setup("v1")
+ 
+     await api.integration.oauth.complete({
+       integrationID: "openrouter",
+       attemptID: "openrouter:0",
+       code: "code",
+       location: { directory: "/repo" },
+     })
+ 
+     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+       "/provider/openrouter/oauth/callback",
+-      "/instance/dispose",
+-      "/instance/dispose",
+     ])
+-    expect(requests[1]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
+-    expect(requests[2]!.headers.get("x-opencode-directory")).toBeNull()
++    expect(requests[0]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
+   })
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 index cc5ab75ac..7f3179e99 100644
 --- a/packages/opencode/src/provider/provider.ts
@@ -168,7 +257,32 @@ diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencod
 index af12b6010..a0e6425a5 100644
 --- a/packages/opencode/test/provider/provider.test.ts
 +++ b/packages/opencode/test/provider/provider.test.ts
-@@ -2259,3 +2259,46 @@ it.instance(
+@@ -4,7 +4,7 @@
+ import path from "path"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+-import { Effect, Layer } from "effect"
++import { Deferred, Effect, Layer } from "effect"
+ import { ModelsDev } from "@opencode-ai/core/models-dev"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+@@ -16,6 +16,8 @@
+ import { Env } from "../../src/env"
+ import { Plugin } from "../../src/plugin/index"
+ import { Provider } from "@/provider/provider"
++import { SessionRunState } from "@/session/run-state"
++import { SessionID } from "@/session/schema"
+ 
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Filesystem } from "@/util/filesystem"
+@@ -86,5 +88,5 @@
+ const languageBaseURL = (language: unknown) => (language as { config: { baseURL: string } }).config.baseURL
+ 
+-const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node, Plugin.node])))
++const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node, Plugin.node, SessionRunState.node])))
+ const experimentalModels = testEffect(providerLayer({ enableExperimentalModels: true }))
+ 
+@@ -2259,3 +2259,58 @@ it.instance(
    },
  )
  
@@ -187,8 +301,20 @@ index af12b6010..a0e6425a5 100644
 +    const stale = yield* list
 +    expect(stale[ProviderV2.ID.anthropic]).toBeDefined()
 +
++    // 等待真实 work 启动，再验证 Provider 失效不会触发其他服务的取消终结器。
++    const running = yield* SessionRunState.Service
++    const sessionID = SessionID.make("ses_provider_invalidation")
++    const started = yield* Deferred.make<void>()
++    yield* running.ensureRunning(
++      sessionID,
++      Effect.die("unexpected cancellation"),
++      Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
++    ).pipe(Effect.exit, Effect.forkChild)
++    yield* Deferred.await(started)
 +    // 刷新缓存后，下次 list 重新读取 env → anthropic 不再存在
 +    yield* Provider.use.invalidateAll()
++    const busy = yield* running.assertNotBusy(sessionID).pipe(Effect.flip)
++    expect(busy.sessionID).toBe(sessionID)
 +    const after = yield* list
 +    expect(after[ProviderV2.ID.anthropic]).toBeUndefined()
 +  }),
@@ -250,25 +376,17 @@ index 0fd51e3c1..d45384f30 100644
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -461,11 +461,16 @@ export const {
-       switch (event.type) {
-         case "global.disposed":
-           // #273：仅响应 daemon 主动关闭，其他崩溃走重连
--          if ((event.properties as { reason?: string }).reason !== "daemon-stop") break
--          daemonStopSeen = true
--          // #273：直接调用 exit 函数，原因作为参数传递
--          // #273：void 前缀——exit 触发卸载流程，不阻塞事件循环处理后续帧
--          void exit("opencode daemon stopped.")
-+          if ((event.properties as { reason?: string }).reason === "daemon-stop") {
-+            daemonStopSeen = true
-+            // #273：直接调用 exit 函数，原因作为参数传递
-+            // #273：void 前缀——exit 触发卸载流程，不阻塞事件循环处理后续帧
-+            void exit("opencode daemon stopped.")
-+          } else {
-+            // #362：非 daemon-stop 的 global.disposed 来自 auth 变更后的 Provider 缓存刷新。
-+            // 不销毁实例，仅刷新 TUI 本地数据以获取最新 provider 列表。
+@@ -493,8 +493,12 @@
+         case "global.disposed": {
+           // 原始SSE载荷仍按运行时字段识别，普通dispose不触发主动停机路径。
+           const properties: unknown = event.properties
+           if (!properties || typeof properties !== "object" ||
+-            !("reason" in properties) || properties.reason !== "daemon-stop") break
++            !("reason" in properties) || properties.reason !== "daemon-stop") {
++            // 认证刷新只重新拉取客户端数据，保留现有会话与终端。
 +            void bootstrap()
++            break
 +          }
-           break
-         case "server.instance.disposed":
-           // #273：daemon stop 已设置退出标志，不再重连
+           daemonStopSeen = true
+           // 提示走 epilogue；exit 的 reason 参数会被现有退出 owner 判作错误。
+           setEpilogue("opencode daemon stopped.")

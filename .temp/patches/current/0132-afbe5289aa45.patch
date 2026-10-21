@@ -99,7 +99,7 @@ index 52063639f3..b209bc840a 100644
      const shareSvc = yield* SessionShare.Service
      const promptSvc = yield* SessionPrompt.Service
 +    const store = yield* InstanceStore.Service
-   // 请求用量追踪服务
+     // 稳定服务在 handler layer 捕获，查询不重新构造数据库层或项目作用域。
    const usageSvc = yield* SessionRequestUsage.Service
      const revertSvc = yield* SessionRevert.Service
 @@ -234,7 +236,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
@@ -118,49 +118,6 @@ index 52063639f3..b209bc840a 100644
        return true
      })
  
-diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
-index 1060f3ab17..897435406a 100644
---- a/packages/tui/src/context/event.ts
-+++ b/packages/tui/src/context/event.ts
-@@ -1,5 +1,18 @@
- import type { Event } from "@opencode-ai/sdk/v2"
- import { useSDK } from "./sdk"
-+import path from "path"
-+
-+// #132：事件 directory 规范化比较（Win slash/case）
-+export function sameDirectory(a?: string, b?: string) {
-+  if (!a || !b) return false
-+  try {
-+    const left = path.resolve(a).replaceAll("\\", "/")
-+    const right = path.resolve(b).replaceAll("\\", "/")
-+    return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
-+  } catch {
-+    return a === b
-+  }
-+}
- 
- type EventMetadata = {
-   directory: string
-@@ -15,6 +28,12 @@ export function useEvent() {
-         return
-       }
- 
-+      // #132：server.connected 始终投递，支撑重连恢复
-+      if ((event.payload as { type?: string }).type === "server.connected") {
-+        handler(event.payload, { directory: event.directory, workspace: event.workspace })
-+        return
-+      }
-+
-       handler(event.payload, { directory: event.directory, workspace: event.workspace })
-     })
-   }
-@@ -32,5 +51,6 @@ export function useEvent() {
-   return {
-     subscribe,
-     on,
-+    sameDirectory,
-   }
- }
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 index 9365a8abdc..d792279560 100644
 --- a/packages/tui/src/context/sync.tsx
@@ -174,15 +131,11 @@ index 9365a8abdc..d792279560 100644
  import { useKV } from "./kv"
  import { usePermission } from "./permission"
  
-@@ -142,6 +144,8 @@ export const {
-     const sdk = useSDK()
- 
+@@ -150,2 +152,4 @@
      const fullSyncedSessions = new Set<string>()
 +    // #132：区分首次 connected 与重连
 +    let connectedOnce = false
      const syncingSessions = new Map<string, Promise<void>>()
-     const hydratingSessions = new Map<string, { messages: Set<string>; parts: Set<string> }>()
-     const touchMessage = (sessionID: string, messageID: string) => {
 @@ -155,9 +159,7 @@ export const {
        if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
        if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
@@ -210,7 +163,7 @@ index 9365a8abdc..d792279560 100644
          case "permission.replied": {
            const requests = store.permission[event.properties.sessionID]
            if (!requests) break
-@@ -619,8 +630,9 @@ export const {
+@@ -619,8 +630,13 @@ export const {
            if (last.role === "user") return "working"
            return last.time.completed ? "idle" : "working"
          },
@@ -219,9 +172,15 @@ index 9365a8abdc..d792279560 100644
 +        async sync(sessionID: string, options?: { force?: boolean }) {
 +          // #132：force 忽略 fullSynced 缓存
 +          if (!options?.force && fullSyncedSessions.has(sessionID)) return
-           const syncing = syncingSessions.get(sessionID)
-           if (syncing) return syncing
-           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
+-          const syncing = syncingSessions.get(sessionID)
+-          if (syncing) return syncing
++          while (syncingSessions.has(sessionID)) {
++            if (!options?.force) return syncingSessions.get(sessionID)
++            // #132：重连等旧请求收尾并重查 owner，再取新快照，避免并发覆盖 tracker。
++            // #132：旧请求失败仍需补读；仅忽略旧失败，新快照错误照常传出。
++            await syncingSessions.get(sessionID)!.catch(() => undefined)
++          }
+           const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
 diff --git a/packages/core/src/database/migration/20260723100000_normalize_global_session_path.ts b/packages/core/src/database/migration/20260723100000_normalize_global_session_path.ts
 new file mode 100644
 index 0000000000..cffe17793f
@@ -250,10 +209,8 @@ diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/dat
 index 35b1826006..ca21fb7159 100644
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -41,5 +41,6 @@ export const migrations = (
-     import("./migration/20260622170816_reset_v2_session_state"),
-     import("./migration/20260622202450_simplify_session_input"),
-     import("./migration/20260422130633_request_usage_tracking"),
+@@ -44,3 +44,4 @@ export const migrations = (
+     import("./migration/20261009114905_session_request_usage"),
 +    import("./migration/20260723100000_normalize_global_session_path"),
    ])
  ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
@@ -304,16 +261,134 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 4d6d6a7005..0f1c49feef 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -365,6 +365,12 @@ export function Session() {
+@@ -365,6 +365,10 @@ export function Session() {
    })
  
    let lastSwitch: string | undefined = undefined
 +  // #132：重连强制刷新当前会话
-+  event.on("server.connected" as any, () => {
-+    try {
-+      void (sync as any).session.sync((route as any).sessionID, { force: true })
-+    } catch {}
++  event.on("server.connected", () => {
++    void sync.session.sync(route.sessionID, { force: true })
 +  })
    event.on("message.part.updated", (evt) => {
      const part = evt.properties.part
      if (part.type !== "tool") return
+diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+@@ -105,10 +105,116 @@ test("stale session hydration does not overwrite live message parts", async () => {
+     expect(sync.data.part[messageID][0]).toMatchObject({ text: "visible live content" })
+   } finally {
+     app.renderer.destroy()
+   }
+ })
+ 
++test.each(["todo", "diff"] as const)("forced hydration waits for pending %s and restores a missed finish", async (pending) => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  let resolveMessages!: (response: Response) => void
++  const messages = new Promise<Response>((resolve) => { resolveMessages = resolve })
++  let resolvePending!: (response: Response) => void
++  const pendingResponse = new Promise<Response>((resolve) => { resolvePending = resolve })
++  let resolveFreshMessages!: (response: Response) => void
++  const freshMessages = new Promise<Response>((resolve) => { resolveFreshMessages = resolve })
++  const calls = { get: 0, message: 0, todo: 0, diff: 0 }
++  const stale = json([{
++    info: { ...assistant, time: { created: 1 } },
++    parts: [{ id: partID, sessionID, messageID, type: "text", text: "unfinished" }],
++  }])
++  const finished = { id: partID, sessionID, messageID, type: "text" as const, text: "completed while disconnected" }
++  const live = { ...finished, id: "prt_reconnect_live", text: "live during forced hydration" }
++  const { app, emit, sync } = await mount((url) => {
++    if (url.pathname === `/session/${sessionID}`) {
++      calls.get++
++      return json(calls.get === 1 ? session : { ...session, title: "reconnected" })
++    }
++    if (url.pathname === `/session/${sessionID}/message`) {
++      calls.message++
++      return calls.message === 1 ? messages : freshMessages
++    }
++    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) {
++      const kind = url.pathname.endsWith("/todo") ? "todo" : "diff"
++      calls[kind]++
++      return kind === pending && calls[kind] === 1 ? pendingResponse : json([])
++    }
++    return undefined
++  }, tmp.path)
++  try {
++    const hydrate = sync.session.sync(sessionID)
++    const joined = sync.session.sync(sessionID)
++    await wait(() => calls.message === 1 && calls[pending] === 1)
++    resolveMessages(stale)
++    // #132：messages 已读取但另一 RPC 尚未结束，force 不能复用这轮断线前快照。
++    await wait(() => stale.bodyUsed)
++    const forced = sync.session.sync(sessionID, { force: true })
++    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: 1 })
++    resolvePending(json([]))
++    await Promise.all([hydrate, joined])
++    await wait(() => calls.message === 2 && calls[pending] === 2)
++    expect(sync.session.status(sessionID)).toBe("working")
++    expect(sync.data.message[sessionID][0].time).not.toHaveProperty("completed")
++    emit(global({ id: "evt_reconnect_live_part", type: "message.part.updated", properties: {
++      sessionID, time: 3, part: live,
++    } }))
++    await wait(() => sync.data.part[messageID]?.some((part) => part.id === live.id) ?? false)
++    // #132：不发送完成事件；新快照恢复漏收的结束状态，同时保留本轮实时部件。
++    resolveFreshMessages(json([{ info: assistant, parts: [finished] }]))
++    await forced
++    expect(calls).toEqual({ get: 2, message: 2, todo: 2, diff: 2 })
++    expect(sync.session.get(sessionID)?.title).toBe("reconnected")
++    expect(sync.data.message[sessionID][0].time).toMatchObject({ completed: assistant.time.completed })
++    expect(sync.session.status(sessionID)).toBe("idle")
++    expect(sync.data.part[messageID]).toContainEqual(finished)
++    expect(sync.data.part[messageID]).toContainEqual(live)
++    await sync.session.sync(sessionID)
++    expect(calls).toEqual({ get: 2, message: 2, todo: 2, diff: 2 })
++  } finally {
++    resolveMessages(json([]))
++    resolvePending(json([]))
++    resolveFreshMessages(json([]))
++    app.renderer.destroy()
++  }
++})
++
++test.each(["success", "failure"] as const)("forced hydration after an old rejection preserves fresh %s", async (outcome) => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  let resolveSession!: (response: Response) => void
++  const response = new Promise<Response>((resolve) => { resolveSession = resolve })
++  let requested = 0
++  const { app, sync } = await mount((url) => {
++    if (url.pathname === `/session/${sessionID}`) {
++      requested++
++      if (requested === 1) return response
++      if (requested === 2 && outcome === "failure") return json({ message: "fresh snapshot failed" }, { status: 500 })
++      return json(session)
++    }
++    if (url.pathname === `/session/${sessionID}/message`) return json([{ info: assistant, parts: [] }])
++    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) return json([])
++    return undefined
++  }, tmp.path)
++  try {
++    const hydrate = sync.session.sync(sessionID)
++    const oldFailure = hydrate.catch((error: unknown) => error)
++    await wait(() => requested === 1)
++    const forced = sync.session.sync(sessionID, { force: true })
++    const fresh = forced.catch((error: unknown) => error)
++    resolveSession(json({ message: "old snapshot failed" }, { status: 500 }))
++    expect(await oldFailure).toMatchObject({ message: "old snapshot failed" })
++    expect(await fresh).toEqual(outcome === "success" ? undefined : expect.objectContaining({ message: "fresh snapshot failed" }))
++    expect(requested).toBe(2)
++    await sync.session.sync(sessionID)
++    expect(requested).toBe(outcome === "failure" ? 3 : 2)
++    expect(sync.session.status(sessionID)).toBe("idle")
++    expect(sync.data.message[sessionID][0].time).toMatchObject({ completed: assistant.time.completed })
++  } finally {
++    resolveSession(json([]))
++    app.renderer.destroy()
++  }
++})
++
+ test("orphan live deltas do not suppress hydrated parts", async () => {
+   await using tmp = await tmpdir()
+   await Bun.write(`${tmp.path}/kv.json`, "{}")
+ 

@@ -495,7 +495,25 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
  // #364：goal 类型定义（SDK 未重新生成前使用内联类型）
  // 字段与 src/session/goal.ts 的 Goal schema 对齐
  type SessionGoalInfo = {
-@@ -669,7 +702,16 @@ export const {
+@@ -521,8 +554,15 @@
+     const acceptSession = (info: Session, tracker?: SessionTrace) => {
+       // 只有明确 null 才是删除；复制事件快照再入 store，避免另一列表或 reconcile 改写请求证据。
+       const current = tracker?.session === undefined ? info : structuredClone(tracker.session)
+-      if (!current || !tracker?.moved) return current
+-      return { ...current, ...tracker.moved, time: { ...current.time, ...tracker.moved.time } }
++      if (!current) return current
++      const match = search(store.session, current.id, (session) => session.id)
++      // raw trace仍保留完整事件；只有进入viewer store时才保留同一diff投影的本地总量。
++      const summary = match.found && Object.hasOwn(store.session_diff, current.id)
++        ? store.session[match.index].summary
++        : undefined
++      const projected = summary ? { ...current, summary } : current
++      if (!tracker?.moved) return projected
++      return { ...projected, ...tracker.moved, time: { ...projected.time, ...tracker.moved.time } }
+     }
+     const touchMessage = (sessionID: string, messageID: string) => {
+       hydratingSessions.get(sessionID)?.messages.add(messageID)
+@@ -752,7 +792,16 @@
            break
  
          case "session.diff":
@@ -513,34 +531,28 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            break
  
          case "session.deleted": {
-@@ -689,7 +731,19 @@ export const {
+@@ -773,13 +822,15 @@
          case "session.updated": {
+           touchSession(event.properties.info.id, event.properties.info)
++          // 与GET/list共用接收边界，防止迟到完整summary覆盖已归一化的viewer总量。
++          const info = acceptSession(event.properties.info)!
            const result = search(store.session, event.properties.info.id, (s) => s.id)
            if (result.found) {
 -            setStore("session", result.index, reconcile(event.properties.info))
-+            const summary = Object.hasOwn(store.session_diff, event.properties.info.id)
-+              ? store.session[result.index]?.summary
-+              : undefined
-+            setStore(
-+              "session",
-+              result.index,
-+              reconcile({
-+                ...event.properties.info,
-+                // 已有viewer diff时summary属于同一TUI投影；完整updated只更新其余Session metadata。
-+                // Summary/Revert两种事件顺序最终都由下一次session.diff提交新的normalized totals。
-+                summary: summary ?? event.properties.info.summary,
-+              }),
-+            )
++            setStore("session", result.index, reconcile(info))
              break
            }
            setStore(
-@@ -1129,13 +1183,18 @@ export const {
-           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
-           hydratingSessions.set(sessionID, tracker)
-           const task = (async () => {
+             "session",
+             produce((draft) => {
+-              draft.splice(result.index, 0, event.properties.info)
++              draft.splice(result.index, 0, info)
+             }),
+           )
+@@ -1223,8 +1274,13 @@
 -            const [session, messages, todo, diff] = await Promise.all([
 +            // diff 不再参与首屏屏障：大 Session 的 patch 聚合不再阻塞 messages/todo 渲染。
-+            const [session, messages, todo, status] = await Promise.all([
++            const [session, messages, todo] = await Promise.all([
                sdk.client.session.get({ sessionID }, { throwOnError: true }),
                // #162：会话消息拉取窗口扩至 200，降低长会话过早截断
                // #290：会话消息拉取窗口同步提升至 300，与本地缓存窗口对齐
@@ -554,9 +566,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
                sdk.client.session.todo({ sessionID }),
 -              sdk.client.session.diff({ sessionID }),
                // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
-               sdk.client.session.status({ workspace: project.workspace.current() }),
-             ])
-@@ -1195,7 +1254,6 @@ export const {
+@@ -1291,7 +1347,6 @@ export const {
                  }
                  for (const message of removed) delete draft.part[message.id]
                  draft.message[sessionID] = visible
@@ -564,7 +574,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
                }),
              )
              // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。
-@@ -1206,6 +1264,36 @@ export const {
+@@ -1302,6 +1357,36 @@ export const {
                  replayOrphanDeltas(part.id, message.info.id)
                }
              }
@@ -670,12 +680,12 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
  import { SessionSummary } from "@/session/summary"
  import { Todo } from "@/session/todo"
  import { MessageID, PartID, SessionID } from "@/session/schema"
-+import { Snapshot } from "@/snapshot"
++import type { Snapshot } from "@/snapshot"
  // [local-smark] session preview: 直接查 DB 获取用户消息预览文本
  // 表定义在 core（drizzle schema owner），此处跨包引用保持单一定义源
  import { MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 @@ -51,6 +52,11 @@ import { PermissionNotFoundError } from "../errors"
- import * as ApiError from "../errors"
+ import { PermissionNotFoundError, notFound } from "../errors"
  import * as SessionError from "./session-errors"
  
 +// 私有 header 只选择更浅的 TUI wire projection；缺失时 public Message/diff schema 与完整 payload 原样保留。
@@ -767,14 +777,11 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  // #0500：Goal chronology 只读取 Message hot info 与三个 Part locator 字段；Tool output、Reasoning、附件和 summary.diffs
  // 不会进入 JS，也不会触发持久 thaw。排序继续使用 persisted time，再以 MessageID 处理同毫秒 tie。
  // #557：Goal Tool 只消费 current/previous；technical user 不应迫使普通 Provider step 扫描整段历史。
-@@ -356,13 +367,26 @@ const older = (row: Cursor) =>
- const atOrNewer = (row: Cursor) =>
-   or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
- 
--function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
+@@ -358,10 +369,19 @@
+-function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
 +function hydrate(
 +  db: Database.Interface["db"],
-+  sync: ColdStorage.TxOrDb,
++  sync: Database.Interface["sync"],
 +  rows: (typeof MessageTable.$inferSelect)[],
 +  includeHidden = true,
 +  messageProjection?: "viewer",
@@ -783,24 +790,18 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
    // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
    // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
    // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
--  const restoredRows = ColdStorage.thawMessageRows(sync, rows)
--  const ids = restoredRows.map((row) => row.id)
-+  // 默认业务读取仍批量 thaw 完整 Message；viewer 只使用热投影，完整消费者合同不被削弱。
-+  // projection 在 thawMessageRows 之前决定，防止出现“response 删除字段但 cold owner 已解压并持久预热”的假优化。
-+  // Parts 仍走唯一 cold-aware decoder；Tool/Text/Reasoning 内容不因 Message summary 收窄而缺失。
-+  // 目标 hydrate 在 gen 外同步求 infos：viewer 分支完全同步，不触碰 ColdStorage 事务。
-+  const infos =
-+    messageProjection === "viewer"
-+      ? rows.map(viewerInfo)
-+      : ColdStorage.thawMessageRows(sync, rows).map(infoFromRestored)
-+  const ids = rows.map((row) => row.id)
-   const partByMessage = new Map<string, Part[]>()
    return Effect.gen(function* () {
+-    const restoredRows = yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))
+-    const ids = restoredRows.map((row) => row.id)
++    // viewer在任何冷Message解压前选热投影；默认完整读取仍预约Effect驱动的同一连接。
++    const infos = messageProjection === "viewer"
++      ? rows.map(viewerInfo)
++      : (yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))).map(infoFromRestored)
++    const ids = rows.map((row) => row.id)
+     const partByMessage = new Map<string, Part[]>()
      if (ids.length > 0) {
-@@ -389,9 +413,9 @@ function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (
-     // #0500：持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
-     // restoredRows 保持原 page 顺序，child Map 不改变 newest/oldest 语义。
-     // 因此持久预热副作用与本次返回 transcript 的范围严格一致。
+@@ -387,7 +407,7 @@
+     // 持久 thaw 在返回前完成并保留 page/child 顺序，不对范围外历史产生预热副作用。
 -    return restoredRows.map((row) => ({
 -      info: infoFromRestored(row),
 -      parts: partByMessage.get(row.id) ?? [],
@@ -811,7 +812,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
    })
  }
 @@ -771,7 +795,10 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-   // #106：includeHidden 默认 false，page 层过滤隐藏消息/part
+   // 显式审计读取保留隐藏内容，普通分页在 LIMIT 前筛选可见消息。
    includeHidden?: boolean
    fromMessageID?: MessageID
 +  messageProjection?: "viewer"
@@ -821,24 +822,25 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
    const { db, sync } = yield* Database.Service
    if (input.limit === 0) {
      // #493：零范围只验证 Session existence，不读取 Message 探针，更不触发任何 thaw。
-@@ -845,7 +872,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
- 
-   const more = rows.length > input.limit
-   const slice = more ? rows.slice(0, input.limit) : rows
+@@ -812,5 +837,5 @@
+   // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
+   // 协议重试隐藏畸形审查轮次，和撤回、空助手修复一样保留审计记录但不进入普通历史。
 -  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden))
 +  const items = yield* hydrate(db, sync, slice, Boolean(input.includeHidden), input.messageProjection)
    items.reverse()
- // Hidden messages remain persisted for audit/recovery, but are removed from
- // normal prompt replay and visible history. Each reason names the workflow that
+   const tail = slice.at(-1)
 
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
-@@ -1,8 +1,12 @@
+@@ -1,11 +1,15 @@
  /** @jsxImportSource @opentui/solid */
 -import { describe, expect, test } from "bun:test"
 +import { describe, expect, spyOn, test } from "bun:test"
 +import { testRender } from "@opentui/solid"
+ import { EventV2 } from "@opencode-ai/core/event"
+ import { SessionSchema } from "@opencode-ai/core/session/schema"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
  import { tmpdir } from "../../../fixture/fixture"
  import { directory, json, mount, wait, worktree } from "./sync-fixture"
  import type { AssistantMessage, GlobalEvent, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
@@ -848,9 +850,7 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
  
  function branchEvent(branch: string, workspace?: string): GlobalEvent {
    return {
-@@ -95,6 +99,304 @@ function questionRequest(id: string): QuestionRequest {
- }
- 
+@@ -164,4 +168,302 @@
  describe("tui sync", () => {
 +  test("projects bounded patch-free TUI data through HTTP and SSE", async () => {
 +    // 同一 public sync 覆盖两个 transport producer；任一 header 漏传都会恢复完整 payload。
@@ -1154,6 +1154,31 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
    // #192：reconnected 标志控制 API 返回——初始为空，重连后返回 pending 请求
    // #192：server.connected 事件触发 bootstrap——第一个是初始连接，后续是重连
 
+diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+@@ -145,16 +145,18 @@
+   try {
+     const hydrate = sync.session.sync(sessionID)
+     const joined = sync.session.sync(sessionID)
+-    await wait(() => calls.message === 1 && calls[pending] === 1)
++    await wait(() => calls.message === 1 && calls.todo === 1)
+     resolveMessages(stale)
+     // #132：messages 已读取但另一 RPC 尚未结束，force 不能复用这轮断线前快照。
+     await wait(() => stale.bodyUsed)
++    // diff在历史发布后才发起；todo阻塞时应尚未请求diff，diff阻塞时则等待其真实到达。
++    if (pending === "diff") await wait(() => calls.diff === 1)
+     const forced = sync.session.sync(sessionID, { force: true })
+-    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: 1 })
++    expect(calls).toEqual({ get: 1, message: 1, todo: 1, diff: pending === "todo" ? 0 : 1 })
+     resolvePending(json([]))
+     await Promise.all([hydrate, joined])
+-    await wait(() => calls.message === 2 && calls[pending] === 2)
++    await wait(() => calls.message === 2 && calls.todo === 2)
+     expect(sync.session.status(sessionID)).toBe("working")
+     expect(sync.data.message[sessionID][0].time).not.toHaveProperty("completed")
+     emit(global({ id: "evt_reconnect_live_part", type: "message.part.updated", properties: {
+       sessionID, time: 3, part: live,
 diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/opencode/test/server/session-messages.test.ts
 --- a/packages/opencode/test/server/session-messages.test.ts
 +++ b/packages/opencode/test/server/session-messages.test.ts
@@ -1180,7 +1205,22 @@ diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/o
  
  const model = {
    providerID: ProviderV2.ID.make("test"),
-@@ -77,8 +85,8 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
+@@ -48,6 +56,7 @@
+ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
+   sessionID: SessionID,
+   count: number,
+   time = (i: number) => Date.now() + i,
++  parts = true,
+ ) {
+   const session = yield* SessionNs.Service
+@@ -67,4 +76,6 @@
+         } satisfies SessionV1.User)
++        // 纯条数边界不需要逐条Part；其他用例默认仍构建完整消息/部件。
++        if (!parts) return id
+         yield* session.updatePart({
+           id: PartID.ascending(),
+           sessionID,
+@@ -77,8 +88,8 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
    )
  })
  
@@ -1191,7 +1231,14 @@ diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/o
  }
  
  function json<T>(response: HttpClientResponse.HttpClientResponse) {
-@@ -177,4 +185,118 @@ describe("session messages endpoint", () => {
+@@ -149,4 +160,5 @@
+         const session = yield* sessionScoped
+-        yield* fill(session.id, 520)
++        // 保留520条真实Message和limit=510断言，避免无关Part写入耗尽CI原有30秒预算。
++        yield* fill(session.id, 520, undefined, false)
+ 
+         const res = yield* request(`/session/${session.id}/message?limit=510`)
+@@ -177,4 +189,123 @@ describe("session messages endpoint", () => {
      ),
      { git: true },
    )
@@ -1272,8 +1319,11 @@ diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/o
 +
 +        const { db, sync } = yield* Database.Service
 +        // 真实 cold owner 让测试区分“跳过 Message thaw”和“完整 thaw 后仅删除响应字段”。
-+        // freezeOwner 首参为 TxOrDb（sync）且为同步函数——目标 ColdStorage API 比 source 单参形态多事务上下文。
-+        expect(ColdStorage.freezeOwner(sync, { type: "message", id: messageID, now: Date.now() + 1, olderThanMs: 0 }).type).toBe("frozen")
++        // 同步冷事务也需预约驱动连接，不能与Effect reader在同一连接上交错执行。
++        const outcome = yield* Database.withSync({ db, sync }, () =>
++          ColdStorage.freezeOwner(sync, { type: "message", id: messageID, now: Date.now() + 1, olderThanMs: 0 }),
++        )
++        expect(outcome.type).toBe("frozen")
 +        const readColdRef = Effect.gen(function* () {
 +          // cold_ref 只读探针经同一 Effect db seam；不引入第二数据源。
 +          const row = yield* db
@@ -1304,7 +1354,9 @@ diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/o
 +        expect(completeBody[0]?.info.role === "user" ? completeBody[0].info.summary : undefined).toMatchObject({
 +          title: "large turn",
 +          body: "summary body",
++          diffs: [{ file: "large.txt", patch, additions: 512, deletions: 0, status: "modified" }],
 +        })
++        expect(yield* readColdRef).toBeNull()
 +      }),
 +    ),
 +    { git: true },

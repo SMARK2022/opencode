@@ -678,19 +678,16 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
 --- a/packages/tui/src/component/dialog-goal.tsx
 +++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -7,21 +7,17 @@ import { useToast } from "../ui/toast"
+@@ -7,18 +7,17 @@ import { useToast } from "../ui/toast"
  import { createMemo, createSignal, onMount } from "solid-js"
  import { useTheme } from "../context/theme"
  import { Locale } from "../util/locale"
--
--// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（6400）对齐：
--// tui 不依赖 server 包内部模块，本地常量保持同一上限，两处需同步修改
--const MAX_OBJECTIVE_CHARS = 6400
+-import { MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
 +import { goalEndpointUrl, goalHttpClear, goalHttpSet } from "../util/goal-http"
  
  // [local-smark] goal 管理 dialog
  // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
- // POST/DELETE 需手动设置 directory query param（sdk.fetch 的 rewrite 仅处理 GET/HEAD）
+ // raw sdk.fetch不经过生成SDK的rewrite；POST/DELETE显式携带directory并复用鉴权headers。
 -// 修复 Enter 无响应：as any 调用运行时为 undefined 导致 TypeError 静默失败
  
  interface DialogGoalProps {
@@ -785,13 +782,11 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
    }
  
    return { setGoal, clearGoal }
-@@ -247,4 +212,18 @@ function DialogGoalEdit(props: DialogGoalProps) {
+@@ -239,4 +212,18 @@ function DialogGoalEdit(props: DialogGoalProps) {
        onCancel={() => dialog.clear()}
      />
    )
--}
-\ No newline at end of file
-+}
+ }
 +
 +// #0503：供 prompt `/goal` 零参数路径使用：直接用 submit 权威 sessionID 打开 dialog，
 +// 不走 goal.manage 的 route.type===session 守卫（home 上 create 后路由可能尚未切换）
@@ -928,28 +923,12 @@ diff --git a/packages/tui/src/util/goal-http.ts b/packages/tui/src/util/goal-htt
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/util/goal-http.ts
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,124 @@
++import { SessionGoal } from "@opencode-ai/schema/session-goal"
 +import type { GoalSlashIntent } from "./parse-goal-slash"
 +
-+// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（6400）对齐：
-+// tui 包不依赖 server 内部模块，本地常量保持同一上限，两处需同步修改
-+const MAX_OBJECTIVE_CHARS = 6400
-+
-+// #0503：结构化 Goal 镜像——与 context/sync.tsx 内联 SessionGoalInfo、
-+// src/session/goal.ts schema 三方对齐；SDK 重新生成 goal 类型前以此承载 reconcile 载荷。
-+export type GoalHttpGoal = {
-+  sessionID: string
-+  id: string
-+  objective: string
-+  status: "active" | "paused" | "complete" | "blocked"
-+  tokenBudget?: number | null
-+  tokensUsed: number
-+  timeUsedSeconds: number
-+  continueOnError: boolean
-+  generation: number
-+  reason?: string | null
-+  time: { created: number; updated: number }
-+}
++// 客户端预检和 reconcile 复用 Schema 的同一合同，不从持久化服务层导入或复制 wire 字段。
++export type GoalHttpGoal = SessionGoal.Goal
 +
 +export type GoalHttpSetInput = {
 +  objective?: string
@@ -967,8 +946,8 @@ new file mode 100644
 +export async function goalHttpSet(deps: GoalHttpDeps, input: GoalHttpSetInput) {
 +  // 仅对 objective 做长度预检；status-only 更新必须跳过，否则会误拦 Pause/Resume
 +  // 上限常量与 SessionGoal.MAX_OBJECTIVE_CHARS 一致，提前拦截避免无效往返
-+  if (input.objective !== undefined && input.objective.trim().length > MAX_OBJECTIVE_CHARS) {
-+    deps.onError(`Goal objective must be at most ${MAX_OBJECTIVE_CHARS} characters`)
++  if (input.objective !== undefined && input.objective.trim().length > SessionGoal.MAX_OBJECTIVE_CHARS) {
++    deps.onError(`Goal objective must be at most ${SessionGoal.MAX_OBJECTIVE_CHARS} characters`)
 +    return undefined
 +  }
 +  try {

@@ -489,10 +489,10 @@ index 0000000000000000000000000000000000000000..da481ab71f3ccc1fffe3e20af1cd3ca5
 +Implementation may proceed to commit (REQ-07).
 +```
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index e15e50500..c85fe272f 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -71,7 +71,8 @@ const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|
  const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
  const RE_D_DECODE_PIPE_INTERPRETER = /\b(?:base64|openssl|xxd|gunzip|bunzip2|unxz|zcat)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|dash|fish|ksh|python|python3|node|ruby|perl|pwsh|powershell)\b/i

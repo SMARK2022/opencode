@@ -30,10 +30,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  import path from "node:path"
  import { mkdir, writeFile } from "node:fs/promises"
  import { useRoute, useRouteData } from "../../context/route"
-@@ -1614,7 +1632,12 @@ const visibleParts = createMemo(() => {
- if (!ctx.showThinking()) return false
-         return part.text.replace("[REDACTED]", "").trim().length > 0
-       }
+@@ -1617,4 +1635,9 @@ const visibleParts = createMemo(() => {
 -      if (part.type === "tool") return true
 +      // #185：工具是否计入 visibleParts 与 shouldHide 同口径
 +      if (part.type === "tool")
@@ -88,3 +85,40 @@ new file mode 100644
 +    ).toBe(true)
 +  })
 +})
+diff --git a/packages/tui/src/util/layout.ts b/packages/tui/src/util/layout.ts
+--- a/packages/tui/src/util/layout.ts
++++ b/packages/tui/src/util/layout.ts
+@@ -18,2 +18,6 @@
+-    const value = margin(previous.get(el))
++    const sibling = previous.get(el)
++    // 组内工具保持紧排，跨助手消息至少隔一行；空消息组不会制造额外间距。
++    const boundary = el.parent && sibling?.parent && el.parent !== sibling.parent
++      && layoutGroups.has(el.parent) && layoutGroups.has(sibling.parent)
++    const value = Math.max(margin(sibling), boundary ? 1 : 0)
+     if (el.marginTop !== value) el.marginTop = value
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -227,2 +227,22 @@
+ describe("TUI inline tool wrapping", () => {
++  test("separates assistant groups without separating tools inside one group", async () => {
++    // 使用生产行和实际布局，空组不能吞掉边界或给同组工具增加空行。
++    const frame = await renderFrame(
++      () => (
++        <box flexDirection="column" width={40}>
++          <For each={["A", "", "B"]}>{(label) => (
++            <box flexDirection="column" ref={(el: BoxRenderable) => layoutGroups.add(el)}>
++              <Show when={label}>
++                <InlineToolRow icon="→" complete={true} pending="">{label}1</InlineToolRow>
++                <InlineToolRow icon="→" complete={true} pending="">{label}2</InlineToolRow>
++              </Show>
++            </box>
++          )}</For>
++        </box>
++      ),
++      { width: 40, height: 8 },
++    )
++    expect(frame).toMatch(/A1\n[^\n]*A2\n\n[^\n]*B1\n[^\n]*B2/)
++  })
++
+   test("falls back for unknown tool names", () => {

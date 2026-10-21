@@ -2,7 +2,7 @@ diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/tok
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/util/token-estimate.ts
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,194 @@
 +import type { AssistantMessage, Message, Part, Provider, SessionRequestUsage } from "@opencode-ai/sdk/v2"
 +import { estimate } from "@opencode-ai/core/util/token"
 +
@@ -165,8 +165,16 @@ new file mode 100644
 +    && lastSFIdx < 0 && (!request.assistantID || (!!lastAssistant && lastAssistant.time.completed === undefined))
 +  // bootstrap 只属于首轮尚未确认的请求，确认零也必须退出引导估算。
 +  const promptInputEstimate = unconfirmed ? bootstrapInputTokens : 0
++  const lastStepFinish = lastParts[lastSFIdx]
++  // 未确认续轮保留源 bootstrap；完成态和明确零确认继续服从真实投影。
++  const currentPromptInputEstimate = !!lastAssistant && lastAssistant.time.completed === undefined
++    && ((lastSFIdx < 0 && request.stepInput === 0 && request.stepOutput === 0)
++      || (hasInFlightTail && lastStepFinish?.type === "step-finish"
++        && lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
++          + lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning > 0))
++    ? bootstrapInputTokens : promptInputEstimate
 +  // step 确认来自完整投影，native 无 V1 parts 或助手被淘汰仍保留真实值，不以粗略系统开销抬高它。
-+  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + promptInputEstimate
++  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + currentPromptInputEstimate
 +  const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + pendingOutputTokens
 +  // step 与 request 两种范围各加一次尾部；请求累计永远不由有限 transcript 求和。
 +  const totalInput = request.input + pendingInputTokens + promptInputEstimate
@@ -440,7 +448,7 @@ diff --git a/packages/tui/test/util/token-estimate.test.ts b/packages/tui/test/u
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/util/token-estimate.test.ts
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,61 @@
 +import { expect, test } from "bun:test"
 +import type { AssistantMessage, Part, SessionRequestUsage, StepFinishPart, UserMessage } from "@opencode-ai/sdk/v2"
 +import { computeFinalTokens, estimateUserInputTokens, getBootstrapInputTokens } from "../../src/util/token-estimate"
@@ -491,8 +499,10 @@ new file mode 100644
 +  const previous = { ...completed, id: "previous", parentID: "prior", time: { created: 0, completed: 0 } }
 +  expect(getBootstrapInputTokens([previous, user, assistant], request, (id) => id === "previous" ? [confirmedFinish] : parts)).toBe(1611)
 +  expect(computeFinalTokens(assistant, [confirmedFinish], confirmed, 2800)).toEqual({ input: 1000, output: 10, totalInput: 1000, totalOutput: 10 })
-+  // 新尾部先于快照到达时遮掉旧 step，只在请求累计上加一次流式字符。
-+  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed, 2800)).toEqual({ input: 0, output: 2, totalInput: 1000, totalOutput: 12 })
++  // 续轮主值继续估算输入；请求累计保持确认加尾部的口径。
++  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed, 2800)).toEqual({ input: 2800, output: 2, totalInput: 1000, totalOutput: 12 })
++  // 换助手而没有新用户时，当前轮仍保留同一请求的引导估算。
++  expect(computeFinalTokens({ ...assistant, id: "next" }, [], { ...settled, assistantID: "next", stepInput: 0, stepOutput: 0 }, 2800)).toEqual({ input: 2800, output: 0, totalInput: 4000, totalOutput: 30 })
 +  const tool: Part = {
 +    id: "tool", sessionID: "s", messageID: "a", type: "tool", callID: "call", tool: "read",
 +    state: { status: "completed", input: {}, output: "abcdefgh", title: "read", metadata: {}, time: { start: 2, end: 3 } },

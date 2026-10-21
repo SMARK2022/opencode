@@ -11,16 +11,15 @@ index 8cc506bcea17c35845fdf040cac391ea1bc49639..3b2157c394c19d5fe15f1ac7310eec81
    const cancel = SynchronizedRef.modify(ref, (st) => {
      switch (st._tag) {
        case "Idle":
-@@ -178,28 +180,30 @@ export const make = <A, E = never>(
+@@ -177,27 +179,29 @@ export const make = <A, E = never>(
        case "Running":
          return [
            Effect.gen(function* () {
--            // 先 fail done 唤醒等待者，再非阻塞中断 fiber
+-            // 原 work 的退出 owner 提交后才释放结果；先 fail done 会让调用方返回未中止的快照。
 +            // #153：先触发 onIdle 再中断，取消路径的 idle 通知不得晚于收尾
 +            yield* idleIfCurrent()
-             // #149：先中断 fiber 再 fail done，避免未 settle 的工具输出被抢先收口
-             yield* Fiber.interrupt(st.run.fiber)
-             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.asVoid)
+             yield* Fiber.interrupt(st.run.fiber).pipe(Effect.exit, Effect.asVoid)
+             yield* Deferred.fail(st.run.done, new Cancelled()).pipe(Effect.exit, Effect.asVoid)
 -            yield* idleIfCurrent()
            }),
            { _tag: "Idle" } as const,
@@ -232,77 +231,41 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 index ebcd8909883722b33096da6e63eccc9513155f73..ce1449c1b9421039e02152f2e1a0bdac0e0144e9 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -686,8 +686,10 @@ const layer = Layer.effect(
-                 ? { raw: part.state.raw + pendingRaw }
-                 : {}),
+@@ -721,6 +721,8 @@
                status: "error",
 -              error: "Tool execution aborted",
--              metadata: { ...metadata, interrupted: true },
+-              metadata: { ...metadata, interrupted: true,
 +              // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
 +              // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
 +              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
-+              metadata: aborted ? { ...metadata, interrupted: true } : metadata,
++              metadata: { ...metadata, ...(aborted ? { interrupted: true } : {}),
+                 ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
+               },
                time: { start: "time" in part.state ? part.state.time.start : end, end },
-             },
-           })
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index 8281f87204350b53792c14f18849ebb376c857a4..0847a3ef8403e3f44752b83ca1789952f42cbf0a 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -168,23 +168,40 @@ const layer = Layer.effect(
-       // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
-       // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
-       yield* // #71：cancel 时中止未完成 assistant 与 running 工具
--abortPendingAssistant(sessionID).pipe(Effect.ignore)
-+abortPendingAssistants(sessionID).pipe(Effect.ignore)
-     })
- 
--    const abortPendingAssistant = Effect.fn("SessionPrompt.abortPendingAssistant")(function* (sessionID: SessionID) {
--      // findMessage 可能抛出 NotFound（session 不存在），catchAll 转为 None
+@@ -155,8 +155,8 @@
+-      // runner 取消会先发布 Idle，必须在释放前冻结旧助手，不能随后 newest-first 选中新运行。
 -      const match = yield* sessions.findMessage(
 -        sessionID,
 -        (msg) => msg.info.role === "assistant" && !msg.info.time.completed,
 -      ).pipe(Effect.catch(() => Effect.succeed(Option.none())))
--      if (Option.isNone(match)) return
-+    const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-+      // #153：cancel 必须覆盖全部可见未完成 assistant，而非仅 findMessage 命中的第一条
-+      // sessions.messages 返回 chronological 顺序且默认过滤 hidden，取消只需覆盖可见项
-+      const visible = yield* sessions.messages({ sessionID })
-+      const pending = visible.filter(
-+        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
-+          msg.info.role === "assistant" && !msg.info.time.completed,
-+      )
-+      if (pending.length === 0) return
- 
-+      // 同一时间戳保证同批被取消的 assistant 时间线一致
-       const now = Date.now()
--      const assistant = match.value.info
--      if (assistant.role !== "assistant" || assistant.time.completed) return
--      assistant.time.completed = now
--      assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
--      yield* sessions.updateMessage(assistant)
-+      const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-+      // 逐条终态化而非批量写，保持每条消息的事件粒度与既有持久化路径一致
-+      yield* Effect.forEach(
-+        pending,
-+        Effect.fnUntraced(function* (msg) {
-+          const assistant = msg.info
-+          assistant.time.completed = now
-+          // error 只在缺失时补写，保留上游已设置的错误语义
-+          assistant.error ??= new SessionV1.AbortedError({ message: "Aborted" }).toObject()
-+          // #153：无任何 part 的悬挂 assistant 直接隐藏，避免 UI 残留空泡
-+          if (msg.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" as const }
-+          yield* sessions.updateMessage(assistant)
-+          if (usage && assistant.parentID) {
-+            // Interface 声明为 Effect<any, any>，运行时由 Layer 吸收依赖，收窄以维持 cancel 的 never 契约
-+            yield* usage.recordAssistant({ sessionID, requestID: assistant.parentID, assistant }) as Effect.Effect<void>
-+          }
-+        }),
-+        { discard: true },
-+      )
- 
-       // #149：不在此强制写 tool error；各工具 cancel handler（如 bash 截断）负责收口，避免竞态
- 
++      // 先冻结全部可见未完成助手；取消发布 idle 后不能选中新开始的消息。
++      const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
++        .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
++        .map((msg) => msg.info.id)
+       yield* state.cancel(sessionID)
+-      // 消息已被删除或 owner 已结算时只结束本次取消；不能扫描其他 pending 助手补位。
+-      if (Option.isSome(match)) yield* abortPendingAssistant(sessionID, match.value.info.id).pipe(Effect.ignore)
++      yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
++        discard: true,
++      })
+@@ -179,1 +180,3 @@
+       // 用户取消不是 provider finish，准备窗口只保存 AbortedError/completed，不伪造模型结束原因。
++      // 空体残留不占可见时间线，仍沿原子 publishAssistant 提交其账本终态。
++      if (match.value.parts.length === 0) assistant.hidden = { time: now, reason: "repair-empty-dangling-assistant" }
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
 index e5f9a6240d9850e680961ef416b68f937fcdb351..fb89b774948f8ad2aba64fee305e1de0bc301021 100644
 --- a/packages/opencode/src/session/revert.ts
@@ -318,7 +281,7 @@ index e5f9a6240d9850e680961ef416b68f937fcdb351..fb89b774948f8ad2aba64fee305e1de0
  import { SessionID, MessageID, PartID } from "./schema"
  import { SessionRunState } from "./run-state"
  import { SessionSummary } from "./summary"
-+import { SessionRequestUsage } from "./request-usage"
++import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
  
  export const RevertInput = Schema.Struct({
    sessionID: SessionID,
@@ -481,7 +444,7 @@ index 54d0f02d181cf6b6f45bef4abcb3396cdb960e21..a62ef3f7e1c153d61b1b3f08551ced4e
  import { Session } from "@/session/session"
  
  import { SessionRevert } from "../../src/session/revert"
-+import { SessionRequestUsage } from "../../src/session/request-usage"
++import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
  import { MessageV2 } from "../../src/session/message-v2"
  import { Snapshot } from "../../src/snapshot"
  import { MessageID, PartID, SessionID } from "../../src/session/schema"
@@ -601,15 +564,19 @@ index 0b075c2bff96f440b7d9b281c42d57db24f48b21..707895a75ce11119698429e64b33ad77
              sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
              sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
              project.workspace.sync(),
-@@ -651,6 +658,8 @@ export const {
+@@ -651,6 +658,9 @@ export const {
                sdk.client.session.messages({ sessionID, limit: 100 }),
                sdk.client.session.todo({ sessionID }),
                sdk.client.session.diff({ sessionID }),
 +              // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
-+              sdk.client.session.status({ workspace: project.workspace.current() }),
++              sdk.client.session.status({ workspace: project.workspace.current() })
++                .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
              ])
              setStore(
                produce((draft) => {
+@@ -795,1 +805,2 @@
++      sessionStatus: { refresh: refreshStatus },
+       bootstrap,
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index ad20ce812a8796579a3eb1a1c79c4822bd6f6f86..1120443e20c7793075c4575b7a472536b8d80469 100644
 --- a/packages/tui/src/routes/session/index.tsx

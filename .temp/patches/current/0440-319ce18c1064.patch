@@ -6,9 +6,12 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 +  "version": "1.18.43-smark",
 +  "//440-release-note": "#440 源 patch bump 1.15.10→1.15.11 按版本线映射为 1.18.42→1.18.43；禁止回写 1.14/1.15。",
    "//396-release-note": "#396 源 patch bump 1.15.9→1.15.10 按版本线映射为 1.18.41→1.18.42；禁止回写 1.14/1.15。",
-diff --git a/CONTEXT.md b/CONTEXT.md
---- a/CONTEXT.md
-+++ b/CONTEXT.md
-@@ -231 +231 @@
--The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.10-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
-+The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.11-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -572,4 +572,4 @@
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.18.38-smark",
++      "version": "1.18.43-smark",
+       "bin": {

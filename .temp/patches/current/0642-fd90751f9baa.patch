@@ -13,7 +13,7 @@ Content-Transfer-Encoding: 8bit
 补齐真实取消、撤回、HTTP 与后台任务接线的红绿回归，按 R9 完成独立全范围实现审计；相关测试 322 通过、14 个既有条件跳过，类型检查通过。按用户要求撤除 MCP 计分扩展，不增加工具结果字段、持久化迁移或额外兜底路径。
 
 适配说明（0642，目标 v1.18.32）：
-1. goal.ts/prompt.ts/tool/goal.ts/goal.txt 四个文本与机制 owner 与 source 同名同构，全部 hunk（含 STRATEGY_SWITCH_BLOCK、GOAL_LONG_RUN_NOTICE、continuationPrompt 第三参、What counts as progress 段、blocked 消息边界、task exploration 分类分支、GOAL_LONG_RUN_TURN_THRESHOLD=8、恢复注入分支、loop() cleanupRevert 空守卫、LoopInput 可选字段）逐字重锚到 0641 状态的对应行位。
+1. 本轮共享Goal正文和进度分类归Core，两代实际工具与runner承接同一语义；V1首次恢复在请求身份冻结前注入，原生恢复复用Synthetic及真实eligible历史。其余source计划与用例保留；后列旧路径说明为历史记录。
 2. handlers/session.ts goalSet 恢复 fork loop 传 cleanupRevert: true，与 source 一致（唯一 flag 调用方）。
 3. src/tool/task.ts 不做生产改动：0641 目标的 TaskPromptOps 无 loop 方法、task.ts 无 loop 调用，后台完成恢复走 inject→ops.prompt()，prompt() 自带 createUserMessage 前的 revert.cleanup（prompt.ts:1747→1748），source 计划 §10.7（round-8 N-01 修正后）确认该路径 cleanup-before-create 已成立；为不存在的调用点添加 flag 属 over-design，INV-16 语义由既有 owner 完整承担。
 4. test/tool/task.test.ts：source 用例断言 loop 输入携带 cleanupRevert；目标等价可观测面为父会话恢复输入到达 prompt seam（清理 owner），适配为 Deferred 捕获父绑定 prompt 输入并断言经公开 prompt 入口恢复（含注释说明 owner 迁移）。
@@ -1179,15 +1179,15 @@ index a5b748b..6581a4a 100644
          // prompt_async observability，不能静默吞掉或伪造 mutation 成功后的执行结果。
          // startImmediately 让 fork 在 handler scope 内开始，随后仍由 RunState 决定 start/join；
          // HTTP 200 只承诺 mutation 已提交，不把后台执行成败混入 response contract。
--        yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
-+        yield* promptSvc.loop({ sessionID: ctx.params.sessionID, cleanupRevert: true }).pipe(
+-        yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
++        yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID, cleanupRevert: true }).pipe(
            Effect.catchCause((cause) =>
              Effect.gen(function* () {
                yield* Effect.logError("goal resume loop failed").pipe(
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
 index a99d038..4068b63 100644
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
+--- a/packages/core/src/session/goal.ts
++++ b/packages/core/src/session/goal.ts
 @@ -335,7 +335,8 @@ const layer = Layer.effect(
        if ((input.status === "complete" || input.status === "blocked") && row.status !== "active") {
          return {
@@ -1324,11 +1324,10 @@ index a99d038..4068b63 100644
      '- Use operate "blocked" only when you are truly at an impasse and cannot make meaningful progress without user input or an external-state change.',
      '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',
      '- Never use operate "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index a4e69cf..059b921 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -362,6 +362,14 @@ function absorbGoalTurnEvidence(
+diff --git a/packages/core/src/session/goal-progress.ts b/packages/core/src/session/goal-progress.ts
+--- a/packages/core/src/session/goal-progress.ts
++++ b/packages/core/src/session/goal-progress.ts
+@@ -245,6 +245,14 @@ export function absorbGoalTurnEvidence(
          const ckey = `${command.trim().toLowerCase()}\0${String(exit)}\0${output}`
          if (recordIfNew(ledger.commands, ckey)) exploration = true
        }
@@ -1343,6 +1342,10 @@ index a4e69cf..059b921 100644
      }
    }
    return { exploration, advancement }
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index a4e69cf..059b921 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
 @@ -2087,6 +2095,8 @@ const layer = Layer.effect(
              // [local-smark] goal 续跑不再需要 experimental 开关，始终可用；
              // goal_max_turns 已提升为顶层 config 字段（0367）
@@ -1416,9 +1419,9 @@ index a4e69cf..059b921 100644
 +            }
 +          }
 +
-           step++
-           if (step === 1)
-             yield* title({
+           // 本轮选中的 user 在模型/agent/上下文准备前冻结，失败时不重读后来保存的 steer。
+           requestID = lastUser.id
+           existingAssistantID = lastAssistant?.parentID === lastUser.id ? lastAssistant.id : undefined
 @@ -2676,6 +2737,21 @@ const layer = Layer.effect(
      const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
        input: LoopInput,
@@ -1457,7 +1460,7 @@ index d6c2cef..4216ba8 100644
 @@ -32,7 +32,7 @@ export const Parameters = Schema.Struct({
      description:
        // #517：blocked 首轮指引改为 BFS 复核；two-turn 阈值与 exact reason 契约不变。
-       // A17：two consecutive eligible Goal turns→a second consecutive call（调用即计数，非 turn 语义）；adjacent 枚举改 breadth-first 泛化。
+       // 首轮启动audit，重复确认仍须后续合法turn；这里不改变运行时状态机。
 -      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
 +      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker after the next goal-continuation message arrives. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal after the user sends a new message.",
    }),
@@ -1514,6 +1517,105 @@ index e16068a..ec012f1 100644
  - Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; use `operate: "blocked"`.
  - Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.
  - Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+--- a/packages/core/src/tool/goal.ts
++++ b/packages/core/src/tool/goal.ts
+@@ -15,9 +15,9 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
+     goal: Tool.make({
+-      // 首轮必须能启动受阻审计；后续确认继续遵守真实turn与reason约束。
+-      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked to start a blocker audit; a second consecutive call with the same trimmed reason in the next eligible Goal turn marks it blocked. The first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
++      // 共享持久消息边界约束两代工具；去掉分段措辞不放宽确认与用户授权。
++      description: "Use operate read before changing any goal status. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked to start a blocker audit; a second consecutive call with the same trimmed reason after the next goal-continuation message arrives marks it blocked; a repeated call while answering the same message does not count. The first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. Optionally delegate an independent audit to a subagent with the task tool before confirming. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only after the user sends a new message, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
+       input: Schema.Struct({
+         // 显式 read 消除空调用歧义；可信快照仍保存在 runner 提供的同一 turn 上。
+         operate: Schema.Literals(["read", "complete", "blocked", "active"]).annotate({
+-          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Use blocked to start a blocker audit; a second consecutive call in the next eligible Goal turn using the same trimmed reason marks it blocked; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
++          description: "Use read before any transition. Use complete/blocked with reason, or active to resume after the user sends a new message. Use blocked to start a blocker audit; a second consecutive call after the next goal-continuation message arrives using the same trimmed reason marks it blocked; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
+         }),
+         reason: Schema.String.pipe(Schema.optional).annotate({
+@@ -66,12 +66,14 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
+                   "1. Restate the exact blocker and the Goal requirement it prevents.",
+                   "2. Re-read the most relevant files and inspect one adjacent producer, consumer, test, or configuration path that could change the conclusion.",
+                   "3. Run one different search, test, or focused check, and split the blocker into a smaller verifiable question.",
+-                  "4. If any branch yields a viable path, continue working and do not call blocked again.",
+-                  'If the same blocker still prevents meaningful progress after this exploration, call operate "blocked" in the next eligible Goal turn with the same trimmed reason. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
++                  // 审查建议不新增持久状态或准入条件；计数仍归modelTransition。
++                  "4. Delegate an independent audit to a subagent with the task tool: fresh context should judge whether the blocker is real, whether the current route is wrong, and which requirements remain unfinished.",
++                  "5. If any branch yields a viable path, continue working and do not call blocked again.",
++                  'If no branch is viable, call operate "blocked" again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count. Do not mark the Goal blocked merely because the work is hard, uncertain, or incomplete.',
+                 ].join("\n")
+               : output.status === "active"
+                 ? "Goal resumed to active. Continue working toward the objective."
+-                : `Goal marked as ${output.status}: ${output.reason}. The session loop will end after this turn.`,
++                : `Goal marked as ${output.status}: ${output.reason}.${output.status === "blocked" ? " The user can resume the goal later." : ""}`,
+       }],
+     }),
+   }).pipe(Effect.orDie)
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -232,7 +232,8 @@ const layer = Layer.effect(
+             if (Option.isSome(goal) && goal.value.status === "active") {
+               yield* events.publish(SessionEvent.Synthetic, {
+                 sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
+-                text: SessionGoal.continuationPrompt(goal.value, continuation.mode),
++                // 本次发布后才递增；已发布八次时，下一条才是第九次长程督促。
++                text: SessionGoal.continuationPrompt(goal.value, continuation.mode, continuation.turns >= 8),
+               })
+               continuation.turns++
+             }
+@@ -600,6 +601,17 @@ const layer = Layer.effect(
+       yield* failInterruptedTools(input.sessionID)
+       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
+       // frontier 仅属于本次 drain；新唤醒不继承旧运行的停滞或验证基线。
+       const continuation: GoalContinuation = { turns: 0, progressLedger: SessionGoalProgress.createGoalProgressLedger(), progressGate: { noProgressTurns: 0, replanRequired: false } }
++      // 仅显式恢复且没有待提升输入时补上下文；自动wake与未回答消息保留原入口。
++      if (input.force && !promotion && (Config.latest(configuration, "goal_max_turns") ?? 32) > 0) {
++        const session = yield* getSession(input.sessionID)
++        const agent = yield* agents.select(session.agent)
++        const goal = yield* goals.get(input.sessionID)
++        if (!session.parentID && agent.id !== "decide" && Option.isSome(goal) && goal.value.status === "active") {
++          const answered = yield* SessionHistory.goalTurnMessages(db, input.sessionID)
++          // 采用原生eligible历史；显式revert.commit仍由其owner消费，不能吞掉新admission。
++          if (answered.length > 0) continuation.goal = goal.value
++        }
++      }
+       let shouldRun = input.force || hasSteer || hasQueue
+       while (shouldRun) {
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -683,6 +683,8 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+     yield* session.resume(sessionID)
+     // 已排队输入先提升；随后恰好两次合成续跑，预算仅记录，不提前截断。
+     expect(requests).toHaveLength(4)
++    // 未回答的首个用户输入不能被恢复注入抢占。
++    expect(userTexts(requests[0]!)).toEqual(["Start working"])
+     expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
+     expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
+     // queue 先提升；其后两个无证据完成才切策略，不能按 provider step 提前计轮。
+@@ -733,7 +735,10 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+     requests.length = 0
+     yield* session.resume(sessionID)
+     // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
+     expect(requests).toHaveLength(3)
++    // 两条旧续跑之后，首次恢复请求已携带第三条上下文，不能等盲答后才补。
++    expect(userTexts(requests[0]!).filter((text) => text.includes("<session-goal-continuation>"))).toHaveLength(3)
++    expect(userTexts(requests[0]!).at(-1)).toContain("<objective>Finish the native task</objective>")
+     expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({
+       status: "complete", generation: 1, reason: "Verified requested end state", tokensUsed: 15,
+     })
+@@ -841,6 +846,10 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a new drain", () =>
+     yield* session.resume(sessionID)
+     // 首轮加32次续跑，到限暂停；恢复后由新用户输入开启下一轮额度。
+     expect(requests).toHaveLength(33)
++    // 第八次仍保持原合同，第九次附加长程提示并保留既有replan。
++    expect(userTexts(requests[8]!).at(-1)).not.toContain("<long-run-notice>")
++    expect(userTexts(requests[9]!).at(-1)).toContain("<long-run-notice>")
++    expect(userTexts(requests[9]!).at(-1)).toContain('mode="breadth-first-replan"')
+     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
+     yield* goals.set(sessionID, { status: "active" })
+     yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue the goal" }), resume: false })
 diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
 index 1b94f9b..0928591 100644
 --- a/packages/opencode/test/server/httpapi-goal.test.ts
@@ -2070,7 +2172,10 @@ index e3efaf1..769d1c3 100644
  import { ProviderV2 } from "@opencode-ai/core/provider"
  import { ModelV2 } from "@opencode-ai/core/model"
  
-@@ -1403,6 +1403,8 @@ describe("tool.task", () => {
+@@ -1441,9 +1441,11 @@ describe("tool.task", () => {
+   background.instance("background task completion does not wait for the parent async prompt", () =>
+     Effect.gen(function* () {
+       const jobs = yield* BackgroundJob.Service
        const { chat, assistant } = yield* seed()
        const tool = yield* TaskTool
        const def = yield* tool.init()
@@ -2079,7 +2184,7 @@ index e3efaf1..769d1c3 100644
  
        const result = yield* def.execute(
          {
-@@ -1420,7 +1422,9 @@ describe("tool.task", () => {
+@@ -1461,7 +1463,9 @@ describe("tool.task", () => {
              promptOps: {
                ...stubOps({ text: "background done" }),
                prompt: (input) =>
@@ -2090,13 +2195,11 @@ index e3efaf1..769d1c3 100644
              } satisfies TaskPromptOps,
            },
            messages: [],
-@@ -1432,6 +1436,12 @@ describe("tool.task", () => {
+@@ -1473,6 +1477,10 @@ describe("tool.task", () => {
        const waited = yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })
        expect(waited.timedOut).toBe(false)
        expect(waited.info?.status).toBe("completed")
-+      // 子任务先写入结果消息，再通过公开 prompt seam 恢复父会话；目标中 prompt() 自带
-+      // createUserMessage 前的 revert cleanup（前置清理），因此不存在需要 cleanupRevert 的
-+      // 独立 loop 接线——断言恢复确实经由 prompt 入口即锁定清理职责归属。
++      // 后台结果经公开prompt入口恢复；该入口负责创建新消息前的撤回清理，不另造loop接线。
 +      const input = yield* awaitWithTimeout(Deferred.await(resumed), "parent resume was not requested")
 +      expect(input.sessionID).toBe(chat.id)
 +      expect(JSON.stringify(input.parts)).toContain("Background task completed: inspect bug")

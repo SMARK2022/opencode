@@ -6,79 +6,35 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E4=B8=8A=E4=B8=8B?=
  =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81=E6=B5=81=E5=BC=8F=E5=B7=A5=E5=85=B7?=
  =?UTF-8?q?=E8=BE=93=E5=85=A5=E5=A2=9E=E9=87=8F=E8=B7=9F=E8=B8=AA?=
 
-diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
-index 1111111111..2222222222 100644
---- a/packages/tui/src/context/sync.tsx
-+++ b/packages/tui/src/context/sync.tsx
-@@ -454,6 +454,17 @@
-             event.properties.messageID,
-             produce((draft) => {
-               const part = draft[result.index]
-+              // #157：pending tool 的 raw 在 state 下，不能走顶层 part[field]
-+              if (
-+                part.type === "tool" &&
-+                part.state?.status === "pending" &&
-+                event.properties.field === "raw"
-+              ) {
-+                // #157：与 processor tool-input-delta field:"raw" 对齐
-+                const state = part.state as { raw?: string }
-+                state.raw = (state.raw ?? "") + event.properties.delta
-+                return
-+              }
-               const field = event.properties.field as keyof typeof part
-               const existing = part[field] as string | undefined
-               ;(part[field] as string) = (existing ?? "") + event.properties.delta
 diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
 index 1111111111..2222222222 100644
 --- a/packages/tui/src/routes/session/context-usage.tsx
 +++ b/packages/tui/src/routes/session/context-usage.tsx
-@@ -14,6 +14,13 @@
+@@ -18,4 +18,10 @@
    type ContextUsageData,
    type GridSquare,
  } from "../../util/context-usage"
 +
-+// #157：JSON 往返强制读取嵌套 Solid store（如 part.state.raw），浅拷贝数组不够
-+// #157：TSX 下泛型用尾逗号，避免 <T> 被解析为 JSX
++// 深读 Solid 嵌套字段使 raw 增量参与依赖追踪；节流继续作用于完整快照。
 +export function contextUsageSnapshot<T,>(value: T): T {
 +  return JSON.parse(JSON.stringify(value)) as T
 +}
 +
  
- // 格式化 token 数为人类可读的 k/m 简写
- function formatTokens(tokens: number) {
-@@ -259,10 +266,13 @@
- 
-   // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
-+  // #157：inputRaw 的响应式依赖由深快照建立，后续 produce 内的 raw 增量可精确触发重算
-   const inputRaw = createMemo(() => {
--    // 展开拷贝消息数组：避免直接引用 sync 内部状态，防止后续 mutation 影响响应式追踪
--    const messages = [...(sync.data.message[props.sessionID] ?? [])]
--    // 按 messageID 分组部件列表
--    const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
-+    // #157：messages/parts 都 deep snapshot，嵌套 raw 增量才能触发 memo
-+    const messages = contextUsageSnapshot([...(sync.data.message[props.sessionID] ?? [])])
-+    // #157：parts 同样 deep-read，否则 state.raw 增长不重算
-+    const parts = Object.fromEntries(
-+      messages.map((msg) => [msg.id, contextUsageSnapshot([...(sync.data.part[msg.id] ?? [])])]),
-+    )
-     const paths = project.instance.path()
-     return {
-       messages,
+@@ -242,1 +248,1 @@
+-  const snapshot = createMemo<ComputeContextDataInput>(() => JSON.parse(JSON.stringify(input())))
++  const snapshot = createMemo<ComputeContextDataInput>(() => contextUsageSnapshot(input()))
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 index 1111111111..2222222222 100644
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -1,3 +1,6 @@
+@@ -1,3 +1,4 @@
 +import { contextUsageSnapshot } from "../src/routes/session/context-usage"
-+import { createMemo, createRoot } from "solid-js"
-+import { createStore } from "solid-js/store"
  import { describe, expect, test } from "bun:test"
- import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
- import { computeContextData, filterCompactedMessages } from "../src/util/context-usage"
-@@ -503,3 +506,32 @@
-     expect(part.inputBreakdown.messages.attachments).toBe(20)
-   })
- })
+-import { createComputed, createRoot, createSignal } from "solid-js"
++import { createComputed, createMemo, createRoot, createSignal } from "solid-js"
+ import { createStore } from "solid-js/store"
+@@ -94,1 +95,30 @@
 +
 +
 +// #157：验证嵌套 raw 流式增量触发 memo（runs=2）
@@ -108,6 +64,7 @@ index 1111111111..2222222222 100644
 +    dispose()
 +  })
 +})
+ describe("context usage", () => {
 --
 2.39.0
 

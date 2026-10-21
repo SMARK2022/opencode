@@ -491,10 +491,9 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 index ce90ef6e7..dae3efabd 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -36,7 +36,7 @@ import { iife } from "@/util/iife"
+@@ -36,6 +36,6 @@ import { iife } from "@/util/iife"
  import { errorMessage } from "@/util/error"
  import { isMedia } from "@/util/media"
- // #282：compaction 清理后改用统一 notice 信封，替代旧的硬编码英文标记
 -import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
 +import { ensureTaskResumeVisible, formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
  import type { SystemError } from "bun"

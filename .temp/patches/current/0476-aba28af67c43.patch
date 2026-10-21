@@ -30,15 +30,9 @@ diff --git a/CONTEXT.md b/CONTEXT.md
 index c3204f0fa90253453d5a57e3d8595931d08de5ec..5cc772f8f6816af3b41b8ae92d2c2966cb11ea28 100644
 --- a/CONTEXT.md
 +++ b/CONTEXT.md
-@@ -126,7 +126,7 @@ _Avoid_: proxy-config, http-proxy
- 
- ## Module map
- 
+@@ -357,1 +357,1 @@
 -A descriptive index of current structure and each area's responsibility — **not** a design spec and **not** a statement of future direction. It indexes what exists now so skills (e.g. `zoom-out`) can navigate; the glossary above is the canonical vocabulary.
 +A descriptive index of current structure and each area's responsibility — **not** a design spec and **not** a statement of future direction. It indexes what exists now so skills (e.g. `improve-codebase-architecture`, `diagnosing-bugs`) can navigate; the glossary above is the canonical vocabulary.
- 
- ### `packages/opencode/src/`
- 
 diff --git a/docs/agents/domain.md b/docs/agents/domain.md
 index 2cb5bcf49e49eb5d8bf567550ee598da89f2466a..9dabd110c35768ee59f8055620329927b833350e 100644
 --- a/docs/agents/domain.md
@@ -61,8 +55,8 @@ index 2cb5bcf49e49eb5d8bf567550ee598da89f2466a..9dabd110c35768ee59f8055620329927
  
  ## Monorepo orientation
  
--When a skill (e.g. `zoom-out`) asks for a map of modules and callers, use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index of current structure and responsibilities, not a design spec. Other packages (`app`, `desktop`, `desktop-electron`, `web`, `console`, `sdk`, `plugin`, `core`, `ui`, `shared`) are consumers/facades of the core domain; canonical definitions live in `packages/opencode`.
-+When you need a map of modules and callers (e.g. during `improve-codebase-architecture` or `diagnosing-bugs`), use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index of current structure and responsibilities, not a design spec. Other packages (`app`, `desktop`, `desktop-electron`, `web`, `console`, `sdk`, `plugin`, `core`, `ui`, `shared`) are consumers/facades of the core domain; canonical definitions live in `packages/opencode`.
+-When a skill (e.g. `zoom-out`) asks for a map of modules and callers, use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index, not a design spec. Follow Schema → Core/Protocol → Server dependencies; Client runtime may use Schema and Protocol, never Core or Server. The native Session owner is `packages/core/src/session`, and terminal components live in `packages/tui`.
++When you need a map of modules and callers (e.g. during `improve-codebase-architecture` or `diagnosing-bugs`), use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index, not a design spec. Follow Schema → Core/Protocol → Server dependencies; Client runtime may use Schema and Protocol, never Core or Server. The native Session owner is `packages/core/src/session`, and terminal components live in `packages/tui`.
 diff --git a/docs/agents/triage-labels.md b/docs/agents/triage-labels.md
 index c08a380526f3da5c0a058daf7284d17f3d72b8fc..be1a138ddeb6842d19878ad6509a7ea905791310 100644
 --- a/docs/agents/triage-labels.md

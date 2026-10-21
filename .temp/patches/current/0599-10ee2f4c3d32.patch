@@ -8,9 +8,107 @@ Subject: [PATCH] =?UTF-8?q?fix(permission):=20reviewer=20=E9=BB=98?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 
-适配说明：五 hunk 全量落地——schema 路径重锚 packages/opencode/src/config/permission.ts→packages/core/src/v1/config/permission.ts（上游 v1.18.32 迁移；同步 #196 注释 90→120）；TIME_BUDGET_RETRY_USER_ITEM 插模块顶层常量区（目标常量已提升至顶层）；perAttemptTimeout 与三分支重试按目标显式类型箭头函数形态重锚；测试断言插超时重试用例 llm.calls 锚后。语义零改写。
+适配说明：保留source五hunk并按真实V1上下文重锚；共享prompt保存唯一时间预算文本，V1保留局部常量名，Core原生reviewer同步120秒与单份后缀。按最近失败种类选择协议或时间提示，三次尝试、596的窄400协商和取消边界不变；既有Core回归覆盖首轮、超时及混合链。
 
 
+diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
+--- a/packages/core/src/permission/reviewer/prompt.ts
++++ b/packages/core/src/permission/reviewer/prompt.ts
+@@ -24,3 +24,9 @@
+ // #198：默认租户策略从 policy.md 导入——可在 config 中用 policy_path 或 policy 字段覆盖或追加
+ export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
+ 
++// 超时才提示600词软预算；保留意图/风险/策略清单，重建上下文不能引用不可见的上一轮分析。
++export const TIME_BUDGET_RETRY_USER_ITEM = {
++  type: "text" as const,
++  text: "Time advisory: a previous attempt at this review exceeded its time budget. Think concisely now: keep reasoning within roughly 600 words. State the user's intent and authorization, the action's concrete risk, and the policy rule that matches, then submit the decision. Do not re-derive the transcript, do not re-check alternatives repeatedly, and do not stall in 'wait, but…' loops.",
++}
++
+diff --git a/packages/core/src/config/auto-review.ts b/packages/core/src/config/auto-review.ts
+--- a/packages/core/src/config/auto-review.ts
++++ b/packages/core/src/config/auto-review.ts
+@@ -10,3 +10,3 @@
+   // 与V1相同，单次执行期限不包含后续补试及清理的全部墙钟时间。
+-  timeout_ms: Schema.Number.pipe(Schema.optional).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts. Defaults to 90000." }),
++  timeout_ms: Schema.Number.pipe(Schema.optional).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts. Timeout retries append a time-budget advisory to the prompt. Defaults to 120000." }),
+   policy_path: Schema.String.pipe(Schema.optional),
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -79,3 +79,3 @@
+       // 只在reviewer解码边界接受source允许的文本裁决，通用generateObject契约保持严格。
+-      const attempt = (index: number, nudged = false): Effect.Effect<PermissionReviewerSchema.Assessment, Failed | LLMError> => Effect.gen(function* () {
++      const attempt = (index: number, retry?: "protocol" | "timeout"): Effect.Effect<PermissionReviewerSchema.Assessment, Failed | LLMError> => Effect.gen(function* () {
+         const forced = !toolChoiceRejectedProviders.has(selected.model.provider)
+@@ -86,1 +86,1 @@
+-          prompt: items.map((item) => item.text).join("\n\n") + (nudged ? "\n\nSubmit a valid decision using the generate_object tool. Avoid prose, questions, explanations of inability, and offers to execute the action. Keep the supplied evidence and requested action unchanged. If tool calls are unavailable, reply with ONLY the JSON decision object." : ""),
++          prompt: items.map((item) => item.text).join("\n\n") + (retry === "timeout" ? "\n\n" + PermissionReviewerPrompt.TIME_BUDGET_RETRY_USER_ITEM.text : retry === "protocol" ? "\n\nSubmit a valid decision using the generate_object tool. Avoid prose, questions, explanations of inability, and offers to execute the action. Keep the supplied evidence and requested action unchanged. If tool calls are unavailable, reply with ONLY the JSON decision object." : ""),
+@@ -103,8 +103,8 @@
+         // 单次超时位于重试内侧；取消保持interruption，绝不能变成批准或补试。
+-        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
++        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 120_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
+         Effect.catchIf((error) => error instanceof Failed || error.reason._tag === "InvalidProviderOutput", (error) => {
+           if (index >= 2) return Effect.fail(error)
+-          // 超时保留原提示；协议错误只加一次格式nudge，不重建或扩张授权证据。
+-          return attempt(index + 1, nudged || !(error instanceof Failed && error.reason === "auto reviewer timed out"))
++          // 以最近失败选择单份后缀；混合链不保留旧nudge，也不改变三次预算或授权证据。
++          return attempt(index + 1, error instanceof Failed && error.reason === "auto reviewer timed out" ? "timeout" : "protocol")
+         }),
+       )
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -49,3 +49,5 @@
+     reviewRequests.push(request)
++    // 先固定本次挂起计划再发布开始信号，下一轮计划不能反向影响当前运输。
++    const hanging = reviewHangs > 0
+     if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
+     // 只在强制选择时产生typed400，不连真实provider；去参请求仍走同一个fake运输边界。
+@@ -58,1 +60,1 @@
+-    if (reviewHangs > 0) {
++    if (hanging) {
+@@ -568,6 +570,11 @@
+-    // 真正中断第一次运输后才补试，超时补试保持相同证据且不添加协议nudge。
++    // 真正中断首次运输；超时补试保留完整证据前缀，只附加一份时间预算。
+     expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
+     expect(reviewInterrupted).toBe(1)
+     expect(reviewRequests).toHaveLength(2)
+-    expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
++    const timeoutInputs = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n"))
++    expect(timeoutInputs[0]).not.toContain("Time advisory")
++    expect(timeoutInputs[1]).toContain("Time advisory")
++    expect(timeoutInputs[1]).toContain("600 words")
++    expect(timeoutInputs[1]?.split("\n\nTime advisory:")[0]).toBe(timeoutInputs[0])
++    expect(timeoutInputs[1]?.match(/Time advisory:/g)).toHaveLength(1)
+     reviewText = "Based on my analysis:\n" + JSON.stringify({ ...assessment, rationale: 'bounded } transfer with "quoted" evidence' })
+@@ -585,3 +592,27 @@
+     expect(JSON.stringify(reviewRequests[0]?.messages)).not.toContain("Submit a valid decision using the generate_object tool")
+     expect(JSON.stringify(reviewRequests[1]?.messages)).toContain("Submit a valid decision using the generate_object tool")
++    // 第一轮协议失败、第二轮挂起超时、第三轮成功；用已有运输闸门确定性交错，不靠睡眠。
++    reviewRequests.length = 0
++    reviewGate = yield* Deferred.make<void>()
++    reviewStarted = yield* Deferred.make<void>()
++    const mixed = yield* service.ask({ ...input, metadata: { ...input.metadata, diff: "mixed" } }).pipe(Effect.forkChild)
++    yield* Deferred.await(reviewStarted)
++    reviewHangs = 1
++    reviewStarted = yield* Deferred.make<void>()
++    yield* Deferred.succeed(reviewGate, undefined)
++    reviewGate = undefined
++    yield* Deferred.await(reviewStarted)
++    malformed = false
++    yield* TestClock.adjust("1 second")
++    expect(yield* Fiber.join(mixed)).toMatchObject({ effect: "allow" })
++    expect(reviewInterrupted).toBe(2)
++    expect(reviewRequests).toHaveLength(3)
++    expect(JSON.stringify(reviewRequests[0]?.messages)).not.toContain("Time advisory")
++    expect(JSON.stringify(reviewRequests[1]?.messages)).toContain("Submit a valid decision using the generate_object tool")
++    expect(JSON.stringify(reviewRequests[1]?.messages)).not.toContain("Time advisory")
++    // 最近失败是超时，第三轮不能同时携带旧协议提示或多份时间预算。
++    expect(JSON.stringify(reviewRequests[2]?.messages)).toContain("Time advisory")
++    expect(JSON.stringify(reviewRequests[2]?.messages)).toContain("600 words")
++    expect(JSON.stringify(reviewRequests[2]?.messages)).not.toContain("Submit a valid decision using the generate_object tool")
++    expect(JSON.stringify(reviewRequests[2]?.messages).match(/Time advisory:/g)).toHaveLength(1)
+     // 首个完整对象不符契约时不能继续寻找后面的allow对象。
 diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/config/permission.ts
 --- a/packages/core/src/v1/config/permission.ts
 +++ b/packages/core/src/v1/config/permission.ts
@@ -21,9 +119,9 @@ diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/co
 -  // #196：model 指定 reviewer 使用的模型；timeout_ms 默认 90 秒。
 +  // #196：model 指定 reviewer 使用的模型；599 起 timeout_ms 默认 120 秒（超时重试附时间预算后缀）。
    model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
-   // #390：timeout_ms 是每次尝试的超时（非总超时）——reviewer 重试 0→3 次后语义已变
--  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000." }),
-+  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000." }),
+   // timeout_ms限制单次执行，共1次初始加2次重试，不把清理开销计成执行总界。
+-  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Defaults to 90000." }),
++  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000." }),
    // #196：policy_path 和 policy 追加到默认 tenant policy 之后。
    policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
    policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),
@@ -31,44 +129,31 @@ diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/co
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -97,6 +97,15 @@ const REVIEWER_DECISION_PROTOCOL_ERROR = "reviewer did not call permission_revie
+@@ -98,6 +98,8 @@
  // consumers from confusing protocol retry cleanup with undo or session repair.
  const PROTOCOL_RETRY_HIDDEN_REASON = "permission-reviewer-protocol-retry"
  // #227：协议失败重试的隐藏原因——首次尝试的畸形输出在重试前隐藏，避免用户把 JSON/散文答案误读为已批准
-+// [local-smark] 599 超时重试的时间预算后缀：只在超时后的重试注入（首次 attempt 不动，
-+// 零常规质量影响）。显式字数锚点比抽象 efficiency 更可控制；正向内容清单
-+// （意图/风险/策略）防欠思考；禁引用模型看不见的「上一轮分析」（重试为
-+// 重建全新上下文）。600 词 ≈ 成功评审 reasoning 中位（~800 词）的 3/4，
-+// 压掉 15k+ 字符的打转循环同时留足判断空间。
-+const TIME_BUDGET_RETRY_USER_ITEM = {
-+  type: "text" as const,
-+  text: "Time advisory: a previous attempt at this review exceeded its time budget. Think concisely now: keep reasoning within roughly 600 words. State the user's intent and authorization, the action's concrete risk, and the policy rule that matches, then submit the decision. Do not re-derive the transcript, do not re-check alternatives repeatedly, and do not stall in 'wait, but…' loops.",
-+}
++// 两条reviewer路径共用预算措辞；仅超时后的新请求追加，不污染首次证据。
++const TIME_BUDGET_RETRY_USER_ITEM = PermissionReviewerPrompt.TIME_BUDGET_RETRY_USER_ITEM
  // reviewer 总尝试次数：1 初始 + 2 重试。协议错误与超时共用该预算。
  const MAX_REVIEWER_ATTEMPTS = 3
  const PROTOCOL_RETRY_USER_ITEM = {
-@@ -219,7 +228,11 @@ export const layer = Layer.effect(
+@@ -214,7 +216,8 @@
              }) as Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error, never>
            }
-           // perAttemptTimeout：timeout_ms 现为单次尝试预算，总最坏 3 倍（1 初始 + 2 重试）
+           // timeout_ms是每次执行预算，共三次尝试；清理开销不构成严格的总墙钟上限。
 -          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
-+          // [local-smark] 599 默认 90s→120s：生产 DB 实测 glm-5.3 系成功 attempt
-+          // p90=77s，90s 红线切在其自然长尾腰部（185 次 ≈90s 截断、多连链 62%
-+          // 全灭）；120s 覆盖 p90 留余量，配合超时重试的时间预算后缀压缩
-+          // overthinking（截断时 reasoning 中位 15.8k 字符 vs 成功中位 4.8k）。
++          // 默认120秒覆盖source观测长尾；显式配置与三次尝试总数不变。
 +          const perAttemptTimeout = autoReview?.timeout_ms ?? 120_000
            // 显式返回注解：递归函数的返回类型无法推断（TS7023/7024）
            const reviewerRetry = (attemptNum: number, currentMessages: readonly ModelMessage[], hideProtocolFailure: boolean): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
              runReviewerAttempt(currentMessages, hideProtocolFailure).pipe(
-@@ -231,10 +244,15 @@ export const layer = Layer.effect(
+@@ -226,10 +229,12 @@
                // 旧代码顺序相反，超时绕过了重试。
                Effect.catchIf(isReviewerRetryable, (error) => {
                  if (attemptNum >= MAX_REVIEWER_ATTEMPTS - 1) return Effect.fail(error)
 -                // 协议错误：附加 protocol nudge 修复提交格式；超时：保持原 prompt
-+                // 协议错误：附加 protocol nudge 修复提交格式；超时：附加时间预算
-+                // 后缀压缩 overthinking（重试不会自我压缩：实测后继 attempt 40/76
-+                // 不比被截断者短）。混合链（协议错误→超时）只保留时间后缀：超时
-+                // attempt 的问题在时长而非提交格式，时间约束是当时主绑定。
++                // 按最近失败重建单份后缀；协议→超时只留时间预算，不累积旧格式提示。
                  const nextMessages = isReviewerDecisionProtocolError(error)
                    ? buildMessages({ system, userItems: [...userItems, PROTOCOL_RETRY_USER_ITEM] })
 -                  : currentMessages
@@ -82,13 +167,11 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1982,6 +1982,13 @@ it.instance(
+@@ -2325,6 +2325,11 @@
  
        // 超时后重试成功：共 2 次 provider 调用
        expect(yield* llm.calls).toBe(2)
-+      // [local-smark] 599 超时重试注入时间预算后缀：首次请求不含，重试请求含显式
-+      // 字数锚点（600 words）与凝练指令——针对 glm-5.3 系 90s 截断时 reasoning
-+      // 中位 15.8k 字符（成功中位 4.8k）的 overthinking 实测形态。
++      // 首次不受预算提示影响；只有超时补试附加600词软约束。
 +      const timeoutInputs = yield* llm.inputs
 +      expect(JSON.stringify(timeoutInputs[0])).not.toContain("Time advisory")
 +      expect(JSON.stringify(timeoutInputs[1])).toContain("Time advisory")

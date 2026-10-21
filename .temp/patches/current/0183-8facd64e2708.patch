@@ -46,8 +46,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      // #181：先扣指标与 gutter 再谈 trend
    const trendRoom = content - metricsBudget - 15 - labelFloor
    // #181：小于 6 列不画 trend，避免碎裂
-@@ -190,24 +193,39 @@ const dashboardTopTable = (
-   const labelWidth = Math.max(labelFloor, Math.min(labelCap, content - metricsBudget - 15 - trendWidth))
+@@ -190,24 +193,40 @@ const dashboardTopTable = (
+-  const labelWidth = Math.max(labelFloor, Math.min(labelCap, content - metricsBudget - 15 - trendWidth))
++  // 指标槽宽含空格与缩进；窄屏优先缩标签，保留 per-call 和数量级。
++  const labelWidth = Math.max(1, Math.min(labelCap, content - (kind === "model" ? 41 : 32) - (trendWidth > 0 ? trendWidth + 3 : 0)))
    const lines = [`▸ ${title}`]
      // #181：宽屏表头带 share│trend，窄屏去掉 trend
 -  const head =
@@ -79,17 +81,17 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    // #181：标签按显示列截断，保留 CJK 语义
      const label = truncateVisible(row.label, labelWidth)
 -        // #181：行体固定指标槽位，便于扫读对齐
--    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(String(row.tokens), 8)} ${fitVisible(String(row.calls), 5)} ${fitVisible(share, 5)}`
+-    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(formatNumber(row.tokens), 8)} ${fitVisible(formatNumber(row.calls), 5)} ${fitVisible(share, 5)}`
 -        // #181：trend 用 │ 与 share 分隔
 +    // #183：per-call = tokens/assistantCalls，便于单次调用效率扫读
 +    const perCall = row.calls > 0 ? Math.round(row.tokens / row.calls) : 0
 +    const cols = [
 +      fitVisible(label, labelWidth),
 +      fitVisible(money(row.cost), 8),
-+      fitVisible(String(row.tokens), 8),
-+      fitVisible(String(row.calls), 5),
++      fitVisible(formatNumber(row.tokens), 8),
++      fitVisible(formatNumber(row.calls), 5),
 +    ]
-+    if (kind === "model") cols.push(fitVisible(String(perCall), 8))
++    if (kind === "model") cols.push(fitVisible(formatNumber(perCall), 8))
 +    cols.push(fitVisible(share, 5))
 +    const base = `  ${cols.join(" ")}`
 +    // #181：trend 用 │ 与 share 分隔
@@ -99,7 +101,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -348,3 +348,31 @@ describe("stats dashboard sectioned overview (#182)", () => {
+@@ -348,3 +348,46 @@ describe("stats dashboard sectioned overview (#182)", () => {
      expect(text).toMatch(/Failed\/aborted requests: 3 \(30%\)/)
    })
  })
@@ -129,5 +131,20 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +      tokensPerSession: 25, medianTokensPerSession: 25,
 +    } as unknown as StatsReport
 +    expect(renderDashboard(report as any, { limit: 5 })).toContain("per-call")
++    const large = renderDashboard({ ...report, models: report.models.map((model) => ({ ...model, tokens: { ...model.tokens, total: 1_000_000_000 } })) }, { limit: 5 })
++    expect(large).toContain("1.0B")
++    expect(large).toContain("200.0M")
++    // 在真实 58 列输入下检查表头和数据行，而不是只断言趋势列隐藏。
++    const previous = process.stdout.columns
++    Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
++    try {
++      const lines = renderDashboard(report, { limit: 5 }).split("\n")
++      const start = lines.indexOf("▸ Top models")
++      expect(start).toBeGreaterThanOrEqual(0)
++      expect(lines[start + 1].length).toBeLessThanOrEqual(58)
++      expect(lines[start + 2].length).toBeLessThanOrEqual(58)
++    } finally {
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
++    }
 +  })
 +})

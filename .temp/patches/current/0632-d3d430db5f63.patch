@@ -19,7 +19,7 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 --- a/.github/workflows/test.yml
 +++ b/.github/workflows/test.yml
 @@ -47,12 +47,26 @@ jobs:
-             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+             command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
              # opencode 分片产出 junit-core.xml 与 junit-tui.xml——消费侧一律 glob 拾取。
              junit: packages/opencode/.artifacts/unit/*.xml
 -          - id: opencode-windows
@@ -30,21 +30,21 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 -            os_label: Windows
 +            os_label: Windows / 会话与服务集成
              runner: windows-latest
--            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+-            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
 -            junit: packages/opencode/.artifacts/unit/*.xml
-+            command: OPENCODE_TEST_SHARD=integration bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
++            command: GITHUB_ACTIONS=false OPENCODE_TEST_SHARD=integration bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
 +            junit: packages/opencode/.artifacts/unit/junit-integration.xml
 +          - id: opencode-windows-runtime
 +            label: packages/opencode
 +            os_label: Windows / 工具与基础模块
 +            runner: windows-latest
-+            command: OPENCODE_TEST_SHARD=runtime bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
++            command: GITHUB_ACTIONS=false OPENCODE_TEST_SHARD=runtime bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
 +            junit: packages/opencode/.artifacts/unit/junit-runtime.xml
 +          - id: opencode-windows-tui
 +            label: packages/opencode
 +            os_label: Windows / TUI
 +            runner: windows-latest
-+            command: OPENCODE_TEST_SHARD=tui bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
++            command: GITHUB_ACTIONS=false OPENCODE_TEST_SHARD=tui bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
 +            junit: packages/opencode/.artifacts/unit/junit-tui.xml
            - id: core-linux
              label: packages/core
@@ -58,15 +58,23 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
            if compgen -G "${{ matrix.junit }}" > /dev/null; then
              echo "exists=true" >> "$GITHUB_OUTPUT"
            else
-@@ -354,12 +368,13 @@ jobs:
+@@ -373,19 +387,22 @@ jobs:
          continue-on-error: true
-         # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
-         # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
--        # 串行消除并行资源竞争，预期总时长 ~30m（opencode 24m + 其余 <2m + 安装 4m）。
--        run: bun turbo test:ci --continue=always --summarize --concurrency=1
-+        # Windows 的 OpenCode 已由必过三分片完整覆盖，此处只跑其余包，避免重复占据约 30m。
-+        # 其余包仍在同机串行；Linux 保留原有全量兼容性检查，Windows 实时日志保留卡点。
-+        run: bun turbo test:ci --continue=always --summarize --concurrency=1 ${{ matrix.runner == 'windows-latest' && '--filter=!opencode --log-order=stream' || '' }}
+         run: |
+           # 所有现有test任务共用相同相对报告路径，各包目录先准备好。
+           for package in packages/* packages/console/* packages/stats/*; do
+             if [ -f "$package/package.json" ]; then mkdir -p "$package/.artifacts/unit"; fi
+           done
+           # 其余包沿原test；opencode仅运行隔离runner，任一侧失败均传播且不阻止另一侧出报告。
+           status=0
+           GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml || status=$?
+-          GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
++          # Windows已由必过三片覆盖；其他包仍执行原test，不把它们误换为test:ci。
++          if [ '${{ matrix.runner }}' != 'windows-latest' ]; then
++            GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
++          fi
+           exit "$status"
+ 
  
        - name: Warn on upstream unit failures
          if: always() && steps.upstream.outcome != 'success'
@@ -79,7 +87,7 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
              echo "### 警告 上游单元兼容性"
              echo "| 范围 | 平台 | 结果 | 说明 |"
              echo "| --- | --- | --- | --- |"
--            echo "| bun turbo test:ci --continue=always | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
+-            echo "| bun turbo test --continue=always | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
 +            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
            } >> "$GITHUB_STEP_SUMMARY"
  
@@ -152,55 +160,29 @@ diff --git a/packages/opencode/script/test-ci.ts b/packages/opencode/script/test
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1249,39 +1249,27 @@ export const ShellTool = Tool.define(
+@@ -717,20 +717,14 @@ export const ShellTool = Tool.define(
              timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
            ])
  
 -          if (exit.kind === "abort") {
 -            aborted = true
--            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
--            // forceKillAfter 在 Unix 上是 no-op：只限制信号发送，不限制退出等待。
--            // timeoutOrElse 包裹整个 kill 实现 SIGTERM→500ms→SIGKILL 序列；
--            // orElse 加 Effect.ignore：进程可能恰好退出，SIGKILL 抛 ESRCH 无害。
--            yield* handle.kill().pipe(
--              Effect.timeoutOrElse({
--                duration: "500 millis",
--                orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
--              }),
--              Effect.orDie,
--            )
+-            // 底层已把退出等待纳入forceKillAfter，复用它而不叠加第二套超时与吞错。
+-            yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
 -          }
 -          if (exit.kind === "timeout") {
 -            expired = true
--            // SIGTERM 后等待最多 500ms 进程退出；超时则 SIGKILL 强杀。
--            // forceKillAfter 在 Unix 上是 no-op：只限制信号发送，不限制退出等待。
--            // timeoutOrElse 包裹整个 kill 实现 SIGTERM→500ms→SIGKILL 序列；
--            // orElse 加 Effect.ignore：进程可能恰好退出，SIGKILL 抛 ESRCH 无害。
 +          if (exit.kind !== "exit") {
 +            aborted = exit.kind === "abort"
 +            expired = exit.kind === "timeout"
-+            // kill 等到的是主进程 exit，后代仍可能持有 stdout/stderr。
-+            // 将输出排空纳入同一 500ms 宽限期，避免主进程先退出后跳过强杀升级。
-+            // 此处只等待 output fiber；宽限期到期不打断它，保留后续缓冲输出消费。
-             yield* handle.kill().pipe(
-+              Effect.andThen(Fiber.join(output)),
-               Effect.timeoutOrElse({
-                 duration: "500 millis",
-+                // 主进程退出后仍向原进程组发送 SIGKILL，清理持有管道的后代。
-+                // 保留原有忽略错误语义：升级时进程组可能已经消失。
-                 orElse: () => handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore),
-               }),
-               Effect.orDie,
-             )
++            // Core的强杀等待覆盖持管道的后代；这里不叠第二套计时或提前打断output。
+             yield* handle.kill({ forceKillAfter: "500 millis" }).pipe(Effect.orDie)
            }
  
 -          // #291：子进程 close 只说明 OS 管道已关闭，不代表 Effect stream 已经处理完
 -          // 已缓冲的最后几个 chunk 或它们触发的 metadata 更新。最终输出、截断、
 -          // 诊断摘要都必须在输出消费完成后组装，否则 Linux 上 fast-exit 命令
 -          // 会偶发丢尾部输出并把错误上下文误判为仍然可见。
-+          // 进程退出不代表 Effect stream 已处理完缓冲 chunk 及其 metadata 更新。
-+          // 正常退出或强杀后都完成消费，再组装最终输出、截断和诊断摘要。
-+          // 宽限期内已排空时，此次 join 立即返回；否则继续消费剩余输出。
++          // 正常退出或强杀后仍需消费完缓冲chunk及metadata，再组装最终输出和诊断。
            yield* Fiber.join(output)
  
            return exit.kind === "exit" ? exit.code : null
@@ -261,7 +243,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
              if (chunk.includes("Compression completed")) {
 @@ -2230,6 +2233,8 @@ test(
        } finally {
-         if (ServerLockModule.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
+         if (ServerLock.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
          await yesDaemon.proc.exited.catch(() => undefined)
 +        // 失败清理不覆盖原始断言错误，也不让竞争者在下一用例中访问已删除目录。
 +        await Promise.allSettled([contender])
@@ -378,15 +360,71 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -6372,6 +6372,8 @@
-             }),
-           ),
-         )
-+        // 先证明观察器捕获了本轮资源，避免从未创建proof也通过释放断言。
-+        expect(weak).toBeDefined()
-         // 两轮 gc 之间让出事件循环，确保 WeakRef 回调与终结队列先跑完再观察。
-         const collect = Effect.promise(async () => {
-           await Bun.sleep(0)
+@@ -6836,8 +6836,9 @@
+ // dispose必须操作it.instance加载实例时的同一store；fixture提供无bootstrap的真实生命周期owner。
+ const cacheLifetime = testEffect(Layer.mergeAll(makeHttpNoLLMServer(), testInstanceStoreLayer))
++// 观察真实发布的槽位与generation，不依赖GC回收时机或仅有replacement的假绿。
+ for (const lifecycle of ["delete", "dispose"] as const) {
+   cacheLifetime.instance(
+-    `prompt window proof is released after session ${lifecycle}`,
++    `prompt window cache is invalidated after session ${lifecycle}`,
+     () =>
+       Effect.gen(function* () {
+         const sessions = yield* Session.Service
+@@ -6864,35 +6865,30 @@
+         const sessionID = yield* seed("x".repeat(1024))
+-        const original = MessageV2.promptWindowProof
+-        let weak: WeakRef<MessageV2.PromptWindowProof> | undefined
+-        const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) => original(id).pipe(
+-          Effect.map((proof) => {
+-            if (id === sessionID) weak = new WeakRef(proof)
+-            return proof
+-          }),
+-        ))
++        const original = PromptWindowCache.publish
++        let slot: Parameters<typeof original>[0] | undefined
++        // 只捕获发布目标并调用真实实现；不额外保留entry/proof改变其生命周期。
++        const observer = spyOn(PromptWindowCache, "publish").mockImplementation((target, generation, entry) => {
++          if (entry.sessionID === sessionID) slot = target
++          return original(target, generation, entry)
++        })
+         yield* prompt.loop({ sessionID }).pipe(Effect.ensuring(Effect.sync(() => {
+           observer.mockClear()
+           observer.mockRestore()
+         })))
+-        // 清除spy结果后跨事件轮次GC，防止WeakRef当前job或observer自身成为保活来源。
+-        const collect = Effect.promise(async () => {
+-          await Bun.sleep(0)
+-          Bun.gc(true)
+-          await Bun.sleep(0)
+-          Bun.gc(true)
+-        })
+-        yield* collect
+-        // 正向对照不可省：证明Service仍保有warm缓存，再测试删除/dispose使其不可达。
+-        expect(weak?.deref()).toBeDefined()
++        // 先确认真实warm entry存在，再观察失效，不能把从未缓存当作正确清理。
++        expect(slot).toBeDefined()
++        if (!slot) throw new Error("prompt window cache was not published")
++        const generation = PromptWindowCache.lease(slot)
++        expect(PromptWindowCache.read(slot, sessionID)?.instance?.directory).toBe((yield* TestInstance).directory)
+         if (lifecycle === "delete") yield* sessions.remove(sessionID)
+         if (lifecycle === "dispose") yield* disposeAllInstancesEffect
+-        yield* collect
+-        const retainedAfter = weak?.deref() !== undefined
++        // 在replacement覆盖槽位前验证清空与凭证推进，避免后续发布掩盖缺陷。
++        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
++        expect(PromptWindowCache.lease(slot)).toBeGreaterThan(generation)
+         const replacement = yield* seed("small replacement")
+         yield* prompt.loop({ sessionID: replacement })
+-        yield* collect
+-        expect(weak?.deref()).toBeUndefined()
+-        expect(retainedAfter).toBe(false)
++        // 同一Service仍可发布新Session，永久禁用缓存不能通过此正向对照。
++        expect(PromptWindowCache.read(slot, sessionID)).toBeUndefined()
++        expect(PromptWindowCache.read(slot, replacement)).toBeDefined()
+       }),
+     { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } },
+   )
 
 diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
 --- a/packages/core/src/cross-spawn-spawner.ts

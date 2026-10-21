@@ -1,35 +1,32 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -3414,5 +3414,7 @@
+@@ -3270,6 +3270,6 @@
      })()
  
+-    // 删除计数仍由 delete 分支展示，不重复从空 patch 推导统计。
 -    if (file.type === "delete" || !file.patch) return baseTitle
-+    // #248：只有 legacy 无 patch 数据才退回纯标题；删除文件带 patch 时
-+    // 同样显示 +added -removed（删除场景为 +0 -N），与其他类型口径一致
++    // 删除带真实patch时沿同一hunk统计；legacy缺少patch才保留纯动作标题。
 +    if (!file.patch) return baseTitle
  
-     // 统计 patch 行数：+ 开头为新增，- 开头为删除
-@@ -3453,4 +3455,4 @@
+     // 与 Edit 共享按 hunk 解析的统计，包含多文件与 ++counter/--counter 内容。
+@@ -3308,11 +3308,12 @@
              <BlockTool
--          // #144：ApplyPatch 按 file.patch 行数武装，delete 走摘要预览
-+          // #248：preview 由 !!file.patch 驱动——仅 legacy 删除（无 patch）走 -N lines 摘要
+-              // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
++              // 文件各自拥有展开状态；有patch的删除项也预览diff，legacy仍走删除摘要。
            // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
            autoReview={false}
-@@ -3460,4 +3462,5 @@
-           preview={
-             <Show
--              when={file.type !== "delete"}
-+              // #248：删除带 patch 走真实 diff 预览，不再按 type 硬切断路
-+              when={!!file.patch}
-               fallback={
-@@ -3476,4 +3478,5 @@
+-              preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
++              preview={!!file.patch && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
+               title={title(file)}
+               part={props.part}
+-              onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
++              onClick={!!file.patch && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}
              >
                <Show
 -                when={file.type !== "delete"}
-+                // #248：展开态与预览共用同一守卫，删除文件有 patch 时可完整渲染 diff
++                // 正文与折叠预览按相同patch就绪条件分流，避免删除diff只能看到预览。
 +                when={!!file.patch}
-                 fallback={
 @@ -3668,9 +3673,12 @@
      const type = stringValue(file.type)
      const relativePath = stringValue(file.relativePath)

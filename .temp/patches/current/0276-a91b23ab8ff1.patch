@@ -54,24 +54,6 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 index 4bcb84f..fd08941 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -27,6 +27,8 @@ import {
-   tmpdirScoped,
- } from "../fixture/fixture"
- import { testEffect } from "../lib/effect"
-+// #276：导入 Image.Service 供 read 工具处理图片附件
-+import { Image } from "@/image/image"
- 
- const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
- 
-@@ -55,6 +57,8 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
-       LSP.node,
-       Ripgrep.node,
-       Truncate.node,
-+      // #276：read 工具需 Image.Service 处理图片附件
-+      Image.node,
-     ]),
-   )
- 
 @@ -515,7 +519,11 @@ describe("tool.read truncation", () => {
    it.live("detects attachment media from file contents", () =>
      Effect.gen(function* () {

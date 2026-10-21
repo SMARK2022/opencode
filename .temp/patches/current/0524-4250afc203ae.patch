@@ -503,7 +503,7 @@ index 1be17dfc8..fc0fdf7e7 100644
  // control request 总是携带当前 lock token，并用短 timeout 把本机 daemon 不可达明确反馈给 CLI。
  // 非 2xx 响应保留 daemon 错误语义，调用方不得在失败后改走 offline 并伪造成功。
 -async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit) {
-+// #524：timeoutMs=false 取消 deadline——status 是唯一无 task 结果可轮询、必须同请求等到完整报告的操作。
++// status 报告显式取消短 deadline；其他 immediate 操作不因此自动获得相同豁免。
 +async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init?: RequestInit, timeoutMs: number | false = 2_000) {
    const response = await fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
      ...init,
@@ -525,7 +525,7 @@ index 1be17dfc8..fc0fdf7e7 100644
  // 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
  // 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
 +// #524：status 的 deadline 豁免只在 CLI 侧；task 类 control 仍走 2s acknowledgement 合同。
- async function executeMaintenance(db: ColdStorage.TxOrDb, request: ColdStorage.MaintenanceRequest) {
+ async function executeMaintenance(db: Database.Interface, request: ColdStorage.MaintenanceRequest) {
    const lock = await liveDaemon()
    if (lock) {
 @@ -234,12 +237,19 @@ const StatusCommand = effectCmd({
@@ -533,7 +533,7 @@ index 1be17dfc8..fc0fdf7e7 100644
        }
        if (lock) {
 +        // #524：status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
-+        // 豁免 deadline 只此一处；新增 immediate 操作必须先证明有 task 结果可轮询才能复用 false。
++        // 只有本报告调用显式传 false；task 状态查询和其他操作仍沿原 acknowledgement 合同。
          printMaintenance(
 -          await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, {
 -            method: "POST",
@@ -678,19 +678,16 @@ index 6bacf5965..a0328f7c2 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
 @@ -15,6 +15,8 @@ import { mkdir, rename } from "fs/promises"
- import { _spawn } from "../../../src/cli/cmd/tui"
+ import { DaemonProcess, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
  import path from "path"
  import { fileURLToPath, pathToFileURL } from "url"
 +// #524：db status 压力夹具直接用 bun:sqlite 写入 part 行（FK OFF）。
-+import { Database as SQLite } from "bun:sqlite"
++import { Database } from "bun:sqlite"
  import { tmpdir } from "../../fixture/fixture"
- import * as ServerLockModule from "../../../src/cli/tui/server-lock"
- // #523：stopping-owner / launcher 用例直接消费目标的 daemon 发现 owner（源仓 Daemon.ensure 等价 seam）。
-@@ -1422,6 +1424,74 @@ test(
- 
- 
- 
-+  // #524：status 是唯一无 task 轮询的 immediate 操作；真实 CLI 必须等到完整 StatusReport。
+ import { ServerLock } from "../../../src/cli/tui/server-lock"
+ // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
+@@ -1412,3 +1414,71 @@
++  // status 报告没有可轮询 task，真实 CLI 必须等到同一请求的完整结果。
 +  test(
 +    "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
 +    async () => {
@@ -702,16 +699,16 @@ index 6bacf5965..a0328f7c2 100644
 +        if (!lock.controlPort) throw new Error("missing control port")
 +        // #524：worker 延迟打开数据库；先走同一 status seam 完成真实 migration，再写入压力夹具。
 +        const initialized = await fetch(
-+          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_MAINTENANCE_PATH}`,
++          `http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_MAINTENANCE_PATH}`,
 +          {
 +            method: "POST",
-+            headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
++            headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token, "content-type": "application/json" },
 +            body: JSON.stringify({ operation: "status" }),
 +          },
 +        )
 +        expect(initialized.status).toBe(200)
 +        // #524：该夹具只放大真实 eligibility 扫描，不伪造 worker 延迟或添加测试专用生产分支。
-+        const db = new SQLite(lock.dbPath)
++        const db = new Database(lock.dbPath)
 +        // 关闭 FK 仅服务压力夹具插入速度，不改变 status 的 eligibility 语义。
 +        db.exec("PRAGMA foreign_keys = OFF")
 +        const insert = db.prepare(
@@ -751,7 +748,7 @@ index 6bacf5965..a0328f7c2 100644
 +          report: { eligibleOwners: 0, payloads: 0, refCountMismatches: 0, orphans: 0 },
 +        })
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -767,15 +764,15 @@ index 24fd3b00f..f64075a52 100644
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
 @@ -23,6 +23,8 @@ import { aggregateStats } from "@/cli/cmd/stats-data"
- import { TestInstance } from "../fixture/fixture"
+ import { TestInstance, tmpdirScoped } from "../fixture/fixture"
  import type { SessionID } from "@/session/schema"
  import path from "path"
 +// #524：metadata 投影子进程脚本需要 fileURL 对齐目标 core 模块路径。
 +import { fileURLToPath } from "url"
  
- const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node]))
+ const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node, CrossSpawnSpawner.node]))
  const it = testEffect(coldLayer)
-@@ -1019,6 +1021,77 @@ describe.serial("ColdStorage", () => {
+@@ -1019,6 +1021,80 @@ describe.serial("ColdStorage", () => {
    // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
    // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
    // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。
@@ -795,7 +792,7 @@ index 24fd3b00f..f64075a52 100644
 +          const { Effect, ManagedRuntime } = await import("effect")
 +          const { Database } = await import(${JSON.stringify(new URL("../../../core/src/database/database.ts", import.meta.url).href)})
 +          const { ColdStorage } = await import(${JSON.stringify(new URL("../../../core/src/storage/cold-storage.ts", import.meta.url).href)})
-+          // 目标 Database 在 Effect layer 内初始化（#493）；ManagedRuntime 构建即完成 migration 与 syncRef。
++          // 显式 Layer 初始化自己的连接和 migration，不注册模块级最后连接。
 +          const rt = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
 +          await rt.runPromise(Effect.void)
 +          const hash = "a5".repeat(32)
@@ -815,11 +812,14 @@ index 24fd3b00f..f64075a52 100644
 +          const gate = new SQLite(${JSON.stringify(dbPath)})
 +          gate.query("PRAGMA hard_heap_limit = 67108864").get()
 +          gate.close()
-+          // 重开 runtime 只复用连接（migration 已持久化）；缩小页缓存后 heap 差异只来自被查询列。
++          // 重开同一隔离文件，随后预约该 Layer 的连接；heap 门禁不进入共享测试进程。
 +          const rt2 = ManagedRuntime.make(Database.layerFromPath(${JSON.stringify(dbPath)}))
-+          await rt2.runPromise(Effect.void)
-+          Database.client().run("PRAGMA cache_size = -512")
-+          process.stdout.write(JSON.stringify(ColdStorage.status(Database.client())))
++          const database = await rt2.runPromise(Database.Service)
++          const report = await rt2.runPromise(Database.withSync(database, (db) => {
++            db.run("PRAGMA cache_size = -512")
++            return ColdStorage.status(db)
++          }))
++          process.stdout.write(JSON.stringify(report))
 +          await rt2.dispose()
 +        `
 +        const result = yield* Effect.promise(async () => {

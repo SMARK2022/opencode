@@ -14,6 +14,93 @@ Content-Transfer-Encoding: 8bit
 
 适配说明：apply_patch Delete+Add 同文件顺序对折叠为覆写，3 文件按 0621 态重锚（HunkGroup.rewrite 字段、processHunkGroup oldContent 真实旧基线、execute 内 rewritten 折叠环先于 validateOwnership、成功 Note 移至 let output 声明之后——fuzz 曾将其置于声明前；txt 两条目 verbatim；两个新测试与 INV-10 断言扩展按目标 fixture 上下文落位）。语义与 original 逐 hunk 等价。
 
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -26,4 +26,5 @@
+   type: Schema.Literals(["add", "update", "delete"]),
+   resource: Schema.String,
+   target: Schema.String,
++  rewrite: Schema.optional(Schema.Boolean),
+ })
+@@ -44,3 +45,6 @@
+     // 原生批量修改同样尚无 LSP 结果，不能把操作成功作为诊断通过。
+     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
++    ...(output.applied.some((item) => item.rewrite)
++      ? ["\nNote: a *** Delete File + *** Add File pair was applied as an in-place rewrite without a delete. A standalone *** Add File still only creates a missing file."]
++      : []),
+     ...(output.errors?.length ? [`\nFailed to update ${output.errors.length} file(s):`, ...output.errors] : []),
+@@ -51,3 +55,5 @@
+       readonly target: LocationMutation.Target
+       readonly before: string
+       readonly after: string
++      readonly source?: Uint8Array
++      readonly rewrite?: boolean
+@@ -77 +83 @@
+-              "Apply one patch containing add, update, and delete file operations. Create a new file only when the user explicitly requires it. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
++              "Apply one patch containing add, update, and delete file operations. Create a new file only when the user explicitly requires it. A standalone Add File never replaces an existing file. An exact Delete File then Add File pair for the same canonical path rewrites in place without deleting; reverse order and other mixed operations conflict. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
+@@ -105,3 +111,20 @@
+-                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target }> = []
+-                for (const hunk of hunks)
+-                  targets.push({ hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) })
++                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly rewrite?: boolean }> = []
++                const byTarget = new Map<string, typeof targets>()
++                for (const hunk of hunks) {
++                  const entry = { hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) }
++                  const group = byTarget.get(entry.target.canonical)
++                  if (group) group.push(entry)
++                  else byTarget.set(entry.target.canonical, [entry])
++                }
++                // 完整canonical组确认意图后才授权，Delete不成为外部目录或edit审批的额外操作。
++                for (const group of byTarget.values()) {
++                  const [first, second] = group
++                  if (group.length === 2 && first.hunk.type === "delete" && second.hunk.type === "add") {
++                    targets.push({ hunk: second.hunk, target: first.target, rewrite: true })
++                    continue
++                  }
++                  if (group.length > 1 && group.some((entry) => entry.hunk.type !== "update")) {
++                    return yield* new ToolFailure({ message: `Conflicting operations for ${first.hunk.path}` })
++                  }
++                  targets.push(...group)
++                }
+@@ -159,9 +182,17 @@
+-                for (const { hunk, target } of grouped) {
++                for (const { hunk, target, rewrite } of grouped) {
+                   yield* Effect.gen(function* () {
+                     if (hunk.type === "add") {
++                      // 只为显式配对在批准后取旧bytes；同一份bytes同时拥有审计基线和条件写入版本。
++                      const stat = rewrite
++                        ? yield* fs.stat(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
++                        : undefined
++                      if (stat && stat.type !== "File") return yield* fail(hunk.path)
++                      const source = stat ? yield* fs.readFile(target.canonical) : undefined
+                       prepared.push({
+                         ...hunk,
+                         target,
+-                        before: "",
++                        source,
++                        rewrite,
++                        before: source ? new TextDecoder("utf-8", { ignoreBOM: true }).decode(source).replace(/^\uFEFF/, "") : "",
+                         after:
+                           hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`,
+@@ -204,12 +235,9 @@
+                       if (change.type === "add") {
+-                        const result = yield* files.create({
+-                          target: change.target,
+-                          content:
+-                            change.contents.endsWith("\n") || change.contents === ""
+-                              ? change.contents
+-                              : `${change.contents}\n`,
+-                        })
+-                        applied.push({ type: change.type, resource: result.resource, target: result.target })
++                        // Add-alone继续wx创建；显式覆写用原有同锁比较写，不改变底层create和顺序提交合同。
++                        const result = yield* change.source === undefined
++                          ? files.create({ target: change.target, content: change.after })
++                          : files.writeIfUnchanged({ target: change.target, expected: change.source, content: change.after })
++                        applied.push({ type: change.type, resource: result.resource, target: result.target, ...(change.rewrite ? { rewrite: true } : {}) })
+                         return
+                       }
+                       if (change.type === "delete") {
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
@@ -38,28 +125,29 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
        // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
        const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
        const next = Bom.split(newContent)
-@@ -268,6 +271,20 @@ export const ApplyPatchTool = Tool.define(
+@@ -268,6 +271,16 @@ export const ApplyPatchTool = Tool.define(
        // #518：先按 canonicalPath 分组并在 Permission 前拒绝 ownership 冲突。
        // 冲突 patch 不得进入 ask；被批准后再失败会浪费一次审批并污染 always 授权记录。
        const groups = groupHunks(hunks, instance)
-+      // [local-smark] Delete+Add 同文件顺序对折叠为覆写：Add 对已有路径本就是完整覆写，
-+      // delete 永不执行、也不进入权限审批面（metadata.files 只见 add，precheck 的
-+      // delete 提升不触发，与 write 覆写同构走 general 放行）。diff 以真实旧内容为基线，
-+      // 审计可见完整替换。只认恰好 [Delete, Add] 的顺序对；Add+Delete、三项及以上等
-+      // 其余组合维持 Conflicting operations 拒绝。
++      // 只认完整canonical组恰好[Delete,Add]；删除不执行、不进入审批，真实旧内容仍可审计。
++      // 倒序或三项以上继续冲突；纯Update沿原始快照聚合，不把本次生成文本当后续旧块。
 +      const rewritten: string[] = []
 +      for (const group of groups) {
 +        const [first, second] = group.hunks
 +        if (group.hunks.length === 2 && first.type === "delete" && second.type === "add") {
 +          group.hunks = [second]
 +          group.rewrite = true
-+          rewritten.push(group.filePath)
 +        }
 +      }
        validateOwnership(groups, instance)
        for (const group of groups) {
          for (const hunk of group.hunks) {
-@@ -446,6 +463,10 @@ export const ApplyPatchTool = Tool.define(
+@@ -298,3 +311,4 @@
+         const change = exit.value
++        if (group.rewrite) rewritten.push(group.filePath)
+         fileChanges.push(change)
+         totalDiff += change.diff + "\n"
+@@ -446,6 +460,10 @@ export const ApplyPatchTool = Tool.define(
          return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
        })
        let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
@@ -90,6 +178,61 @@ diff --git a/packages/opencode/src/tool/apply_patch.txt b/packages/opencode/src/
 +- To fully rewrite an existing file, use *** Add File alone with the complete new content — it overwrites in place. A *** Delete File + *** Add File pair on the same path is treated as the rewrite; the Delete is redundant.
  - A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
 
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -355,3 +355,51 @@
+ 
++  it.live("collapses exact canonical delete/add pairs without a remove or exclusive-add regression", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => {
++        reset()
++        const target = path.join(tmp.path, "rewrite.txt")
++        // remove若被调用就产生不可伪装成成功的defect；正常覆写必须只提交条件写。
++        failRemoveTarget = "rewrite.txt"
++        return Effect.promise(() => fs.writeFile(target, "old line one\nold line two\n")).pipe(
++          Effect.andThen(withTool(tmp.path, (registry) => Effect.gen(function* () {
++            const result = yield* settleTool(registry, call([
++              "*** Begin Patch",
++              "*** Delete File: rewrite.txt",
++              "*** Add File: side.txt",
++              "+side",
++              "*** Add File: ./rewrite.txt",
++              "+replacement",
++              "*** End Patch",
++            ].join("\n")))
++            // 其他文件操作夹在两条之间也不能拆散canonical意图；批准前不读文件正文。
++            expect(assertions[0]?.metadata?.files).toEqual([
++              { type: "add", relativePath: "rewrite.txt" },
++              { type: "add", relativePath: "side.txt" },
++            ])
++            expect(readsBeforeEditApproval).toBe(0)
++            expect(result.output?.structured).toMatchObject({
++              applied: [{ type: "add", resource: "rewrite.txt", rewrite: true }, { type: "add", resource: "side.txt" }],
++              files: [{ patch: expect.stringContaining("-old line one"), additions: 1, deletions: 2 }, { file: "side.txt", additions: 1, deletions: 0 }],
++            })
++            expect(result.result).toMatchObject({ type: "text", value: expect.stringContaining("in-place rewrite without a delete") })
++            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
++            for (const patchText of [
++              "*** Begin Patch\n*** Add File: rewrite.txt\n+wrong\n*** Delete File: rewrite.txt\n*** End Patch",
++              "*** Begin Patch\n*** Delete File: rewrite.txt\n*** Add File: rewrite.txt\n+wrong\n*** Update File: rewrite.txt\n@@\n-replacement\n+wrong\n*** End Patch",
++            ]) {
++              assertions.length = 0
++              const rejected = yield* executeTool(registry, call(patchText))
++              expect(rejected).toMatchObject({ type: "error", value: expect.stringContaining("Conflicting operations") })
++              expect(assertions).toEqual([])
++              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
++            }
++          }))),
++        )
++      },
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   it.live("rejects add hunks targeting an existing file without replacing it", () =>
+     Effect.acquireUseRelease(
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
@@ -99,7 +242,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
  
 +  // Delete+Add 同文件对 = 覆写意图：折叠为单个 Add（delete 不执行、不进权限审批），
 +  // diff 以真实旧内容为基线，output 附一句提醒。其它组合（Add+Delete、三项以上）维持冲突拒绝。
-+  it.instance("collapses a Delete+Add pair into an in-place rewrite without executing the delete", () =>
++  itFeedback.instance("collapses a Delete+Add pair into an in-place rewrite without executing the delete", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const { ctx, calls } = makeCtx()
@@ -127,7 +270,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +    }),
 +  )
 +
-+  it.instance("still rejects Add+Delete (wrong order) and Delete+Add+Update on the same path", () =>
++  itFeedback.instance("still rejects Add+Delete (wrong order) and Delete+Add+Update on the same path", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const { ctx } = makeCtx()
@@ -166,7 +309,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +  )
 +
    // INV-10：description 必须携带陈旧转写禁令与 more-than-3-lines 诱导。文案即合同。
-   it.instance("description carries staleness and context-size guidance", () =>
+   itFeedback.instance("description carries staleness and context-size guidance", () =>
      Effect.gen(function* () {
 @@ -455,6 +523,9 @@ describe("tool.apply_patch freeform", () => {
        const tool = yield* info.init()

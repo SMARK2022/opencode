@@ -9,24 +9,6 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index 6bd1d6f7c0..370142dd38 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -58,6 +58,17 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
- import { SessionReminders } from "./reminders"
- import { SessionTools } from "./tools"
- import { LLMEvent } from "@opencode-ai/llm"
-+// #140：无历史样本时回退 Token.estimate（chars/4）
-+import { estimate as tokenEstimate } from "@/util/token"
-+
-+// #140：输入侧 chars/token 样本窗口与夹紧范围
-+const INPUT_CHARS_HISTORY_LIMIT = 100_000
-+const MIN_CHARS_PER_TOKEN = 3
-+const MAX_CHARS_PER_TOKEN = 4
-+// #140：防止异常样本把 preflight 估得过乐观/过悲观
-+function clampCharsPerToken(value: number) {
-+  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
-+}
- 
- // @ts-ignore
- globalThis.AI_SDK_LOG_WARNINGS = false
 @@ -1229,14 +1240,7 @@ const layer = Layer.effect(
              continue
            }
@@ -43,54 +25,59 @@ index 6bd1d6f7c0..370142dd38 100644
  
            const agent = yield* agents.get(lastUser.agent)
            if (!agent) {
-@@ -1398,11 +1402,11 @@ const layer = Layer.effect(
-               tools: toolsText.length,
-               messages: { userText: msgUserChars, assistantText: msgAssistantChars, reasoning: msgReasoningChars, toolInput: msgToolInputChars, toolOutput: msgToolOutputChars, attachments: msgAttachmentChars, total: msgUserChars + msgAssistantChars + msgReasoningChars + msgToolInputChars + msgToolOutputChars + msgAttachmentChars },
-             } as SessionV1.StepFinishPart["inputBreakdown"]
--            // 输入侧比率校准：从历史 step-finish 的 inputChars / inputTokens 推算
--            // 100k 字符上限避免长会话过度影响比率
-+            // #140：输入侧比率校准（历史 step-finish inputChars/tokens），夹紧到 [3,4]
-+            // #140：history 校准样本来自 step-finish.inputChars
-             let historyInputChars = 0
-             let historyInputTokens = 0
--            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 100_000; i--) {
-+            for (let i = msgs.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
-               const m = msgs[i]
-               if (m.info.role !== "assistant") continue
-               const sf = m.parts.findLast((p) => p.type === "step-finish")
-@@ -1418,11 +1422,27 @@ const layer = Layer.effect(
-                 historyInputTokens += tokens
-               }
-             }
--            // 样本不足（<500 字符）时回退 /4，避免少量数据导致比值失真
--            const charsPerToken = historyInputTokens > 0 && historyInputChars > 500
--              ? historyInputChars / historyInputTokens
--              : 4
--            const estimatedInput = Math.round(inputChars / charsPerToken)
-+            // #140：样本不足时回退 Token.estimate；有样本则夹紧比值
-+            const estimatedInput =
-+              historyInputTokens > 0 && historyInputChars > 500
-+                ? Math.round(inputChars / clampCharsPerToken(historyInputChars / historyInputTokens))
-+                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))
-+            // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量
-+            if (
-+              yield* compaction.isOverflow({
-+                tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+                model,
-+              })
-+            ) {
-+              // #140：auto compact 使用 estimatedInput 窗口
-+              yield* compaction.create({
-+                sessionID,
-+                agent: lastUser.agent,
-+                model: lastUser.model,
-+                auto: true,
-+              })
-+              return "continue" as const
-+            }
-             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
-             handle.message.tokens.input = estimatedInput
-             // #127：pending 快照落 assistant message（首 chunk/step-start 前即可读）
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -751,1 +751,3 @@
+         ctx.needsCompaction = false
++        // 仅本次准备请求触发的内部转移，不能吞掉真实失败或用户中断。
++        const preflightCompaction = Symbol("preflight-compaction")
+@@ -773,3 +775,8 @@
+               // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
++              const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
++              // 限制异常历史密度对预检的影响；无样本时现有估算器仍给出 /4。
++              const charsPerToken = Math.min(4, Math.max(3, estimate.charsPerToken ?? 4))
+               ctx.assistantMessage.inputEstimate = {
+-                ...Token.estimateRequest(body, samples, streamInput.inputSections ?? []),
++                ...estimate,
++                input: Math.round(estimate.bodyChars / charsPerToken),
++                charsPerToken,
+@@ -780,2 +787,10 @@
+               // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
++              // 用即将发送的请求体判断，压缩保留的旧 tail 不再触发连续压缩。
++              if (!ctx.assistantMessage.summary && isOverflow({
++                cfg: yield* config.get(), model: ctx.model,
++                tokens: { input: ctx.assistantMessage.inputEstimate.input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++              })) {
++                ctx.needsCompaction = true
++                return yield* Effect.die(preflightCompaction)
++              }
+               yield* publishAssistant(ctx.assistantMessage, events)
+@@ -789,1 +804,5 @@
+           }).pipe(
++            // 转入已有 compact 结果，保留 cleanup 且不发布虚构的 provider 错误。
++            Effect.catchCauseIf(
++              (cause) => Cause.squash(cause) === preflightCompaction, () => Effect.void,
++            ),
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -438,1 +438,2 @@
+-        yield* llm.text("after", { usage: { input: 100, output: 0 } })
++        // 估算允许发出请求，随后由provider确认的超限用量触发压缩，区分prepared预检分支。
++        yield* llm.text("after", { usage: { input: 30_000, output: 0 } })
+@@ -441,4 +442,4 @@
+         const parent = yield* user(chat.id, "compact")
+         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+         const base = yield* provider.getModel(ref.providerID, ref.modelID)
+-        const mdl = { ...base, limit: { context: 20, output: 10 } }
++        const mdl = { ...base, limit: { context: 20_000, output: 10 } }
+@@ -481,3 +482,3 @@
+-        // 800字符的真实系统片段提高准备估算，但provider只确认100输入，公开账本必须服从后者。
+-        expect((yield* session.get(chat.id)).request?.input).toBe(100)
++        // 800字符指令仍归属原桶，公开账本使用provider确认的30000输入而非prepared估算。
++        expect((yield* session.get(chat.id)).request?.input).toBe(30_000)
+         expect(yield* llm.calls).toBe(1)
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 8eba5efd9e..61bd0144c7 100644
 --- a/packages/opencode/test/session/prompt.test.ts

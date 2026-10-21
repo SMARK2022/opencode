@@ -22,12 +22,12 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
 --- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
 +++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
-@@ -61,2 +61,12 @@
+@@ -67,2 +67,12 @@
    })
 +
 +  // #460：首个工具 part 需要消息级顶距——无前驱兄弟时 margin=1（与文本气泡基线一致）
 +  test("InlineTool gives first tool part message-level top spacing", () => {
-+    const start = sessionSource.indexOf("function InlineTool(")
++    const start = sessionSource.indexOf("function InlineToolRow(")
 +    const end = sessionSource.indexOf("function BlockTool(")
 +    const inlineToolSource = sessionSource.slice(start, end)
 +    expect(start).toBeGreaterThan(-1)
@@ -35,4 +35,26 @@ diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/pac
 +    expect(inlineToolSource).toContain('if (!previous) return 1')
 +  })
  })
-\ No newline at end of file
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -262,1 +262,3 @@
++    // 首个工具真实占一行消息顶距，组内紧排和跨消息分隔仍由下面的断言验证。
++    expect(frame.split("\n")[0]).toBe("")
+     expect(frame).toMatch(/A1\n[^\n]*A2\n\n[^\n]*B1\n[^\n]*B2/)
+@@ -317,1 +319,1 @@
+-    expect(frame.split("\n").map((line) => line.trim())).toEqual(["~ Writing command", "auto review"])
++    expect(frame.split("\n").map((line) => line.trim())).toEqual(["", "~ Writing command", "auto review"])
+diff --git a/packages/tui/test/cli/tui/__snapshots__/inline-tool-wrap-snapshot.test.tsx.snap b/packages/tui/test/cli/tui/__snapshots__/inline-tool-wrap-snapshot.test.tsx.snap
+--- a/packages/tui/test/cli/tui/__snapshots__/inline-tool-wrap-snapshot.test.tsx.snap
++++ b/packages/tui/test/cli/tui/__snapshots__/inline-tool-wrap-snapshot.test.tsx.snap
+@@ -59,2 +59,3 @@
+ exports[`TUI inline tool wrapping separates after a multi-line task row 1`] = `
+-"   ✱ Grep "Task" (2 matches)
++"
++   ✱ Grep "Task" (2 matches)
+@@ -70,2 +71,3 @@
+ exports[`TUI inline tool wrapping separates a task row from a preceding inline detail 1`] = `
+-"   → Read src/cli/cmd/tui/routes/session/index.tsx
++"
++   → Read src/cli/cmd/tui/routes/session/index.tsx

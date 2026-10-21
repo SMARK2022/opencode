@@ -46,19 +46,20 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
    }
  }
  
-@@ -221,7 +224,7 @@ describe("tool.shell", () => {
-         expect(result.metadata.output).toContain("test")
+@@ -294,7 +297,8 @@ describe("tool.shell", () => {
+ 
        }),
      ),
 -  )
-+   60_000)
++    60_000,
++  )
  
    it.live("falls back from terminal-only configured shell", () =>
      Effect.gen(function* () {
 diff --git a/packages/opencode/test/cli/help/help-snapshots.test.ts b/packages/opencode/test/cli/help/help-snapshots.test.ts
 --- a/packages/opencode/test/cli/help/help-snapshots.test.ts
 +++ b/packages/opencode/test/cli/help/help-snapshots.test.ts
-@@ -88,7 +88,8 @@
+@@ -88,6 +88,7 @@
  // Fixed wrap width so a developer's terminal doesn't affect snapshots.
  // yargs honors COLUMNS; CI runners typically default to 80 which produces
  // different wraps from a 200-col local terminal.
@@ -67,7 +68,6 @@ diff --git a/packages/opencode/test/cli/help/help-snapshots.test.ts b/packages/o
 +const SNAPSHOT_ENV = { COLUMNS: "120", LC_ALL: "en_US.UTF-8" }
  
  describe("opencode CLI help-text snapshots", () => {
-   // Single test, parallel spawns. Each command's help fires under
 diff --git a/packages/opencode/test/cli/run/run-process.test.ts b/packages/opencode/test/cli/run/run-process.test.ts
 --- a/packages/opencode/test/cli/run/run-process.test.ts
 +++ b/packages/opencode/test/cli/run/run-process.test.ts

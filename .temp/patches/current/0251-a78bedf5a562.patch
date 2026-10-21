@@ -1,8 +1,8 @@
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -363,5 +363,10 @@
-         }) as any as Effect.Effect<void, never, never>)
+@@ -398,5 +398,10 @@
+       const own = yield* SessionProcessor.ownAssistant({ sessionID: input.sessionID, requestID: input.parentID }, { events, db })
 -      const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
 +      const rawHistory = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
 +      // #251：压缩上传必须和普通 prompt 共用同一个 active replay window：数据库里的 raw history
@@ -84,7 +84,7 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 +
 +        // #251：双条目锁定 active window 语义——prior summary 与本轮 tail 都在，
 +        // 已总结 head 与未纳入 tail 的新消息都必须缺席
-+        expect(captured).toContain("<previous-summary>")
++        expect(captured).toContain("<prior-summary>")
 +        expect(captured).toContain("PREVIOUS SUMMARY")
 +        expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
 +        expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")

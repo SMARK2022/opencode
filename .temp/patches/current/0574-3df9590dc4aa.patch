@@ -1538,3 +1538,49 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
    it.instance(
      "falls back to directory when filtering legacy sessions without path",
      () =>
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
+@@ -177,6 +177,7 @@
+       titleUrl.searchParams.set("limit", String(SESSION_LIST_SEARCH_LIMIT))
+       if (scope.scope) titleUrl.searchParams.set("scope", scope.scope)
+-      if (scope.path) titleUrl.searchParams.set("path", scope.path)
++      // 空 path 表示当前 worktree 根；省略它会让 title 与 scan 落入不同的会话宇宙。
++      if (scope.path !== undefined) titleUrl.searchParams.set("path", scope.path)
+       if ("directory" in scope && scope.directory) titleUrl.searchParams.set("directory", scope.directory)
+ 
+       // limit 与 Path B 搜索上限同源：title 子集也被 cap 在 400，partial 展示不会超发。
+diff --git a/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx b/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/dialog-session-list.test.tsx
+@@ -93,14 +93,28 @@
+ test("successful empty search still shows Not Found", async () => {
+   // 失败路径不得改写成功空结果文案；用户侧 empty 文案必须保持 Not Found。
++  const paths: { title?: string | null; scan?: unknown } = {}
+   await withSessionList({
+-    title: () => json([]),
+-    scan: () => json({ sessions: [], nextCursor: null, done: true }),
++    // 请求目录等于 worktree，真实 Sync query 因而生成有定义的空 path。
++    fetch: (url) => {
++      if (url.pathname === "/path") return json({ home: "", state: "", config: "", worktree: directory, directory })
++      if (url.pathname === "/api/location") return json({ directory, project: { id: "proj_test", directory } })
++    },
++    title: (url) => {
++      paths.title = url.searchParams.get("path")
++      return json([])
++    },
++    scan: (_url, init) => {
++      paths.scan = JSON.parse(String(init?.body)).path
++      return json({ sessions: [], nextCursor: null, done: true })
++    },
+     run: async ({ app }) => {
+       await enterSearch(app, "needle")
+       // 成功空结果走同一文案——失败路径不得污染空态合同（INV-05/10）。
+       const frame = await waitForFrame(app, (value) => value.includes("Not Found needle"))
++      // 在组件 catch 之外断言真实 transport，缺参数或未发 scan 都不能以空结果假绿。
++      expect(paths).toEqual({ title: "", scan: "" })
+       expect(frame).not.toContain("Search failed")
+       expect(frame).not.toMatch(SPINNER)
+     },
+   })
+ })

@@ -5,9 +5,9 @@ Subject: [PATCH] fix(image): 修复TUI Sharp原生依赖链并迁移历史图片
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-适配：目标 image 后端为 Photon WASM（非 Sharp），Sharp 打包链（build.ts/image.ts 的 233 行）
-由目标静态嵌入方案等价承载（SATISFIED，不移植）；本 patch 落地 fail-closed 三处反转、
-migrate-image-attachment.ts 维护脚本（Image.layer 导出供复用）、三个测试文件的重表达适配。
+适配：普通图片保留Photon WASM，特殊格式沿V1/V2共享Core Sharp adapter恢复compiled资源链。
+Sharp打包保持目标0.33.5与已发布平台边界；生产端只移除原图回退，保留Read预算和PDF路径。
+历史修复仍为显式离线迁移，迁移测试独立于AppRuntime清理hook。
 diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Proposal/tui-image-validation-and-history-repair.md
 new file mode 100644
 --- /dev/null
@@ -17,10 +17,10 @@ new file mode 100644
 +
 +Status: approved after independent audit; user selected a distributable repository migration script and authorized implementation
 +
-+> **适配说明（#485 落地于 v1.18.32 目标谱系）**：本文 A 部分（TUI Sharp 原生打包链）不适用于目标——目标 image 后端为
-+> Photon WASM（`photon_rs_bg.wasm` 静态嵌入），compiled 打包问题在目标谱系不存在，Sharp 打包链修复被目标方案等价承载。
-+> 本 patch 在目标落地范围为 B（消费端 fail-closed）与 C（`script/migrate-image-attachment.ts` 历史图片迁移工具），
-+> 以及下文引用的 fail-closed 回归测试。涉及 `lib/sharp.js` 打包细节的小节仅作源谱系历史记录。
++> **适配说明（#485 落地于 v1.18.32 目标谱系）**：普通格式沿用Photon WASM；TIFF/AVIF/HEIF/HEIC仍由共享Core Sharp处理。
++> A的原生资源打包与加载落在现有正式build和Core adapter，保持目标Sharp 0.33.5及既有平台支持范围。
++> 三处fail-closed属于新附件生产边界；B历史消费不增加修复器，C仍为显式离线维护脚本。
++> 本文涉及Sharp 0.34.5 loader细节保留为源谱系记录，实际实现按目标版本精确适配。
 +Date: 2026-07-14
 +
 +## 0. 推荐方案摘要
@@ -795,6 +795,189 @@ new file mode 100644
 +  if (!Number.isSafeInteger(result) || result < 0) throw new Error(`--${name} must be a non-negative integer`)
 +  return result
 +}
+diff --git a/packages/opencode/script/sharp-native.ts b/packages/opencode/script/sharp-native.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/script/sharp-native.ts
+@@ -0,0 +1,90 @@
++import type { BunPlugin } from "bun"
++import fs from "node:fs/promises"
++import os from "node:os"
++import path from "node:path"
++import { createRequire } from "node:module"
++
++type Target = { os: string; arch: "arm64" | "x64"; abi?: "musl" }
++const dir = path.resolve(import.meta.dir, "..")
++const require = createRequire(import.meta.url)
++const sharpRequire = createRequire(require.resolve("sharp/package.json"))
++const metadata = sharpRequire("./package.json") as { version: string; optionalDependencies: Record<string, string> }
++
++export async function createSharpNativeFileMap(item: Target) {
++  const target = `${item.os === "linux" && item.abi === "musl" ? "linuxmusl" : item.os}-${item.arch}`
++  const addonPackage = `@img/sharp-${target}`
++  // 0.33.5未发布Windows ARM64 addon；保留该平台原有Photon能力，不伪造Sharp支持或阻断整个发布。
++  if (!Object.hasOwn(metadata.optionalDependencies, addonPackage)) return { source: `export default ${JSON.stringify({ target, version: metadata.version, addon: null, files: {} })}`, supported: false }
++  const packages = [addonPackage, ...(item.os === "win32" ? [] : [`@img/sharp-libvips-${target}`])]
++  const files = (await Promise.all(packages.map(async (name) => {
++    const root = path.dirname(sharpRequire.resolve(`${name}/package`))
++    return (await Array.fromAsync(new Bun.Glob("lib/**/*").scan({ cwd: root, onlyFiles: true }))).map((file) => ({ absolute: path.join(root, file), relative: `${name}/${file.replaceAll("\\", "/")}` }))
++  }))).flat()
++  const addons = files.filter((file) => file.relative.endsWith(".node"))
++  const libraries = files.filter((file) => /\.(?:dll|dylib|so(?:\..*)?)$/.test(file.relative))
++  // 完整相对布局同时满足RPATH和Windows DLL搜索；有addon但无依赖库不能当成成功构建。
++  if (addons.length !== 1 || libraries.length === 0) throw new Error(`Incomplete Sharp native package for ${target}`)
++  const imports = files.map((file, index) => {
++    const spec = path.relative(dir, file.absolute).replaceAll("\\", "/")
++    return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
++  })
++  return { supported: true, source: [...imports, "export default {", `target: ${JSON.stringify(target)}, version: ${JSON.stringify(metadata.version)}, addon: ${JSON.stringify(addons[0].relative)},`, "files: {", ...files.map((file, index) => `${JSON.stringify(file.relative)}: file_${index},`), "},", "}"].join("\n") }
++}
++
++export const sharpPlugin: BunPlugin = {
++  name: "opencode-sharp-native",
++  setup(build) {
++    build.onLoad({ filter: /[\\/]sharp[\\/]lib[\\/]sharp\.js$/ }, async (args) => {
++      const source = await Bun.file(args.path).text()
++      const before = "const paths = ["
++      // 精确匹配当前0.33.5 loader；该版没有0.34.5的x64-v2 guard，不移入不存在的第二锚点。
++      if (source.indexOf(before) === -1 || source.indexOf(before) !== source.lastIndexOf(before)) throw new Error(`Sharp ${metadata.version} loader changed`)
++      return { contents: source.replace(before, "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,"), loader: "js" }
++    })
++  },
++}
++
++export async function runSharpSmoke(item: Target, target: string, files: string, version: string) {
++  if (item.os !== process.platform || item.arch !== process.arch || item.abi) return
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-sharp-smoke-"))
++  const outfile = path.join(root, `sharp-smoke${item.os === "win32" ? ".exe" : ""}`)
++  const sharp = (await import("sharp")).default
++  // TIFF强制经过共享Sharp adapter；PNG在目标走Photon，不能拿来认证这条原生加载链。
++  const input = await sharp(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVR4nGP4z8DQAMIMMAYAOOgF/REzMMkAAAAASUVORK5CYII=", "base64")).tiff().toBuffer()
++  const source = `
++import { Image } from "./src/image/image"
++import { TestConfig } from "./test/fixture/config"
++import { Effect, Layer } from "effect"
++import { PartID, MessageID, SessionID } from "./src/session/schema"
++const result = await Effect.runPromise(Effect.gen(function* () {
++  const image = yield* Image.Service
++  return yield* image.normalize({ id: PartID.make("prt_sharp_smoke"), messageID: MessageID.make("msg_sharp_smoke"), sessionID: SessionID.make("ses_sharp_smoke"), type: "file", mime: "image/tiff", url: "data:image/tiff;base64," + ${JSON.stringify(input.toString("base64"))} })
++}).pipe(Effect.provide(Image.layer.pipe(Layer.provide(TestConfig.layer({ get: () => Effect.succeed({ attachment: { image: { auto_resize: true, max_width: 1, max_height: 1, max_base64_bytes: 100000 } } }) }))))))
++const data = Buffer.from(result.url.slice(result.url.indexOf(",") + 1), "base64")
++const sharp = (await import("sharp")).default
++const metadata = await sharp(data).metadata()
++if (metadata.width !== 1 || metadata.height !== 1 || data.length === 0) throw new Error("Compiled Image.Service smoke failed")
++console.log(JSON.stringify({ mime: result.mime, width: metadata.width, height: metadata.height, bytes: data.length }))
++`
++  try {
++    const result = await Bun.build({
++      conditions: ["bun", "node"], tsconfig: "./tsconfig.json", plugins: [sharpPlugin],
++      compile: { target: target as Bun.Build.CompileTarget, outfile, autoloadBunfig: false, autoloadDotenv: false },
++      files: { "opencode-sharp.gen.ts": files, "opencode-sharp-smoke.gen.ts": source },
++      entrypoints: ["opencode-sharp-smoke.gen.ts", "opencode-sharp.gen.ts"],
++      define: { OPENCODE_COMPILED: "true", OPENCODE_VERSION: JSON.stringify(version) },
++    })
++    if (!result.success) throw new AggregateError(result.logs, "Failed to build compiled Sharp smoke")
++    const run = async () => {
++      // 只使用smoke自己的目录；即使维护者在本机build，也不借用其业务数据库、锁或全局配置。
++      const child = Bun.spawn([outfile], { cwd: root, env: { ...process.env, XDG_CACHE_HOME: path.join(root, "cache"), LOCALAPPDATA: root, XDG_DATA_HOME: path.join(root, "data"), XDG_STATE_HOME: path.join(root, "state"), XDG_CONFIG_HOME: path.join(root, "config"), OPENCODE_DB: path.join(root, "isolated.db"), OPENCODE_LOCK_PATH: path.join(root, "locks"), OPENCODE_CONFIG: "", OPENCODE_CONFIG_CONTENT: "{}", OPENCODE_CONFIG_DIR: path.join(root, "config") }, stdout: "pipe", stderr: "pipe" })
++      const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
++      if (code !== 0) throw new Error(stderr || stdout || `Sharp smoke exited ${code}`)
++    }
++    // 两个首次启动验证原子释放竞争，第三次验证同版本资源复用。
++    await Promise.all([run(), run()])
++    await run()
++  } finally {
++    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {})
++  }
++}
+
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -11,1 +11,2 @@
+ import { resolveInstallTarget } from "./install-target"
++import { createSharpNativeFileMap, runSharpSmoke, sharpPlugin } from "./sharp-native"
+@@ -227,8 +228,9 @@
+   const workerPath = "./src/cli/tui/worker.ts"
+   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
+   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
++  const sharpFiles = await createSharpNativeFileMap(item)
+ 
+-  await Bun.build({
++  const result = await Bun.build({
+     conditions: ["bun", "node"],
+     tsconfig: "./tsconfig.json",
+-    plugins: [plugin],
++    plugins: [plugin, sharpPlugin],
+@@ -254,1 +256,2 @@
+       "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
++      "opencode-sharp.gen.ts": sharpFiles.source,
+@@ -262,1 +265,2 @@
+       "opencode-pvrecorder.gen.ts",
++      "opencode-sharp.gen.ts",
+@@ -276,1 +280,3 @@
+   })
++  if (!result.success) throw new AggregateError(result.logs, `Failed to build ${name}`)
++  if (sharpFiles.supported) await runSharpSmoke(item, name.replace(pkg.name, "bun"), sharpFiles.source, Script.version)
+
+diff --git a/packages/core/src/image/sharp.ts b/packages/core/src/image/sharp.ts
+--- a/packages/core/src/image/sharp.ts
++++ b/packages/core/src/image/sharp.ts
+@@ -5,1 +5,8 @@
+ import { Image } from "../image"
++import { Global } from "../global"
++import { createHash, randomUUID } from "node:crypto"
++import fs from "node:fs/promises"
++import path from "node:path"
++
++declare const OPENCODE_COMPILED: boolean | undefined
++type EmbeddedSharp = { target: string; version: string; addon: string | null; files: Record<string, string> }
+@@ -9,2 +16,4 @@
+     try: async () => {
++      // V1和原生Image共用此adapter，compiled只改变装载位置，不改变规整/预算算法。
++      if (typeof OPENCODE_COMPILED !== "undefined" && OPENCODE_COMPILED) await prepareCompiledSharp()
+       const module = await import("sharp")
+@@ -78,4 +87,39 @@
+     }
+     return yield* sizeError
+   })
+ })
++
++async function prepareCompiledSharp() {
++  // 虚拟模块与构建入口成对；不猜测开发机node_modules路径或临时切换第二后端。
++  // @ts-expect-error generated at build time
++  const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
++  if (!embedded.addon) throw new Error(`Sharp is unavailable for ${embedded.target}`)
++  const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
++  await Promise.all(Object.entries(embedded.files).map(async ([relative, source]) => {
++    const target = path.join(root, ...relative.split("/"))
++    if (await sameFileContent(source, target)) return
++    await fs.mkdir(path.dirname(target), { recursive: true })
++    const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
++    try {
++      await Bun.write(temp, Bun.file(source))
++      try { await fs.rename(temp, target) } catch (error) {
++        // Windows的并发winner可能已加载DLL；只有内容完全一致才复用，否则保留原错误。
++        if (!(await sameFileContent(source, target))) throw error
++      }
++      if (!(await sameFileContent(source, target))) throw new Error(`Extracted Sharp resource failed verification: ${target}`)
++    } finally {
++      await fs.rm(temp, { force: true }).catch(() => {})
++    }
++  }))
++  // 所有shared library校验完成后才公开addon路径，不能让加载器观察到半释放状态。
++  ;(globalThis as typeof globalThis & { __OPENCODE_SHARP_NATIVE_PATH?: string }).__OPENCODE_SHARP_NATIVE_PATH = path.join(root, ...embedded.addon.split("/"))
++}
++
++async function sameFileContent(source: string, target: string) {
++  if (!(await Bun.file(target).exists()) || Bun.file(source).size !== Bun.file(target).size) return false
++  return (await fileDigest(source)) === (await fileDigest(target))
++}
++
++async function fileDigest(file: string) {
++  return createHash("sha256").update(Buffer.from(await Bun.file(file).arrayBuffer())).digest("hex")
++}
+
 diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
 --- a/packages/opencode/src/image/image.ts
 +++ b/packages/opencode/src/image/image.ts
@@ -812,20 +995,21 @@ diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -624,14 +624,9 @@ const layer = Layer.effect(
+@@ -636,15 +636,10 @@ const layer = Layer.effect(
              }
              const rawOutput = toolResultOutput(value)
              const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
 +              // #485：fail-closed——resizer 不可用时该附件失败省略（omitted 计数），不再回退原图
                attachment.mime.startsWith("image/")
--                ? image.normalize(attachment).pipe(
+                 // 沿用唯一附件归一化分支，只有实际 Read 调用携带源预算。
+-                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(
 -                    Effect.catchIf(
 -                      (error) => error instanceof Image.ResizerUnavailableError,
 -                      () => Effect.succeed(attachment),
 -                    ),
 -                    Effect.exit,
 -                  )
-+                ? image.normalize(attachment).pipe(Effect.exit)
++                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(Effect.exit)
                  : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
              )
              const omitted = normalized.filter(Exit.isFailure).length
@@ -853,22 +1037,19 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -790,13 +790,8 @@ export const ReadTool = Tool.define<
-               // #277：read 结果立即进入模型上下文，预算对齐既有图片 token 上限
-               { tokenBudget: 1600 },
-             )
--            .pipe(
--              // #277：resizer 不可用时保留原始图片字节，维持既有 read 行为而不是让读取失败
--              Effect.catchIf(
--                (error) => error instanceof Image.ResizerUnavailableError,
--                () => Effect.succeed(input),
--              ),
--            )
-+          // #485：fail-closed 反转 #277 的回退决策——resizer 不可用时读取直接失败，
-+          // 不再把未经压缩的原始字节交给模型
-           const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
-           return {
-             title,
+@@ -784,11 +784,5 @@
+                 { tokenBudget: 1600 },
+               )
+-              .pipe(
+-                // #277：只有 resizer 不可用才回退；DecodeError 与尺寸错误继续失败。
+-                Effect.catchIf(
+-                  (error) => error instanceof Image.ResizerUnavailableError,
+-                  () => Effect.succeed(input),
+-                ),
+-              )
++              // 不可用与解码失败均不发送原图；下方PDF分支仍原样返回。
+           : input
+         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
 
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
 --- a/packages/opencode/test/session/processor-effect.test.ts
@@ -1043,50 +1224,11 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -1,5 +1,6 @@
- import { PermissionV1 } from "@opencode-ai/core/v1/permission"
--import { afterEach, describe, expect } from "bun:test"
-+import { afterEach, describe, expect, test } from "bun:test"
-+import { Database as SQLite } from "bun:sqlite"
- import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { Cause, Effect, Exit, Layer, Stream } from "effect"
- import path from "path"
-@@ -24,6 +25,7 @@ import {
-   provideInstance,
-   testInstanceStoreLayer,
-   TestInstance,
-+  tmpdir,
-   tmpdirScoped,
- } from "../fixture/fixture"
- import { testEffect } from "../lib/effect"
-@@ -31,6 +33,22 @@ import { testEffect } from "../lib/effect"
- import { Image } from "@/image/image"
- 
- const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
-+// #485：迁移脚本路径——子进程跑真实 CLI 边界，覆盖参数校验、只读模式与退出码
-+const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
-+
-+async function migrateImageAttachment(args: string[]) {
-+  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], {
-+    cwd: path.join(import.meta.dir, "../.."),
-+    stdout: "pipe",
-+    stderr: "pipe",
-+  })
-+  const [exitCode, stdout, stderr] = await Promise.all([
-+    child.exited,
-+    new Response(child.stdout).text(),
-+    new Response(child.stderr).text(),
-+  ])
-+  return { exitCode, stdout, stderr }
-+}
- 
- afterEach(async () => {
-   await disposeAllInstances()
-@@ -586,8 +604,9 @@ describe("tool.read truncation", () => {
+@@ -724,8 +724,9 @@ describe("tool.read truncation", () => {
      }),
    )
  
--  // #277：resizer 不可用时回退为附加原始图片字节，保持 read 的可用性而不是失败
+-  // resizer 不可用时，附件必须保留原始 MIME 和逐字节相同的内容。
 -  noResizer.live("falls back to original image bytes when the image resizer is unavailable", () =>
 +  // #485：fail-closed 反转 #277 回退契约——处理器不可用时终止本次 Read，
 +  // 不再把未经主处理链确认的原始字节继续交给模型
@@ -1094,12 +1236,11 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
        const png = Buffer.from(
-@@ -596,14 +615,9 @@ describe("tool.read truncation", () => {
+@@ -734,13 +735,9 @@ describe("tool.read truncation", () => {
        )
        yield* put(path.join(dir, "image.png"), png)
  
 -      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
--      // #277：stub 使 normalize 必然失败，此时附件必须逐字节等于原始输入而非压缩产物
 -      expect(result.output).toStartWith("Image read successfully")
 -      expect(result.attachments?.[0]).toMatchObject({
 -        type: "file",
@@ -1112,10 +1253,45 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
      }),
    )
  
-@@ -1381,3 +1395,119 @@ describe("tool.read visible context stubs", () => {
-   )
- })
- 
+diff --git a/packages/opencode/test/image/attachment-migration.test.ts b/packages/opencode/test/image/attachment-migration.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/image/attachment-migration.test.ts
+@@ -0,0 +1,150 @@
++import { describe, expect, test } from "bun:test"
++import { Database } from "bun:sqlite"
++import path from "node:path"
++import { tmpdir } from "../fixture/fixture"
++const FIXTURES_DIR = path.join(import.meta.dir, "../tool/fixtures")
++const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
++async function migrateImageAttachment(args: string[]) {
++  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], { cwd: path.join(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe" })
++  const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
++  return { exitCode, stdout, stderr }
++}
++
++test("bundles the real Sharp loader and native assets without executing a program", async () => {
++  const { createSharpNativeFileMap, sharpPlugin } = await import("../../script/sharp-native")
++  const native = await createSharpNativeFileMap({ os: process.platform, arch: process.arch === "arm64" ? "arm64" : "x64" })
++  expect(native.supported).toBe(true)
++  const unsupported = await createSharpNativeFileMap({ os: "win32", arch: "arm64" })
++  expect(unsupported.supported).toBe(false)
++  expect(unsupported.source).toContain('"addon":null')
++  // 只验证正式plugin与资源表能生成bundle；不compile、不运行产物或OpenCode helper。
++  const result = await Bun.build({
++    target: "bun", conditions: ["bun", "node"], plugins: [sharpPlugin], root: path.join(import.meta.dir, "../.."),
++    files: {
++      "sharp-build-probe.gen.ts": 'import sharp from "sharp"; export default sharp.versions',
++      "opencode-sharp.gen.ts": native.source,
++    },
++    entrypoints: ["sharp-build-probe.gen.ts", "opencode-sharp.gen.ts"],
++  })
++  if (!result.success) throw new AggregateError(result.logs, "Sharp bundle failed")
++  const output = (await Promise.all(result.outputs.filter((file) => file.kind === "entry-point").map((file) => file.text()))).join("\n")
++  expect(output).toContain("__OPENCODE_SHARP_NATIVE_PATH")
++  expect(result.outputs.length).toBeGreaterThan(2)
++})
++
 +describe("image attachment migration", () => {
 +  test(
 +    "dry-runs, migrates once, remains idempotent, and rejects non-images",
@@ -1136,7 +1312,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +          attachments: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${oldBytes.toString("base64")}` }],
 +        },
 +      })
-+      const db = new SQLite(dbPath)
++      const db = new Database(dbPath)
 +      // WAL模式与生产库一致：备份快照必须包含未checkpoint的已提交页。
 +      db.run("PRAGMA journal_mode = WAL")
 +      // 最小真实SQLite表保留脚本依赖的四列，让测试聚焦Part行为而非复制生产schema。
@@ -1162,7 +1338,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +      expect(dryRun.exitCode).toBe(0)
 +      const report = JSON.parse(dryRun.stdout.slice(dryRun.stdout.lastIndexOf('{\n  "status"')))
 +      expect(report.status).toBe("dry-run")
-+      const dryRunDb = new SQLite(dbPath, { readonly: true })
++      const dryRunDb = new Database(dbPath, { readonly: true })
 +      expect(dryRunDb.query("SELECT data FROM part").get()).toEqual({ data: original })
 +      dryRunDb.close()
 +
@@ -1195,25 +1371,25 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +      // Apply成功必须留下可独立恢复的一致master及其manifest，而不是只证明目标行已改变。
 +      expect(await Bun.file(path.join(appliedReport.backup, "master", "opencode.db")).exists()).toBe(true)
 +      expect(await Bun.file(path.join(appliedReport.backup, "manifest.json")).exists()).toBe(true)
-+      const master = new SQLite(path.join(appliedReport.backup, "master", "opencode.db"), { readonly: true })
++      const master = new Database(path.join(appliedReport.backup, "master", "opencode.db"), { readonly: true })
 +      // 保持另一个WAL连接存活，确认一致快照包含已提交WAL中的无关行且仍保留迁移前目标值。
 +      expect(master.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
 +      expect(master.query("SELECT data FROM part WHERE id = 'prt_migrate'").get()).toEqual({ data: original })
 +      master.close()
-+      const migratedDb = new SQLite(dbPath)
++      const migratedDb = new Database(dbPath)
 +      // 直接回读数据库而非相信stdout，确认实际存储的是Sharp生成且hash匹配的附件。
 +      const migrated = JSON.parse((migratedDb.query<{ data: string }, []>("SELECT data FROM part").get() as { data: string }).data)
-+      expect(migrated.state.attachments[0].mime).toBe("image/jpeg")
++      expect(migrated.state.attachments[0].mime).toBe(report.new_mime)
 +      expect(hash(Buffer.from(migrated.state.attachments[0].url.split(",")[1], "base64"))).toBe(report.new_sha256)
 +      expect(migratedDb.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
 +
-+      // 第二次运行应在读取source和创建大备份前幂等退出，避免恢复命令重试产生副作用。
++      // 重跑仍验证source与确定性输出，随后在创建备份前幂等退出。
 +      const repeated = await migrateImageAttachment(applyArgs)
 +      expect(repeated.exitCode).toBe(0)
 +      expect(repeated.stdout).toContain('"status": "already migrated"')
 +
 +      // 相同bytes但错误MIME不能走幂等短路，避免provider按错误媒体类型解释正确payload。
-+      migrated.state.attachments[0].mime = "image/png"
++      migrated.state.attachments[0].mime = report.new_mime === "image/png" ? "image/jpeg" : "image/png"
 +      migratedDb.query("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(migrated), "prt_migrate")
 +      const mismatchedMime = await migrateImageAttachment(applyArgs)
 +      expect(mismatchedMime.exitCode).not.toBe(0)
@@ -1236,20 +1412,19 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 --- a/packages/core/src/tool/read.ts
 +++ b/packages/core/src/tool/read.ts
-@@ -84,9 +84,9 @@ const layer = Layer.effectDiscard(
-                 limit: input.limit,
-               })
-               if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
--                return yield* image
--                  .normalize(resource, { ...content, encoding: "base64" })
--                  .pipe(Effect.catchTag("Image.ResizerUnavailableError", () => Effect.succeed(content)))
-+                // #485：与 V1 read 工具同语义反转——resizer 不可用时读取失败，
-+                // 不再把未经主处理链确认的原始字节回退给模型（V2 路径与 V1 保持一致）。
-+                return yield* image.normalize(resource, { ...content, encoding: "base64" })
+@@ -110,11 +110,6 @@
+                 return yield* image
+                   // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
+                   .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
+-                  .pipe(
+-                    Effect.catchTag("Image.ResizerUnavailableError", (error) =>
+-                      SUPPORTED_IMAGE_MIMES.has(content.mime) ? Effect.succeed(content) : Effect.fail(error),
+-                    ),
+-                  )
                }
                if ("encoding" in content && content.encoding === "base64")
                  return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
-@@ -94,7 +94,9 @@ const layer = Layer.effectDiscard(
+@@ -122,7 +117,9 @@ const layer = Layer.effectDiscard(
              }).pipe(
                Effect.mapError((error) => {
                  const message =

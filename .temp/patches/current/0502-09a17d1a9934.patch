@@ -1067,7 +1067,7 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
              { type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { command: "ls" } },
            ],
          },
-@@ -3009,6 +3019,33 @@ describe("ProviderTransform.message - openai-compatible empty content filter", (
+@@ -3009,6 +3019,41 @@ describe("ProviderTransform.message - openai-compatible empty content filter", (
        expect(result[0].content[0]).toEqual({ type: "text", text: " " })
        expect(result[0].content[1].type).toBe("tool-call")
      })
@@ -1075,28 +1075,36 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
 +    // #502：Kimi 重试持久化 reasoning("")——空 reasoning 在 interleaved 降级后变成
 +    // reasoning_content:"" 触发 Moonshot 400；过滤必须发生在降级之前。
 +    test("drops assistant messages whose only part is empty reasoning", () => {
-+      const msgs = [{ role: "assistant", content: [{ type: "reasoning", text: "" }] }] as any[]
++      const msgs: ModelMessage[] = [{ role: "assistant", content: [{ type: "reasoning", text: "" }] }]
 +
-+      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
++      const result = ProviderTransform.message(msgs, kimiModel, {})
 +
 +      // 全部 parts 被过滤的 assistant 整条移除——不进入后续降级/重试。
 +      expect(result).toEqual([])
 +    })
 +
 +    test("preserves whitespace-surrounded non-empty reasoning", () => {
-+      const msgs = [
++      const msgs: ModelMessage[] = [
 +        {
 +          role: "assistant",
-+          content: [{ type: "reasoning", text: "  thinking  " }],
++          content: [
++            { type: "reasoning", text: "  thinking  " },
++            { type: "text", text: "Answer" },
++          ],
 +        },
-+      ] as any[]
++      ]
 +
-+      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
++      const result = ProviderTransform.message(msgs, kimiModel, {})
 +
 +      // 非空 reasoning 保留原始空白——trim 只用于判空，不修改载荷；
 +      // interleaved 降级把同一原文写入 reasoning_content。
-+      expect(result).toHaveLength(1)
-+      expect(result[0].providerOptions?.openaiCompatible?.reasoning_content).toBe("  thinking  ")
++      expect(result).toEqual([
++        {
++          role: "assistant",
++          content: [{ type: "text", text: "Answer" }],
++          providerOptions: { openaiCompatible: { reasoning_content: "  thinking  " } },
++        },
++      ])
 +    })
    })
  

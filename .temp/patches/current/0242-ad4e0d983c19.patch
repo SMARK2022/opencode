@@ -20,10 +20,10 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
  import { Session } from "@/session/session"
 -import { SessionCompaction } from "@/session/compaction"
  import { MessageV2 } from "@/session/message-v2"
- import { SessionRequestUsage } from "@/session/request-usage"
+ import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
  import { SessionPrompt } from "@/session/prompt"
 @@ -56,7 +55,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-   // 请求用量追踪服务
+   // 稳定服务在 handler layer 捕获，查询不重新构造数据库层或项目作用域。
    const usageSvc = yield* SessionRequestUsage.Service
      const revertSvc = yield* SessionRevert.Service
 -    const compactSvc = yield* SessionCompaction.Service
@@ -373,22 +373,6 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
            // #140：overflow 改到 assembled prompt 的 estimatedInput 之后，避免 tail 旧用量连环压缩
  
            const agent = yield* agents.get(lastUser.agent)
-@@ -1642,12 +1657,14 @@ const layer = Layer.effect(
-               })
-             ) {
-               // #140：auto compact 使用 estimatedInput 窗口
--              yield* compaction.create({
-+              // #242：auto compact 直接执行而非排队为历史任务，避免留下可重放的 compact 命令
-+              const compacted = yield* compaction.run({
-                 sessionID,
-                 agent: lastUser.agent,
-                 model: lastUser.model,
-                 auto: true,
-               })
-+              if (compacted === "stop") return "break" as const
-               return "continue" as const
-             }
-             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
 @@ -1707,13 +1724,16 @@ const layer = Layer.effect(
  
              if (result === "stop") return "break" as const
@@ -507,7 +491,7 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1156,15 +1156,20 @@ it.instance("auto compaction resumes without compacting retained old tail usage again", () => {
+@@ -1156,15 +1156,23 @@ it.instance("auto compaction resumes without compacting retained old tail usage again", () => {
      yield* sessions.updateMessage(old.assistant)
      yield* addCompletedTool(chat.id, old.assistant.id)
      yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
@@ -515,7 +499,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +    yield* llm.text("summary")
 +    yield* llm.text("resumed")
 -    yield* compact.create({
-+    yield* compact.run({
++    const compacted = yield* compact.run({
        sessionID: chat.id,
        agent: "build",
        model: ref,
@@ -524,11 +508,14 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 -    yield* llm.text("summary")
 -    yield* llm.text("resumed")
  
++    expect(compacted).toBe("continue")
 +    const filtered = yield* MessageV2.filterCompactedEffect(chat.id)
 +    expect(filtered.map((msg) => msg.info.id)).toContain(old.user.id)
 +    expect(filtered.map((msg) => msg.info.id)).toContain(old.assistant.id)
++    expect(filtered.some(msg => msg.info.role === "user" && msg.parts.some(part => part.type === "text" && part.metadata?.compaction_continue === true))).toBe(true)
 +
      const result = yield* prompt.loop({ sessionID: chat.id })
++    if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
      const all = yield* sessions.messages({ sessionID: chat.id })
      const compactions = all.flatMap((msg) => msg.parts).filter((part) => part.type === "compaction")
 @@ -2614,6 +2619,42 @@ noLLMServer.instance("assertNotBusy succeeds when idle", () =>

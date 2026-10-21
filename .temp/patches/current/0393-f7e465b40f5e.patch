@@ -1336,67 +1336,122 @@ diff --git a/packages/tui/src/routes/session/dialog-message.tsx b/packages/tui/s
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -311,6 +311,9 @@
-       payload: typeof SummarizePayload.Type
-     }) {
-       const info = yield* requireSession(ctx.params.sessionID)
-+      // revert 进行中时同步返回错误——与下方 assertNotBusy 的 reverting 检查冗余，
-+      // 但端点错误联合声明了 SessionBusyError（HttpApiBuilder 精确匹配要求守卫来源）
-+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       // #153：compaction 摘要消息与 revert 清理的落库位置跟随 session 持久化目录
-       yield* inSessionDirectory(
-         ctx.params.sessionID,
-@@ -346,7 +346,12 @@
-       params: { sessionID: SessionID }
-       payload: typeof PromptPayload.Type
-     }) {
-+      // revert 进行中时阻止 prompt——避免 cleanup 与 in-progress revert 的消息/文件竞争
-+      // 端点错误联合只声明 BadRequest——SessionBusyError 需就地收敛，TUI 保留草稿
-+      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
-+        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
-+      )
-       yield* requireSession(ctx.params.sessionID)
-       // #153：流式返回的 message 必须来自 session 所属实例，防止跨目录读写
+@@ -350,9 +350,11 @@
        const message = yield* inSessionDirectory(
          ctx.params.sessionID,
-@@ -366,7 +366,11 @@
-       params: { sessionID: SessionID }
-       payload: typeof PromptPayload.Type
-     }) {
-+      // revert 进行中时同步返回错误，不 fork——TUI 收到 BadRequest 保留草稿
-+      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
-+        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
-+      )
-       yield* requireSession(ctx.params.sessionID)
-       // #153：后台 fork 的 Error 事件必须发布到 session 所属实例，订阅方才能收到
+-        promptSvc
+-          .prompt({
++        Effect.gen(function* () {
++          // 守卫必须与执行同属持久会话目录，否则会读到另一份InstanceState。
++          yield* runState.assertNotReverting(ctx.params.sessionID)
++          return yield* promptSvc.prompt({
+             ...ctx.payload,
+             sessionID: ctx.params.sessionID,
+           })
+-          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
++        }).pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+       )
+@@ -370,15 +372,21 @@
        yield* inSessionDirectory(
          ctx.params.sessionID,
-@@ -390,6 +390,11 @@
-       params: { sessionID: SessionID }
-       payload: typeof CommandPayload.Type
-     }) {
-+      // command 内部调用 prompt()（含 cleanup），同样需要 revert 守卫
-+      // 端点错误联合只声明 BadRequest——SessionBusyError 需就地收敛，TUI 保留草稿
-+      yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
-+        Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
+-        promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
++        Effect.gen(function* () {
++          // 同步拒绝发生在fork之前，不能把revert冲突藏进后台Error事件。
++          yield* runState.assertNotReverting(ctx.params.sessionID).pipe(
++            Effect.catchTag("SessionBusyError", () => new HttpApiError.BadRequest({})),
++          )
++          yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
+           // catchCause 后统一转 Error 事件，单次失败不影响请求作用域内其他 fiber
+           Effect.catchCause((cause) =>
+             Effect.gen(function* () {
+               yield* Effect.logError("prompt_async failed", { sessionID: ctx.params.sessionID, cause })
+               yield* events.publish(Session.Event.Error, {
+                 sessionID: ctx.params.sessionID,
+                 error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+               })
+             }),
+           ),
+-        ),
+-      ).pipe(Effect.forkIn(scope, { startImmediately: true }))
++          ).pipe(Effect.forkIn(scope, { startImmediately: true }))
++        }),
 +      )
-       yield* requireSession(ctx.params.sessionID)
-       // #153：命令消息持久化与 agent 解析依赖 session 目录上下文
-       return yield* inSessionDirectory(
-@@ -404,7 +417,9 @@
-       params: { sessionID: SessionID }
-       payload: typeof ShellPayload.Type
-     }) {
-+      // shell 内部调用 shellImpl（含 cleanup），同样需要 revert 守卫
-+      yield* SessionError.mapBusy(runState.assertNotReverting(ctx.params.sessionID))
-       yield* requireSession(ctx.params.sessionID)
-       // #153：shell 的输出落盘与快照写入 session 所在存储根，跨目录会写到错误位置
+@@ -394,6 +402,7 @@
        return yield* inSessionDirectory(
          ctx.params.sessionID,
+-        promptSvc
+-          .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
+-          .pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
++        Effect.gen(function* () {
++          yield* runState.assertNotReverting(ctx.params.sessionID)
++          return yield* promptSvc.command({ ...ctx.payload, sessionID: ctx.params.sessionID })
++        }).pipe(Effect.mapError(() => new HttpApiError.BadRequest({}))),
+       )
+@@ -408,5 +417,7 @@
+       return yield* inSessionDirectory(
+         ctx.params.sessionID,
+-        SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID })),
++        SessionError.mapBusy(
++          runState.assertNotReverting(ctx.params.sessionID).pipe(Effect.andThen(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))),
++        ),
+       )
+     })
+@@ -418,8 +429,15 @@
+       yield* requireSession(ctx.params.sessionID)
+-      return yield* SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload }))
++      // revert与四个提交入口必须读写同一目录作用域的reverting集合。
++      return yield* inSessionDirectory(
++        ctx.params.sessionID,
++        SessionError.mapBusy(revertSvc.revert({ sessionID: ctx.params.sessionID, ...ctx.payload })),
++      )
+     })
+ 
+     const unrevert = Effect.fn("SessionHttpApi.unrevert")(function* (ctx: { params: { sessionID: SessionID } }) {
+       yield* requireSession(ctx.params.sessionID)
+-      return yield* SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID }))
++      return yield* inSessionDirectory(
++        ctx.params.sessionID,
++        SessionError.mapBusy(revertSvc.unrevert({ sessionID: ctx.params.sessionID })),
++      )
+     })
+@@ -448,6 +466,9 @@
+       yield* requireSession(ctx.params.sessionID)
+-      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
+-      yield* session.removeMessage(ctx.params)
++      yield* inSessionDirectory(ctx.params.sessionID, Effect.gen(function* () {
++        // assertNotBusy新增reverting语义后，删除检查也要消费同一目录状态。
++        yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
++        yield* session.removeMessage(ctx.params)
++      }))
+       return true
+     })
+ 
+diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
+--- a/packages/opencode/test/server/httpapi-session.test.ts
++++ b/packages/opencode/test/server/httpapi-session.test.ts
+@@ -282,3 +282,18 @@
+         const session = yield* createSession().pipe(Effect.provide(first))
+         const message = yield* createTextMessage(session.id, "shared run").pipe(Effect.provide(first))
++        const other = yield* tmpdirScoped({ git: true }).pipe(Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node)))
++        yield* Effect.acquireUseRelease(
++          firstRunState.beginRevert(session.id).pipe(Effect.provide(first)),
++          () => Effect.gen(function* () {
++            // 请求目录不同仍同步拒绝；若守卫放在fork内则会错误返回204。
++            const response = yield* Effect.promise(() => handlers[0]!.web.handler(new Request(
++              `http://localhost${pathFor(SessionPaths.promptAsync, { sessionID: session.id })}?directory=${encodeURIComponent(other)}`,
++              { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ noReply: true, parts: [{ type: "text", text: "must not be admitted" }] }) },
++            ), HttpApiApp.context))
++            expect(response.status).toBe(400)
++            expect(yield* Context.get(first, Session.Service).messages({ sessionID: session.id }).pipe(Effect.provide(first))).toHaveLength(1)
++          }),
++          () => firstRunState.endRevert(session.id).pipe(Effect.provide(first)),
++        )
++
+         const interrupted = { info: message.info, parts: [message.part] }
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -21,12 +21,7 @@
+@@ -22,13 +22,7 @@
  import { Database } from "@opencode-ai/core/database/database"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { NotFoundError } from "@/storage/storage"
@@ -1406,13 +1461,14 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 -import { inArray } from "drizzle-orm"
 -import { lt } from "drizzle-orm"
 -import { or } from "drizzle-orm"
-+import { and, desc, eq, gte, inArray, lt, or } from "drizzle-orm"
+-import { sql } from "drizzle-orm"
++import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm"
  import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
  import { ProviderError } from "@/provider/error"
  import { iife } from "@/util/iife"
-@@ -485,12 +480,17 @@
+@@ -492,13 +486,23 @@
    before?: string
-   // #106：includeHidden 默认 false，page 层过滤隐藏消息/part
+   // 显式审计读取保留隐藏内容，普通分页在 LIMIT 前筛选可见消息。
    includeHidden?: boolean
 +  fromMessageID?: MessageID
  }) {
@@ -1420,16 +1476,37 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
    const before = input.before ? cursor.decode(input.before) : undefined
 -  const where = before
 -    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-+  // fromMessageID 裁剪：MessageID 单调递增（见 message-v2.ts ascending），
-+  // gte(id, fromMessageID) 等价于"该消息及之后的所有消息"，与 revert.ts 中
-+  // `msg.info.id >= rev.messageID` 的字符串比较语义一致。
-+  const base = input.fromMessageID
-+    ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
-     : eq(MessageTable.session_id, input.sessionID)
-+  const where = before ? and(base, older(before)) : base
+-    : eq(MessageTable.session_id, input.sessionID)
++  const anchor = input.fromMessageID
++    ? yield* db.select({ id: MessageTable.id, time: MessageTable.time_created })
++        .from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.fromMessageID)))
++        .get().pipe(Effect.orDie)
++    : undefined
++  // 导入及回绕ID不保证时间单调，范围必须与现有(time_created,id)分页顺序一致。
++  const lower = input.fromMessageID
++    ? anchor
++      ? or(gt(MessageTable.time_created, anchor.time), and(eq(MessageTable.time_created, anchor.time), gte(MessageTable.id, anchor.id)))
++      : sql`0`
++    : undefined
++  const where = and(eq(MessageTable.session_id, input.sessionID), lower, before ? older(before) : undefined)
+   // #98：隐藏消息在 LIMIT 前过滤，保留可见页容量和游标。
    const rows = yield* db
      .select()
      .from(MessageTable)
+@@ -541,11 +545,11 @@
+ // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
+-export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
++export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
+   // includeHidden 默认 false：正常流不返回被撤销隐藏的消息和 part
+   const size = 50
+   return Effect.gen(function* () {
+     const result = [] as WithParts[]
+     let before: string | undefined
+     while (true) {
+-      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden }).pipe(
++      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden, fromMessageID: opts?.fromMessageID }).pipe(
+         Effect.catchIf(NotFoundError.isInstance, () =>
+           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
 --- a/packages/opencode/src/session/revert.ts
 +++ b/packages/opencode/src/session/revert.ts
@@ -1484,7 +1561,7 @@ diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/ses
 +          Effect.gen(function* () {
 +            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
 +            if (!session.revert) return session
-+            // 只恢复被 revert 的文件，避免覆盖同目录其他 session 的改动
++            // 恢复撤回前快照，标志仍与正常revert共用同一释放边界。
 +            if (session.revert.snapshot) yield* snap.restore(session.revert.snapshot)
 +            yield* sessions.clearRevert(input.sessionID)
 +            return yield* sessions.get(input.sessionID).pipe(Effect.orDie)
@@ -1515,8 +1592,7 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
      const status = yield* SessionStatus.Service
  
      const state = yield* InstanceState.make(
--      Effect.fn("SessionRunState.state")(function* () {
-+      Effect.fn("SessionRunState.state")(function* (ctx) {
+       Effect.fn("SessionRunState.state")(function* () {
          const scope = yield* Scope.Scope
          const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
 +        // revert 进行中标记：beginRevert 原子 check-and-set，endRevert 清除。
@@ -1566,8 +1642,9 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
      })
  
      const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-@@ -114,7 +147,7 @@
-         )
+@@ -117,8 +150,8 @@
+       return yield* current.startShell(tracked, ready)
+         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
      })
  
 -    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
@@ -1588,7 +1665,7 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
    readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
    readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
    readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
-@@ -834,7 +835,7 @@ const layer: Layer.Layer<
+@@ -782,7 +783,7 @@ const layer: Layer.Layer<
      const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
        if (input.limit) {
          // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
@@ -1597,17 +1674,15 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
            Effect.provideService(Database.Service, database),
          )).items
        }
-@@ -848,7 +849,12 @@ const layer: Layer.Layer<
+@@ -791,7 +792,8 @@
+       yield* get(input.sessionID)
+-      const newestFirst = yield* MessageV2.stream(input.sessionID).pipe(
++      // 把边界交给既有分页查询，不能全量hydrate后再作内存过滤。
++      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID: input.fromMessageID }).pipe(
          Effect.provideService(Database.Service, database),
        )
        // stream 为 newest-first；Session.messages 契约为 chronological oldest-first
--      return newestFirst.slice().reverse()
-+      // #393：无 limit 路径的 fromMessageID 裁剪——内存过滤 id >= fromMessageID，
-+      // 与 limit 路径的 page(fromMessageID) 语义一致（revert 尾部裁剪优化依赖此契约）
-+      const filtered = input.fromMessageID
-+        ? newestFirst.filter((m) => m.info.id >= input.fromMessageID!)
-+        : newestFirst
-+      return filtered.slice().reverse()
+       return newestFirst.slice().reverse()
      })
  
      const removeMessage = Effect.fn("Session.removeMessage")(function* (input: {
@@ -1642,11 +1717,11 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
  import path from "path"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 -import { Effect } from "effect"
-+import { Effect, Exit } from "effect"
++import { Cause, Effect, Exit } from "effect"
  import { Session } from "@/session/session"
  
  import { SessionRevert } from "../../src/session/revert"
-@@ -736,3 +737,230 @@
+@@ -736,3 +737,238 @@
      ),
    )
  })
@@ -1729,6 +1804,9 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
 +          // 一个成功一个失败（BusyError）——顺序不确定，但恰好一个 success
 +          const successCount = [exit1, exit2].filter((e) => Exit.isSuccess(e)).length
 +          expect(successCount).toBe(1)
++          const failure = [exit1, exit2].find(Exit.isFailure)
++          expect(failure).toBeDefined()
++          if (failure) expect(Cause.squash(failure.cause)).toBeInstanceOf(Session.BusyError)
 +
 +          yield* session.remove(sid)
 +        }),
@@ -1737,7 +1815,7 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
 +  )
 +
 +  it.live(
-+    "revert clears reverting flag on failure allowing subsequent operations",
++    "revert clears reverting flag on early return allowing subsequent operations",
 +    provideTmpdirInstance(
 +      (dir) =>
 +        Effect.gen(function* () {
@@ -1853,11 +1931,11 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
 +          const info = yield* session.create({})
 +          const sid = info.id
 +
-+          const u1 = yield* user(sid)
++          const u1 = yield* userAt(sid, "msg_z9-crop-before", 1)
 +          yield* text(sid, u1.id, "first")
-+          const u2 = yield* user(sid)
++          const u2 = yield* userAt(sid, "msg_z1-crop-target", 2)
 +          yield* text(sid, u2.id, "second")
-+          const u3 = yield* user(sid)
++          const u3 = yield* userAt(sid, "msg_a0-crop-after", 3)
 +          yield* text(sid, u3.id, "third")
 +
 +          // 全量加载应返回 3 条
@@ -1871,6 +1949,11 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
 +          expect(tailIds).toContain(u2.id)
 +          expect(tailIds).toContain(u3.id)
 +          expect(tailIds).not.toContain(u1.id)
++          // 回绕ID仍沿时间后缀分页；不存在的锚点不能退回全量历史。
++          expect((yield* session.messages({ sessionID: sid, limit: 1, fromMessageID: u2.id })).map((m) => m.info.id)).toEqual([u3.id])
++          expect(yield* session.messages({ sessionID: sid, fromMessageID: MessageID.make("msg_missing-crop") })).toEqual([])
++          const page = yield* MessageV2.page({ sessionID: sid, limit: 1, fromMessageID: u2.id })
++          expect((yield* MessageV2.page({ sessionID: sid, limit: 1, before: page.cursor, fromMessageID: u2.id })).items.map((m) => m.info.id)).toEqual([u2.id])
 +
 +          yield* session.remove(sid)
 +        }),

@@ -108,7 +108,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +      })
  
      for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
-       addUsage(total, event)
+       addUsage(sessionUsage, event)
 @@ -1059,11 +1074,13 @@ const filteredAggregates =
      statusSeries: finalizeSeries(statusSeries, completeDaily),
      projectSeries: finalizeSeries(projectSeries, completeDaily),
@@ -127,7 +127,20 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -115,6 +115,21 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+@@ -111,7 +111,11 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+                   }))
+                 : report.models
+ 
+-  const rows = limitRows(groups, options.limit).map((group) => {
++  // #177：显式 cost 先排序再限行，避免 tokens-first 漏掉高成本分组
++  const rows = limitRows(
++    options.sort === "cost" ? [...groups].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...groups].sort((a, b) => b.assistantCalls - a.assistantCalls) : groups,
++    options.limit,
++  ).map((group) => {
+     const value = metric === "cost" ? group.cost : group.tokens.total
+     return { label: group.label || group.id, value }
+   })
+@@ -121,6 +125,21 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
    ]
      // #176：tool 维附加 context/count/IO 明细
    if (by === "tool") {
@@ -149,7 +162,37 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      lines.push("")
      lines.push("Tool context tokens / counts")
      for (const tool of limitRows(report.toolUsage ?? [], options.limit)) {
-@@ -176,8 +191,9 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions
+@@ -159,9 +178,13 @@ export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+     ...header(report, "stats models"),
+     ...renderRankBars({
+-      rows: limitRows(options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models, options.limit).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
++      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
++      rows: limitRows(
++        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
++        options.limit,
++      ).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
+     }),
+     ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
+     ...renderGroupDetails(report.models, options),
+   ].join("\n")
+ 
+@@ -168,9 +191,13 @@ export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+     ...header(report, "stats providers"),
+     ...renderRankBars({
+-      rows: limitRows(options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers, options.limit).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
++      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
++      rows: limitRows(
++        options.sort === "cost" ? [...report.providers].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers,
++        options.limit,
++      ).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
+     }),
+     ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
+     ...renderGroupDetails(report.providers, options),
+   ].join("\n")
+ 
+@@ -184,8 +211,9 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions
    ].join("\n")
  
  // #174：sessions 按 sort 键排序再切片
@@ -159,8 +202,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +  const sort = options.sort ?? "tokens"
    const rows = [...report.sessions].sort((a, b) => {
      if (sort === "tokens") return b.tokens.total - a.tokens.total
-     if (sort === "calls") return b.requests - a.requests
-@@ -195,6 +211,18 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
+     if (sort === "calls") return b.assistantCalls - a.assistantCalls
+@@ -203,10 +231,22 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
  export const renderCharts = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
      ...header(report, "stats charts"),
@@ -178,11 +221,89 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +      : []),
      ...renderRankBars({ rows: limitRows(report.models, options.limit ?? 8).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
      ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
+     ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
+     ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
+     ...renderStackedAreaChart({ title: "Token components", daily: report.daily, layers: layersFromTokenParts() }),
+     ...renderStreamStackChart({ title: "Model mix over time", daily: report.daily, layers: limitRows(report.modelSeries, options.limit).map((series) => ({ id: series.id, label: series.label || series.id, color: "cyan", value: (day) => { const point = series.points.find((point) => point.day === day.day); return options.metric === "cost" ? point?.cost ?? 0 : point?.tokens.total ?? 0 } })) }),
    ].join("\n")
+@@ -226,9 +266,15 @@
+ export const renderCosts = (report: StatsReport, options: StatsRenderOptions = {}) =>
+   [
+     ...header(report, "stats costs"),
+-    ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.cost })) }),
++    ...renderRankBars({
++      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
++      rows: limitRows(
++        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
++        options.limit,
++      ).map((m) => ({ label: m.label || m.id, value: m.cost })),
++    }),
+     ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
+     ...renderWaterfall({ title: "Provider cost waterfall", steps: report.providers.map((provider) => ({ label: provider.label || provider.id, delta: provider.cost })) }),
+     ...renderHistogram({ title: "Session cost distribution", values: report.sessions.map((session) => session.cost) }),
+   ].join("\n")
+ 
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -61,4 +61,53 @@ describe("stats render width (#176)", () => {
+@@ -6,6 +6,56 @@
+ // #176：CJK 显示列宽与 breakdown 冒烟
+ describe("stats render width (#176)", () => {
++  test("cost sorting selects groups before limiting without changing token defaults", async () => {
++    const { renderModels, renderProviders, renderCosts } = await import("../../src/cli/cmd/stats-render")
++    const { emptyComponents } = await import("../../src/cli/cmd/stats-data")
++    // #177：token 榜首成本低，显式 cost 必须在限行前选出高成本行
++    const groups = [
++      { id: "token-heavy", tokens: 100, cost: 1, calls: 1 },
++      { id: "cost-heavy", tokens: 10, cost: 9, calls: 20 },
++    ].map((group) => ({
++      id: group.id,
++      label: group.id,
++      tokens: { input: group.tokens, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: group.tokens },
++      components: emptyComponents(),
++      cost: group.cost,
++      requests: 1,
++      assistantCalls: group.calls,
++      errors: 0,
++      aborted: 0,
++      durationMs: 0,
++      sessions: 1,
++      providers: [],
++      models: [],
++    }))
++    const report = {
++      totalSessions: 1, sessionsWithUsage: 1, totalMessages: 2, totalTools: 0, days: 1,
++      dateRange: { earliest: 0, latest: 0 },
++      total: {
++        ...groups[0],
++        tokens: { input: 110, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 110 },
++        cost: 10,
++        requests: 2,
++        assistantCalls: 2,
++      },
++      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups,
++      daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
++      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
++      tokensPerSession: 110, medianTokensPerSession: 110,
++    } satisfies StatsReport
++    for (const render of [renderModels, renderProviders, renderBreakdown, renderCosts]) {
++      for (const metric of ["tokens", "cost"] as const) {
++        for (const sort of [undefined, "tokens", "cost", "calls"] as const) {
++          const text = render(report, { sort, metric, limit: 1, color: "never" })
++          expect(text).toContain(sort === "cost" || sort === "calls" ? "cost-heavy" : "token-heavy")
++          // 排名限行只约束榜单；后续完整费用瀑布仍应展示其他供应商。
++          expect(text.split("\n").slice(0, 4).join("\n")).not.toContain(sort === "cost" || sort === "calls" ? "token-heavy" : "cost-heavy")
++        }
++      }
++    }
++    expect(groups.map((group) => group.id)).toEqual(["token-heavy", "cost-heavy"])
++  })
++
+   test("counts CJK glyphs as two columns", () => {
+     expect(visibleLength("中文")).toBe(4)
+     expect(visibleLength("abc")).toBe(3)
+   })
+@@ -61,4 +110,53 @@ describe("stats render width (#176)", () => {
      // with toolSeries present, breakdown must surface the #177 chart title
    })
  

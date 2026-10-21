@@ -20,13 +20,113 @@ immutable release，原渲染探针与 300 项 TUI 测试在新 runtime 上全�
 
 
 适配说明（v1.18.32 重放）：
-目标 TUI 已迁 packages/tui（路径前缀映射）；bun.lock x3 与 package.json x2 无目标 base，
-按 0489/0512/0516/0560/0563 SUPERSEDED_BY_REGISTRY 先例跳过（registry 0.4.5 catalog 钉死）；
-session-v2.tsx x3 与 session-v2-error.test x1 的宿主（TUI v2 debug surface）在目标从未创建
-（grep session.v2/SessionV2Debug 全域零命中），不可本地补偿。可承载语义全部保留：折叠
-sentinel 移除（index/notebook/preview-diff 语义逐字 + #224/#233 注释同步）、preview-diff
-测试断言反转、渲染测试按 #506/#550 源码合同先例落 shell-output-spacing（运行时展开面
-由既有 block-tool-collapse.test.tsx 覆盖）、docs plan 与 gitlink 前移零适配落地。
+目标 TUI 已迁 packages/tui；主会话保留共享 Unicode 安全截断 owner，只关闭折叠卡片的
+省略号提示，普通错误摘要保持原默认策略。notebook/diff 去 sentinel，footer 继续负责展开。
+目标已消费 SMARK .5，本项恢复 .6 catalog、全部 11 个 override 与锁闭包；native 宽字符
+修复随实际发布包消费，不用 gitlink 代替运行时。source 的旧 V2 debug 路由没有目标宿主，
+对应展示能力沿共享 Session 工具路径验证，不新建旧路由。原计划、diff 断言与 gitlink 保留，
+真实预览/展开用例复用现有 headless BlockTool，另测共享截断策略及 Unicode 边界。
+
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -45,3 +45,3 @@
+-      "@opentui/core": "0.4.3-smark.5",
+-      "@opentui/keymap": "0.4.3-smark.5",
+-      "@opentui/solid": "0.4.3-smark.5",
++      "@opentui/core": "0.4.3-smark.6",
++      "@opentui/keymap": "0.4.3-smark.6",
++      "@opentui/solid": "0.4.3-smark.6",
+@@ -142,11 +142,11 @@
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-0.4.3-smark.5.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-darwin-arm64-0.4.3-smark.5.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-darwin-x64-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-arm64-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-arm64-musl-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-x64-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-x64-musl-0.4.3-smark.5.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-win32-arm64-0.4.3-smark.5.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-win32-x64-0.4.3-smark.5.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-keymap-0.4.3-smark.5.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-solid-0.4.3-smark.5.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-0.4.3-smark.6.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-arm64-0.4.3-smark.6.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-x64-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-musl-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-musl-0.4.3-smark.6.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-arm64-0.4.3-smark.6.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-x64-0.4.3-smark.6.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-keymap-0.4.3-smark.6.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-solid-0.4.3-smark.6.tgz",
+
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -1106,11 +1106,11 @@
+-    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-0.4.3-smark.5.tgz",
+-    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-darwin-arm64-0.4.3-smark.5.tgz",
+-    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-darwin-x64-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-arm64-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-arm64-musl-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-x64-0.4.3-smark.5.tgz",
+-    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-x64-musl-0.4.3-smark.5.tgz",
+-    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-win32-arm64-0.4.3-smark.5.tgz",
+-    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-win32-x64-0.4.3-smark.5.tgz",
+-    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-keymap-0.4.3-smark.5.tgz",
+-    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-solid-0.4.3-smark.5.tgz",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-0.4.3-smark.6.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-arm64-0.4.3-smark.6.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-x64-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-musl-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-0.4.3-smark.6.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-musl-0.4.3-smark.6.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-arm64-0.4.3-smark.6.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-x64-0.4.3-smark.6.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-keymap-0.4.3-smark.6.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-solid-0.4.3-smark.6.tgz",
+@@ -1134,3 +1134,3 @@
+-    "@opentui/core": "0.4.3-smark.5",
+-    "@opentui/keymap": "0.4.3-smark.5",
+-    "@opentui/solid": "0.4.3-smark.5",
++    "@opentui/core": "0.4.3-smark.6",
++    "@opentui/keymap": "0.4.3-smark.6",
++    "@opentui/solid": "0.4.3-smark.6",
+@@ -2072,21 +2072,21 @@
+-    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-0.4.3-smark.5.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.5", "@opentui/core-darwin-x64": "0.4.3-smark.5", "@opentui/core-linux-arm64": "0.4.3-smark.5", "@opentui/core-linux-arm64-musl": "0.4.3-smark.5", "@opentui/core-linux-x64": "0.4.3-smark.5", "@opentui/core-linux-x64-musl": "0.4.3-smark.5", "@opentui/core-win32-arm64": "0.4.3-smark.5", "@opentui/core-win32-x64": "0.4.3-smark.5" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-iyY9y/H/l4wTpjK9GvXrEs0cnRMHMZeaG3mv+Yl3AOVSE0qC6pZaW4VFQPmgpTtPlcKzA5Kq5fQn1/xX2+oY3A=="],
++    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-0.4.3-smark.6.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.6", "@opentui/core-darwin-x64": "0.4.3-smark.6", "@opentui/core-linux-arm64": "0.4.3-smark.6", "@opentui/core-linux-arm64-musl": "0.4.3-smark.6", "@opentui/core-linux-x64": "0.4.3-smark.6", "@opentui/core-linux-x64-musl": "0.4.3-smark.6", "@opentui/core-win32-arm64": "0.4.3-smark.6", "@opentui/core-win32-x64": "0.4.3-smark.6" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-02wCR/RsNKFHaCfaoHl0VdtCU36awIsM4Mgi3rT6pmynrFhujfAqqRHeBk8cpjf7zKu0kU0jyBbiuhxplHG4aQ=="],
+ 
+-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-darwin-arm64-0.4.3-smark.5.tgz", {}, "sha512-+JQKrwORTtdVBNinFp5370ZyYbiwIfl46vG1Qf3/oyFla0MQL1LLzgUR4SRjffpVkqExkf09GTgg8mmFgKpOiw=="],
++    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-arm64-0.4.3-smark.6.tgz", {}, "sha512-38riEmFGM3Hx/ZUoabRTy75ZdSKMlzJys7MKVJig/bPv8ZX8QLKm9n3oXjujmJlYRecKhYcNUUSieDuEkAbH1Q=="],
+ 
+-    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-darwin-x64-0.4.3-smark.5.tgz", {}, "sha512-QsFPyaa2qwt55wJQg+Pwsw3RZ36Qtd/uHWd3QdOzqccpaKUHfVs0AVFsT7w+5iYZ7yfJl7oiAfHo1Gf0ruy8mw=="],
++    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-darwin-x64-0.4.3-smark.6.tgz", {}, "sha512-1lCRH4h7+rp76ndcUw8KqYXqZV6mKvNiBmykxbqJ1tm9bR8sL0+Rdj8RgxyaxitFDYRESTwhABbfhakt1uQYSg=="],
+ 
+-    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-arm64-0.4.3-smark.5.tgz", {}, "sha512-QyKDufAN0amdCAdWYCXU3t/dCRi70mKQ5HUT6qGNrPTxTvUOkiGAY/GRY5N/ZodHthfB+vwJyqQGW6K8fjnKvw=="],
++    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-0.4.3-smark.6.tgz", {}, "sha512-86tC7b9xNMi2+3whDoCwHWAgV2rqKIRBPfvod1occY0NtXw0KE3JRJ+X6h1HrswG38czPg3yNQKcDY7GRVMhdg=="],
+ 
+-    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-arm64-musl-0.4.3-smark.5.tgz", {}, "sha512-m/t7WoprzyNsfC2FgKPnzkcte7vbkpv5eIhEiMHJq23NEyYSJeJbe7QBcKtKyET9WqzCfZQCvrlrF4aKBfB5xg=="],
++    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-arm64-musl-0.4.3-smark.6.tgz", {}, "sha512-JaXgCINJqdUZoJjGefzsJJo5FhGJSvc2/kiKfI/GwOZXLhhrpfp4Zej0kkYsrSJyZI9JnDK6gojfvC7LPadsRA=="],
+ 
+-    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-x64-0.4.3-smark.5.tgz", {}, "sha512-Xf8CtzEorlbTdmzfGJGSsCNp3utZaZzr+moe+SPNQM8InpCqwZSyuREamSj0t74Xs6CWQnw/VZ6Jh59EpVXv5Q=="],
++    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-0.4.3-smark.6.tgz", {}, "sha512-7WFdq9E32RBmb0/viamVSS/1qHhPeizk0Gn4lsvJWhcxTr5I4jo9R6xBPbHArvY8P6NbBBFxrUkqXLKl2wGgBw=="],
+ 
+-    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-linux-x64-musl-0.4.3-smark.5.tgz", {}, "sha512-LYSg4amRZCI+Y2k9IRZWSxn0gHmCOAl76fPPO3323hTUroaogJI/boLxkUDhI/LFAEc3J82Q5aUbz9uMAHgFig=="],
++    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-linux-x64-musl-0.4.3-smark.6.tgz", {}, "sha512-iLy3BsGt2GHJw03OGWBPW2XH3BzJihGxQT+1gQQKvGBvRT1Wwm/vBR2C4YD5+OepT7FJhWOKlOi1Ll6+XT35vA=="],
+ 
+-    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-win32-arm64-0.4.3-smark.5.tgz", {}, "sha512-txw8KCs1WG6PjA/CtX+8Zpelqw8Q5rPayi5u6VhwEq2tmxEIcNcS6fsBLoWcfLxgiVARWtEgRZPUQQfEGcd+dw=="],
++    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-arm64-0.4.3-smark.6.tgz", {}, "sha512-+qZ8jk4OBSjO2vqyNJswsho7naRUM3/kzO3wmkJZVqVTAZ2nwGYD6NIyN37KRw6VtCJmA8i6gG6UdsviuvDApA=="],
+ 
+-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-core-win32-x64-0.4.3-smark.5.tgz", {}, "sha512-6y9MsGSiyDyNvaiqSBcUIhSw9R0uuM6x3iu7T7dnPgwg0p2w8T1nEjQXs1nuBqMDoWA6jxBy9WIhJfQR3I+FTQ=="],
++    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-core-win32-x64-0.4.3-smark.6.tgz", {}, "sha512-z41eZwAggLfLPHGBCNZYGUvCaOAdBwgi68YkogJ4ozxDO1LZ8r6lOfdP9emDPF2QcbCkMzC3U5rXPGT7hNWS/A=="],
+ 
+-    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-keymap-0.4.3-smark.5.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.5" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.5", "@opentui/solid": "0.4.3-smark.5", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-BEotlJVsa/bChNLXusSzezwny+oTH28S0CaPhn2u/3wjPE6KLOwSkE/HlwA8ZU7q21GcqBF7GJB3tJDiJqNSHQ=="],
++    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-keymap-0.4.3-smark.6.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.6" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.6", "@opentui/solid": "0.4.3-smark.6", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-mOwiCb8x35+7xupFoV8vdyKbItiYExWSekAbtc5L4CPIL4KacM0RE/rxF5TI2wZNhZPmgFQYbKRtnBdGLk49Tg=="],
+ 
+-    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.5/opentui-solid-0.4.3-smark.5.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.5", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-1O61ae7mMZY104wyK8CHYyQVuyBZi7Z7V4guFFMeKfcvSfITnG3r8m91Np7e4nCrxwDxwLe5p5HDSRDzzn1tAg=="],
++    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.6/opentui-solid-0.4.3-smark.6.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.6", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-J/QveIjtB6UKdx3Y0mOdbfZ7Ba4lHHxEtE+jUVAuoPsYIO0f0W8dcYN3A4QEzpWoxHoLxbig8LsFGcdKzgVsGA=="],
 
 diff --git a/docs/plans/tui-collapse-ellipsis-and-buffer-scissor.md b/docs/plans/tui-collapse-ellipsis-and-buffer-scissor.md
 new file mode 100644
@@ -566,20 +666,32 @@ new file mode 100644
 +`No blocking findings` for the current implementation and approved plan
 +revision.
 
+diff --git a/packages/tui/src/util/collapse-tool-output.ts b/packages/tui/src/util/collapse-tool-output.ts
+--- a/packages/tui/src/util/collapse-tool-output.ts
++++ b/packages/tui/src/util/collapse-tool-output.ts
+@@ -1,1 +1,2 @@
+-export function collapseToolOutput(output: string, maxLines: number, maxChars: number) {
++// 折叠卡片已有footer提示；普通错误摘要仍沿用省略号策略，避免静默丢失溢出提示。
++export function collapseToolOutput(output: string, maxLines: number, maxChars: number, ellipsis = true) {
+@@ -12,2 +13,2 @@
+-          .slice(0, Math.max(0, maxChars - 1))
+-          .join("") + "…",
++          .slice(0, Math.max(0, maxChars - (ellipsis ? 1 : 0)))
++          .join("") + (ellipsis ? "…" : ""),
+@@ -18,1 +19,1 @@
+-  return { output: [...lines.slice(0, maxLines), "…"].join("\n"), overflow: true }
++  return { output: ellipsis ? [preview, "…"].join("\n") : preview, overflow: true }
+
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2344,8 +2344,8 @@ function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_C
-   const text = lineLimited ? lines.slice(0, maxLines).join("\n") : input
-   const charLimited = text.length > maxChars
-   if (!lineLimited && !charLimited) return input
--  const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
--  return preview ? [preview, "…"].join("\n") : "…"
-+  // #564：截断预览直接返回真实内容，不追加 `…` sentinel 行；“还有更多”由 BlockTool footer 承载。
-+  return charLimited ? text.slice(0, maxChars).trimEnd() : text
+@@ -2292,4 +2292,4 @@
+ function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
+-  // #144：复用 Unicode 安全的 collapseToolOutput，宽度变化仍驱动原预算。
+-  return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD)).output
++  // 折叠信号由footer承载，仍保留Unicode安全与随宽度变化的原字符预算。
++  return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output
  }
- 
- // #224：工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
 
 diff --git a/packages/tui/src/routes/session/notebook-tool.tsx b/packages/tui/src/routes/session/notebook-tool.tsx
 --- a/packages/tui/src/routes/session/notebook-tool.tsx
@@ -687,7 +799,7 @@ diff --git a/packages/tui/test/util/preview-diff.test.ts b/packages/tui/test/uti
 diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
 --- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
 +++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
-@@ -78,4 +78,34 @@ describe("Session Shell output spacing", () => {
+@@ -78,4 +78,31 @@ describe("Session Shell output spacing", () => {
      expect(end).toBeGreaterThan(start)
      expect(inlineToolSource).toContain('if (!previous) return 1')
    })
@@ -695,16 +807,13 @@ diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/pac
 \ No newline at end of file
 +})
 +
-+// #564 语义：折叠预览不再注入 `…`/` …` sentinel 行——“还有更多”由 BlockTool footer（Click to expand）承载。
-+// 以下为源码合同断言（#506/#550 absent-render-harness 先例）：previewText 未导出且目标无
-+// session-message-render 渲染级 harness；运行时展开面由 block-tool-collapse.test.tsx 覆盖，
-+// previewDiff 运行时行为由 preview-diff.test.ts 覆盖。
++// 主会话保留共享截断入口；真实预览与展开行为另由helper和headless BlockTool用例覆盖。
 +describe("Session collapsed preview sentinel removal", () => {
 +  test("main previewText returns truncated content without ellipsis row", () => {
 +    // sentinel 注入形态（两种旧分支）必须全部消失，直接返回真实截断内容。
 +    expect(sessionSource).not.toContain('[preview, "…"].join("\\n")')
 +    expect(sessionSource).not.toContain(': "…"')
-+    expect(sessionSource).toContain("return charLimited ? text.slice(0, maxChars).trimEnd() : text")
++    expect(sessionSource).toContain("return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD), false).output")
 +  })
 +
 +  test("notebook previewText drops the ellipsis sentinel row", () => {
@@ -724,6 +833,42 @@ diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/pac
 +    expect(previewDiffSource).not.toContain('body.push(" …")')
 +  })
 +})
+
+diff --git a/packages/tui/test/util/tool-display.test.ts b/packages/tui/test/util/tool-display.test.ts
+--- a/packages/tui/test/util/tool-display.test.ts
++++ b/packages/tui/test/util/tool-display.test.ts
+@@ -30,2 +30,16 @@
+   })
++
++  test("disclosure previews keep real rows and Unicode character budgets", () => {
++    const output = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n")
++    const preview = collapseToolOutput(output, 10, 1000, false)
++    expect(preview.output).toBe(output.split("\n").slice(0, 10).join("\n"))
++    expect(preview.overflow).toBe(true)
++    // 隐藏sentinel不能多留半个surrogate，也不能把真实省略号字符从源内容中抹掉。
++    const unicode = String.fromCodePoint(0x1f600).repeat(201)
++    const clipped = collapseToolOutput(unicode, 10, 200, false)
++    expect(Array.from(clipped.output)).toEqual(Array(200).fill(String.fromCodePoint(0x1f600)))
++    expect(clipped.overflow).toBe(true)
++    expect(collapseToolOutput("真实…内容", 10, 200, false)).toEqual({ output: "真实…内容", overflow: false })
++    expect(collapseToolOutput("tail", 10, 0, false)).toEqual({ output: "", overflow: true })
++  })
+ })
+
+diff --git a/packages/tui/test/routes/session/block-tool-collapse.test.tsx b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
+--- a/packages/tui/test/routes/session/block-tool-collapse.test.tsx
++++ b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
+@@ -15,0 +16,1 @@
++import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
+@@ -36,1 +37,2 @@
+-    const preview = <text>PREVIEW-FRONT preview body PREVIEW-END</text>
++    // 实际共享预览只展示前十行；原展开/再展开断言继续验证完整正文恢复。
++    const preview = <text>{collapseToolOutput(output, 10, 600, false).output}</text>
+@@ -75,1 +77,3 @@
+-    expect(frame).toContain("PREVIEW-FRONT")
++    expect(frame).toContain("source line 10")
++    expect(frame).not.toContain("source line 11")
++    expect(frame).not.toContain("…")
 
 diff --git a/thirdparty/opentui b/thirdparty/opentui
 index 2ce7e0d5f571bc6572b0eb0cee9d681f8cdaca4d..afd11de829e5745de83695d877b98833219a2f8c 160000

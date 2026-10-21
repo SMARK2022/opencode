@@ -424,7 +424,7 @@ index 87eac81bde25805d83f0c711c0a3173aa0aa0550..2a36de9b092ac2d96b8bb6714a63b75e
 -    while (tries-- > 0) {
 -      await new Promise((resolve) => setTimeout(resolve, 200))
 -      // 仅 fetch 的网络拒绝进入就绪重试，HTTP 认证错误必须在 catch 外传播。
--      const response = await fetch(`http://localhost:${port}/app`, { headers: cliHeaders(env) }).catch(() => undefined)
+-      const response = await fetch(`http://localhost:${port}/global/health`, { headers: cliHeaders(env) }).catch(() => undefined)
 -      // 401/403 不会靠等待修复，立即交还命令 owner，不能反复探测同一错误凭证。
 -      if (response?.status === 401 || response?.status === 403) throw new Error(`CLI authentication failed: HTTP ${response.status}`)
 -      // fetch 收到 4xx/5xx 也会 resolve，只有 2xx 能作为监听器已就绪的证据。
@@ -2361,11 +2361,11 @@ index 87eac81bde25805d83f0c711c0a3173aa0aa0550..2a36de9b092ac2d96b8bb6714a63b75e
 +
 +  let tries = 10
 +  let connected = false
-+  // CLI 的 /app 就绪与 notebook bridge 的端口是不同接口，探测不能转发到 bridge。
++  // CLI 的 /global/health 就绪与 notebook bridge 的端口是不同接口，探测不能转发到 bridge。
 +  while (tries-- > 0) {
 +    await new Promise((resolve) => setTimeout(resolve, 200))
 +    // 仅 fetch 的网络拒绝进入就绪重试，HTTP 认证错误必须在 catch 外传播。
-+    const response = await fetch(`http://localhost:${port}/app`, { headers: cliHeaders(env) }).catch(() => undefined)
++    const response = await fetch(`http://localhost:${port}/global/health`, { headers: cliHeaders(env) }).catch(() => undefined)
 +    // 401/403 不会靠等待修复，立即交还命令 owner，不能反复探测同一错误凭证。
 +    if (response?.status === 401 || response?.status === 403) throw new Error(`CLI authentication failed: HTTP ${response.status}`)
 +    // fetch 收到 4xx/5xx 也会 resolve，只有 2xx 能作为监听器已就绪的证据。

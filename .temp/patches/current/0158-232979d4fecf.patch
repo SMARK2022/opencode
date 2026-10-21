@@ -10,44 +10,12 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index 1111111111..2222222222 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -453,19 +453,28 @@
- function shellCompatibilityError(root: Node, shellName: string): string | undefined {
-   if (process.platform !== "win32") return
-   if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
--  for (const node of commands(root)) {
-+  // #158：localCommands 过滤引号载荷，避免误杀 ssh/wsl 内 Unix 工具
-+  for (const node of localCommands(root)) {
-     const command = parts(node)
-     const raw = command[0]?.text
-     if (!raw) continue
-     const name = raw.toLowerCase().replace(/\.exe$/, "")
-     if (UNIX_TEXT_COMMANDS.has(name)) {
--      // Unix 文本工具在 Windows shell 中不存在，返回错误阻止执行
-+      // #158：仅拦截本地管道中的 Unix 文本工具；引号内 ssh/wsl 载荷跳过
-+      if (shellName === "powershell" || shellName === "pwsh") {
-+        // #158：PowerShell 给出可操作替代，并提示远程命令留在远程字符串内
-+        return [
-+          `The current shell is ${shellName}, but the local command uses Unix utility \`${raw}\`.`,
-+          `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
-+          powershellUnixAlternative(name),
-+          `Keep remote Unix pipelines inside the remote shell string (ssh/wsl), not as a local pipeline.`,
-+        ].join(" ")
-+      }
-+      // #158：cmd 走 cmd 原生命令提示，不混入 PowerShell 说法
-       return [
-         `The current shell is ${shellName}, but the command uses Unix utility \`${raw}\`.`,
-         `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
--        shellName === "powershell" || shellName === "pwsh"
--          ? `If a shell command is truly required, use PowerShell equivalents such as Get-Content -Tail or Select-String.`
--          : `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
-+        `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
-       ].join(" ")
-     }
-     if (shellName === "cmd" && name === "ls") {
-@@ -482,6 +492,32 @@
- 
- // 生成 per-shell 指引文本：Windows 下按 shell 类型提供 Unix 工具禁用和替代方案
- // powershell 5.1 不支持 && ||，需要用 A; if ($?) { B } 条件链
+@@ -379,4 +379,19 @@
+ function shellCompatibilityError(root: Node, shellName: string) {
+   // V1 保留完整 AST 提取；分类与错误文字复用 Core 的同一 guard。
+-  return Shell.compatibilityError(commands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
++  return Shell.compatibilityError(localCommands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
+ }
 +
 +// #158：只扫描本地 command 节点；祖先含 string 视为远程/WSL 引号载荷
 +function localCommands(root: Node) {
@@ -63,6 +31,20 @@ index 1111111111..2222222222 100644
 +  })
 +}
 +
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -363,1 +363,5 @@
+     if (["tail", "head", "sed", "awk", "grep"].includes(command)) {
++      // 本地 PowerShell 给出对应替代，远程管道继续留在 SSH/WSL 字符串内。
++      if (shellName !== "cmd") {
++        return `The current shell is ${shellName}, but the local command uses Unix utility \`${raw}\`. ${powershellUnixAlternative(command)} Keep remote Unix pipelines inside the remote shell string (ssh/wsl), not as a local pipeline.`
++      }
+@@ -419,3 +423,15 @@
+     if (shellName !== "cmd" && command === "find") return `The current shell is ${shellName}; find is ambiguous on Windows. Prefer available dedicated search tools.`
+   }
+ }
++
 +// #158：PowerShell 本地 Unix 工具的可操作替代提示
 +function powershellUnixAlternative(name: string) {
 +  if (name === "head") return "Prefer Select-Object -First N for local pipelines."
@@ -74,9 +56,6 @@ index 1111111111..2222222222 100644
 +  return "Prefer PowerShell-native commands, or run the Unix utility inside ssh/wsl."
 +}
 +
- function shellGuidance(name: string) {
-   if (process.platform !== "win32") return ""
- 
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 index 1111111111..2222222222 100644
 --- a/packages/opencode/test/tool/shell.test.ts

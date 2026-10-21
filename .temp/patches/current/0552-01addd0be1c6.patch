@@ -17,7 +17,8 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 @@ -45,13 +45,14 @@ jobs:
              os_label: Linux
              runner: ubuntu-latest
-             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+-            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
 -            junit: packages/opencode/.artifacts/unit/junit.xml
 +            # opencode 分片产出 junit-core.xml 与 junit-tui.xml——消费侧一律 glob 拾取。
 +            junit: packages/opencode/.artifacts/unit/*.xml
@@ -25,7 +26,8 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
              label: packages/opencode
              os_label: Windows
              runner: windows-latest
-             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+-            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
 -            junit: packages/opencode/.artifacts/unit/junit.xml
 +            junit: packages/opencode/.artifacts/unit/*.xml
            - id: core-linux
@@ -34,12 +36,35 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 @@ -84,7 +85,7 @@ jobs:
              os_label: macOS
              runner: macos-latest
-             command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
+-            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
 -            junit: packages/opencode/.artifacts/unit/junit.xml
 +            junit: packages/opencode/.artifacts/unit/*.xml
            - id: core-macos
              label: packages/core
              os_label: macOS
+@@ -92,2 +93,21 @@ jobs:
+             junit: packages/core/.artifacts/unit/junit.xml
++          # 迁出的原生消费测试由TUI包自己的进程和preload承载，不漏出原全覆盖合同。
++          - id: tui-linux
++            label: packages/tui
++            os_label: Linux
++            runner: ubuntu-latest
++            command: GITHUB_ACTIONS=false bun turbo test --filter=@opencode-ai/tui --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++            junit: packages/tui/.artifacts/unit/junit.xml
++          - id: tui-windows
++            label: packages/tui
++            os_label: Windows
++            runner: windows-latest
++            command: GITHUB_ACTIONS=false bun turbo test --filter=@opencode-ai/tui --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++            junit: packages/tui/.artifacts/unit/junit.xml
++          - id: tui-macos
++            label: packages/tui
++            os_label: macOS
++            runner: macos-latest
++            command: GITHUB_ACTIONS=false bun turbo test --filter=@opencode-ai/tui --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++            junit: packages/tui/.artifacts/unit/junit.xml
+     defaults:
 @@ -123,7 +124,8 @@ jobs:
          id: junit
          if: always()
@@ -50,7 +75,16 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
              echo "exists=true" >> "$GITHUB_OUTPUT"
            else
              echo "exists=false" >> "$GITHUB_OUTPUT"
-@@ -357,10 +359,10 @@ jobs:
+@@ -357,2 +377,6 @@ jobs:
+-          # 串行调度Turbo任务以减少Windows资源竞争；--后的包内reporter参数保持原样。
+-          GITHUB_ACTIONS=false bun turbo test --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++          # 其余包沿原test；opencode仅运行隔离runner，任一侧失败均传播且不阻止另一侧出报告。
++          status=0
++          GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml || status=$?
++          GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
++          exit "$status"
++
+@@ -362,10 +387,10 @@ jobs:
          run: echo "::warning title=上游单元兼容性::${{ matrix.os_label }} 上游全量单元测试存在失败；此结果只作为兼容性警告，不阻断 fork 核心测试。"
  
        - name: Publish upstream unit reports
@@ -68,7 +102,7 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
            if-no-files-found: ignore
            retention-days: 7
 -          path: packages/**/.artifacts/unit/junit.xml
-+          # 双 shard 文件名不固定，上传与发布都按 glob 收集。
++          # 两个独立shard报告均需上传，与发布端使用同一glob。
 +          path: packages/**/.artifacts/unit/*.xml
  
        - name: Write upstream unit summary
@@ -967,13 +1001,18 @@ new file mode 100644
 diff --git a/turbo.json b/turbo.json
 --- a/turbo.json
 +++ b/turbo.json
-@@ -13,6 +13,11 @@
+@@ -13,6 +13,16 @@
        "outputs": [],
        "passThroughEnv": ["*"]
      },
 +    "opencode#test:ci": {
 +      "dependsOn": ["^build"],
 +      "outputs": [".artifacts/unit/*.xml"],
++      "passThroughEnv": ["*"]
++    },
++    "@opencode-ai/tui#test": {
++      "dependsOn": ["^build"],
++      "outputs": [".artifacts/unit/junit.xml"],
 +      "passThroughEnv": ["*"]
 +    },
      "@opencode-ai/core#test": {

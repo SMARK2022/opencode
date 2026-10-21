@@ -511,7 +511,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index 7a4f1ca97..846556cbe 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -45,6 +45,12 @@ const DAEMON_START_TIMEOUT_MS = 30_000
+@@ -44,6 +44,12 @@ const DAEMON_START_TIMEOUT_MS = 30_000
  const POLL_INTERVAL_MS = 100
  const DAEMON_STOP_TIMEOUT_MS = 60_000
  
@@ -522,12 +522,11 @@ index 7a4f1ca97..846556cbe 100644
 +}
 +
  afterEach(() => {
-   ServerLockModule._setLockPath(undefined)
+   ServerLock._setLockPath(undefined)
  })
-@@ -110,7 +116,7 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
+@@ -103,6 +109,6 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
    await prepareCliData(lockPath)
-   // #259：预置 CLI 数据目录避免迁移阻塞
-   // #259：使用 argv 数组直接调用真实 CLI，避免 shell 引号
+   // 用 argv 数组保留路径和密码中的空格，并从真实入口验证命令注册。
 -  const proc = Bun.spawn([process.execPath, INDEX_TS, "daemon", "stop"], {
 +  const proc = spawnBackground([process.execPath, INDEX_TS, "daemon", "stop"], {
      env: isolatedDaemonEnv(lockPath, env),
@@ -624,15 +623,15 @@ index 7a4f1ca97..846556cbe 100644
        stdin: "ignore",
        stdout: "ignore",
        stderr: "ignore",
-@@ -1155,7 +1162,7 @@ describe("daemon lifecycle", () => {
+@@ -1148,7 +1155,7 @@ describe("daemon lifecycle", () => {
    test("daemon stop command refuses a live lock without a safe control port", async () => {
      await using tmp = await tmpdir()
      const lockPath = path.join(tmp.path, "tui-server.json")
 -    const nonDaemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
 +    const nonDaemon = spawnBackground([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
-     // #259：启动一个真实存活的非 daemon 进程——模拟 pid 被复用后误杀的场景
        stdin: "ignore",
        stdout: "ignore",
+       stderr: "ignore",
 @@ -1194,7 +1201,7 @@ describe("daemon lifecycle", () => {
        await using tmp = await tmpdir()
        const lockPath = path.join(tmp.path, "tui-server.json")
@@ -642,23 +641,14 @@ index 7a4f1ca97..846556cbe 100644
          stdin: "ignore",
          stdout: "ignore",
          stderr: "ignore",
-@@ -1469,7 +1476,7 @@ describe("daemon lifecycle", () => {
-       await using tmp = await tmpdir()
-       const lockPath = path.join(tmp.path, "tui-server.json")
- 
--      const proc = Bun.spawn([process.execPath, INDEX_TS, "src/cli/tui/worker.ts"], {
-+      const proc = spawnBackground([process.execPath, INDEX_TS, "src/cli/tui/worker.ts"], {
-         env: {
-           ...process.env,
-           OPENCODE_PROCESS_ROLE: "worker",
-@@ -1508,6 +1515,58 @@ describe("daemon lifecycle", () => {
-     expect(() => Win32Module.win32DetachConsole()).not.toThrow()
+@@ -1328,6 +1335,58 @@ describe("daemon lifecycle", () => {
+     expect(() => win32DetachConsole()).not.toThrow()
    })
  
 +  test.skipIf(process.platform !== "win32")(
 +    "Windows daemon PowerShell wrapper hides its console window",
 +    async () => {
-+      // INV-01：必须拦截真实 Bun.spawn 上的 powershell wrapper 选项；_spawn seam 会走默认 spawnDaemon 的 wrapper 构造。
++      // INV-01：必须拦截真实Bun.spawn；DaemonProcess.spawn调用默认wrapper，替换整个adapter无法证明hide。
 +      await using tmp = await tmpdir()
 +      const original = Bun.spawn
 +      let wrapperHide: boolean | undefined
@@ -680,8 +670,8 @@ index 7a4f1ca97..846556cbe 100644
 +      )
 +
 +      try {
-+        const proc = await _spawn([process.execPath, worker], {
-+          env: { ...process.env, DAEMON_HIDE_MARKER: marker },
++        const proc = await DaemonProcess.spawn([process.execPath, worker], {
++          env: { ...isolatedDaemonEnv(path.join(tmp.path, "tui-server.json")), DAEMON_HIDE_MARKER: marker },
 +          stdin: "ignore",
 +          stdout: "ignore",
 +          stderr: "ignore",
@@ -710,6 +700,15 @@ index 7a4f1ca97..846556cbe 100644
    test(
      "Windows daemon detaches from the shared console yet keeps serving HTTP, SSE and control port",
      async () => {
+@@ -1511,7 +1570,7 @@ describe("daemon lifecycle", () => {
+       await using tmp = await tmpdir()
+       const lockPath = path.join(tmp.path, "tui-server.json")
+ 
+-      const proc = Bun.spawn([process.execPath, INDEX_TS, "src/cli/tui/worker.ts"], {
++      const proc = spawnBackground([process.execPath, INDEX_TS, "src/cli/tui/worker.ts"], {
+         env: {
+           ...isolatedDaemonEnv(lockPath),
+           OPENCODE_PROCESS_ROLE: "worker",
 @@ -1685,7 +1744,7 @@ test(
        )
        // FileShare.Read 拒绝 delete/rename，复现 CI 全量负载下 scanner 或延迟 reader 留下的真实 NT sharing boundary。
@@ -807,20 +806,14 @@ index f23512602..d2cc9f36b 100644
      if (code !== 0) throw new Error(`${command.join(" ")} failed: ${await new Response(proc.stderr).text()}`)
    })
 
-diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 45973abf1..e33092da4 100644
---- a/packages/opencode/test/tool/read.test.ts
-+++ b/packages/opencode/test/tool/read.test.ts
-@@ -39,10 +39,12 @@ const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
+diff --git a/packages/opencode/test/image/attachment-migration.test.ts b/packages/opencode/test/image/attachment-migration.test.ts
+--- a/packages/opencode/test/image/attachment-migration.test.ts
++++ b/packages/opencode/test/image/attachment-migration.test.ts
+@@ -6,5 +6,6 @@
  const MIGRATION_SCRIPT = path.join(import.meta.dir, "../../script/migrate-image-attachment.ts")
- 
  async function migrateImageAttachment(args: string[]) {
 +  // 迁移 CLI 子进程在 Windows 上隐藏 console，覆盖真实入口时不弹 conhost。
-   const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], {
-     cwd: path.join(import.meta.dir, "../.."),
-     stdout: "pipe",
-     stderr: "pipe",
-+    windowsHide: process.platform === "win32",
-   })
-   const [exitCode, stdout, stderr] = await Promise.all([
-     child.exited,
+-  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], { cwd: path.join(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe" })
++  const child = Bun.spawn([process.execPath, MIGRATION_SCRIPT, ...args], { cwd: path.join(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe", windowsHide: process.platform === "win32" })
+   const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+   return { exitCode, stdout, stderr }

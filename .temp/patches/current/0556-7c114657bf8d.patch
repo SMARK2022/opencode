@@ -403,9 +403,9 @@ index 0000000000000000000000000000000000000000..3b35bd2adda75d13f8c4586106d5b43f
 +
 +Audited: plan R2 + precheck.ts / precheck.test.ts. Independent: precheck 107 pass, auto 22 pass.
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -53,7 +53,7 @@ const SENSITIVE_PATH_LOCAL_ARGUMENT_PATTERN = String.raw`["']?${SENSITIVE_PATH_C
  // #217：捕获不透明 shell（重定向、命令替换、SSH/WSL 载荷、不支持分隔符）中的可见文件变更
  const RAW_COMMAND_START = "(?:^|[;&|{(]\\s*|[\\r\\n]\\s*|\\$\\(\\s*|`\\s*)"
@@ -515,7 +515,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -1207,4 +1207,45 @@ describe("permission precheck bash classifier", () => {
+@@ -1207,4 +1207,49 @@ describe("permission precheck bash classifier", () => {
      expect(bash("git status | head -5").level).toBe("safe")
      expect(bash("git status | git checkout main")).toMatchObject({ level: "cautious" })
    })
@@ -541,6 +541,7 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect(bash("ri -Recurse /")).toMatchObject({ level: "dangerous" })
 +    expect(bash("Remove-Item -Recurse /")).toMatchObject({ level: "dangerous" })
 +    expect(bash("Remove-Item -Force file.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("ri -Recurse docs")).toMatchObject({ level: "cautious" })
 +  })
 +
 +  test("joins PowerShell -Command remaining tokens like cmd /c", () => {
@@ -556,6 +557,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect(bash("env FOO=1 rm file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("env git reset --hard")).toMatchObject({ level: "cautious" })
 +    expect(bash("env git apply p.diff")).toMatchObject({ level: "cautious" })
++    expect(bash("env -i FOO=1 mv old.txt new.txt")).toMatchObject({ level: "cautious" })
++    expect(bash("env -u HOME git reset --hard")).toMatchObject({ level: "cautious" })
++    expect(bash("env --unset HOME rm file.txt")).toMatchObject({ level: "cautious" })
 +    expect(bash("env")).toMatchObject({ level: "general" })
 +    // 与既有 env git status 守卫一致：wrapper 不得把内层 safe 升成 safe
 +    expect(bash("env git status")).toMatchObject({ level: "general" })

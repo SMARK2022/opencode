@@ -6,77 +6,57 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E5=AE=88=E6=8A=A4?=
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -215,10 +215,40 @@ export async function discoverOrSpawnDaemon(
-       proc.unref()
-       fwdPid = proc.pid
+@@ -223,12 +223,34 @@ export async function discoverOrSpawnDaemon(
++        let exitedBeforeReady = false
+         try {
+           // exited 的拒绝先安装 observer；read/unref 的同步异常仍由两层 finally 清理。
+           void proc.exited.catch(() => undefined)
+           proc.unref()
  
-+      // #179：启动等待与 worker exited 竞态，崩溃则带 exit code 快速失败
-+      // #179：兼容无 exited 的 spawn mock，缺失则永不完成
-+      const exited =
-+        "exited" in proc && (proc as { exited?: PromiseLike<number> | number }).exited !== undefined
-+          ? // #179：统一 thenable/number exited 形态
-+          Promise.resolve((proc as { exited: PromiseLike<number> | number }).exited).then(
-+              (code) => ({ kind: "code" as const, code: Number(code) }),
-+              () => ({ kind: "error" as const }),
-+            )
-+          : // #179：无 exited 时不完成，保持轮询语义
-+          new Promise<{ kind: "code"; code: number }>(() => {})
-+
-+      // #179：将 sleep 与 exited 合并为可中断等待
-+      const raceSleep = async (ms: number) => {
-+        const sleepP = deps.sleep(ms).then(() => ({ kind: "sleep" as const }))
-+        const result = await Promise.race([sleepP, exited])
-+        // #179：仅 sleep 胜出才继续等待
-+        if (result.kind === "sleep") return
-+        // #179：失败文案引导 --print-logs，避免空等超时
-+        const msg =
-+          // #179：带 code 的文案便于对照日志
-+          result.kind === "code"
-+            ? `opencode daemon exited before startup with exit code ${result.code}. Re-run with --print-logs to show daemon startup logs.`
-+            : `opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs.`
-+        // #179：UI 与 throw 同步同一失败文案
-+        UI.error(msg)
-+        throw new Error(msg)
-+      }
-+
-       const deadline = Date.now() + deps.waitMs
-       // 启动后等待 1s 再轮询，避免过早健康检查失败
-       // #49 启动后先 sleep 1s 再进入健康轮询
--      await deps.sleep(1000)
-+      // #179：首等 1s 同样可被崩溃打断
-+      await raceSleep(1000)
-       // 轮询锁文件直到守护进程存活且健康检查通过（不校验 spawn PID）
-       while (Date.now() < deadline) {
-         const daemonLock = await deps.read()
-@@ -234,7 +264,8 @@ export async function discoverOrSpawnDaemon(
-             break
-           }
-         }
--        await deps.sleep(deps.pollMs)
-+        // #179：轮询间隔同样可被崩溃打断
-+        await raceSleep(Math.min(deps.pollMs, Math.max(0, deadline - Date.now())))
-       }
- 
-       await electionLease.release()
-@@ -242,10 +273,16 @@ export async function discoverOrSpawnDaemon(
- 
-       if (!existingUrl) {
-         // 超时失败：杀死半拉起的进程并向上抛错
--        UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-+        // #179：超时同样提示 --print-logs
-+        UI.error(
-+          `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
-+        )
-+        // #179：仅超时路径 kill，崩溃路径不杀已退出进程
-         proc.kill()
-         // 超时文案与常量同源，避免 60 字面量与 waitMs 再次漂移
--        throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-+        throw new Error(
-+          `opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`,
-+        )
-       }
-     }
-   }
++          // 首等和轮询共用退出观察，崩溃不能一直占用选举租约直到超时。
++          const exited = proc.exited.then(
++            (code) => ({ kind: "code" as const, code }),
++            () => ({ kind: "error" as const }),
++          )
++          const raceSleep = async (ms: number) => {
++            const result = await Promise.race([deps.sleep(ms).then(() => ({ kind: "sleep" as const })), exited])
++            if (result.kind === "sleep") return
++            // Windows 启动器可退出而真实 daemon 已发布锁，交付仍经过唯一 read/reuse 的身份认证。
++            if (result.kind === "code" && result.code === 0) {
++              const lock = await deps.read(lockPath)
++              if (lock && deps.alive(lock.pid)) existingUrl = await reuse(lock)
++              if (existingUrl) { fwdPid = lock!.pid; return }
++            }
++            exitedBeforeReady = true
++            const msg = result.kind === "code"
++              ? `opencode daemon exited before startup with exit code ${result.code}. Re-run with --print-logs to show daemon startup logs.`
++              : "opencode daemon exited before startup. Re-run with --print-logs to show daemon startup logs."
++            UI.error(msg)
++            throw new Error(msg)
++          }
+           // 等待放在 proc 与 lease 的 finally 内，sleep 拒绝也不能泄漏选举所有权。
+           // 完整启动预算从 sleep 后开始，不能用避让早期探测的延迟吃掉健康等待时间。
+-          await deps.sleep(1000)
++          await raceSleep(1000)
+           const deadline = Date.now() + deps.waitMs
+           // 启动器 PID 可不同；健康锁仍必须通过 reuse 的身份与稳定 owner 校验。
+-          while (Date.now() < deadline) {
++          while (!existingUrl && Date.now() < deadline) {
+             const daemonLock = await deps.read(lockPath)
+@@ -244,1 +270,2 @@ export async function discoverOrSpawnDaemon(
+-            await deps.sleep(deps.pollMs)
++            // 轮询间隔也被退出打断，不扩大原有健康等待期限。
++            await raceSleep(Math.min(deps.pollMs, Math.max(0, deadline - Date.now())))
+@@ -250,2 +277,3 @@ export async function discoverOrSpawnDaemon(
+-            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
+-            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
++            // 超时诊断与提前退出共享日志指引，资源仍由原 finally 清理。
++            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`)
++            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds. Re-run with --print-logs to show daemon startup logs.`)
+@@ -255,1 +283,2 @@ export async function discoverOrSpawnDaemon(
+-          if (!existingUrl) proc.kill()
++          // 已观察退出不重复终止；其他未交付异常仍保留原清理责任。
++          if (!existingUrl && !exitedBeforeReady) proc.kill()
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
@@ -98,7 +78,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 @@ -15,6 +15,11 @@ import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
  import { cliIt } from "../../lib/cli-process"
  
- // 注入 deps 验证单服务器复用与 spawn 主路径
+ // 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
 +// #179：幸福路径 mock 使用永不 resolve 的 exited
 +function hangingExited() {
 +  return new Promise<number>(() => {})
@@ -107,64 +87,34 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
  describe("tui thread", () => {
    test("loads the TUI integration lazily", async () => {
      const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
-@@ -147,7 +152,9 @@ describe("tui thread", () => {
-         }),
+@@ -184,6 +189,6 @@ describe("tui thread", () => {
          spawn: ((_cmd, _opts) => {
            daemonSpawnCount++
--          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+          return { pid: FAKE_DAEMON_PID,
-+          exited: hangingExited(),
-+          unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+-          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
          }) as DiscoverDaemonDeps["spawn"],
        }))
        expect(daemonSpawnCount).toBe(0)
-@@ -165,7 +172,9 @@ describe("tui thread", () => {
-         },
+@@ -244,3 +249,3 @@ describe("tui thread", () => {
+               // 注入 proc handle 不创建进程；就绪仍走真实 PID、身份和 token 复查。
+-              return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++              return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+             }) as DiscoverDaemonDeps["spawn"],
+@@ -355,6 +360,6 @@ describe("tui thread", () => {
          spawn: ((_cmd, _opts) => {
            daemonSpawnCount++
--          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+          return { pid: FAKE_DAEMON_PID,
-+          exited: hangingExited(),
-+          unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+-          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
          }) as DiscoverDaemonDeps["spawn"],
        }))
        expect(daemonSpawnCount).toBe(1)
-@@ -191,7 +200,9 @@ describe("tui thread", () => {
-         },
-         spawn: ((_cmd, _opts) => {
-           daemonSpawnCount++
--          return { pid: 12345, unref() {}, kill() {} } as never
-+          return { pid: 12345,
-+          exited: hangingExited(),
-+          unref() {}, kill() {} } as never
-         }) as DiscoverDaemonDeps["spawn"],
-       }))
-       expect(result.url).toBe("http://127.0.0.1:9999")
-@@ -224,7 +235,9 @@ describe("tui thread", () => {
-         },
-         spawn: ((_cmd, _opts) => {
-           daemonSpawnCount++
--          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+          return { pid: FAKE_DAEMON_PID,
-+          exited: hangingExited(),
-+          unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-         }) as DiscoverDaemonDeps["spawn"],
-       }))
-       expect(daemonSpawnCount).toBe(1)
-@@ -277,7 +290,9 @@ describe("tui thread", () => {
-         ping: async () => true,
-         clear: async () => {},
-         acquire: async () => ({ release: async () => {} }) as never,
--        spawn: () => ({ pid: SPAWN_PID, unref() {}, kill() {} }) as ReturnType<typeof Bun.spawn>,
-+        spawn: () => ({ pid: SPAWN_PID,
-+          exited: hangingExited(),
-+          unref() {}, kill() {} }) as ReturnType<typeof Bun.spawn>,
-         sleep: async () => {},
-         resolveDaemonFile: async () => "/tmp/daemon.ts",
-         electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS,
-@@ -289,3 +304,44 @@ describe("tui thread", () => {
-     })
-   })
+@@ -379,2 +384,2 @@ describe("tui thread", () => {
+-            return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0),
++            return { pid: FAKE_DAEMON_PID, exited: hangingExited(),
+               unref() { if (stage === "unref") fail() }, kill() { kills++ } } as ReturnType<typeof Bun.spawn>
+@@ -430,3 +435,47 @@ describe("tui thread", () => {
+     }),
+   )
  })
 +
 +
@@ -186,6 +136,9 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        acquire: async () => ({ release: async () => undefined }),
 +        clear: async () => undefined,
 +        resolveDaemonFile: async () => "/tmp/fake-daemon.js",
++        identity: () => ({ dbPath: "/tmp/test.db", channel: "local" }),
++        placement: () => undefined,
++        resolveNetwork: async (args: Parameters<DiscoverDaemonDeps["resolveNetwork"]>[0]) => resolveNetworkOptionsNoConfig(args),
 +        spawn: () =>
 +          ({
 +            pid: 4242,

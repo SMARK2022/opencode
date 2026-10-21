@@ -484,7 +484,7 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 index 867918536..ed0588c69 100644
 --- a/packages/opencode/src/cli/tui/server-lock.ts
 +++ b/packages/opencode/src/cli/tui/server-lock.ts
-@@ -29,6 +29,10 @@ export const CONTROL_STATUS_PATH = "/status"
+@@ -46,5 +46,9 @@ export const CONTROL_STATUS_PATH = "/status"
  export const CONTROL_MAINTENANCE_PATH = "/maintenance"
  export const CONTROL_MAINTENANCE_STATUS_PATH = "/maintenance/status"
  export const CONTROL_MAINTENANCE_RESUME_PATH = "/maintenance/resume"
@@ -492,7 +492,6 @@ index 867918536..ed0588c69 100644
 +// 25ms 只决定下一次探测节奏；writeAtomic 与 stale lock rename 共用，避免两套边界漂移。
 +const MAINTENANCE_RENAME_TIMEOUT_MS = 1_000
 +const MAINTENANCE_RENAME_RETRY_MS = 25
- // #259：header 名是 CLI 与 daemon 两侧的契约常量——集中定义避免字符串漂移
  export const CONTROL_TOKEN_HEADER = "x-opencode-daemon-token"
  
 @@ -213,30 +217,42 @@ function taskPath(taskID: string, dbPath?: string) {
@@ -615,11 +614,11 @@ index d6a6e3a1e..f5209a24f 100644
 +      await worker.stdin!.end()
 +      expect(await readUntil(reader, "write-ok")).toContain("write-ok")
 +      expect(await worker.exited).toBe(0)
-+      const task = await ServerLockModule.readMaintenanceTask("dbm_write_atomic_retry", dbPath)
++      const task = await ServerLock.readMaintenanceTask("dbm_write_atomic_retry", dbPath)
 +      expect(task?.status).toBe("interrupted")
 +    } finally {
 +      reader.releaseLock()
-+      if (ServerLockModule.alive(worker.pid)) worker.kill()
++      if (ServerLock.alive(worker.pid)) worker.kill()
 +      await worker.exited.catch(() => undefined)
 +    }
 +  }, 10_000)
@@ -745,10 +744,10 @@ index 63ebbd429..61353391a 100644
          })
          expect(tail.map((part) => part.id)).toEqual([...partIDs.slice(-2), midPartID])
          expect(tail.every((part) => part.type === "tool" && part.state.status !== "pending")).toBe(true)
--        // freeze 的 previous tools 仍在 cold 统计内；具体 pack 数随 cold layout 可变，至少保留有界 thaw 不爆表。
--        expect(ColdStorage.status(sync).coldOwners).toBeGreaterThanOrEqual(2)
-+        // #509：有界 tail 只 thaw 选中 part；本 session 的 previous freeze tools 仍应保持 cold（至少 2）。
-+        expect(sessionColdOwners(sync, sessionID)).toBeGreaterThanOrEqual(2)
+-        // 五个 frozen owner 只恢复 previous 的两个；mid 未冻结，后一次查询不能再 thaw 其它 owner。
+-        expect(ColdStorage.status(sync).coldOwners).toBe(3)
++        // 本 session 的五个 frozen owner 只 thaw 两个；局部精确值不依赖其它 fixture 留存。
++        expect(sessionColdOwners(sync, sessionID)).toBe(3)
  
          const two = yield* MessageV2.previousAssistantToolTail({
            sessionID,

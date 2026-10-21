@@ -8,7 +8,7 @@ Subject: [PATCH] =?UTF-8?q?fix(tool):=20shell=20=E6=9D=83=E9=99=90?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 
-适配说明：五生产 hunk 全量落地——normalizeBareDoubleDash/isTokenChar 插 listCommand 与 ShellTool 之间（目标函数顺序重排，shellCompatibilityError 已移 :756，纯位置适配函数体零改动）；collect 签名+parseInput/locals 提升/零节点兜底原样（#207 注释保留）；execute parseInput 声明插 compressOutput 后（目标 0590 增插行），parse/collect 两调用点改用 parseInput，执行与 audit 保持原文。测试 16 用例插 each("matches redirects") 前；Permission.Request→PermissionV1.Request、fail() 入参移除目标已不存在的 description 字段（目标 shell 参数面无该字段，属源时代字段）——其余断言逐字保留。
+适配说明：source状态机迁入两条路径共用的Core Shell.parse，保持ps-only、原文执行与三类豁免；V1沿root.text取得同一解析输入并保留ERROR整句审查，仅补零locals边界。原生Bash已有每次完整命令授权，不复制空pattern扫描；其解析偏移与remote范围同步使用解析文本。原计划和16个权限用例保留，按真实API/锚点重放。
 
 
 diff --git a/docs/plans/shell-bare-dash-permission-parse-repair.md b/docs/plans/shell-bare-dash-permission-parse-repair.md
@@ -346,29 +346,19 @@ new file mode 100644
 +| 1 | R2 | yes | B-01：INV-05 豁免锁（C1 引号内 `--`、C2 `--%`）为 approved R2 §13/§16 承诺的测试但未实现，全仓无任何等价覆盖（套件对引号状态分支删除不敏感），§23 "由既有 pattern 组回归覆盖"声明失实；实现本身经探针证实正确 | N-01 §23 省略 §18 tool-group 行（审计已补证：仅 shell/parameters 引用 shell.ts，四 seam 全绿）；N-02 L2 对零节点非空输入扩审批面（已批准边界，维持）；N-03 E 测试仅 `;` 变体（谓词与探针覆盖 `--&`/`--|`）；N-04 E/C 记录笔误（重算 E=40/C=25 生产，0.63）；N-05 quoted `"--"` 入 raw 证据（已记录边界） | BLOCK（补齐 C1/C2/C3 公开 seam 用例 + 更正 §23 覆盖声明与行数；shell 全量 202/0） | task ses_fa13b514bffeMOowUyqkcIKI8s |
 +| 2 | R2 | yes | 无（No blocking findings） | N-01 §23 记录过时（测试 +241/16 新测/202 pass；已随本 verdict 同步更正）；N-02 raw 证据含引号化 `--`（维持）；N-03 E 仅 `;` 变体（维持）；N-04 §10 边界措辞未含 `;&|`（R1 残留，已更正；§22/§16/实现一致）；N-05 全 diff 口径 C/E≈0.13（≥0.10 下限，<15% 目标） | APPROVE（仅限 R2 + 当前 diff：shell.ts +68/-3、shell.test.ts +241；独立复现 202/0、278/0、8/0、typecheck clean） | task ses_fa1262b6dffedgCrrVFx79pCpm |
 
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -997,6 +997,52 @@ function listCommand(name: string) {
-   return "the shell-native directory listing command"
- }
- 
-+// [local-smark] 600 裸 `--` 词法盲区归一化：tree-sitter-powershell 0.25.10 对引号外的
-+// 独立 `--` token 没有词法归类，command 规则在其后断裂：单语句形态丢失全部
-+// command 节点（生产事故：3 次零权限 ask 的 git commit），紧邻分隔符形态丢弃
-+// 所在命令段（审批证据缺段）。引号化为 `"--"` 后两种形态均完整解析，且对
-+// bash grammar 无害。仅用于权限解析输入，实际执行命令保持原文（INV-03）。
-+// token 边界 = 空白/串首/串尾/分隔符 `;` `&` `|`；豁免 `--%` 与一切 `--x` sequel 形态。
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -501,6 +501,44 @@
++// powershell grammar会丢弃裸--所在命令段；仅归一解析输入，不改执行文本或扩建词法器。
 +function normalizeBareDoubleDash(command: string) {
-+  // 快路径：无 -- 时零拷贝返回，绝大多数命令不进入状态机。
 +  if (!command.includes("--")) return command
 +  let out = ""
 +  let quote: "" | "'" | '"' | "`" = ""
 +  for (let i = 0; i < command.length; i++) {
 +    const ch = command[i]!
 +    if (quote) {
-+      // 双引号内 bash 以反斜杠转义、PowerShell 以反引号转义 closing quote；两者都接受。
-+      // 过度保持引号态只会错过改写（fail-safe：不改写就不改写），不会错误改写。
++      // 沿source保留反引号及双引号内反斜杠的转义边界，引号内--始终视为数据。
 +      const escaped = command[i - 1] === "`" || (quote === '"' && command[i - 1] === "\\")
 +      if (ch === quote && !escaped) quote = ""
 +      out += ch
@@ -381,10 +371,8 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +    }
 +    const after = command[i + 2]
 +    const before = command[i - 1]
-+    // 独立 `--` token：两侧均非 token 字符且非 `--%` 保留字（sequel 为 % 直接豁免）
-+    // `--flag` 因 sequel 是字母（token 字符）被左侧否定排除，天然不改写。
++    // 分隔符也是token边界；--%、--flag等带后续字符的形态不改写。
 +    if (ch === "-" && command[i + 1] === "-" && after !== "%" && !isTokenChar(after) && !isTokenChar(before)) {
-+      // i++ 跳过第二个 -，避免第二字符重复进入独立 token 判定。
 +      out += '"--"'
 +      i++
 +      continue
@@ -394,86 +382,112 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +  return out
 +}
 +
-+// token 字符 = 非空白/非分隔符的可见字符；`--` 两侧均非 token 字符即独立 token
++// 仅空白、串首尾和;&|分隔符允许独立--，不把参数子串当成分隔标记。
 +function isTokenChar(ch: string | undefined) {
 +  return ch !== undefined && !/\s/.test(ch) && ch !== ";" && ch !== "&" && ch !== "|"
 +}
 +
- export const ShellTool = Tool.define(
-   ShellID.ToolID,
-   Effect.gen(function* () {
-@@ -1049,6 +1095,7 @@ export const ShellTool = Tool.define(
-       ps: boolean,
-       shell: string,
-       instance: InstanceContext,
-+      parseInput: string,
-     ) {
-       const scan: Scan = {
-         dirs: new Set<string>(),
-@@ -1057,9 +1104,10 @@ export const ShellTool = Tool.define(
-         always: new Set<string>(),
-       }
+ export async function parse(command: string, ps: boolean) {
+   const p = await parser()
+-  const tree = (ps ? p.ps : p.bash).parse(command)
++  // 节点偏移属于归一后的tree.text；调用者仍保留原command用于实际执行和授权。
++  const tree = (ps ? p.ps : p.bash).parse(ps ? normalizeBareDoubleDash(command) : command)
+   if (!tree) throw new Error("Failed to parse command")
+   return tree
+ }
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -502,7 +502,8 @@
        const shellKind = ShellID.toKind(Shell.name(shell))
-+      const locals = localCommands(root)
++      const locals = localCommands(root, Shell.name(shell))
  
-       // #207：collect 循环改用 localCommands——过滤远程载荷范围后的命令节点进行 external_directory 扫描
--      for (const node of localCommands(root)) {
+-      for (const node of localCommands(root, Shell.name(shell))) {
 +      for (const node of locals) {
          const command = parts(node)
          const tokens = command.map((item) => item.text)
          const cmd = ps || shellKind === "cmd" ? tokens[0]?.toLowerCase() : tokens[0]
-@@ -1087,6 +1135,15 @@ export const ShellTool = Tool.define(
-         }
+ 
+@@ -537,4 +538,9 @@
        }
  
-+      // [local-smark] 600 零 command 节点兜底（INV-01）：grammar 归一化后仍解析不出
-+      // 任何 command 节点的非空命令，以解析输入 trim 原文作为 pattern 进入 ask——
-+      // 分级由 precheck 手写 tokenizer 精确完成（进入分类的入口，非 cautious 通道）。
-+      // 条件限定零节点而非 patterns 空集：CWD 类命令解析正常但有意零 pattern
-+      // （cd-only 契约测试锁定），不属于解析失败，不得扩审批面。
-+      if (scan.patterns.size === 0 && locals.length === 0 && parseInput.trim()) {
-+        scan.patterns.add(parseInput.trim())
++      // 只给零命令节点补送审入口；cd等有意零pattern仍保持原契约，分类交给既有precheck。
++      if (scan.patterns.size === 0 && locals.length === 0 && root.text.trim()) {
++        scan.patterns.add(root.text.trim())
 +      }
 +
        return scan
      })
- 
-@@ -1487,17 +1544,21 @@ export const ShellTool = Tool.define(
-               // 下对高置信的单一 python -c "..." 命令做引号修复。不命中返回 undefined，
-               // 原命令原样执行，不产生 compatibility error 或 adaptation metadata
-               const normalization = ps ? normalizePowerShellInlinePython(params.command) : undefined
-+              // [local-smark] 600 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
-+              // 与 audit 元数据保持 params.command 原文；ps 分支限定因 bash grammar
-+              // 对 `--` 天然免疫，不改无缺陷路径。
-+              const parseInput = ps ? normalizeBareDoubleDash(params.command) : params.command
-               // 从配置和参数决定是否启用输出压缩，默认启用
-               const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
-               yield* Effect.scoped(
-                 Effect.gen(function* () {
--                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
-+                  const tree = yield* Effect.acquireRelease(parse(parseInput, ps), (tree) =>
-                     Effect.sync(() => tree.delete()),
-                   )
-                                 // parse 后检测 Unix 工具误用，不兼容时抛出错误阻止执行
-               const compatibility = shellCompatibilityError(tree.rootNode, name)
-               if (compatibility) throw new Error(compatibility)
--              const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
-+              const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx, parseInput)
-                   if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
-                   // [local-smark] 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
-                   if (normalization) scan.raw.add(normalization.audit)
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -207,5 +207,8 @@
++                    // 引号化--会移动节点；remote范围与转义检查必须跟同一解析文本对齐。
++                    const parsed = tree.rootNode.text
++                    const parsedRemote = ShellRemote.ranges(parsed, Shell.name(shell))
+                     return tree.rootNode
+                       .descendantsOfType("command")
+                       .flatMap((node) => {
+                         if (!node) return []
+-                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
++                        if (parsedRemote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
+@@ -213,1 +216,1 @@
+-                        const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
++                        const escaped = parsed.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
 
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -24,1 +24,26 @@
+ describe("shell", () => {
++  test("normalizes bare double dash only for PowerShell permission parsing", async () => {
++    // 直接调用共享解析器覆盖事故、缺段、三类豁免与残余错误；不启动任何shell进程。
++    for (const [command, expected] of [
++      ['git commit -m "x" -- a.ts', 'git commit -m "x" "--" a.ts'],
++      ['git commit --only -m "a" -m "b" -- p1.txt p2.txt', 'git commit --only -m "a" -m "b" "--" p1.txt p2.txt'],
++      ['git log --oneline -2 -- path', 'git log --oneline -2 "--" path'],
++      ['git checkout --;git reset --hard', 'git checkout "--";git reset --hard'],
++      ['git commit -m "unclosed', 'git commit -m "unclosed'],
++      ['echo "a -- b"', 'echo "a -- b"'],
++      ['git push --% --force', 'git push --% --force'],
++      ['git log --oneline', 'git log --oneline'],
++    ] as const) {
++      const tree = await Shell.parse(command, true)
++      try {
++        expect(tree.rootNode.text).toBe(expected)
++        if (!expected.includes('"--"')) continue
++        expect(tree.rootNode.hasError).toBe(false)
++        expect(tree.rootNode.descendantsOfType("command").length).toBe(command.includes(";") ? 2 : 1)
++      } finally { tree.delete() }
++    }
++    // Bash无需改写；同一共享入口不能扩大归一化范围。
++    const bash = await Shell.parse("git log -- path", false)
++    try { expect(bash.rootNode.text).toBe("git log -- path") } finally { bash.delete() }
++  })
++
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -301,1 +301,3 @@
+                 ]
++                // 归一后偏移不能遮住后续宿主黑名单命令；此夹具的进程边界始终是替身。
++                if (!cmd) blocked.push('git checkout --;head missing', 'git checkout --;ssh host "head ignored";head missing')
+@@ -322,1 +324,6 @@
+-                if (!cmd) allowed.push('& "C:\\tools with spaces\\HEAD.EXE" missing', ". 'C:\\tools with spaces\\grep.exe' missing", '.\\head.exe missing')
++                if (!cmd) allowed.push('& "C:\\tools with spaces\\HEAD.EXE" missing', ". 'C:\\tools with spaces\\grep.exe' missing", '.\\head.exe missing',
++                  // 每项继续走既有资源/argv断言，证明裸--修复没有改写真实执行或授权原文。
++                  'git commit -m "x" -- a.ts', 'git log --oneline -2 -- path', 'git checkout --;git reset --hard',
++                  'git commit -m "unclosed', 'git checkout --;ssh host "cat /etc/os-release | grep NAME";Write-Output done',
++                  'git checkout --;Write-Output head`;grep.exe',
++                )
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1580,6 +1580,261 @@ it.live("uses Git Bash /tmp semantics for external workdir", () =>
+@@ -1623,6 +1623,256 @@
      }),
    )
  
-+  // [local-smark] 裸 `--` 解析修复（R2 计划）：tree-sitter-powershell 0.25.10 无法归类
-+  // 引号外独立 `--` token → command 规则断裂/丢段 → patterns 空或缺失段。
-+  // 以下红测复现生产事故形态（2026-09-01 三次零 ask commit），修复后转绿。
-+  // 事故主形态：单语句裸 -- 使 command 规则断裂，零节点兑底前的第一层验证。
++  // 裸--会使PowerShell grammar丢节点或命令段；以下保留事故与缺段形态的公开授权回归。
 +  for (const item of ps) {
 +    it.live(`asks for bash permission when bare -- separates git command arguments [${item.label}]`, () =>
 +      withShell(
@@ -629,9 +643,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +    )
 +  }
 +
-+  // 豁免锁（INV-05，R2 §16 slice 4；实现审计 B-01 补齐）：三类 `--` 形态不得被
-+  // normalizeBareDoubleDash 改写——引号内是数据、`--%` 是 PowerShell 保留字、
-+  // `--flag` 带参形态天然不满足独立 token 判定。
++  // 三类豁免：引号内是数据，--%是保留字，--flag不满足独立token边界。
 +  for (const item of ps) {
 +    it.live(`keeps in-quote double dash untouched in permission pattern [${item.label}]`, () =>
 +      withShell(

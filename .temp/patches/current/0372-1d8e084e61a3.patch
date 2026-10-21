@@ -257,10 +257,10 @@
      </box>
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -512,4 +512,103 @@ describe("prompt voice input", () => {
-     expect(errors).toEqual([])
-     expect(controller.status()).toEqual({ type: "idle" })
-   })
+@@ -555,4 +555,103 @@ describe("prompt voice input", () => {
+       if (pid > 0) await Bun.spawn(["taskkill", "/pid", String(pid), "/T", "/F"], { windowsHide: true, stdout: "ignore", stderr: "ignore" }).exited
+     }
+   }, 15_000)
 +
 +  // [local-smark] 以下测试覆盖 DialogPrompt / QuestionPrompt voice 接入所依赖的 controller 安全边界。
 +  // 对话框场景生命周期更复杂（onCleanup + createEffect 可能先后触发 abort、
@@ -361,4 +361,3 @@
 +    expect(controller.status()).toEqual({ type: "idle" })
 +  })
  })
-\ No newline at end of file

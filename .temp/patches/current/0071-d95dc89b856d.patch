@@ -868,10 +868,11 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 index 8bea1c16f2..0c4b6f8aed 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -193,29 +193,6 @@ if (isDaemon) {
+@@ -194,30 +194,7 @@ if (isDaemon) {
    })
  
    try {
+     const sharedServices = HttpApiApp.createSharedServices()
 -    // 先完成预热再发布监听，已安装的 fatal/shutdown 闭包仍负责预热失败时的 token/scope 清理。
 -    await AppRuntime.runPromise(Effect.gen(function* () {
 -      const { RuntimeFlags } = yield* Effect.promise(() => import("@/effect/runtime-flags"))
@@ -897,8 +898,8 @@ index 8bea1c16f2..0c4b6f8aed 100644
 -    ))
      // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
      // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
-     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients })
-@@ -229,6 +206,29 @@ if (isDaemon) {
+     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
+@@ -230,6 +207,29 @@ if (isDaemon) {
      }
      // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
      lockToken = await ServerLock.write(internalServer.port, externalUrl, network)

@@ -18,18 +18,48 @@ gate 误判失败（invalid source revision manifest）。
 gitlink==远端 tag commit 的 provenance 一致性，语义不变），test.yml 去掉
 --source-revision-authorized。随删不再被引用的 verifySourceRevisionAuthorization 与其测试。
 
-适配说明：source 的九个 hunk 在目标谱系全部悬空——closure 脚手架链（verify-opentui-closure.ts/opentui-provenance.ts/opentui-source-revision.json/opentui-provenance.test.ts 与 test.yml 的 closure step）自 0512 起在目标整体剥除（0586/0587/0598 连续裁定，等价质量面为 smoke 脚本+opentui-required CI job），文件与步骤均不存在。其语义意图（OpenTUI 身份永远由根 package.json catalog + git gitlink/远端 tag 派生、无手写 revision 清单、无 CI 授权 flag）正是目标谱系的天然地态——手写清单机制从未在目标物化。为满足非空 current 合同，将派生身份不变量以注释形式落在目标的等价 owner（test.yml opentui-required job 头部），同时记录源仓 0615 修复的事故语境（smark.12 bump 漏改 smark.11 清单）与目标天然满足的原因——这是对后续维护者的真实约束文档，非凑数注释。工作流禁止空 current 与能力凭空恢复，此为最小语义承载。
+适配说明：目标的清单有实际build消费者，按source原意在现有构建证据owner改为catalog派生、checkout内读取父仓索引gitlink后删除清单；Nix归档源码不带Git元数据，不伪造commit身份。保留declaredSource和完整安装/native/executable证据；不存在的closure helper/flag不恢复，派生声明不冒充远端授权，consumer CI保持原步骤。
 
 diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 --- a/.github/workflows/test.yml
 +++ b/.github/workflows/test.yml
-@@ -174,6 +174,9 @@ jobs:
+@@ -194,7 +194,8 @@ jobs:
+   opentui-required:
      # #489：consumer 回归与 typecheck 必须同一 job 执行，避免不同安装图互相掩盖 peer 漂移。
-     # 目标谱系以 registry 0.4.5 承载 OpenTUI，无 smark.1 closure 校验面，测试直接钉住用户可见 seam。
+-    # 目标谱系以 registry 0.4.5 承载 OpenTUI，无 smark.1 closure 校验面，测试直接钉住用户可见 seam。
      # 版本名不写死：gate 钉住的是 user-visible seam 行为，OpenTUI 版本由 catalog 决策单独管理。
-+    # 派生身份不变量：OpenTUI 身份永远由根 package.json catalog + git gitlink/远端 tag 派生，
-+    # 不存在手写 revision 清单——后者会在版本 bump 漏改时让 CI 误报身份不匹配（源仓
-+    # 0615 修的正是 smark.12 漏改 smark.11 清单事故；目标谱系从未引入清单，天然满足）。
++    # 构建声明从root catalog派生，checkout另采索引gitlink；不再维护随版本过期的手写清单。
++    # 声明、实际安装及远端tag授权是不同证据；consumer回归不能互相冒充这些事实。
      name: 必过 OpenTUI consumer gate
      runs-on: ubuntu-latest
      timeout-minutes: 45
+diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
+--- a/packages/opencode/script/build.ts
++++ b/packages/opencode/script/build.ts
+@@ -221,4 +221,13 @@
+-  // 声明的源码身份与实际包/产物证据分开记录，不以 gitlink 代替安装或远端 tag 授权验证。
+-  const declaredSource = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()
++  // 声明从root catalog与父仓索引派生，消除随版本手工同步的第二信源。
++  const root = path.resolve(dir, "../..")
++  const version = (await Bun.file(path.join(root, "package.json")).json()).workspaces.catalog["@opentui/core"]
++  // Nix源码归档不携带.git：缺席的源码身份不作声明，安装与产物证据仍照常验证。
++  const hasGit = fs.existsSync(path.join(root, ".git"))
++  const sourceGitlink = hasGit
++    ? (await $`git ls-files --stage -- thirdparty/opentui`.cwd(root).text()).trim().split(/\s+/)[1]
++    : undefined
++  if (hasGit && !sourceGitlink) throw new Error("thirdparty/opentui gitlink is missing")
++  // 同形releaseCommit仍是声明，不替代下方安装/native证据或远端tag授权验证。
++  const declaredSource = { schema: 1, sourceGitlink, releaseTag: `v${version}`, releaseCommit: sourceGitlink }
+   // target 名、manifest 约束和 native 文件必须同时一致；只记录解析到的包名会掩盖 Bun 选错 ABI 的情况。
+   if (
+diff --git a/packages/opencode/script/opentui-source-revision.json b/packages/opencode/script/opentui-source-revision.json
+deleted file mode 100644
+--- a/packages/opencode/script/opentui-source-revision.json
++++ /dev/null
+@@ -1,6 +0,0 @@
+-{
+-  "schema": 1,
+-  "sourceGitlink": "0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2",
+-  "releaseTag": "v0.4.3-smark.11",
+-  "releaseCommit": "0f64a76eb3f09fe5e12dfb55f2f1575d5b9ca3a2"
+-}

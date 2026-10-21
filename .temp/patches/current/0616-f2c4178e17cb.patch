@@ -422,38 +422,31 @@ index 0000000000000000000000000000000000000000..4a1c1a80cba8772b0006f23a8ed3b0e8
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -3031,7 +3031,13 @@ export function BlockTool(props: {
-   const [expanded, setExpanded] = createSignal(false)
-   // #459：collapsed 直接消费 collapsible——与上游同构，无需 canCollapse 信号中转。
-   const collapsed = createMemo(() => collapsible() && !expanded())
--  const hasPreview = createMemo(() => props.preview !== undefined)
-+  // [local-smark] R2 冻结根因：preview 必须经 memo 构建恰好一次。直接对
-+  // props.preview 求 `!== undefined` 会纯为存在性检查构造整棵 preview 子树
-+  // （DiffRenderable+缓存 Code/LineNumber/Gutter，约 18 个 native 句柄）而后丢弃；
-+  // 2845 个 patch part ≈ 51k 句柄直接击穿 65,535 注册表上限（Failed to create
-+  // TextBuffer）。存在性检查改为消费已 memo 的同一棵树。
+@@ -2917,5 +2917,7 @@ export function BlockTool(props: {
+   // 外层拥有展开状态；保存预览节点，使它暂时缺席时不会销毁后再挂载。
+-  const collapsed = createMemo(() => props.preview !== undefined)
+-  const preview = createMemo<JSX.Element>((previous) => props.preview ?? previous)
++  // getter会创建renderable；存在性、挂载和提示必须复用同一次求值，不能留下弃用树。
 +  const previewTree = createMemo(() => props.preview)
-+  const hasPreview = createMemo(() => previewTree() !== undefined)
-   // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
-   // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
-   // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
-@@ -3098,7 +3104,7 @@ export function BlockTool(props: {
-           marginTop={collapsed() ? 1 : 0}
-           visible={collapsed()}
-         >
--          {props.preview}
-+          {previewTree()}
++  const collapsed = createMemo(() => previewTree() !== undefined)
++  const preview = createMemo<JSX.Element>((previous) => previewTree() ?? previous)
+   const [bodyMounted, setBodyMounted] = createSignal(!collapsed())
+   // 正文首次展开才挂载，此后仅隐藏，保留diff等renderable的内部状态。
+@@ -2979,5 +2981,5 @@ export function BlockTool(props: {
          </box>
        </Show>
-       {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
+-      <Show when={props.preview}>
++      <Show when={previewTree()}>
+         <text fg={theme.textMuted}>Click to expand</text>
+       </Show>
 
 diff --git a/packages/tui/test/routes/session/block-tool-preview-once.test.tsx b/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,75 @@
 +/** @jsxImportSource @opentui/solid */
-+import { Renderable } from "@opentui/core"
++import { Renderable, engine } from "@opentui/core"
 +import { testRender } from "@opentui/solid"
 +import { expect, test } from "bun:test"
 +import { randomUUID } from "node:crypto"
@@ -467,13 +460,8 @@ new file mode 100644
 +import { RouteProvider } from "../../../src/context/route"
 +import { BlockTool } from "../../../src/routes/session"
 +
-+// R2 冻结回归锁：preview 必须经 memo 构建恰好一次——存在性检查不得为
-+// `!== undefined` 而构造并丢弃整棵 preview 子树（每块约 18 个 native 句柄，
-+// 大 apply_patch 会击穿 65,535 注册表上限）。检测机制与源仓一致：渲染前快照
-+// Renderable.renderablesByNumber 的键集合，排空 deferred destroy 后，新增
-+// renderable 的父链必须全部可达 renderer.root——出现顶点不可达即泄漏。
-+// 适配目标：无 withRenderedSession harness，改用 BlockTool 直接挂载
-+// （block-tool-visible-once 同款 provider 栈）；fork 检测机械逐字保留。
++// preview存在性检查不能弃用刚构造的树；快照隔离其他测试遗留节点，只检查本次新增对象。
++// 排空正常延迟销毁后沿父链查root，保留源测试的永久脱树泄漏判据。
 +
 +const stateDir = path.join(tmpdir(), `blocktool-preview-kv-${randomUUID()}`)
 +await mkdir(stateDir, { recursive: true })
@@ -489,9 +477,7 @@ new file mode 100644
 +              <RouteProvider>
 +                <BlockTool
 +                  title="bash"
-+                  totalLines={24}
-+                  threshold={20}
-+                  maxLines={10}
++                  autoReview={false}
 +                  preview={<text>{props.text}</text>}>
 +                  <text>{`${props.text}\napplied`}</text>
 +                </BlockTool>
@@ -506,13 +492,12 @@ new file mode 100644
 +
 +test("preview card mounts without leaking discarded preview tree", async () => {
 +  const before = new Set((Renderable as { renderablesByNumber: Map<number, unknown> }).renderablesByNumber.keys())
-+  const app = await testRender(() => <PreviewCard text="$ patch preview" />, { width: 60, height: 40 })
++  const app = await testRender(() => <PreviewCard text="$ patch preview" />, { width: 60, height: 40, useThread: false })
 +  try {
 +    // Provider 初始化（KV/主题）需要沉淀——与 block-tool-visible-once 同款 100ms。
 +    await new Promise((resolve) => setTimeout(resolve, 100))
 +    await app.waitForFrame((frame) => frame.includes("patch preview"))
-+    // reconciler 的 deferred destroy 经 process.nextTick 排空：固定 10 轮 20ms
-+    // 渲染循环后，所有被弃用子树应已完成销毁并从注册表移除。
++    // 固定10轮20ms让正常nextTick销毁排空，避免把待销毁对象误判为永久泄漏。
 +    for (let i = 0; i < 10; i++) {
 +      await new Promise((resolve) => setTimeout(resolve, 20))
 +      await app.renderOnce()
@@ -520,8 +505,7 @@ new file mode 100644
 +    const detached: number[] = []
 +    for (const key of (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber.keys()) {
 +      if (before.has(key)) continue
-+      // 沿父链上行（深度上限 100 防御环）：顶点必须是 renderer.root——
-+      // 任何不可达顶点都是已构造却未挂载/未销毁的泄漏子树。
++      // 父链深度界沿用源判据；仍存活但无法到root的对象才计为脱树泄漏。
 +      let node: Renderable | undefined = (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber.get(key)
 +      let top: Renderable | undefined = node
 +      for (let depth = 0; depth < 100 && top; depth++) {
@@ -533,5 +517,6 @@ new file mode 100644
 +    expect(detached).toEqual([])
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
 +  }
 +})

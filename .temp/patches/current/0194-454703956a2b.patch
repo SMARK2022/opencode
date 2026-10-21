@@ -38,73 +38,14 @@ index a3177275ac..20235fda41 100644
            total += estimate
            if (total <= PRUNE_PROTECT) continue
            pruned += estimate
-@@ -405,3 +408,13 @@ const layer = Layer.effect(
-          .join("\n\n")
-+      // #194：compaction summary 上传估算——与 prompt.ts 同一 estimateUploadInput 路径
-+      // #194：tip summary 请求体即 nextPrompt 单文本，无需旧版 modelMessages 前缀
-+      const compactionMessages = [{ role: "user" as const, content: [{ type: "text" as const, text: nextPrompt }] }]
-+      const compactionEstimate = TokenEstimate.sanitizeModelMessages(compactionMessages)
-+      const estimatedInput = TokenEstimate.estimateUploadInput({
-+        text: compactionEstimate.text,
-+        attachments: compactionEstimate.attachments,
-+        history: selected.head,
-+        model,
-+      }).inputTokens
-      const ctx = yield* InstanceState.context
-      const msg: SessionV1.Assistant = {
-@@ -416,12 +429,16 @@ const layer = Layer.effect(
-           root: ctx.worktree,
-         },
-         cost: 0,
-+        // #194：input 用 estimateUploadInput 估算——TUI/stats 与 daemon 口径一致
-         tokens: {
-           output: 0,
--          input: 0,
-+          input: estimatedInput,
-           reasoning: 0,
-           cache: { read: 0, write: 0 },
-         },
-+        // #194：inputChars/inputTokens 供 TUI pending 展示——与 prompt.ts 对齐
-+        inputChars: JSON.stringify(compactionMessages).length,
-+        inputTokens: estimatedInput,
-         modelID: model.id,
-         providerID: model.providerID,
-         time: {
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index 16715bba2f..d5d78fb956 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -43,7 +43,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
- import { Truncate } from "@/tool/truncate"
- import { Image } from "@/image/image"
- import { decodeDataUrl } from "@/util/data-url"
--import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
-+// #194：AttachmentToken 已由 TokenEstimate 替代
- import { Process } from "@/util/process"
- import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types , Semaphore} from "effect"
- import { InstanceState } from "@/effect/instance-state"
-@@ -59,19 +59,11 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
- import { SessionReminders } from "./reminders"
- import { SessionTools } from "./tools"
- import { LLMEvent } from "@opencode-ai/llm"
--// #140：无历史样本时回退 Token.estimate（chars/4）
--import { estimate as tokenEstimate } from "@/util/token"
+@@ -62,1 +62,2 @@
+-import { Token } from "@opencode-ai/core/util/token"
 +// #194：改用 TokenEstimate 统一上传估算
 +import { TokenEstimate } from "@/token/estimate"
- // #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
- import { usable } from "./overflow"
- 
--// #140：输入侧 chars/token 样本窗口与夹紧范围
--const INPUT_CHARS_HISTORY_LIMIT = 100_000
--const MIN_CHARS_PER_TOKEN = 3
--const MAX_CHARS_PER_TOKEN = 4
--// #140：防止异常样本把 preflight 估得过乐观/过悲观
--function clampCharsPerToken(value: number) {
--  return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
--}
- 
- // #159：decide 最近轮目标占用区间（相对 usable）
- // LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
 @@ -1304,7 +1296,7 @@ const layer = Layer.effect(
        throw new Error("Impossible")
      })
@@ -122,7 +63,7 @@ index 16715bba2f..d5d78fb956 100644
 +        // #194：decide mode 用 estimateUploadInput——与 normal prompt 同一估算路径
 +        const decideEstimate = TokenEstimate.sanitizeModelMessages(modelMessages)
          const ratio =
--          tokenEstimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
+-          Token.estimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
 +          TokenEstimate.estimateUploadInput({
 +            text: [input.systemText, decideEstimate.text].join("\n"),
 +            attachments: decideEstimate.attachments,
@@ -132,60 +73,44 @@ index 16715bba2f..d5d78fb956 100644
          // 超满：退回上一个可容纳窗口
          if (ratio >= DECIDE_MAX) return fallback ?? candidate
  
-@@ -1560,7 +1558,7 @@ const layer = Layer.effect(
-             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
-             // #175：消毒后文本用于估计；raw 单独保留线长
-             // #175：messagesText 不得再含 base64
--            const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(messages)
-+            const messageEstimate = TokenEstimate.sanitizeModelMessages(messages)
-             const messagesText = messageEstimate.text
-             // #175：raw 仅用于 inputChars，不参与 Token.estimate 文本路径
-             const rawMessagesText = JSON.stringify(messages)
-@@ -1612,36 +1610,14 @@ const layer = Layer.effect(
-               // #175：count>0 才写 media，兼容无附件会话
-               ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
-             } as SessionV1.StepFinishPart["inputBreakdown"]
--            // #140：输入侧比率校准（历史 step-finish inputChars/tokens），夹紧到 [3,4]
--            // #140：history 校准样本来自 step-finish.inputChars
--            let historyInputChars = 0
--            let historyInputTokens = 0
--            for (let i = msgs.length - 1; i >= 0 && historyInputChars < INPUT_CHARS_HISTORY_LIMIT; i--) {
--              const m = msgs[i]
--              if (m.info.role !== "assistant") continue
--              const sf = m.parts.findLast((p) => p.type === "step-finish")
--              if (!sf) continue
--              const chars = (sf as any).inputChars
--              // 样本不足 100 字符跳过，与 TUI charsPerTokenFromHistory 对齐
--              if (!chars || chars < 100) continue
--              const tokens = (sf.tokens.input ?? 0) + (sf.tokens.cache?.read ?? 0) + (sf.tokens.cache?.write ?? 0)
--              if (typeof chars === "number" && chars > 0 && tokens > 0) {
--                // 附件不参与输入侧 chars/token 密度校准
--                const bd = (sf as any).inputBreakdown
--                // #175：history 与 live 同一 raw→text 密度公式
--                historyInputChars += bd?.media
--                  ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
--                  : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
--                historyInputTokens += tokens
--              }
--            }
--            // #140：样本不足时回退 Token.estimate；有样本则夹紧比值
--            // #175：文本估计后加 media.tokens，只加一次
--            const estimatedInput =
--              (historyInputTokens > 0 && historyInputChars > 500
--                // #175：校准分支被除数用消毒文本；raw 含 base64 会导致 media.tokens 二次计入
--                ? Math.round([systemText, messagesText, toolsText].join("\n").length / clampCharsPerToken(historyInputChars / historyInputTokens))
--                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))) + messageEstimate.attachments.tokens
-+            // #194：输入侧比率校准已由 TokenEstimate.learnInputCharsPerToken 接管
-+            // #194：用 estimateUploadInput 对齐 compaction 同一估算路径
-+            const estimatedInput = TokenEstimate.estimateUploadInput({
-+              text: [systemText, messagesText, toolsText].join("\n"),
-+              attachments: messageEstimate.attachments,
-+              history: requestMsgs,
-+              model,
-+            }).inputTokens
-             // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量
-             // #175：overflow 使用含 media 的 estimatedInput
-             if (
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -1,1 +1,2 @@
++import { TokenEstimate } from "@/token/estimate"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -805,2 +806,3 @@
+-              // 限制异常历史密度对预检的影响；无样本时现有估算器仍给出 /4。
+-              const charsPerToken = Math.min(4, Math.max(3, estimate.charsPerToken ?? 4))
++              // #194：同模型优先、会话历史回退，普通与摘要请求都在真实 prepared 入口学习。
++              const charsPerToken = TokenEstimate.learnInputCharsPerToken({ messages: history, model: ctx.model })?.charsPerToken
++                ?? estimate.charsPerToken ?? 4
+diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
+--- a/packages/core/src/util/token.ts
++++ b/packages/core/src/util/token.ts
+@@ -22,5 +22,8 @@
+     // 媒体样本用占位字符替换 raw；文本密度不能把 base64 当普通正文。
+     const media = item.inputBreakdown?.media
++    // #194：只有已知媒体 token 才能从确认输入中分离；旧附件样本不能校准文本密度。
++    const textInput = item.input - (media?.tokens ?? 0)
++    if (textInput <= 0 || (!media && (item.inputBreakdown?.messages.attachments ?? 0) > 0)) return sum
+     return { bodyChars: sum.bodyChars + Math.max(0, media
+       ? item.bodyChars - media.rawChars + media.textChars
+-      : item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
++      : item.bodyChars), input: sum.input + textInput }
+@@ -28,1 +31,2 @@
+-  return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
++  // #194：实际上传可达到六字符以上的密度，统一2..8边界而不退回旧3..4。
++  return sample.bodyChars > 500 && sample.input > 0 ? Math.min(8, Math.max(2, sample.bodyChars / sample.input)) : CHARS_PER_TOKEN
+diff --git a/packages/core/test/util-token.test.ts b/packages/core/test/util-token.test.ts
+--- a/packages/core/test/util-token.test.ts
++++ b/packages/core/test/util-token.test.ts
+@@ -24,2 +24,3 @@
+-  expect(Token.charsPerTokenFromHistory(history)).toBe(2.5)
+-  expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(2.5)
++  // #194：旧附件只有 raw 字符，缺媒体确认量时不能继续学习这个样本。
++  expect(Token.charsPerTokenFromHistory(history)).toBe(4)
++  expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(4)
 diff --git a/packages/opencode/src/token/accounting.ts b/packages/opencode/src/token/accounting.ts
 index b2c9a8b4bc..3d5d1e85be 100644
 --- a/packages/opencode/src/token/accounting.ts
@@ -388,31 +313,38 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
 index 5f59f52fc4..f364f45730 100644
 --- a/packages/tui/src/util/token-accounting.ts
 +++ b/packages/tui/src/util/token-accounting.ts
-@@ -214,8 +214,9 @@ export function tokenAccounting(
+@@ -159,6 +159,7 @@ export function tokenAccounting(
+-          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number } } | undefined
++          const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number; tokens: number } } | undefined
+           // #175：校准剔除 media.raw，加回 text 占位
+-          ratioChars += bd?.media
+-            ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
+-            : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
+-          ratioTokens += tok
++          // #194：旧附件样本排除，已知媒体量从确认分母扣除，不能稀释文本密度。
++          if (bd?.media || !bd?.messages?.attachments) {
++            ratioChars += bd?.media ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars) : chars
++            ratioTokens += Math.max(0, tok - (bd?.media?.tokens ?? 0))
++          }
+@@ -196,8 +196,9 @@ export function tokenAccounting(
    }
  
    // ── 3. ratio ──
 -  // #122：样本不足时回落 DEFAULT_RATIO，避免小样本失真
--  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
 +  // #194：clamp 2..8——与 TokenEstimate.learnInputCharsPerToken 同口径，防极端样本失真
 +  // #194：TUI 不能直接 import TokenEstimate（包边界），但 ratio 逻辑与 daemon 对齐
-+  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
+   const density = projection?.session?.request?.inputEstimate?.charsPerToken
+-  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
++  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
    // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
    const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
- 
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 index 395441599..3753f3ac8 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -9,7 +9,7 @@ import * as Stream from "effect/Stream"
- import { Config } from "@/config/config"
- import { LLM } from "../../src/session/llm"
- import { SessionCompaction } from "../../src/session/compaction"
+@@ -12,1 +12,1 @@ import * as Stream from "effect/Stream"
 -import { Token } from "@/util/token"
 +import { TokenEstimate } from "@/token/estimate"
- import { Plugin } from "../../src/plugin"
- import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
- import { Session as SessionNs } from "@/session/session"
 @@ -134,6 +134,22 @@ function createAssistantMessage(sessionID: SessionID, parentID: MessageID, root:
      }),
    )
@@ -436,12 +368,12 @@ index 395441599..3753f3ac8 100644
  
  function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID, root: string, text: string) {
    return SessionNs.Service.use((ssn) =>
-@@ -864,6 +880,37 @@ describe("session.compaction.process", () => {
+@@ -864,6 +880,46 @@ describe("session.compaction.process", () => {
      }),
    )
  
 +  // #194：compaction summary 的 pending input 估算必须用确认密度，而非 raw /4
-+  it.instance(
++  itCompaction.instance(
 +    "summary assistant pending input estimate uses confirmed upload density",
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -466,9 +398,18 @@ index 395441599..3753f3ac8 100644
 +
 +      expect(summary?.info.role).toBe("assistant")
 +      if (summary?.info.role !== "assistant") return
-+      expect(summary.info.inputChars).toBeGreaterThan(0)
-+      expect(summary.info.inputTokens).toBeLessThan(Math.round((summary.info.inputChars ?? 0) / 6))
-+    }),
++      expect(summary.info.inputEstimate?.bodyChars).toBeGreaterThan(0)
++      expect(summary.info.inputEstimate?.input).toBeLessThan(Math.round((summary.info.inputEstimate?.bodyChars ?? 0) / 6))
++    }).pipe(withCompaction({
++      // 仅替换 LLM 边界，执行真实 processor 与准备回调；整体 processor 替身不会产生估算。
++      llm: Layer.succeed(LLM.Service, LLM.Service.of({
++        stream: (input) => Stream.unwrap(
++          (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(
++            Effect.as(reply("summary")(input)),
++          ),
++        ),
++      })),
++    })),
 +  )
 +
    itCompaction.instance(

@@ -64,9 +64,39 @@ diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/
                  // #203：external_directory:auto 让 shell 项目外路径门禁进入 auto 路由，
                  // #203：复用同一条命令的预审证据；白名单目录保持 allow 不被放宽
                  external_directory: {
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -152,9 +152,11 @@
+               { action: "question", resource: "*", effect: "allow" },
+               { action: "plan_enter", resource: "*", effect: "allow" },
+-              // auto只改变shell路由；其余基础权限及后续配置覆盖保持原样。
++              // auto同时审查命令与工作区写入，其他代理权限和后续配置覆盖保持原样。
+               { action: "bash", resource: "*", effect: id === "auto" ? "auto" : "ask" },
++              // edit统一承接write、edit和apply_patch，不新增按工具名分裂的规则。
++              ...(id === "auto" ? [{ action: "edit", resource: "*", effect: "auto" as const }] : []),
+               // auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
+               ...(id === "auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
+               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
+               ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
+             ]),
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -146,8 +146,8 @@
+         expect(item).toMatchObject({ id, mode: "primary", hidden: false })
+         expect(item.system).toBe((yield* agent.resolve("build"))?.system)
+         expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
+-        // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
+-        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe("allow")
++        // 只有auto接入写入审查；interactive继续保留普通编辑权限。
++        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(id === "auto" ? "auto" : "allow")
+         expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
+         expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
+         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -206,16 +206,61 @@
    patterns: readonly string[]
    metadata: Readonly<Record<string, unknown>>
@@ -340,7 +370,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  
  const hasBash = Effect.sync(() => Bun.which("bash") !== null)
  
-@@ -1739,6 +1755,46 @@
+@@ -1739,6 +1755,51 @@
  )
  
  // #216：cancel 在 auto-review 进行中触发——验证中止状态正确传播到工具和 reviewer 子会话
@@ -349,7 +379,11 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  "auto agent tool permission requests carry auto agent evidence before approval",
 +  () =>
 +    Effect.gen(function* () {
-+      const { llm } = yield* useServerConfig(providerCfg)
++      const { llm } = yield* useServerConfig((url) => ({
++        ...providerCfg(url),
++        // 本例只验证权限身份传递，不让Git快照冷启动占用状态等待窗口。
++        snapshot: false,
++      }))
 +      const prompt = yield* SessionPrompt.Service
 +      const permission = yield* Permission.Service
 +      const sessions = yield* Session.Service
@@ -371,6 +405,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +          .item(),
 +      )
 +      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkScoped)
++      yield* llm.wait(1)
 +      const [request] = yield* waitForPermission(1)
 +      expect(request.permission).toBe("todowrite")
 +      // Tool implementations should not each remember to copy ctx.agent into

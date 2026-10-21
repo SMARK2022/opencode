@@ -36,7 +36,7 @@ index 939c7d12dc..783b3eddb0 100644
          required: false
          type: string
    # push 自动触发：dev-smark 分支推送时自动构建，路径过滤避免无关变更触发 CI
-@@ -22,7 +22,7 @@ on:
+@@ -27,6 +27,6 @@ on:
  
  # 默认版本号：push 触发时无 inputs.version，回退到此常量保证产物命名一致
  env:
@@ -44,11 +44,18 @@ index 939c7d12dc..783b3eddb0 100644
 +  DEFAULT_VERSION: "1.14.31-smark"
  
  jobs:
-   # 三平台并行构建：Linux/macOS/Windows 互不依赖，提升 CI 吞吐
 diff --git a/bun.lock b/bun.lock
 index 7f58e4fd53..9dc5acb52a 100644
 --- a/bun.lock
 +++ b/bun.lock
+@@ -19,7 +19,5 @@
+         "@typescript/native-preview": "catalog:",
+         "glob": "13.0.5",
+         "husky": "9.1.7",
+-        // 根构建依赖复用已锁定的 node-gyp@12.3.0 包条目，manifest 与 frozen 输入同步
+-        "node-gyp": "12.3.0",
+         "oxlint": "1.60.0",
+         "oxlint-tsgolint": "0.21.0",
 @@ -1059,11 +1059,12 @@
    },
    "trustedDependencies": [
@@ -69,14 +76,12 @@ diff --git a/bunfig.toml b/bunfig.toml
 index c506ff57c4..646fca5dc3 100644
 --- a/bunfig.toml
 +++ b/bunfig.toml
-@@ -1,5 +1,7 @@
+@@ -1,3 +1,5 @@
  [install]
  exact = true
 +# 与 CI 一致：hoisted 避免 peer 变体冲突
 +linker = "hoisted"
- # Only install newly resolved package versions published at least 3 days ago.
- minimumReleaseAge = 259200
- minimumReleaseAgeExcludes = ["@ai-sdk/amazon-bedrock", "@ai-sdk/anthropic", "@opentui/core", "@opentui/core-darwin-arm64", "@opentui/core-darwin-x64", "@opentui/core-linux-arm64", "@opentui/core-linux-arm64-musl", "@opentui/core-linux-x64", "@opentui/core-linux-x64-musl", "@opentui/core-win32-arm64", "@opentui/core-win32-x64", "@opentui/keymap", "@opentui/solid", "opentui-spinner", "gitlab-ai-provider", "opencode-gitlab-auth", "@ff-labs/fff-node", "@ff-labs/fff-bun", "@ff-labs/fff-bin-darwin-arm64", "@ff-labs/fff-bin-darwin-x64", "@ff-labs/fff-bin-linux-arm64-gnu", "@ff-labs/fff-bin-linux-arm64-musl", "@ff-labs/fff-bin-linux-x64-gnu", "@ff-labs/fff-bin-linux-x64-musl", "@ff-labs/fff-bin-win32-arm64", "@ff-labs/fff-bin-win32-x64", "@pierre/diffs", "@pierre/theming", "app-builder-lib", "dmg-builder", "electron-builder", "electron-publish"]
+ # 镜像仅作为 registry 包的默认源，保留直接 URL、锁定版本及 integrity 哈希。
 diff --git a/package.json b/package.json
 index 58f007e525..fa950adcb6 100644
 --- a/package.json
@@ -85,7 +90,7 @@ index 58f007e525..fa950adcb6 100644
      "@typescript/native-preview": "catalog:",
      "glob": "13.0.5",
      "husky": "9.1.7",
--    "node-gyp": "11.2.0",
+-    "node-gyp": "12.3.0",
      "oxlint": "1.60.0",
      "oxlint-tsgolint": "0.21.0",
      "prettier": "3.6.2",

@@ -4,14 +4,110 @@ Date: Fri, 22 May 2026 23:41:27 +0800
 Subject: [PATCH] feat(permission): add reviewer auto decision service
 
 
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/permission/auto.ts
-@@ -0,0 +1,131 @@
++++ b/packages/core/src/permission/reviewer.ts
+@@ -0,0 +1,92 @@
++export * as PermissionReviewer from "./reviewer"
++
++import path from "path"
++import { LLM, LLMClient } from "@opencode-ai/llm"
++import { Context, Effect, FileSystem, Layer, Schema } from "effect"
++import { Config } from "../config"
++import { ConfigAutoReview } from "../config/auto-review"
++import { makeLocationNode } from "../effect/app-node"
++import { LayerNodePlatform } from "../effect/app-node-platform"
++import { Location } from "../location"
++import { ModelV2 } from "../model"
++import { SessionMessage } from "../session/message"
++import { SessionSchema } from "../session/schema"
++import { SessionStore } from "../session/store"
++import { SessionRunnerModel } from "../session/runner/model"
++import { PermissionAuto } from "./auto"
++import { PermissionReviewerPrompt } from "./reviewer/prompt"
++import { PermissionReviewerSchema } from "./reviewer/schema"
++
++export class Disabled extends Schema.TaggedErrorClass<Disabled>()("PermissionReviewerDisabled", {}) {}
++export class Failed extends Schema.TaggedErrorClass<Failed>()("PermissionReviewerRunError", { reason: Schema.String }) {}
++export class FallbackToUser extends Schema.TaggedErrorClass<FallbackToUser>()("PermissionReviewerFallbackToUser", { reason: Schema.String }) {}
++export class Service extends Context.Service<Service, PermissionAuto.Reviewer>()("@opencode/core/PermissionReviewer") {}
++
++const layer = Layer.effect(Service, Effect.gen(function* () {
++  const config = yield* Config.Service
++  const sessions = yield* SessionStore.Service
++  const models = yield* SessionRunnerModel.Service
++  const client = yield* LLMClient.Service
++  const fs = yield* FileSystem.FileSystem
++  const location = yield* Location.Service
++  const review = Effect.fn("PermissionReviewer.review")(function* (input: PermissionAuto.ReviewInput) {
++    const entries = yield* config.entries()
++    const sessionID = input.sessionID
++    if (Config.latest(entries, "approvals_reviewer") !== "auto_review" || !sessionID) return yield* new Disabled()
++    // 按字段合并各层配置，较近文档只覆盖它明确提供的策略项。
++    const options = entries.flatMap((entry) => entry.type === "document" && entry.info.auto_review ? [entry.info.auto_review] : [])
++      .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})
++    const run = Effect.gen(function* () {
++      const session = yield* sessions.get(SessionSchema.ID.make(sessionID))
++      if (!session) return yield* new Failed({ reason: "Review session was not found" })
++      const target = options.model ? ModelV2.parse(options.model) : undefined
++      // 独立审查复用真实 Catalog/认证解析，不运行 Session 或任何工具。
++      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : undefined })
++      const history = yield* sessions.context(session.id)
++      const policy = options.policy_path ? yield* fs.readFileString(path.resolve(location.directory, options.policy_path)) : ""
++      const tenant = [PermissionReviewerPrompt.DEFAULT_TENANT_POLICY, policy, options.policy].filter(Boolean).join("\n\n")
++      const request = new PermissionReviewerSchema.ReviewerRequest({
++        permission: input.permission, patterns: [...input.patterns], metadata: { ...input.metadata }, precheck: input.precheck,
++      })
++      const items = PermissionReviewerPrompt.buildUserPromptItems({
++        entries: history.slice(-40).map((message) => ({ role: message.type === "assistant" ? "assistant" : "user", text: render(message) })),
++        truncated: history.length > 40,
++      }, request, input.precheck.reason)
++      // generateObject 只生成一次结构化裁决；合成输出工具不具备业务执行权限。
++      const result = yield* LLM.generateObject({
++        model: selected.model, schema: PermissionReviewerSchema.Assessment,
++        system: PermissionReviewerPrompt.buildSystemPrompt(tenant), prompt: items.map((item) => item.text).join("\n\n"),
++      }).pipe(
++        Effect.provideService(LLMClient.Service, client),
++        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
++      )
++      return {
++        action: result.object.outcome, reason: result.object.rationale, reviewID: crypto.randomUUID(),
++        risk_level: result.object.risk_level, user_authorization: result.object.user_authorization,
++      } satisfies PermissionAuto.ReviewDecision
++    }).pipe(Effect.mapError((error) => new Failed({ reason: error instanceof Error ? error.message : String(error) })))
++    // 用户审批回退是显式配置；其他失败由共享 auto 路由拒绝，绝不转换成成功。
++    return yield* run.pipe(Effect.catch((error) => Effect.fail(options.fallback === "user"
++      ? new FallbackToUser({ reason: error.reason }) : error)))
++  })
++  return Service.of({ review })
++}))
++
++function render(message: SessionMessage.Message) {
++  if (message.type === "assistant") return message.content.map((part) => {
++    if (part.type !== "tool") return part.text.slice(0, 4000)
++    const state = part.state
++    const body = state.status === "pending" ? state.input : state.status === "error" ? state.error.message
++      : state.content.map((item) => item.type === "text" ? item.text : `[Attached ${item.mime}]`).join("\n")
++    return `<tool name="${part.name}" status="${state.status}">\n${JSON.stringify(state.input).slice(0, 4000)}\n${body.slice(0, 4000)}\n</tool>`
++  }).join("\n")
++  if (message.type === "user") return [message.text, ...(message.files ?? []).map((file) => `[Attached ${file.mime}: ${file.name ?? ""}]`)].join("\n").slice(0, 4000)
++  if (message.type === "compaction") return `${message.summary}\n${message.recent}`.slice(0, 4000)
++  if (message.type === "shell") return `${message.command}\n${message.output}`.slice(0, 4000)
++  if ("text" in message) return message.text.slice(0, 4000)
++  return `<${message.type} />`
++}
++
++export const node = makeLocationNode({ service: Service, layer,
++  deps: [Config.node, SessionStore.node, SessionRunnerModel.node, LayerNodePlatform.llmClient, LayerNodePlatform.filesystem, Location.node],
++})
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/permission/auto.ts
+@@ -0,0 +1,130 @@
 +import { Effect } from "effect"
 +import { PermissionPrecheck } from "./precheck"
-+import type { SessionID } from "@/session/schema"
 +
 +// #198：自动决策类型——allow/ask/deny 三态，source 追踪决策来源（precheck 或 reviewer），ask 表示 reviewer 不可用时回退到用户审批
 +export type Decision =
@@ -37,7 +133,7 @@ new file mode 100644
 +    }
 +
 +export interface ReviewInput {
-+  readonly sessionID?: SessionID
++  readonly sessionID?: string
 +  readonly permission: string
 +  readonly patterns: readonly string[]
 +  readonly metadata: Readonly<Record<string, unknown>>
@@ -140,6 +236,12 @@ new file mode 100644
 +}
 +
 +export * as PermissionAuto from "./auto"
+diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/permission/auto.ts
+@@ -0,0 +1 @@
++export * from "@opencode-ai/core/permission/auto"
 diff --git a/packages/opencode/src/permission/cache/session-cache.ts b/packages/opencode/src/permission/cache/session-cache.ts
 new file mode 100644
 --- /dev/null
@@ -350,10 +452,10 @@ new file mode 100644
 +export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
 +
 +export * as PermissionCircuitBreaker from "./circuit-breaker"
-diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packages/opencode/src/permission/reviewer/policy/policy.md
+diff --git a/packages/core/src/permission/reviewer/policy/policy.md b/packages/core/src/permission/reviewer/policy/policy.md
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/permission/reviewer/policy/policy.md
++++ b/packages/core/src/permission/reviewer/policy/policy.md
 @@ -0,0 +1,8 @@
 +Default opencode auto-review policy:
 +
@@ -363,10 +465,10 @@ new file mode 100644
 +- Require explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
 +- Allow read-only project inspection when it does not read credentials, private keys, tokens, or sensitive config files.
 +- Allow bounded, reversible local changes only when they are clearly part of the user's requested task and do not touch credentials or shared infrastructure.
-diff --git a/packages/opencode/src/permission/reviewer/policy/policy_template.md b/packages/opencode/src/permission/reviewer/policy/policy_template.md
+diff --git a/packages/core/src/permission/reviewer/policy/policy_template.md b/packages/core/src/permission/reviewer/policy/policy_template.md
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/permission/reviewer/policy/policy_template.md
++++ b/packages/core/src/permission/reviewer/policy/policy_template.md
 @@ -0,0 +1,37 @@
 +You are judging one planned coding-agent action.
 +Assess the exact action's intrinsic risk and whether the transcript authorizes its target and side effects.
@@ -405,10 +507,10 @@ new file mode 100644
 +- `high` risk may be allowed only when user authorization is at least `medium` and the target/scope is explicit.
 +- `critical` risk must be denied.
 +- If the action is destructive and the user did not explicitly authorize that exact destructive side effect, deny.
-diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
+diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/permission/reviewer/prompt.ts
++++ b/packages/core/src/permission/reviewer/prompt.ts
 @@ -0,0 +1,73 @@
 +import POLICY_TEMPLATE from "./policy/policy_template.md" with { type: "text" }
 +import DEFAULT_POLICY from "./policy/policy.md" with { type: "text" }
@@ -483,10 +585,16 @@ new file mode 100644
 +}
 +
 +export * as PermissionReviewerPrompt from "./prompt"
-diff --git a/packages/opencode/src/permission/reviewer/schema.ts b/packages/opencode/src/permission/reviewer/schema.ts
+diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/permission/reviewer/schema.ts
++++ b/packages/opencode/src/permission/reviewer/prompt.ts
+@@ -0,0 +1 @@
++export * from "@opencode-ai/core/permission/reviewer/prompt"
+diff --git a/packages/core/src/permission/reviewer/schema.ts b/packages/core/src/permission/reviewer/schema.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/permission/reviewer/schema.ts
 @@ -0,0 +1,41 @@
 +import { Schema } from "effect"
 +
@@ -529,15 +637,22 @@ new file mode 100644
 +}) {}
 +
 +export * as PermissionReviewerSchema from "./schema"
+diff --git a/packages/opencode/src/permission/reviewer/schema.ts b/packages/opencode/src/permission/reviewer/schema.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/permission/reviewer/schema.ts
+@@ -0,0 +1 @@
++export * from "@opencode-ai/core/permission/reviewer/schema"
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,196 @@
 +import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 +import { Config } from "@/config/config"
 +import { Provider } from "@/provider/provider"
 +import { Session } from "@/session/session"
++import { SessionID } from "@/session/schema"
 +import { generateObject, type ModelMessage } from "ai"
 +import { Context, Effect, Layer, Schema } from "effect"
 +import { PermissionReviewerPrompt } from "./prompt"
@@ -614,7 +729,7 @@ new file mode 100644
 +        // #198：transcript 失败不阻断审查——空 transcript 仍允许 reviewer 基于 planned action 和策略做决策
 +        const transcript = input.sessionID
 +          ? yield* session
-+              .messages({ sessionID: input.sessionID, limit: 40 })
++              .messages({ sessionID: SessionID.make(input.sessionID), limit: 40 })
 +              .pipe(
 +                Effect.map(PermissionReviewerTranscript.fromMessages),
 +                Effect.catch(() => Effect.succeed({ entries: [], truncated: false })),

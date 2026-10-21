@@ -22,9 +22,9 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packages/opencode/src/permission/reviewer/policy/policy.md
---- a/packages/opencode/src/permission/reviewer/policy/policy.md
-+++ b/packages/opencode/src/permission/reviewer/policy/policy.md
+diff --git a/packages/core/src/permission/reviewer/policy/policy.md b/packages/core/src/permission/reviewer/policy/policy.md
+--- a/packages/core/src/permission/reviewer/policy/policy.md
++++ b/packages/core/src/permission/reviewer/policy/policy.md
 @@ -1,8 +1,9 @@
  Default opencode auto-review policy:
  
@@ -37,9 +37,9 @@ diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packag
 -- Allow read-only project inspection when it does not read credentials, private keys, tokens, or sensitive config files.
 +- Allow read-only project inspection when it does not unexpectedly read credentials, private keys, tokens, or sensitive config files.
  - Allow bounded, reversible local changes only when they are clearly part of the user's requested task and do not touch credentials or shared infrastructure.
-diff --git a/packages/opencode/src/permission/reviewer/policy/policy_template.md b/packages/opencode/src/permission/reviewer/policy/policy_template.md
---- a/packages/opencode/src/permission/reviewer/policy/policy_template.md
-+++ b/packages/opencode/src/permission/reviewer/policy/policy_template.md
+diff --git a/packages/core/src/permission/reviewer/policy/policy_template.md b/packages/core/src/permission/reviewer/policy/policy_template.md
+--- a/packages/core/src/permission/reviewer/policy/policy_template.md
++++ b/packages/core/src/permission/reviewer/policy/policy_template.md
 @@ -1,11 +1,12 @@
  You are judging one planned coding-agent action.
 -Assess the exact action's intrinsic risk and whether the transcript authorizes its target and side effects.
@@ -91,9 +91,9 @@ diff --git a/packages/opencode/src/permission/reviewer/policy/policy_template.md
  - `critical` risk must be denied.
 +- Post-denial user approval has highest precedence for non-critical actions: if the user clearly and explicitly re-approves the exact previously denied action after seeing the concrete risk, set `user_authorization = "high"` and allow unless tenant policy defines an absolute deny.
  - If the action is destructive and the user did not explicitly authorize that exact destructive side effect, deny.
-diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
---- a/packages/opencode/src/permission/reviewer/prompt.ts
-+++ b/packages/opencode/src/permission/reviewer/prompt.ts
+diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
+--- a/packages/core/src/permission/reviewer/prompt.ts
++++ b/packages/core/src/permission/reviewer/prompt.ts
 @@ -9,7 +9,11 @@
  
  export interface TranscriptDelta {
@@ -193,12 +193,13 @@ diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/open
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -4,4 +4,7 @@ import { Config } from "@/config/config"
+@@ -4,5 +4,8 @@ import { Config } from "@/config/config"
  import { Provider } from "@/provider/provider"
  import { Session } from "@/session/session"
 +import { MessageV2 } from "@/session/message-v2"
 +import { Database } from "@opencode-ai/core/database/database"
 +
+ import { SessionID } from "@/session/schema"
  import { generateObject, type ModelMessage } from "ai"
  import { Context, Effect, Layer, Schema } from "effect"
 @@ -53,9 +56,14 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/P
@@ -228,9 +229,9 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +        // #206：会把部分历史当作完整对话评估 user_authorization（修复 page.more 语义丢失）
          const transcript = input.sessionID
 -          ? yield* session
--              .messages({ sessionID: input.sessionID, limit: 40 })
+-              .messages({ sessionID: SessionID.make(input.sessionID), limit: 40 })
 -              .pipe(
-+          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
++          ? yield* MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
 +              // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
 +              Effect.provideService(Database.Service, database),
 -                Effect.map(PermissionReviewerTranscript.fromMessages),
@@ -252,6 +253,95 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, Provider.node, Session.node, Database.node] })
  
  export * as PermissionReviewer from "./service"
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -53,4 +53,20 @@
++      const rendered = history.slice(-120).map((message) => {
++        const text = render(message)
++        const role: PermissionReviewerPrompt.TranscriptEntry["role"] = message.type === "user" ? "user" : message.type === "shell" ? "tool" : "assistant"
++        return { role, text: truncate(text, 1000), truncated: text.length > 1000 }
++      })
++      const visible = rendered.filter((entry) => entry.text.trim())
++      const keep = new Set<number>()
++      const first = visible.findIndex((entry) => entry.role === "user")
++      const last = visible.findLastIndex((entry) => entry.role === "user")
++      // 真实用户锚点优先，模型推理或合成上下文不能冒充用户授权。
++      if (first >= 0) keep.add(first)
++      if (last >= 0) keep.add(last)
++      for (let index = visible.length - 1; index >= 0 && keep.size < 40; index--) keep.add(index)
++      const retained = visible.filter((_, index) => keep.has(index))
+       const items = PermissionReviewerPrompt.buildUserPromptItems({
+-        entries: history.slice(-40).map((message) => ({ role: message.type === "assistant" ? "assistant" : "user", text: render(message) })),
+-        truncated: history.length > 40,
++        entries: retained.map(({ role, text }) => ({ role, text })),
++        truncated: history.length > 120 || visible.length > retained.length,
++        entryTruncated: retained.some((entry) => entry.truncated),
++        emptyEntries: rendered.length > visible.length,
+       }, request, input.precheck.reason)
+@@ -77,17 +93,23 @@
+ function render(message: SessionMessage.Message) {
++  if (message.type === "synthetic" || message.type === "system") return ""
+   if (message.type === "assistant") return message.content.map((part) => {
+-    if (part.type !== "tool") return part.text.slice(0, 4000)
++    if (part.type === "reasoning") return ""
++    if (part.type !== "tool") return truncate(part.text)
+     const state = part.state
+     const body = state.status === "pending" ? state.input : state.status === "error" ? state.error.message
+       : state.content.map((item) => item.type === "text" ? item.text : `[Attached ${item.mime}]`).join("\n")
+-    return `<tool name="${part.name}" status="${state.status}">\n${JSON.stringify(state.input).slice(0, 4000)}\n${body.slice(0, 4000)}\n</tool>`
++    return `<tool name="${part.name}" status="${state.status}">\n${truncate(JSON.stringify(state.input))}\n${truncate(body)}\n</tool>`
+   }).join("\n")
+-  if (message.type === "user") return [message.text, ...(message.files ?? []).map((file) => `[Attached ${file.mime}: ${file.name ?? ""}]`)].join("\n").slice(0, 4000)
+-  if (message.type === "compaction") return `${message.summary}\n${message.recent}`.slice(0, 4000)
+-  if (message.type === "shell") return `${message.command}\n${message.output}`.slice(0, 4000)
+-  if ("text" in message) return message.text.slice(0, 4000)
++  if (message.type === "user") return truncate([message.text, ...(message.files ?? []).map((file) => `[Attached ${file.mime}: ${file.name ?? ""}]`)].join("\n"))
++  if (message.type === "compaction") return truncate(`${message.summary}\n${message.recent}`)
++  if (message.type === "shell") return truncate(`${message.command}\n${message.output}`)
+   return `<${message.type} />`
+ }
+ 
++// 单段和整条截短都留下显式证据标记，而不是静默丢弃剩余内容。
++function truncate(text: string, limit = 4000) {
++  return text.length <= limit ? text : text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
++}
++
+ export const node = makeLocationNode({ service: Service, layer,
+   deps: [Config.node, SessionStore.node, SessionRunnerModel.node, LayerNodePlatform.llmClient, LayerNodePlatform.filesystem, Location.node],
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -23,1 +23,2 @@
+-import { SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionMessage } from "@opencode-ai/core/session/message"
+@@ -361,1 +362,15 @@
++    const evidence = yield* Database.Service
++    const evidenceRows = [
++      ...Array.from({ length: 45 }, (_, index) => ({
++        id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
++        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST AUTHORIZATION" : `Follow-up ${index}` },
++      })),
++      {
++        id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 46,
++        data: { time: { created: 46 }, agent: "test", model: { id: "review", providerID: "test" },
++          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) }] },
++      },
++      { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 47, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 47 }, text: "SYNTHETIC AUTHORIZATION" } },
++    ]
++    yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
+     const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
+@@ -367,3 +381,9 @@
+     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
+     expect(reviewRequests).toHaveLength(1)
++    const reviewText = JSON.stringify(reviewRequests[0]?.messages)
++    expect(reviewText).toContain("FIRST AUTHORIZATION")
++    expect(reviewText).toContain("Follow-up 44")
++    expect(reviewText).toContain("shortened")
++    expect(reviewText).not.toContain("PRIVATE REASONING")
++    expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
+     // 外部目录复用同一shell预检，不再为相同命令调用第二次模型。
 diff --git a/packages/opencode/src/permission/reviewer/transcript.ts b/packages/opencode/src/permission/reviewer/transcript.ts
 --- a/packages/opencode/src/permission/reviewer/transcript.ts
 +++ b/packages/opencode/src/permission/reviewer/transcript.ts

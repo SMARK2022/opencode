@@ -1,6 +1,6 @@
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -56,9 +56,11 @@ const RAW_COMMAND_PATH = String.raw`(?:[^\s|;&(){}'"]+[\\/])*`
  const RAW_FILE_DELETE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:rm|unlink|rmdir|del|erase|rd|Remove-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
  const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}\b(?:mv|move|ren|rename|Move-Item|Rename-Item)\b\s+(?!--?(?:h|help|v|version)\b)\S`
@@ -57,7 +57,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -327,6 +327,53 @@ describe("permission precheck bash classifier", () => {
+@@ -327,6 +327,56 @@ describe("permission precheck bash classifier", () => {
      expect(bash("Remove-Item -Recurse -Force /")).toMatchObject({ level: "dangerous" })
    })
  
@@ -76,6 +76,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect(bash("rm -r /usr")).toMatchObject({ level: "dangerous" })
 +    expect(bash("rm -r /home")).toMatchObject({ level: "dangerous" })
 +    expect(bash("rm -r /usr/local")).toMatchObject({ level: "dangerous" })
++    // 引号使raw扫描无法匹配标志，确保token分支仍区分保护根与普通目录。
++    expect(bash('"rm" "-r" "/usr"')).toMatchObject({ level: "dangerous" })
++    expect(bash('"rm" "--recursive" "node_modules"')).toMatchObject({ level: "cautious" })
 +    // raw 层穿透包装器：rm -r / 在 bash -c / ssh / wsl / 命令替换中均被确定性拦截
 +    expect(bash("/bin/sh -c 'rm -r /'")).toMatchObject({ level: "dangerous" })
 +    expect(bash("ssh example.com 'rm -r /'")).toMatchObject({ level: "dangerous" })

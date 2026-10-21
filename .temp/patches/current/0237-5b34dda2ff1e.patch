@@ -277,27 +277,21 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
              if (value.providerMetadata) ctx.reasoningMap[value.id].metadata = value.providerMetadata
 +            yield* logFirstDelta("reasoning", ctx.reasoningMap[value.id].id, "text", value.text.length)
              yield* session.updatePartDelta({
-@@ -369,4 +395,5 @@
+@@ -411,4 +437,5 @@
              yield* ensureToolCall(value)
 +            yield* logPartStart("tool", { callID: value.id, partID: ctx.toolcalls[value.id]?.partID })
              return
  
-           case "tool-input-delta":
-@@ -380,11 +407,13 @@
-               const tcall = ctx.toolcalls[value.id]
--              if (tcall)
-+              if (tcall) {
-+                yield* logFirstDelta("tool", tcall.partID, "raw", value.text.length)
-                 yield* session.updatePartDelta({
-                   sessionID: tcall.sessionID,
-                   messageID: tcall.messageID,
-                   partID: tcall.partID,
-                   field: "raw",
-                   delta: value.text,
-                 })
-+              }
-             }
-             return
+           case "tool-input-delta": {
+@@ -417,7 +444,8 @@
+             if (!pending || pending.part.state.status !== "pending") return
+             // 上游 LLMEvent 使用 text；仅累积内存，不能恢复逐 token 的 durable PartUpdated 写入。
+             ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.text
++            yield* logFirstDelta("tool", pending.call.partID, "raw", value.text.length)
+             // raw 是既有 V1 wire 字段；consumer 在 pending state 内应用，不创造顶层 part.raw。
+             yield* session.updatePartDelta({
+               sessionID: pending.call.sessionID,
+               messageID: pending.call.messageID,
 @@ -594,4 +623,5 @@
              yield* session.updatePart(ctx.currentText)
 +            yield* logPartStart("text", { partID: ctx.currentText.id })
@@ -311,7 +305,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 +            yield* logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
              yield* session.updatePartDelta({
                sessionID: ctx.currentText.sessionID,
-@@ -752,20 +783,34 @@
+@@ -803,11 +833,17 @@
        const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
 +        timing = { startedAt: Date.now(), firstStreamEvent: false, firstDelta: new Set() }
          yield* Effect.logInfo("process", {
@@ -324,16 +318,13 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 +          agent: streamInput.agent.name,
 +        })
          ctx.needsCompaction = false
+         // 仅本次准备请求触发的内部转移，不能吞掉真实失败或用户中断。
+         const preflightCompaction = Symbol("preflight-compaction")
          ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
  
 -        return yield* Effect.gen(function* () {
 +        const result = yield* Effect.gen(function* () {
-           yield* Effect.gen(function* () {
-             ctx.currentText = undefined
-             ctx.reasoningMap = {}
-             yield* status.set(ctx.sessionID, { type: "busy" })
-             const stream = llm.stream(streamInput)
- 
+@@ -859,6 +895,14 @@
              yield* stream.pipe(
 -              Stream.tap((event) => handleEvent(event)),
 +              Stream.tap((event) =>
@@ -348,7 +339,8 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
                Stream.takeUntil(() => ctx.needsCompaction),
                Stream.runDrain,
              )
-@@ -805,5 +850,12 @@
+           }).pipe(
+@@ -901,5 +945,12 @@
            if (ctx.needsCompaction) return "compact"
            if (ctx.blocked || ctx.assistantMessage.error) return "stop"
            return "continue"

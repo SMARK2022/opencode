@@ -13,7 +13,7 @@ index 586751567e..a17dec9d55 100644
        const renderer = yield* Effect.acquireRelease(
          Effect.tryPromise({
            try: async () => {
--            // macOS 上编译的 Bun 二进制可能使用 wcwidth 模式，对 CJK 字符渲染异常
+-            // macOS 编译 Bun 的 native locale 可能让系统 wcwidth 对 CJK 返回 -1，改用内置宽度表。
 -            if (process.platform === "darwin") {
 +            // #108：macOS/Windows 默认强制 Unicode 宽度表；尊重用户 OPENTUI_FORCE_* 覆盖
 +            const shouldForceUnicodeWidth =
@@ -22,7 +22,7 @@ index 586751567e..a17dec9d55 100644
 +              process.env.OPENTUI_FORCE_WCWIDTH === undefined
 +            if (shouldForceUnicodeWidth) {
                process.env.OPENTUI_FORCE_UNICODE = "1"
--              // PTY 初始化竞争可能导致 stdout.columns 为 0，等待最多 100ms
+-              // PTY 尚未报告列数时最多等 100ms，避免初帧过早采用 80x24 回退尺寸。
 +            }
 +            // PTY 初始化竞争：仅 macOS 等待 columns
 +            if (process.platform === "darwin") {
@@ -349,9 +349,10 @@ diff --git a/packages/tui/test/util/revert-diff.test.ts b/packages/tui/test/util
 index fc4794e242..9a0864e19d 100644
 --- a/packages/tui/test/util/revert-diff.test.ts
 +++ b/packages/tui/test/util/revert-diff.test.ts
-@@ -1,8 +1,9 @@
+@@ -1,9 +1,10 @@
 +// #108：revert-diff 路径分隔在 Windows 下行为不同
  import { describe, expect, test } from "bun:test"
+ import { createTwoFilesPatch } from "diff"
  import { getRevertDiffFiles } from "../../src/util/revert-diff"
  
  describe("revert diff", () => {
@@ -380,50 +381,6 @@ index 1cc47a79f6..b20df20b02 100644
      })
  
      test("resolves /usr/bin/bash from env to Git Bash", async () => {
-diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
-index 6238a6a077..338351ddcb 100644
---- a/packages/opencode/test/tool/task.test.ts
-+++ b/packages/opencode/test/tool/task.test.ts
-@@ -420,23 +420,22 @@ describe("tool.task", () => {
-         const child = yield* sessions.get(result.metadata.sessionId)
-         expect(child.parentID).toBe(chat.id)
-         expect(child.agent).toBe("reviewer")
--        expect(child.permission).toEqual([
--          {
--            permission: "todowrite",
--            pattern: "*",
--            action: "deny",
--          },
--          {
--            permission: "bash",
--            pattern: "*",
--            action: "deny",
--          },
--          {
--            permission: "read",
--            pattern: "*",
--            action: "deny",
--          },
--        ])
-+        // #108：toContainEqual 对齐 tip primary_tools deny 生产路径（非假 allow）
-+        expect(child.permission).toContainEqual({
-+          permission: "todowrite",
-+          pattern: "*",
-+          action: "deny",
-+        })
-+        expect(child.permission).toContainEqual({
-+          permission: "bash",
-+          pattern: "*",
-+          action: "deny",
-+        })
-+        expect(child.permission).toContainEqual({
-+          permission: "read",
-+          pattern: "*",
-+          action: "deny",
-+        })
-         expect(seen?.tools).toBeUndefined()
-       }),
-     {
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 index cadc3d7eec..56fe38fbea 100644
 --- a/packages/opencode/test/tool/shell.test.ts
@@ -437,11 +394,11 @@ index cadc3d7eec..56fe38fbea 100644
              const tmp = yield* tmpdirScoped()
              yield* runIn(
                tmp,
-@@ -989,17 +991,20 @@ describe("tool.shell permissions", () => {
+@@ -1049,18 +1051,20 @@ describe("tool.shell permissions", () => {
      }),
    )
  
--  each("always pattern has space before wildcard to not include different commands", () =>
+-  each("always pattern has space before wildcard to not include different commands", (item) =>
 +  // #108：always 模式按 shell 选择命令，避免 Windows cmd/pwsh 硬编码 ls
 +  each("always pattern has space before wildcard to not include different commands", (item) =>
      Effect.gen(function* () {
@@ -450,13 +407,14 @@ index cadc3d7eec..56fe38fbea 100644
          tmp,
          Effect.gen(function* () {
            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
--          yield* run({ command: "ls -la" }, capture(requests))
+-          // cmd 的 ls 被真实 guard 拦截；原权限 wildcard 断言继续用原生命令验证。
+-          yield* run({ command: item.label === "cmd" ? "dir /a" : "ls -la" }, capture(requests))
 +          const cmd = item.label === "cmd" ? "dir" : item.label === "powershell" || item.label === "pwsh" ? "Get-ChildItem" : "ls -la"
 +          const always = item.label === "cmd" ? "dir *" : item.label === "powershell" || item.label === "pwsh" ? "Get-ChildItem *" : "ls *"
 +          yield* run({ command: cmd }, capture(requests))
            const bashReq = requests.find((r) => r.permission === "bash")
            expect(bashReq).toBeDefined()
--          expect(bashReq!.always[0]).toBe("ls *")
+-          expect(bashReq!.always[0]).toBe(item.label === "cmd" ? "dir *" : "ls *")
 +          expect(bashReq!.always[0]).toBe(always)
          }),
        )

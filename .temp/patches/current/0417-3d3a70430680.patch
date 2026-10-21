@@ -2,100 +2,261 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1828,6 +1828,9 @@ const PART_MAPPING = {
- 
- const INLINE_TOOL_ICON_WIDTH = 2
- 
-+// [local-smark] 折叠预览行数：由 maxHeight/overflow 裁剪，而不是重挂更短的正文树
-+const REASONING_PREVIEW_ROWS = 5
-+
- function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
+@@ -94,1 +94,0 @@
+-import { createThrottledSignal } from "../../util/signal"
+@@ -1891,1 +1890,3 @@
+ const REASONING_PREVIEW_ROWS = 5
++// 分隔符只在显示投影中加入，各原Part仍独立解析且不改transcript。
++const REASONING_SEPARATOR = "---\n"
+@@ -1912,22 +1913,8 @@
+   const [override, setOverride] = createSignal<boolean>()
+-  const [bodyMounted, setBodyMounted] = createSignal(false)
+   const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
+   // 加密占位仍显示上游Thought标题，不从metadata猜测正文或长度。
+   const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
+   const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
+-  const [displayTexts, setDisplayTexts] = createThrottledSignal<string[]>([], 50)
+-  createEffect(() => setDisplayTexts(texts()))
+-  const renderedTexts = createMemo(() => displayTexts().length ? displayTexts() : texts())
+   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
+-  const previews = createMemo(() => {
+-    let remaining = REASONING_PREVIEW_ROWS
+-    return parts().flatMap((part, index) => {
+-      // 后续成员必须同时分到marker及至少一行正文，不能留下孤立标记。
+-      const markerRows = index === 0 ? 0 : 1
+-      if (remaining <= markerRows) return []
+-      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
+-      remaining -= markerRows + bodyRows
+-      return [{ part, index, bodyRows }]
+-    })
+-  })
++  // 分隔行也计预算；估算不依赖expanded，避免布局反馈改变折叠选择。
+   const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
+@@ -1939,1 +1926,0 @@
+-  createEffect(() => { if (expanded()) setBodyMounted(true) })
+@@ -1948,2 +1934,2 @@
+-          title={[reasoningSummary(renderedTexts()[0] ?? "").title, renderedTexts().length > 1 ? `${renderedTexts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
+-          characters={opaque() ? undefined : renderedTexts().reduce((total, text) => total + text.length, 0)}
++          title={[reasoningSummary(texts()[0] ?? "").title, texts().length > 1 ? `${texts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
++          characters={opaque() ? undefined : texts().reduce((total, text) => total + text.length, 0)}
+@@ -1951,16 +1937,9 @@
+-        {/* 总预览只有五行，且与普通正文同宽，不再额外增加横向padding。 */}
+-        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
+-          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part}
+-            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`} rows={preview.bodyRows}
+-            width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />}</For>
+-        </box>
+-        {/* 首次展开后保留full树，仅切visible，避免复用已销毁的CodeRenderable。 */}
+-        <Show when={bodyMounted()}><box visible={expanded()}>
+-          <For each={parts().map((part) => part.id)}>{(id) => {
++        {/* 每Part从首帧常驻，展开只改变共享裁剪约束，不挂第二棵异步高亮树。 */}
++        <box maxHeight={expanded() ? undefined : REASONING_PREVIEW_ROWS} overflow={expanded() ? "visible" : "hidden"}>
++          <For each={parts().map((part) => part.id)}>{(id, index) => {
+             const part = createMemo(() => parts().find((item) => item.id === id)!)
+-            const index = createMemo(() => parts().findIndex((item) => item.id === id))
+-            return <ReasoningBody id={`text-${id}`} part={part()} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
+-              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
++            return <ReasoningBody id={`text-${id}`} part={part} separator={index() > 0} expanded={expanded()}
++              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
+           }}</For>
+-        </box></Show>
+-        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${parts().length > previews().length ? ` · +${parts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
++        </box>
++        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : "▼ 展开查看完整推理"}</text></Show>
+@@ -1972,55 +1951,17 @@
+-function ReasoningBody(props: { id: string; part: ReasoningPart; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
++function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
    const { theme } = useTheme()
-   const ctx = use()
-@@ -1916,60 +1919,32 @@ const renderedContent = createMemo(() => displayContent() || content())
-             encrypted={opaque()}
-           />
-         </box>
--        {/* 折叠推理：保留 5 行预览，避免 hide 模式只剩标题不可窥 */}
--        <Show when={inMinimal() && !expanded() && content()}>
--          <box paddingLeft={2} marginTop={1}>
--            {/* 用 content() 而非 summary().body：summary 可能只剩标题体为空 */}
--            <code
--              filetype="markdown"
--              // #137：预览流式用 styled streaming
--              drawUnstyledText={false}
--              streaming={!isDone()}
--              syntaxStyle={syntax()}
--              content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
--              conceal={ctx.conceal()}
--              fg={theme.textMuted}
--            />
--            {/* 超出预览行时提示可展开；展开仍走 header toggle */}
--            <Show when={renderedContent().split(String.fromCharCode(10)).length > 5}>
--              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
--            </Show>
--          </box>
--        </Show>
--        <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
--          <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
--            <Switch>
--              <Match when={!isDone()}>
--                <code
--                  filetype="markdown"
--                  // #135/#137：流式推理 styled streaming，避免 unstyled 闪烁
--                  drawUnstyledText={false}
--                  streaming={true}
--                  syntaxStyle={syntax()}
--                  content={summary().body}
--                  conceal={ctx.conceal()}
--                  fg={theme.textMuted}
--                />
--              </Match>
--              {/* #137：推理完成后 keyed remount */}
--              <Match when={isDone()}>
--                <Show keyed when={completedKey()}>
--                  {(_key) => (
--                    <code
--                      filetype="markdown"
--                      drawUnstyledText={false}
--                      streaming={false}
--                      syntaxStyle={syntax()}
--                      content={summary().body}
--                      conceal={ctx.conceal()}
--                      fg={theme.textMuted}
--                    />
--                  )}
--                </Show>
--              </Match>
--            </Switch>
--          </box>
--        </Show>
-+        {/* [local-smark] 唯一正文树只改变布局约束（maxHeight/overflow/wrapMode），
-+            展开/折叠与 streaming→done 都不重挂已高亮正文，修复展开后正文消失
-+            和高度冲突；预览裁剪交给 maxHeight 而非重挂更短内容。
-+            content() 门合并旧预览/展开双门的可见语义：加密（opaque）part 只留 header */}
-+        <Show when={content()}>
-+          <box
-+            paddingLeft={inMinimal() ? 2 : 0}
-+            marginTop={1}
-+            maxHeight={!inMinimal() || expanded() ? undefined : REASONING_PREVIEW_ROWS}
-+            overflow={!inMinimal() || expanded() ? "visible" : "hidden"}
-+          >
-+            <code
-+              filetype="markdown"
-+              drawUnstyledText={false}
-+              streaming={!isDone()}
-+              syntaxStyle={syntax()}
-+              content={renderedContent()}
-+              conceal={ctx.conceal()}
-+              fg={theme.textMuted}
-+              wrapMode={!inMinimal() || expanded() ? "word" : "char"}
-+            />
-+            <Show when={inMinimal() && !expanded()}>
-+              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
-+            </Show>
-+          </box>
-+        </Show>
-       </box>
-     </Show>
-   )
+-  const content = createMemo(() => normalizeReasoning(props.part.text))
+-  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+-  createEffect(() => setDisplayContent(content()))
+-  const renderedContent = createMemo(() => displayContent() || content())
++  // accessor跟随Part快照替换；固定分隔符不依赖source序号和总数。
++  const content = createMemo(() => {
++    const text = normalizeReasoning(props.part().text)
++    return props.separator ? REASONING_SEPARATOR + text : text
++  })
+   // 保留上游per-Part完成判定，不等待父消息或其他成员结束。
+-  const done = createMemo(() => props.part.time.end !== undefined)
+-  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
+-  const [markerReady, setMarkerReady] = createSignal(false)
+-  let generation = 0
+-  let active = true
+-  createEffect(() => {
+-    renderedContent()
+-    props.conceal
+-    generation++
+-    setMarkerReady(false)
+-  })
+-  onCleanup(() => { active = false; generation++ })
+-  // 每个Part独立解析Markdown；显式锁定正文宽度，避免CJK固有测量向偶数列扩张。
+-  const code = () => <code id={props.id} width={props.width} filetype="markdown" drawUnstyledText={false} streaming={!done()}
+-    syntaxStyle={props.syntaxStyle} content={renderedContent()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.rows ? "char" : "word"}
+-    onChunks={(chunks, context) => {
+-      const current = generation
+-      const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
+-      queueMicrotask(() => {
+-        // 只认可当前conceal结果，晚到的highlight不能在正文消失后复活marker。
+-        if (!active || current !== generation || context.content !== renderedContent()) return
+-        setMarkerReady(visible)
+-      })
+-      return chunks
+-    }} />
+-  return <>
+-    <Show when={props.marker && markerReady()}><text fg={theme.textMuted} wrapMode="none">{props.marker}</text></Show>
+-    <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
+-      <Show when={!done()} fallback={<Show keyed when={completedKey()}>{(_key) => code()}</Show>}>{code()}</Show>
++  const done = createMemo(() => props.part().time.end !== undefined)
++  return (
++    <box flexShrink={0}>
++      {/* 成员不参与共享五行约束的shrink；原宽度固定，独立Markdown只由外层裁尾。 */}
++      <code id={props.id} width={props.width} filetype="markdown" drawUnstyledText={false} streaming={!done()}
++        syntaxStyle={props.syntaxStyle} content={content()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.expanded ? "word" : "char"} />
+     </box>
+-  </>
+-}
+-
+-function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
+-  // 仅控制下级marker，不能据此隐藏正文；裁剪后的远端glyph不能替首行背书。
+-  const bodyWidth = Math.max(width, 1)
+-  let row = 1
+-  let column = 0
+-  return [...text].some((char) => {
+-    if (rows && row > rows) return false
+-    if (char === "\n") { row++; column = 0; return false }
+-    const code = char.codePointAt(0) ?? 0
+-    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
+-    if (column + cells > bodyWidth) { row++; column = 0 }
+-    column += cells
+-    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
+-  })
++  )
+ }
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -495,8 +495,8 @@
+       for (let index = 0; index < 12; index++) {
+         await app.renderOnce()
+-        expect(app.captureCharFrame()).not.toContain("[seg 2/2]")
++        expect(app.captureCharFrame()).not.toContain("private-url")
+         await Bun.sleep(5)
+       }
+       app.mockInput.pressKey("x", { ctrl: true })
+       app.mockInput.pressKey("h")
+-      await frame("[seg 2/2]", "private-url")
++      await frame("private-url")
+@@ -505,7 +505,7 @@
+-      // 逐帧验证conceal往返，晚到highlight不能留下只有marker的帧。
++      // 固定分隔符属于结构；隐藏image后仍逐帧确认正文不会被晚到highlight复活。
++      await waitForReviewFrame(app, async (value) => { if (!value.includes("private-url")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
+       for (let index = 0; index < 12; index++) {
+         await app.renderOnce()
+-        const value = app.captureCharFrame()
+-        expect(value.includes("[seg 2/2]") && !value.includes("private-url")).toBe(false)
++        expect(app.captureCharFrame()).not.toContain("private-url")
+         await Bun.sleep(5)
+       }
+@@ -519,1 +519,1 @@
+-      const value = await frame("10 segments", "[seg 2/10]", "▼ 展开查看完整推理")
++      const value = await frame("10 segments", "short thought 2", "▼ 展开查看完整推理")
+@@ -527,1 +527,1 @@
+-      expect(await frame("short thought 10", "▲ 收起推理")).toContain("[seg 10/10]")
++      expect(await frame("short thought 10", "▲ 收起推理")).toContain("short thought 10")
+@@ -700,1 +700,1 @@
+-    const id = input.thinkingMode === "hide" ? "reasoning-preview-part_b_reasoning" : "text-part_b_reasoning"
++    const id = "text-part_b_reasoning"
+@@ -717,2 +717,2 @@
+-    // CJK单行会真实软换行；折叠容器仍受共享五行预算约束。
+-    if (input.thinkingMode === "hide") expect(code.parent?.height).toBeLessThanOrEqual(5)
++    // 单个source常驻完整高度，共享run容器负责五行裁尾；实际同宽断言不变。
++    if (input.thinkingMode === "hide") expect(code.parent?.parent?.height).toBeLessThanOrEqual(5)
+@@ -720,1 +720,88 @@
+ })
++
++// 复用真实Session/事件/鼠标，单树回归必须观察首帧和原生renderable身份。
++test.each(["first-frame", "streaming", "resize", "selection", "errors"] as const)("single reasoning tree replay: %s", async (scenario) => {
++  const messageID = `msg_single_${scenario}`
++  const content = scenario === "first-frame" ? Array.from({ length: 400 }, (_, index) => `stable thought ${index + 1}`).join("\n")
++    : scenario === "resize" ? `${"resize content ".repeat(24)}RESIZE_TAIL`
++    : Array.from({ length: 7 }, (_, index) => `single thought ${index}`).join("\n")
++  const source = { id: "part_source", sessionID, messageID, type: "reasoning" as const, text: content, time: { start: 1, ...(scenario === "streaming" ? {} : { end: 2 }) } }
++  const info: AssistantMessage = {
++    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: scenario === "streaming" ? undefined : "stop",
++    time: { created: 1, ...(scenario === "streaming" ? {} : { completed: 3 }) }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const failed: AssistantMessage = { ...info, id: "msg_single_failed", finish: "error", error: { name: "APIError", data: { message: "provider reasoning failed", isRetryable: false } } }
++  const messages = scenario === "errors" ? [
++    { info: { ...info, error: { name: "MessageAbortedError" as const, data: { message: "interrupted by user" } } }, parts: [{ ...source, text: "partial aborted thought" }] },
++    { info: failed, parts: [{ ...source, id: "part_failed", messageID: failed.id, text: "partial failed thought" }] },
++  ] : [{ info, parts: [source] }]
++  await withRenderedReview(messages, async (app, _route, emit) => {
++    const frame = async (...texts: string[]) => {
++      await waitForReviewFrame(app, async (value) => { if (texts.every((text) => value.includes(text))) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
++      await app.renderOnce()
++      await app.renderOnce()
++      return app.captureCharFrame()
++    }
++    if (scenario === "errors") {
++      const value = await frame("partial aborted thought", "partial failed thought", "interrupted", "provider reasoning failed")
++      expect(value).toContain("partial aborted thought")
++      expect(value).toContain("partial failed thought")
++      return
++    }
++    await frame("▼ 展开查看完整推理", scenario === "first-frame" ? "stable thought 1" : scenario === "resize" ? "resize content" : "single thought 0")
++    const body = app.renderer.root.findDescendantById(`text-${source.id}`)
++    if (!body) throw new Error("expected mounted reasoning body")
++    if (scenario === "selection") {
++      const lines = app.captureCharFrame().split("\n")
++      const y = lines.findIndex((line) => line.includes("single thought 0"))
++      const x = lines[y].indexOf("single thought")
++      await app.mockMouse.drag(x, y, x + 12, y)
++      await app.renderOnce()
++      expect(app.renderer.getSelection()?.getSelectedText()?.length).toBeGreaterThan(0)
++      expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
++      return
++    }
++    await clickVisibleText(app, "▼ 展开查看完整推理")
++    await app.renderOnce()
++    if (scenario === "first-frame") {
++      // 只检查点击后第一帧，不能以等待最终高亮掩盖双树切换的正文空窗。
++      expect(app.captureCharFrame()).toContain("stable thought")
++      expect(app.captureCharFrame()).toContain("▲ 收起推理")
++      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
++      await frame("stable thought 400", "▲ 收起推理")
++    }
++    if (scenario === "streaming") {
++      await frame("single thought 6", "▲ 收起推理")
++      emit({ directory, project: "proj_test", payload: { id: "evt_stream_delta", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: "\nstream final delta" } } })
++      await frame("stream final delta")
++      // Part先完成而父Message仍pending，沿上游生命周期结束推理，不重挂正文。
++      emit({ directory, project: "proj_test", payload: { id: "evt_part_done", type: "message.part.updated", properties: { sessionID, part: { ...source, text: content + "\nstream final delta", time: { start: 1, end: 2 } }, time: 3 } } })
++      await frame("Thought", "stream final delta")
++      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
++      emit({ directory, project: "proj_test", payload: { id: "evt_message_done", type: "message.updated", properties: { sessionID, info: { ...info, finish: "stop", time: { created: 1, completed: 3 } } } } })
++      await frame("stream final delta")
++    }
++    await frame("▲ 收起推理")
++    await clickVisibleText(app, "▲ 收起推理")
++    await frame("▼ 展开查看完整推理")
++    if (scenario === "resize") {
++      app.resize(160, 48)
++      await waitForReviewFrame(app, async (value) => { if (value.includes("RESIZE_TAIL") && !value.includes("▼ 展开查看完整推理")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
++      expect(app.captureCharFrame()).not.toContain("▲ 收起推理")
++      app.resize(60, 48)
++      expect(await frame("▼ 展开查看完整推理")).not.toContain("RESIZE_TAIL")
++      expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
++      return
++    }
++    await clickVisibleText(app, "▼ 展开查看完整推理")
++    await app.renderOnce()
++    if (scenario === "first-frame") {
++      expect(app.captureCharFrame()).toContain("stable thought")
++      expect(app.captureCharFrame()).toContain("▲ 收起推理")
++    }
++    if (scenario === "streaming") expect((await frame("stream final delta")).split("\n").filter((line) => line.includes("stream final delta"))).toHaveLength(1)
++    expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
++  }, { width: scenario === "resize" ? 60 : 110, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
++})

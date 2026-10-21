@@ -4,13 +4,14 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
 @@ -5,6 +5,8 @@ import { useSync } from "../context/sync"
  import { useSDK } from "../context/sdk"
  import { useToast } from "../ui/toast"
- import { createMemo } from "solid-js"
+-import { createMemo } from "solid-js"
++import { createMemo, onMount } from "solid-js"
 +import { useTheme } from "../context/theme"
 +import { Locale } from "../util/locale"
+ import { MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
  
- // 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（4000）对齐：
- // tui 不依赖 server 包内部模块，本地常量保持同一上限，两处需同步修改
-@@ -109,17 +111,38 @@ export function DialogGoal(props: DialogGoalProps) {
+ // [local-smark] goal 管理 dialog
+@@ -109,17 +111,41 @@ export function DialogGoal(props: DialogGoalProps) {
  export function DialogGoalMenu(props: DialogGoalProps) {
    const dialog = useDialog()
    const sync = useSync()
@@ -19,6 +20,8 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
  
    const goal = createMemo(() => sync.data.session_goal[props.sessionID])
  
++  // 摘要使用large宽度；header只提供内容槽位，不能替代对话框尺寸。
++  onMount(() => dialog.setSize("large"))
 +  // header 显示 goal 摘要：wrapMode=none + overflow=hidden + Locale.truncate
 +  // 保证可预测的行数，不依赖渲染器自动撑开容器
 +  const goalHeader = createMemo(() => {
@@ -41,6 +44,7 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
      <DialogSelect
        title="Manage Goal"
 +      header={goalHeader()}
++      renderFilter={false}
        options={[
          {
            title: "Edit objective",
@@ -138,3 +142,155 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 +      expect((cfg as any).goal_max_turns ?? 32).toBe(32)
        // experimental.goals 不再存在，goal 功能始终可用
        expect((cfg as any).experimental?.goals).toBeUndefined()
+diff --git a/packages/core/src/config.ts b/packages/core/src/config.ts
+--- a/packages/core/src/config.ts
++++ b/packages/core/src/config.ts
+@@ -108,7 +108,7 @@
+   // 上限跨两代配置保持同义；0禁用续跑而不隐藏Goal工具。
+   goal_max_turns: NonNegativeInt.pipe(Schema.optional).annotate({
+-    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
++    description: "Maximum auto-continue turns per goal (default: 32, 0 to disable)",
+   }),
+   experimental: ConfigExperimental.Experimental.pipe(Schema.optional),
+   providers: Schema.Record(Schema.String, ConfigProvider.Info).pipe(Schema.optional),
+ }) {}
+diff --git a/packages/schema/src/session-goal.ts b/packages/schema/src/session-goal.ts
+--- a/packages/schema/src/session-goal.ts
++++ b/packages/schema/src/session-goal.ts
+@@ -10,5 +10,5 @@
+ // [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
+-// 由 tool 或用户显式切换——loop 不自动迁移状态，避免与用户意图冲突。
++// 用户和工具显式切换状态；runner只在正常续跑额度耗尽时自动暂停。
+ export const Status = Schema.Literals(["active", "paused", "complete", "blocked"] as const)
+ export type Status = Schema.Schema.Type<typeof Status>
+ 
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -585,16 +585,21 @@
+           if (!needsContinuation) needsContinuation = yield* SessionInput.hasPending(db, input.sessionID, "steer")
+           if (!needsContinuation && result.canContinueGoal && !(yield* SessionInput.hasPending(db, input.sessionID, "queue"))) {
+-            const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 10
++            const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 32
+             const session = yield* getSession(input.sessionID)
+             const agent = yield* agents.select(session.agent)
+             if (continuation.turns < maxGoalTurns &&
+               !session.parentID && agent.id !== "decide" && result.step < (agent.info?.steps ?? Infinity)) {
+               const goal = yield* goals.get(input.sessionID)
+               if (Option.isSome(goal) && goal.value.status === "active") {
+                 continuation.goal = goal.value
+                 needsContinuation = true
+                 // 下个安全边界也检查 queue，避免候选 Goal 抢占刚到达的用户输入。
+                 promotion = "queue"
+               }
+             }
++            // 只在正常Goal边界耗尽正额度时暂停，0与异常退出不触发状态迁移。
++            if (maxGoalTurns > 0 && !session.parentID && continuation.turns >= maxGoalTurns) {
++              const goal = yield* goals.get(input.sessionID)
++              if (Option.isSome(goal) && goal.value.status === "active") yield* goals.set(input.sessionID, { status: "paused" }).pipe(Effect.orDie)
++            }
+           }
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -688,8 +688,9 @@
+-    const active = yield* goals.get(sessionID)
+-    expect(Option.getOrThrow(active).status).toBe("active")
+-    expect(Option.getOrThrow(active).tokensUsed).toBe(12)
++    const paused = yield* goals.get(sessionID)
++    expect(Option.getOrThrow(paused).status).toBe("paused")
++    expect(Option.getOrThrow(paused).tokensUsed).toBe(12)
+ 
++    yield* goals.set(sessionID, { status: "active" })
+     responses = [[
+       LLMEvent.stepStart({ index: 0 }),
+       LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { status: "complete" } }),
+       LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+@@ -710,5 +711,34 @@
+     expect(requests).toHaveLength(1)
+     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
+   }),
+ )
+ 
++it.effect("defaults native goal continuation to 32 and resets the allowance on a new drain", () =>
++  Effect.gen(function* () {
++    yield* setup
++    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
++    const session = yield* SessionV2.Service
++    const goals = yield* SessionGoal.Service
++    yield* goals.set(sessionID, { objective: "Complete the default goal" })
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Begin" }), resume: false })
++    const normal = [
++      LLMEvent.stepStart({ index: 0 }),
++      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { inputTokens: 1, nonCachedInputTokens: 1, outputTokens: 0 } }),
++      LLMEvent.finish({ reason: "stop" }),
++    ]
++    responses = Array.from({ length: 33 }, () => normal)
++    requests.length = 0
++    yield* session.resume(sessionID)
++    // 首轮加32次续跑，到限暂停；恢复后由新用户输入开启下一轮额度。
++    expect(requests).toHaveLength(33)
++    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
++    yield* goals.set(sessionID, { status: "active" })
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue the goal" }), resume: false })
++    responses = Array.from({ length: 33 }, () => normal)
++    requests.length = 0
++    yield* session.resume(sessionID)
++    expect(requests).toHaveLength(33)
++    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
++  }),
++)
++
+diff --git a/packages/tui/test/cli/tui/dialog-select.test.tsx b/packages/tui/test/cli/tui/dialog-select.test.tsx
+--- a/packages/tui/test/cli/tui/dialog-select.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-select.test.tsx
+@@ -32,6 +32,7 @@
+ function DialogSelectHarness(props: {
+   root: string
+   state: string
++  header?: string
+   options: DialogSelectOption<unknown>[]
+   current?: unknown
+   currentKey?: string
+@@ -60,6 +61,7 @@
+                 <DialogProvider>
+                   <DialogSelect
+                     title="Models"
++                    header={props.header ? <text>{props.header}</text> : undefined}
+                     options={props.options}
+                     current={props.current}
+                     currentKey={props.currentKey}
+@@ -79,6 +81,7 @@
+ async function mountHarness(input: {
+   root: string
++  header?: string
+   options: DialogSelectOption<unknown>[]
+   current?: unknown
+   currentKey?: string
+   onMove?: (option: DialogSelectOption<unknown>) => void
+@@ -99,6 +102,7 @@
+     return (
+       <DialogSelectHarness
+         root={input.root}
++        header={input.header}
+         state={state}
+         options={options()}
+         current={input.current}
+@@ -117,6 +121,7 @@
+   await using tmp = await tmpdir()
+   const app = await mountHarness({
+     root: tmp.path,
++    header: "Goal summary",
+     current: { providerID: "test", modelID: "two" },
+     currentKey: "test/two",
+     options: [
+@@ -137,6 +142,9 @@
+     const frame = (await waitForFrame(app.app, "Model Two")).split("\n")
+     const current = frame.find((line) => line.includes("Model Two")) ?? ""
+     const other = frame.find((line) => line.includes("Model One")) ?? ""
++    // header位于标题和选项之间，不能吞掉原有identity高亮或进入业务选项集合。
++    expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeGreaterThanOrEqual(0)
++    expect(frame.findIndex((line) => line.includes("Goal summary"))).toBeLessThan(frame.findIndex((line) => line.includes("Model One")))
+ 
+     // value 多出的 metadata 使对象不相等，高亮必须来自稳定 key。
+     expect(current).toContain("●")

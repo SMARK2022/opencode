@@ -69,17 +69,12 @@ index 46c45d0260a4cd6b9afba78d76b6997a40d794a5..537738084a0738db2b45108577827523
      editType,
      cellCountBefore: numberValue(data.cellCountBefore),
      cellCountAfter: numberValue(data.cellCountAfter),
-@@ -442,6 +456,10 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-         // 即使 info 偏只读，也保持工具级权限和 agent 配置中的 vscode_notebook_env
-         // 完全一致，避免新增 operation 级配置面。
+@@ -438,3 +451,5 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
          await ask(context, "vscode_notebook_env", args)
-+        // save 是 env 工具中的持久化分支，会把 notebook 文档写回磁盘。
-+        // 因此它必须继续服从通用 edit 门禁；否则用户只禁止 edit 时，仍可
-+        // 通过 vscode_notebook_env.save 绕过普通文件写入边界。
++        // save 写回磁盘，专属工具许可之后仍须通过通用 edit 门禁。
 +        if (args.operation === "save") await ask(context, "edit", args)
-         // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
-         const timeout = 120_000
-         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, timeout))
+         return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+       },
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 index 4a03ed9ea48300fefc8f3fce8290c5c4c4728153..f86f2520b4d246c1f1751442804c991eced34c66 100644
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
@@ -389,99 +384,49 @@ diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/com
 index cef8a61a1deefed302244c6c6e6f1e49253a1b4b..62df8332eb1f46641f5de865aeb129fd7f1b225c 100644
 --- a/sdks/vscode/src/notebook/commands.ts
 +++ b/sdks/vscode/src/notebook/commands.ts
-@@ -271,12 +271,19 @@ async function editNotebookCommand() {
-     ? undefined
-     : await vscode.window.showInputBox({
+@@ -243,5 +243,6 @@ async function editNotebookCommand() {
          title: "vscode_notebook_edit newCode",
--        prompt: "newCode. Use \\n for newlines. Empty = type-only (edit) / no-source.",
-+        prompt: "newCode. Use \\n for newlines. Empty sends an explicit empty source; language-only edits require omitting oldCode/newCode through the bridge API.",
-+        // #252：prompt 文案与 bridge 契约同步——空输入语义在两条入口一致
-         value: editType === "edit" && cell ? cell.document.getText().replace(/\n/g, "\\n") : "",
+-        prompt: "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。",
++        // 输入框的空串仍是显式清空；仅修改语言需要桥接 API 真正省略源码字段。
++        prompt: "newCode 可用 \\n 表示换行；空文本清空内容，取消退出。仅修改语言请通过桥接 API 省略 oldCode/newCode。",
+         value: editType === "edit" && cell ? cell.cell.document.getText().replace(/\n/g, "\\n") : "",
          ignoreFocusOut: true,
        })
- 
-+  // Keep the command-palette tester backward compatible: an empty input box
-+  // still sends the explicit empty string that clears a cell. The prompt points
-+  // language-only callers to the bridge API because that mode depends on true
-+  // field omission, which this simple input box cannot distinguish safely.
-   return await editNotebook({
-+  // #252：命令面板输入框无法区分「字段省略」与「空串」——空输入仍发显式空串，
-+  // language-only 调用方必须走 bridge API 才能表达真正的省略语义
-     filePath: notebook.uri.toString(),
-     editType,
-     cellId,
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
 index aeebc05108ab6831d1b3d3372e2c68a7401a5619..6564838c8e635c138cc386c615b212825cdb16d0 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -50,6 +50,19 @@ if (!editType || !EDIT_TYPES.has(editType)) {
-   const cellId = stringProp(input, "cellId")
+@@ -46,7 +46,11 @@ if (!editType || !EDIT_TYPES.has(editType)) {
    if (!cellId) throw new Error("cellId is required")
  
-+  // Empty arrays are almost always produced by a caller trying to express
-+  // "no source argument" through a JSON shape that still contains the field.
-+  // The edit contract treats omitted fields as language-only preservation and
-+  // present fields as source replacement, so accepting [] would silently become
-+  // an empty string via sourceProp(...). Reject it before any notebook mutation
-+  // can clear a cell by accident; callers that intentionally want an empty cell
-+  // must pass the explicit string "" so the destructive intent is unambiguous.
++  // 空数组不能代表省略源码；在任何写入前拒绝，显式清空仍使用空字符串。
 +  rejectEmptySourceArray(input, "oldCode")
-+  // #252：空数组是「想表达无参数」的 JSON 形态，直接落源会静默清空 cell；
-+  // #252：拒绝点必须在 cellId 校验之后、任何 mutation 之前——顺序即安全性
-+  // 空串才是显式清空——两种意图必须在任何文档变更前区分开
 +  rejectEmptySourceArray(input, "newCode")
 +
+   // 结构编辑会改变 cellCount，差分基线必须在 applyEdit 前记录，不能在返回后反推原格数。
    const beforeCount = notebook.cellCount
  
-   if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount)
-@@ -188,14 +201,21 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
-   }
+   if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount, input)
+   if (editType === "insert") return await handleInsert(notebook, input, cellId, beforeCount)
+@@ -175,13 +179,13 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
    const language = stringProp(input, "language")
+   // oldCode 从格内文本定位，不接受仍可能随编辑漂移的 range 坐标。
    const oldCodeRaw = sourceProp(input, "oldCode")
+-  // python 到 javascript 也需要结构替换，即使二者的 NotebookCellKind 都是 Code。
 -  const typeChange = language !== undefined && language !== targetCell.document.languageId
-+  // `language` maps to both the TextDocument languageId and the notebook cell
-+  // kind. Comparing only languageId misses mixed states such as a code cell whose
-+  // language is already "markdown"; language-only edits must still replace the
-+  // cell so Markup/Code kind matches the requested language contract.
++  // 语言与结构类型联合判定，Code格已有markdown语言时仍须转换为Markup。
 +  const newKind = language === undefined ? undefined : kindFromLang(language)
 +  const typeChange = language !== undefined && (language !== targetCell.document.languageId || newKind !== targetCell.kind)
-+  // #252：language 同时映射 languageId 与 cell kind——只比较 languageId 会漏掉
-+  // #252：kindFromLang 是唯一合法的语言→kind 映射源，绕开它会产生非法组合
-+  // 「code cell 报 markdown 语言」的混合态，language-only 编辑必须连 kind 一起改
  
    if (typeChange) {
 -    const newKind = kindFromLang(language!)
+     // 旧语言和类型在替换前捕获，不能从新格反推转换箭头的左侧。
      const oldKind = cellTypeLabel(targetCell.kind)
      const oldLang = targetCell.document.languageId
-     // Anchor 依赖 oldKind 字段而非把箭头塞进 kind 字符串
 -    return await handleTypeChange(notebook, targetCell, input, newKind, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
 +    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
    }
- 
-   // 有 oldCode 时禁止 silent full-replace，强制 newCode 配对
-@@ -418,8 +438,19 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
-       }
-     }
-   }
--  const source = content.substring(0, matchIdx) + replacement + content.substring(matchIdx + matchLen)
--  const preMatch = content.substring(0, matchIdx)
-+  // All matching is performed against LF-normalized text so model-provided
-+  // snippets work the same for LF and CRLF notebooks. The replacement must be
-+  // assembled from the same normalized coordinate space; slicing the original
-+  // CRLF string with LF offsets shifts by one character for every preceding
-+  // CRLF pair and corrupts the cell. Convert back to the document EOL only after
-+  // the replacement is complete so existing CRLF notebooks keep their line
-+  // separator invariant.
-+  const source = (src.substring(0, matchIdx) + replacement + src.substring(matchIdx + matchLen)).replace(/\n/g, documentEol(targetCell.document))
-+  // #252：替换在 LF 归一坐标上拼装、完成后整体还原文档 EOL——直接用 LF 偏移
-+  // #252：preMatch 也必须用 src 坐标——行号统计与替换坐标同源才不会错位
-+  // 切 CRLF 原文会每个前置换行偏移 1 字符并损坏 cell 内容
-+
-+  const preMatch = src.substring(0, matchIdx)
-   const preLines = preMatch.split(/\r?\n/)
-   const matchStartLine = preLines.length
-   const matchLines = oldCode.split(/\r?\n/)
-@@ -497,6 +528,12 @@ function stripCodeFence(source: string) {
+@@ -432,6 +436,12 @@ function stripCodeFence(source: string) {
    return match ? match[1] : source
  }
  
@@ -491,44 +436,28 @@ index aeebc05108ab6831d1b3d3372e2c68a7401a5619..6564838c8e635c138cc386c615b21282
 +  }
 +}
 +
- // ---------------------------------------------------------------------------
- // Edit result
- // ---------------------------------------------------------------------------
-@@ -670,6 +707,13 @@ function compactEditResult(
-       // #234：insert 结果的 insertedCellIndex/Id——agent 与 UI 都以它定位新 cell
+ async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
+   // 提交前版本是本次修改的基线，不能在 applyEdit 的 await 返回后才采样。
+   const beforeVersion = notebook.version
+@@ -600,6 +610,8 @@ function compactEditResult(
+       // 新格索引和ID同源，既有anchorCellIndex仍保留提交前位置。
        insertedCellIndex: info.insertedCell?.index,
        insertedCellId: info.insertedCell ? copilotLikeCellId(info.insertedCell) : undefined,
-+      // Type changes replace a notebook cell and therefore invalidate the old
-+      // Copilot-style #VSC handle. Surface the replacement id in data so plugin
-+      // renderers and subsequent tool calls can continue with the durable handle
-+      // that VS Code assigned after replaceCells completed.
++      // 类型替换产生新格句柄，后续调用使用同步完成后捕获的anchorCell身份。
 +      updatedCellId: info.editType === "edit" && info.anchorCell ? copilotLikeCellId(info.anchorCell) : undefined,
-+      // #252：type-change 替换后旧 #VSC 句柄失效——暴露替换后的持久句柄，
-+      // 后续工具调用与渲染器用它继续，避免锚定到已销毁的 cell
-       // #224：deletedCellIndex 供 notebookResult 计算删除操作的 cell 标签
-       // #224：beforeSource 是删除前源码，afterSource 为空——diff 显示全删除
        deletedCellIndex: info.deletedCellIndex,
+       affectedCellIndex: info.affectedCellIndex,
+       dirty: notebook.isDirty,
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 index 1d2670b3443d812fe79c74c3105dda34fb7a5e93..8eaa5b5815fa335c89d278497d91ef3602a6b408 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -567,7 +567,15 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
-     }
-   }
+@@ -316,3 +316,4 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
    if (!jupyter.isActive) await jupyter.activate()
 -  const allCommands = await vscode.commands.getCommands(true)
-+  // Restart is contributed by the Jupyter extension as a command that may be
-+  // hidden from VS Code's public command list. Use getCommands(false) so the
-+  // bridge checks the same full command surface that executeCommand can invoke;
-+  // otherwise restart incorrectly reports "not registered" even though the
-+  // command is available to the extension host.
++  // Jupyter 可注册隐藏命令，查询面必须包含 executeCommand 能调用的完整列表。
 +  const allCommands = await vscode.commands.getCommands(false)
-+  // #252：restart 由 Jupyter 以隐藏命令贡献——只查 public 表会误报未注册，
-+  // #252：false=含隐藏命令的全量面；true=面板面。两者语义不同不可混用
-+  // 而 executeCommand 仍可调用它；门禁检查必须与可执行面一致
    if (!allCommands.includes(RESTART_CMD)) {
-     return {
-       ran: true,
 @@ -880,4 +888,4 @@ function extractProbeJson(text: string) {
      throw new Error(`Runtime probe returned no JSON: ${text.slice(0, 500)}`)
    }
@@ -540,38 +469,29 @@ diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/sourc
 index 2661ee4c4c5f0eb06f73f5346d674842b50272f2..6a513167bb35b3e9ecfe735ef53979a241143c03 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -132,11 +132,29 @@ export async function notebookSource(input: Record<string, unknown>) {
-       const outLine = `${globalLineNum}: ${sourceLine}`
+@@ -108,9 +108,22 @@ export async function notebookSource(input: Record<string, unknown>) {
        const outBytes = Buffer.byteLength(outLine, "utf8")
-         // #234：首行超过预算也保留——否则返回空内容没有任何信息
--  if (bytes + outBytes > maxBytes && outputCells.length > 0) {
--        // 仅字节预算设 bytesCut
--        bytesCut = true
--        break outer
--      }
-+        if (bytes + outBytes > maxBytes) {
-+          if (renderedLines > 0) {
-+          // The current line can be rendered intact on the next page. Do not
-+          // consume it here with a partial preview, because pagination is by
-+          // virtual source line rather than byte column and the skipped suffix
-+          // would otherwise be unrecoverable.
-+            bytesCut = true
-+            break outer
-+          }
-+          // #252：单行可能超过整个 16KB 工具响应预算——保留行号前缀 + UTF-8
-+          // #252：有界前缀给 agent 一个源锚点，页尾提示指明下一条真实存在的行
-+          // 有界前缀并标记截断；工具仍按行分页，下一 offset 推进到后续虚拟源行
-+          const prefix = `${globalLineNum}: `
-+          const prefixBytes = Buffer.byteLength(prefix, "utf8")
-+          const available = maxBytes - bytes - prefixBytes
-+          if (available > 0) {
-+            outputCells.push(prefix + takeUtf8Prefix(sourceLine, available))
-+            renderedLines++
-+            lastRenderedLine = globalLineNum
-+          }
+-      // 首个正文行允许推进，未编号格头不能让空正文页永远重复同一 offset。
+-      if (bytes + outBytes > maxBytes && renderedLines > 0) {
++      // 首行超整页预算时保留编号与有界前缀，避免只返回格头而无法推进分页。
++      if (bytes + outBytes > maxBytes) {
++        if (renderedLines > 0) {
++          // 当前页放不下的完整行留给下一页，不能按字节裁掉无法续读的后缀。
 +          bytesCut = true
-+          break outer
++          break
 +        }
++        const prefix = `${globalLineNum}: `
++        const prefixBytes = Buffer.byteLength(prefix, "utf8")
++        const available = maxBytes - bytes - prefixBytes
++        if (available > 0) {
++          outputCells.push(prefix + takeUtf8Prefix(sourceLine, available))
++          renderedLines++
++          lastRenderedLine = globalLineNum
++        }
+         bytesCut = true
+-        break
++        break
+       }
        outputCells.push(outLine)
        bytes += outBytes
        renderedLines++
@@ -600,14 +520,12 @@ diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summ
 index d7958ec0cdb726da458d6df0145e2bb0242f0449..824c6f3adff1e09e5f31f628c096b19b74d27483 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -87,6 +87,9 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+@@ -65,6 +65,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
        return `c${cell.i} id=${cell.id} ${cell.kind}/${cell.lang} lines=${cell.lines} ${rangeText} exec=${quoteForSummary(cell.exec)} existing_outs=${quoteForSummary(cell.existing_outs.join(",") || "none")} first=${JSON.stringify(cell.first)}`
      }),
      "",
--    "Next: use vscode_notebook_source with cellId=#VSC-xxx, offset=1, limit=120 for source; use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
-+    // With a cellId, offset is still a global virtual line number. Keep the
-+    // default next-step hint offset-free so agents do not pass offset=1 for a
-+    // later cell and trigger an avoidable out-of-range warning.
-+    "Next: use vscode_notebook_source with cellId=#VSC-xxx and omit offset for one cell; use offset/limit only for global paging. Use vscode_notebook_run to execute; use vscode_notebook_output for outputs; use vscode_notebook_edit to modify.",
+-    "后续：用 vscode_notebook_source 的 cellId=#VSC-xxx、offset=1、limit=120 读取源码；用 vscode_notebook_run 执行、vscode_notebook_output 读取输出、vscode_notebook_edit 修改。",
++    // 单格 offset 仍是全局虚拟行号，省略默认值可避免后续格错误地从全局第一行读取。
++    "后续：单格源码用 vscode_notebook_source 的 cellId=#VSC-xxx 并省略 offset；全局分页才使用 offset/limit。用 vscode_notebook_run 执行、vscode_notebook_output 读取输出、vscode_notebook_edit 修改。",
    ].join("\n")
  }

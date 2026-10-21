@@ -82,7 +82,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -4,9 +4,11 @@
+@@ -4,10 +4,12 @@
  import path from "path"
  import yargs from "yargs"
  import { tmpdir } from "../../fixture/fixture"
@@ -91,11 +91,12 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +  DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS } from "../../../src/cli/cmd/tui"
  import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
  import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
+ import { ServerLock } from "../../../src/cli/tui/server-lock"
  import { EventClients } from "@opencode-ai/server/event-clients"
 +import { Global } from "@opencode-ai/core/global"
  import { cliIt } from "../../lib/cli-process"
  
-@@ -211,18 +213,52 @@
+@@ -212,18 +214,52 @@
 -    test("no existing server: daemon is spawned then URL returned", async () => {
 +    test("accepts the real daemon owner after spawning a Windows launcher", async () => {
 +      const launcherPid = 99998
@@ -142,7 +143,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        acquire: async (key, opts) => {
 +          acquisitions++
 +          // 核对完整获锁请求，不能把注入的 75 秒误用为 staleMs 或只断言常量大小。
-+          expect(key).toBe("opencode.server:default")
++          expect(key).toBe(`opencode.server:${ServerLock.placement()}`)
 +          expect(opts).toEqual({ dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
 +          throw new Error("contender deadline")
 +        },

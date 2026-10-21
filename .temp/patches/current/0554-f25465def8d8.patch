@@ -492,8 +492,8 @@ diff --git a/packages/opencode/test/session/status.test.ts b/packages/opencode/t
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/session/status.test.ts
-@@ -0,0 +1,33 @@
-+import { expect, it as rawIt } from "bun:test"
+@@ -0,0 +1,39 @@
++import { expect } from "bun:test"
 +import { Effect } from "effect"
 +import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 +import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -520,6 +520,12 @@ new file mode 100644
 +    const snapshot = yield* provideInstance(observer)(status.list())
 +    expect(snapshot.get(sessionID)).toEqual({ type: "busy" })
 +    expect(yield* provideInstance(observer)(status.get(sessionID))).toEqual({ type: "busy" })
++
++    // retry与busy共享精确Session身份；list返回副本，调用方清空快照不能修改owner。
++    yield* provideInstance(observer)(status.set(sessionID, { type: "retry", attempt: 2, next: Date.now() + 1000, message: "controlled retry" }))
++    expect(yield* provideInstance(source.directory)(status.get(sessionID))).toMatchObject({ type: "retry", attempt: 2 })
++    snapshot.clear()
++    expect((yield* status.list()).has(sessionID)).toBe(true)
 +
 +    yield* provideInstance(source.directory)(status.set(sessionID, { type: "idle" }))
 +    // idle 必须删除 active entry，避免全局快照退化成历史 Session 表。

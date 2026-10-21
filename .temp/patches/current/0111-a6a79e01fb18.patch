@@ -9,88 +9,9 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 433803ed69..cb0c30c970 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2137,17 +2137,34 @@ function BlockTool(props: {
-   spinner?: boolean
-   contextView?: boolean
-   contextLabel?: string
-+  // #111：可选折叠契约；仅当调用方明确传入 totalLines 时激活（勿与外置 collapseToolOutput 叠用）
-+  maxLines?: number
-+  threshold?: number
-+  totalLines?: number
- }) {
-   const { theme } = useTheme()
-   const renderer = useRenderer()
-   const [hover, setHover] = createSignal(false)
-   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
--  // 上下文视图时使用 diffContextBg 背景色
-   const background = createMemo(() => {
-     if (props.contextView) return theme.diffContextBg
-     if (hover()) return theme.backgroundMenu
-     return theme.backgroundPanel
-   })
-+  // #111：仅 totalLines 有定义时启用内置折叠，避免与 Shell/Write 外置折叠双主路径
-+  const collapseArmed = createMemo(() => props.totalLines !== undefined)
-+  const previewLines = createMemo(() => props.maxLines ?? 10)
-+  const threshold = createMemo(() => props.threshold ?? 20)
-+  // #111：canCollapse 只升不降
-+  const [canCollapse, setCanCollapse] = createSignal(false)
-+  createEffect(() => {
-+    if (!collapseArmed()) return
-+    if (canCollapse()) return
-+    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) {
-+      setCanCollapse(true)
-+    }
-+  })
-+  const [expanded, setExpanded] = createSignal(false)
-   return (
-     <box
-       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-@@ -2160,11 +2177,10 @@ function BlockTool(props: {
-       backgroundColor={background()}
-       customBorderChars={SplitBorder.customBorderChars}
-       borderColor={props.contextView ? theme.info : theme.background}
--      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
-+      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
-       onMouseOut={() => setHover(false)}
-       onMouseUp={(evt?: TuiMouseEvent) => {
-         if (renderer.getSelection()?.getSelectedText()) return
--        // 右键触发上下文视图切换
-         if (evt?.button === MouseButton.RIGHT) {
-           if (!props.onRightClick) return
-           evt.preventDefault()
-@@ -2172,6 +2188,8 @@ function BlockTool(props: {
-           props.onRightClick()
-           return
-         }
-+        // #111：仅内置折叠武装时切换 expanded
-+        if (canCollapse()) setExpanded((prev) => !prev)
-         props.onClick?.()
-       }}
-     >
-@@ -2190,7 +2208,19 @@ function BlockTool(props: {
-           </Show>
-         )}
-       </Show>
--      <box marginTop={1}>{props.children}</box>
-+      <box
-+        marginTop={1}
-+        // #111：仅内置折叠激活时限制高度
-+        maxHeight={canCollapse() && !expanded() ? previewLines() : undefined}
-+        overflow={canCollapse() && !expanded() ? "hidden" : undefined}
-+      >
-+        {props.children}
-+      </box>
-+      <Show when={canCollapse()}>
-+        <box marginTop={1}>
-+          <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
-+        </box>
-+      </Show>
-       <Show when={error()}>
-         <box marginTop={1}>
-         <text fg={theme.error}>{error()}</text>
-@@ -2224,8 +2254,14 @@ function Shell(props: ToolProps) {
-     }
-     return collapseToolOutput(output(), maxLines, maxChars(), threshold)
+@@ -2239,8 +2239,14 @@ function Shell(props: ToolProps) {
+     if (isRunning() || showContextOutput()) return { output: output(), overflow: false }
+     return collapseToolOutput(output(), 19, maxChars() * 2)
    })
 +  // #111：外置 collapseToolOutput 主路径 sticky（Shell 唯一折叠 owner）
 +  const [shellCanCollapse, setShellCanCollapse] = createSignal(false)
@@ -100,11 +21,11 @@ index 433803ed69..cb0c30c970 100644
 +  })
    const limited = createMemo(() => {
 -    if (expanded() || !collapsed().overflow) return output()
-+    if (expanded() || !shellCanCollapse()) return output()
-     return collapsed().output
++    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return output()
+     return collapseToolOutput(output(), maxLines - 1, (maxLines - 1) * Math.max(20, ctx.width - 6)).output
    })
  
-@@ -2256,7 +2292,7 @@ function Shell(props: ToolProps) {
+@@ -2270,7 +2276,7 @@ function Shell(props: ToolProps) {
          <BlockTool
            title={title()}
            part={props.part}
@@ -113,7 +34,7 @@ index 433803ed69..cb0c30c970 100644
            onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
            contextView={showContextOutput()}
            contextLabel="returned to model"
-@@ -2271,7 +2307,7 @@ function Shell(props: ToolProps) {
+@@ -2286,7 +2292,7 @@ function Shell(props: ToolProps) {
              <Show when={output()}>
                <text fg={theme.text}>{limited()}</text>
              </Show>
@@ -122,10 +43,10 @@ index 433803ed69..cb0c30c970 100644
                <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
              </Show>
            </box>
-@@ -2300,8 +2336,14 @@ function Write(props: ToolProps) {
-   const threshold = 20
-   const maxChars = createMemo(() => threshold * Math.max(20, ctx.width - 6))
-   const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars(), threshold))
+@@ -2314,8 +2320,14 @@ function Write(props: ToolProps) {
+   // 完整展示阈值为 20 行，折叠预览为 10 行；两者都保留字符预算。
+   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+   const collapsed = createMemo(() => collapseToolOutput(code(), 20, maxChars() * 2))
 +  // #111：Write 外置折叠 sticky（唯一折叠 owner；勿传 totalLines 给 BlockTool）
 +  const [writeCanCollapse, setWriteCanCollapse] = createSignal(false)
 +  createEffect(() => {
@@ -135,10 +56,10 @@ index 433803ed69..cb0c30c970 100644
    const limited = createMemo(() => {
 -    if (expanded() || !collapsed().overflow) return code()
 +    if (expanded() || !writeCanCollapse()) return code()
-     return collapsed().output
+     return collapseToolOutput(code(), maxLines, maxChars()).output
    })
    // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
-@@ -2368,7 +2410,7 @@ function Write(props: ToolProps) {
+@@ -2384,7 +2396,7 @@ function Write(props: ToolProps) {
          <BlockTool
            title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
            part={props.part}
@@ -147,7 +68,7 @@ index 433803ed69..cb0c30c970 100644
          >
            <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
              <code
-@@ -2379,7 +2421,7 @@ function Write(props: ToolProps) {
+@@ -2395,7 +2407,7 @@ function Write(props: ToolProps) {
                content={limited()}
              />
            </line_number>

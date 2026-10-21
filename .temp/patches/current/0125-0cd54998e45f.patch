@@ -78,58 +78,28 @@ diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/sr
 index af5963986e..4aa51ab106 100644
 --- a/packages/tui/src/routes/session/context-usage.tsx
 +++ b/packages/tui/src/routes/session/context-usage.tsx
-@@ -1,9 +1,10 @@
--import { createMemo, createResource, For, Show } from "solid-js"
-+import { createEffect, createMemo, createResource, For, Show } from "solid-js"
- import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
- import { useDialog } from "../../ui/dialog"
- import { useLocal } from "../../context/local"
- import { useProject } from "../../context/project"
- import { useSync } from "../../context/sync"
-+import { createThrottledSignal } from "../../util/signal"
+@@ -10,1 +10,2 @@
  import { useTheme } from "../../context/theme"
- import { TextAttributes } from "@opentui/core"
- import { Locale } from "../../util/locale"
-@@ -257,7 +258,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
-   useRenderer()
- 
-   // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
--  const input = createMemo(() => {
-+  const inputRaw = createMemo(() => {
-     // 展开拷贝消息数组：避免直接引用 sync 内部状态，防止后续 mutation 影响响应式追踪
-     const messages = [...(sync.data.message[props.sessionID] ?? [])]
-     // 按 messageID 分组部件列表
-@@ -278,7 +279,13 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
- 
-   // 异步计算上下文数据，Solid 自动追踪 input 变化并重新计算
-   // createResource 自动追踪 input memo 变化并异步重算，加载中 data() 为 undefined
--  const [data] = createResource(() => computeContextData(input()))
-+  // #125：节流 resource 源，避免流式 delta 饿死 computeContextData
-+  const [input, setInput] = createThrottledSignal(inputRaw(), 500)
-+  createEffect(() => setInput(inputRaw()))
-+
-+
-+  // #125：双参 createResource 让 input 成为响应式 source
-+  const [data] = createResource(input, computeContextData)
- 
-   // 键盘处理：escape 或 Ctrl+C 关闭面板；对话框打开时不拦截按键
-   useKeyboard((evt) => {
++import { createThrottledSignal } from "../../util/signal"
+@@ -240,5 +241,8 @@
+ export function contextUsageResource(input: () => ComputeContextDataInput) {
+   const snapshot = createMemo<ComputeContextDataInput>(() => JSON.parse(JSON.stringify(input())))
++  // 深层快照先追踪原位变更，再首尾节流，避免连续 delta 让异步计算持续失效。
++  const [throttled, setThrottled] = createThrottledSignal(snapshot(), 500)
++  createEffect(() => setThrottled(snapshot()))
+   // fetcher 被 Solid untrack；传入脱离 store proxy 的快照，异步 await 后也不会读到另一版本。
+-  return createResource(snapshot, computeContextData)
++  return createResource(throttled, computeContextData)
+ }
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 index 1464dadbc7..9efe05cdc4 100644
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -10,6 +10,7 @@ import matter from "gray-matter"
- import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
- import { Flag } from "@opencode-ai/core/flag/flag"
- import { estimateDataUrlInputTokens, charsPerTokenFromHistory } from "./token-estimate"
-+import { tokenAccounting } from "./token-accounting"
- // 嵌入 catalog：TUI 无法 import opencode Schema，生成期抽取 description/parameters
- import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
- 
-@@ -1133,11 +1134,25 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
-   // 缓冲区优先分配尾部格子：保证压缩缓冲区在网格末尾可视化，与自由空间区分
+@@ -1080,12 +1080,26 @@ export function contextGrid(categories: ContextCategory[], contextLimit: number,
+   // reserve/free 与其他分类共享 bodyLimit，先扣除尾部容量才能避免大额 reserve 吞掉压缩缓冲。
    const tailCount = tail ? countFor(tail, total).count : 0
    const bodyLimit = total - tailCount
+   // 剩余容量约束每次分配，即使估算超过窗口也不会渲染无限格子。
 -  for (const category of body) {
 -    const { exact, count } = countFor(category, bodyLimit - cells.length)
 -    for (let i = 0; i < count; i++) {
@@ -150,7 +120,7 @@ index 1464dadbc7..9efe05cdc4 100644
 +    const count = counts[ci]
 +    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
 +    for (let k = 0; k < count; k++) {
-       // 格子饱满度 = 比例余量，用于选择填充字符
+       // 超窗口估算的余量仍夹在 [0,1]，否则饱满度会越过已定义的两档填充符号。
 -      const fullness = Math.max(0, Math.min(1, exact - i))
 +      const fullness = Math.max(0, Math.min(1, exact - k))
        cells.push({
@@ -163,7 +133,7 @@ index 1464dadbc7..9efe05cdc4 100644
 -    if (cells.length >= bodyLimit) break
    }
  
--  // 剩余空间填充自由空间格子
+-  // 舍入产生的空格归 free，而不是再计入某个 prompt 分类；token 总额不由格子数反推。
 -  const free = categories.find((item) => item.name === "Free space")
 -  while (cells.length < bodyLimit) {
 -    cells.push({
@@ -173,50 +143,20 @@ index 1464dadbc7..9efe05cdc4 100644
 -      fullness: 0,
 -    })
 -  }
-   // 尾部填充压缩缓冲区格子
+   // 尾部饱满度使用 tail 自身比例而非总 used，安全缓冲不会因消息增长被画成消息占用。
    if (tail) {
      const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
-@@ -1210,20 +1214,36 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-   const msg = messageTokens(compacted, ratio)
-   // #99：usage 用 raw 全量消息 + ratio 估流式增量
-   const usage = usageTotals(raw, ratio)
+@@ -1150,1 +1150,2 @@
 -  const instructions = await gatherInstructionFiles(input)
-+  // #125：step 未确认时跳过指令/技能/工具定义 FS 扫描
-+  const acc = tokenAccounting(
-+    input.messages,
-+    (id) => input.parts[id] ?? [],
-+    maxTokens || undefined,
-+  )
-+  const stepConfirmed = acc.step.confirmed
-+  const instructions = stepConfirmed ? await gatherInstructionFiles(input) : []
-   let instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
-   const messageText = msg.text.join("\n")
-   // 加载的指令路径去重：已在消息文本中出现的跳过
-   const loadedInstructions = [] as Array<{ path: string; tokens: number }>
++  // 发送中的快照已有分类总量，文件明细等确认后读取；历史无快照仍沿原路径展示。
++  const instructions = input.instructionFiles ?? (prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
+@@ -1155,1 +1156,1 @@
 -  for (const filepath of msg.loadedInstructionPaths) {
-+  if (stepConfirmed) for (const filepath of msg.loadedInstructionPaths) {
-     if (messageText.includes(`Instructions from: ${filepath}`)) continue
-     const content = await readText(filepath)
-     if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
-   }
- 
++  for (const filepath of prepared?.confirmed === false ? [] : msg.loadedInstructionPaths) {
+@@ -1161,1 +1162,2 @@
 -  const skills = await gatherSkills(input)
-+  // #125：未确认时 skills/toolDefs 为空，分类总量仍可由 bd 路径填充
-+  const skills = stepConfirmed ? await gatherSkills(input) : []
-   const skillListing = skillsSection(skillInfo(skills))
--  let toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser, { modelID: modelInfo.modelID, providerID: modelInfo.providerID }, ratio)
-+  // #125：磁盘扫描仍需 stepConfirmed；嵌入 catalog 的 toolDefs 始终可组装（避免历史 tool call 塌缩）
-+  let toolDefs = await toolDefinitionTokens(
-+    input,
-+    compacted,
-+    skills,
-+    lastUser,
-+    { modelID: modelInfo.modelID, providerID: modelInfo.providerID },
-+    ratio,
-+  )
-   // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
-   const systemText = [
-     baseSystemPrompt(input, lastUser, modelInfo.model),
++  // 跳过技能读盘不跳过现有静态工具目录，避免历史工具调用分类塌缩。
++  const skills = input.skills ?? (prepared?.confirmed === false ? [] : await gatherSkills(input))
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 index d80b61a63b..9f0362dc88 100644
 --- a/packages/tui/src/component/prompt/index.tsx
@@ -226,7 +166,7 @@ index d80b61a63b..9f0362dc88 100644
                      <Match when={usage()}>
                        {(item) => (
 -                        <text fg={theme.textMuted} wrapMode="none">
--                          {/* 使用脉冲信号控制箭头颜色，token 增加时短暂高亮 */}
+-                          {/* 只改变箭头前景色，数值与可选后缀仍从同一 item 快照读取，保持文本布局稳定。 */}
 -                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
 -                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
 -                          {item().context ? ` · ${item().context}` : ""}

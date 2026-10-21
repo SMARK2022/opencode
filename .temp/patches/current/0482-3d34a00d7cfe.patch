@@ -72,116 +72,65 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -375,25 +375,42 @@ const layer = Layer.effect(
-       // session 后续所有 cancel 永久挂起（源实现的 uninterruptible finalizer 语义）
-       const exit = yield* Effect.gen(function* () {
-         yield* Effect.logInfo("cancel", { "session.id": sessionID })
--        // 在中断 runner 前快照待终态化的 assistant 消息 ID，
--        // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀
-+        // #482：所有 cancel 归属都从同一同步快照推导。
-+        const messages = yield* sessions.messages({ sessionID }).pipe(
-+          Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
-+        )
-+        const parentIDs = new Set(
-+          messages.flatMap((message) => (message.info.role === "assistant" ? [message.info.parentID] : [])),
-+        )
-         const pendingIds = new Set(
--          (yield* sessions.messages({ sessionID }).pipe(
--            Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
--          )).filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
-+          messages.filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
-+        )
-+        const orphanIDs = messages.flatMap((message) =>
-+          message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [],
-         )
-         yield* state.cancel(sessionID)
--        // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
--        // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
--        // #71/#153：cancel 时中止未完成 assistant
-         yield* abortPendingAssistants(sessionID, pendingIds).pipe(Effect.ignore)
-+        // #482：cancel 前 queued 的无 assistant 回复的 user 请求需要终态化；
-+        // Service 接口声明为 any/any，沿用本文件 as-cast 收窄模式保持 cancel 的 never/never 签名
-+        const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-+        if (usage) {
-+          yield* Effect.forEach(
-+            orphanIDs,
-+            Effect.fnUntraced(function* (requestID) {
-+              const request = yield* (usage.get({ sessionID, requestID }) as any as Effect.Effect<SessionRequestUsage.Request | undefined, never, never>)
-+              if (request?.status !== "running") return
-+              yield* (usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() }) as any as Effect.Effect<void, never, never>)
-+            }),
-+            { discard: true },
-+          )
-+        }
-       }).pipe(
-         Effect.onExit((exit) =>
-           Effect.uninterruptible(
-             Effect.gen(function* () {
+@@ -336,8 +336,19 @@
+             const children = yield* sessions.children(sessionID)
+-            const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
+-              .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+-              .map((msg) => msg.info.id)
++            // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
++            const messages = yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([])))
++            const parentIDs = new Set(messages.flatMap((message) => message.info.role === "assistant" ? [message.info.parentID] : []))
++            const pending = messages.filter((message) => message.info.role === "assistant" && !message.info.time.completed).map((message) => message.info.id)
++            const orphanIDs = messages.flatMap((message) => message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [])
+             yield* state.cancel(sessionID)
+             yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+               discard: true,
+             })
++            const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
++            if (usage) {
++              yield* Effect.forEach(orphanIDs, Effect.fnUntraced(function* (requestID) {
++                const request = yield* usage.get({ sessionID, requestID })
++                // noReply或已完成请求仍可能没有assistant，只有running项属于待取消队列。
++                if (request?.status !== "running") return
++                yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
++              }), { discard: true })
++            }
+@@ -349,3 +360,3 @@
+-              // 成功、缺陷或中断都释放flight，并让joiner重放同一结果。
 -              cancelFlights.delete(sessionID)
--              // 唤醒 join 的重叠 cancel；join 者走 ignore 路径不重放 exit
-+              // #482：完成 Deferred 必须早于删登记。
-               yield* Deferred.succeed(flight, undefined).pipe(Effect.ignore)
++              // 先发布完整Exit再删登记，重叠caller只能消费相同的取消结果。
+               yield* Deferred.succeed(flight, exit)
 +              cancelFlights.delete(sessionID)
-             }),
-           ),
-         ),
-@@ -1476,7 +1493,28 @@ const layer = Layer.effect(
-         }
-         return message
-       }
+@@ -1422,1 +1433,14 @@
 -      return yield* loop({ sessionID: input.sessionID })
 +      const result = yield* loop({ sessionID: input.sessionID })
-+      // #482：own < parent 表示本请求已被更新 user 合并；先读持久化终态避免二次覆盖。
-+      // message id 单调递增——id 比较是合并归属的权威判据，不能依赖时序或内存状态
-+      if (
-+        result.info.role === "assistant" &&
-+        !result.info.summary &&
-+        message.info.id < result.info.parentID
-+      ) {
-+        const requestUsageCoalesced = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-+        if (requestUsageCoalesced) {
-+          const request = yield* (requestUsageCoalesced.get({ sessionID: input.sessionID, requestID: message.info.id }) as any as Effect.Effect<SessionRequestUsage.Request | undefined, never, never>)
-+          if (request?.status !== "running") return result
-+          yield* (requestUsageCoalesced.complete({
++      // 只有被更新parent合并的旧请求需要零计费闭合，既有终态不可二次覆盖。
++      if (reqUsage && result.info.role === "assistant" && !result.info.summary && message.info.id < result.info.parentID) {
++        const request = yield* reqUsage.get({ sessionID: input.sessionID, requestID: message.info.id })
++        if (request?.status === "running") {
++          // 不复制assistant账单；取消与provider失败分别保留aborted/error语义。
++          yield* reqUsage.complete({
 +            sessionID: input.sessionID, requestID: message.info.id,
-+            // #482：取消路径写入 SessionV1.AbortedError（本文件 cancel 分支同款），
-+            // APIError 是 provider 失败——两者必须分别映射 aborted/error，不可互换
 +            status: SessionV1.AbortedError.isInstance(result.info.error) ? "aborted" : result.info.error ? "error" : "completed",
 +            timeCompleted: result.info.time.completed,
-+          }) as any as Effect.Effect<void, never, never>)
++          })
 +        }
 +      }
 +      return result
-     })
- 
-     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
-@@ -1493,12 +1531,14 @@ const layer = Layer.effect(
-       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-       // Runner.ensureRunning 会加入既有 prompt 而非排队新工作；compact 必须显式
-       // 拒绝 busy 会话，调用方看到真实 busy 响应而非成功空操作
+@@ -1436,10 +1460,7 @@
+-      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+-      // Runner.ensureRunning 会加入既有 prompt 而非排队新工作；compact 必须显式
+-      // 拒绝 busy 会话，调用方看到真实 busy 响应而非成功空操作
 -      yield* state.assertNotBusy(input.sessionID)
 -      yield* revert.cleanup(session)
 -      return yield* state.ensureRunning(
 +      return yield* state.startExclusive(
          input.sessionID,
-+        // 中断目标是当前活跃 assistant——与 prompt 的 ensureRunning 同一恢复语义，
-+        // 保证 compact 被取消时 runner 仍能续上未完成的模型轮次
          lastAssistant(input.sessionID),
          Effect.gen(function* () {
-+          // cleanup 与 compaction 都必须在 exclusive ownership 内执行。
++          // cleanup与compaction在同一exclusive边界内，维护结束才交接已排队的普通loop。
 +          yield* revert.cleanup(yield* sessions.get(input.sessionID).pipe(Effect.orDie))
            yield* compaction.run({
-             sessionID: input.sessionID,
-             agent: input.agent,
-@@ -1643,6 +1683,9 @@ const layer = Layer.effect(
-             terminalError !== undefined &&
-             lastAssistant?.error !== undefined &&
-             lastAssistant.id === terminalError.assistantID &&
-+            // #482：归属校验——合并后 terminal assistant 可能属于更新的 user 请求，
-+            // 只有仍归属于本请求时才允许触发续跑，避免重复消费后续请求的错误语义
-+            lastAssistant.parentID === lastUser.id &&
-             (APIError.isInstance(lastAssistant.error) ||
-               NamedError.Unknown.isInstance(lastAssistant.error))
  
 
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
@@ -325,8 +274,9 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
        data.reverting.add(sessionID)
      })
  
-@@ -139,6 +151,45 @@ const layer = Layer.effect(
-         .pipe(Effect.ensuring(Effect.sync(end)))
+@@ -141,7 +154,46 @@ const layer = Layer.effect(
+       const current = yield* runner(sessionID, onInterrupt)
+       return yield* current.ensureRunning(tracked)
      })
  
 +    // #482：compaction/cleanup 的独占执行入口——复用 shell runner 的并发控制，
@@ -371,8 +321,8 @@ diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/
      const startShell = Effect.fn("SessionRunState.startShell")(function* (
        sessionID: SessionID,
        onInterrupt: Effect.Effect<SessionV1.WithParts>,
-@@ -155,7 +206,7 @@ const layer = Layer.effect(
-         )
+@@ -159,7 +210,7 @@ const layer = Layer.effect(
+         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
      })
  
 -    return Service.of({ assertNotBusy, assertNotReverting, beginRevert, endRevert, cancel, ensureRunning, startShell })
@@ -424,81 +374,16 @@ diff --git a/packages/opencode/test/effect/runner.test.ts b/packages/opencode/te
 +  )
  })
 
-diff --git a/packages/opencode/test/lib/llm-server.ts b/packages/opencode/test/lib/llm-server.ts
---- a/packages/opencode/test/lib/llm-server.ts
-+++ b/packages/opencode/test/lib/llm-server.ts
-@@ -46,6 +46,8 @@ type HttpError = {
-   type: "http-error"
-   status: number
-   body: unknown
-+  // #482：wait 仅用于把外部 HTTP 失败同步到确定的并发边界，不改变默认即时错误行为
-+  wait?: PromiseLike<unknown>
- }
- 
- export type Item = Sse | HttpError
-@@ -565,11 +567,13 @@ export function reply() {
-   return new Reply()
- }
- 
--export function httpError(status: number, body: unknown): Item {
-+export function httpError(status: number, body: unknown, wait?: PromiseLike<unknown>): Item {
-+  // 可选门闩沿用 SSE reply 的 PromiseLike 约定，测试无需引入第二套计时器
-   return {
-     type: "http-error",
-     status,
-     body,
-+    wait,
-   }
- }
- 
-@@ -690,7 +694,12 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
-         }
-         hits = [...hits, current]
-         yield* notify()
--        if (next.type !== "sse") return fail(next)
-+        if (next.type !== "sse") {
-+          // #482：延迟 HTTP 错误响应，让并发测试能在请求已到达后稳定建立待交接工作
-+          const wait = next.wait
-+          if (wait) yield* Effect.promise(() => wait)
-+          return fail(next)
-+        }
-         if (mode === "responses") return send(responses(next, modelFrom(body)))
-         if (next.reset) {
-           yield* reset(next)
-
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -46,6 +46,7 @@ import { SessionProcessor } from "../../src/session/processor"
- import { SessionPrompt } from "../../src/session/prompt"
- import { SessionRevert } from "../../src/session/revert"
- import { SessionRunState } from "../../src/session/run-state"
-+import { SessionRequestUsage } from "../../src/session/request-usage"
- import { MessageID, PartID, SessionID } from "../../src/session/schema"
- import { SessionStatus } from "../../src/session/status"
- import { SessionV2 } from "@opencode-ai/core/session"
-@@ -61,7 +62,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
- import { Format } from "../../src/format"
- import { TestInstance } from "../fixture/fixture"
- import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
+@@ -65,1 +65,1 @@
 -import { reply, TestLLMServer } from "../lib/llm-server"
 +import { httpError, reply, TestLLMServer } from "../lib/llm-server"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- import { ProviderV2 } from "@opencode-ai/core/provider"
- import { ModelV2 } from "@opencode-ai/core/model"
-@@ -212,6 +213,8 @@ const promptRoot = LayerNode.group([
-   BackgroundJob.node,
-   SessionStatus.node,
-   SessionRunState.node,
-+  // #482：provider-error 移交场景直接读取 RequestUsage 主键，node 进共享 layer
-+  SessionRequestUsage.node,
-   Database.node,
-   EventV2Bridge.node,
-   Question.node,
-@@ -4372,3 +4375,423 @@ it.instance(
-   60_000,
+@@ -4734,3 +4734,423 @@
+   { git: true },
+   30_000,
  )
- 
 +// #482：手动压缩标题行为的端到端验证——summary 持有 Run state 期间提交的 queued user
 +// 必须经 ShellThenRun 无 Idle 空窗地移交到下一次 Agent run，而不是被旧 revert 边界隐藏
 +it.instance(
@@ -927,13 +812,13 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
  import fs from "fs/promises"
  import path from "path"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
--import { Effect, Exit } from "effect"
-+import { Deferred, Effect, Exit, Fiber } from "effect"
+-import { Cause, Effect, Exit } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber } from "effect"
  import { Session } from "@/session/session"
  
  import { SessionRevert } from "../../src/session/revert"
 +import { SessionRunState } from "../../src/session/run-state"
- import { SessionRequestUsage } from "../../src/session/request-usage"
+ import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
  import { MessageV2 } from "../../src/session/message-v2"
  import { Snapshot } from "../../src/snapshot"
 @@ -20,7 +21,7 @@ import { ModelV2 } from "@opencode-ai/core/model"

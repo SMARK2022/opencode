@@ -480,13 +480,15 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
              },
            })
  
-@@ -65,49 +98,83 @@
+@@ -65,51 +98,83 @@
            const search = FSUtil.resolve(requested)
            const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
            const cwd = info?.type === "Directory" ? search : path.dirname(search)
 -          const result = yield* ripgrep
 -            .grep({
 -              cwd,
+-              // #138：现存单文件传入精确目标，避免按父目录计数与搜索。
+-              file: info?.type === "File" ? path.basename(search) : undefined,
 -              pattern: params.pattern,
 -              include: params.include,
 -              // #138：多取 1 条以检测截断
@@ -903,6 +905,27 @@ diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/t
    it.instance("finds matches in tmp instance", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
+@@ -161,12 +337,12 @@
+       const ripgrep = yield* Ripgrep.Service
+-      // #138：两个文件配合真实 grep 的 maxFiles=1 覆盖目录门限。
+-      const info = yield* GrepTool.pipe(
+-        Effect.provideService(Ripgrep.Service, {
+-          ...ripgrep,
+-          grep: (input) => ripgrep.grep({ ...input, maxFiles: 1 }),
+-        }),
+-      )
++      // 内部grep仍保留候选上限；交互工具改用时间预算，单文件目标继续保持精确。
++      const tooBroad = yield* ripgrep.grep({
++        cwd: test.directory, pattern: "line2", include: "*.txt", limit: 65, maxFiles: 1,
++      }).pipe(Effect.flip)
++      expect(tooBroad).toMatchObject({ maxFiles: 1 })
++      const info = yield* GrepTool
+       const grep = yield* info.init()
+       const broad = yield* grep.execute({ pattern: "line2", path: test.directory, include: "*.txt" }, ctx)
+-      expect(broad.output).toContain("more than 1 candidate files")
++      expect(broad.metadata.matches).toBe(2)
++      expect(broad.output).not.toContain("Search scope is too broad")
+       const result = yield* grep.execute(
 diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/test/tool/parameters.test.ts
 --- a/packages/opencode/test/tool/parameters.test.ts
 +++ b/packages/opencode/test/tool/parameters.test.ts

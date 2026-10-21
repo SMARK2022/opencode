@@ -1,6 +1,6 @@
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -58,9 +58,15 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
  
  // #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
@@ -40,8 +40,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +  // 折叠多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc），
 +  // 归一化后才能正确匹配保护根路径
 +  let rawNormalized = normalized.replace(/(?!^)\/{2,}/g, "/")
-+  while (/\/[^/]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
-+    rawNormalized = rawNormalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
++  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
++    rawNormalized = rawNormalized.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
 +  }
 +  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
    if (RE_D_CURL_PIPE_INTERPRETER.test(normalized))
@@ -79,7 +79,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -374,6 +374,63 @@ describe("permission precheck bash classifier", () => {
+@@ -377,6 +377,69 @@ describe("permission precheck bash classifier", () => {
      expect(bash("Remove-Item -Recurse node_modules")).toMatchObject({ level: "cautious" })
    })
  
@@ -95,6 +95,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect(bash("rm -rf /Users/alice/Downloads/old-app")).toMatchObject({ level: "cautious" })
 +    // /root/<deeper> → cautious（root 用户的家目录子路径）
 +    expect(bash("rm -rf /root/old-project")).toMatchObject({ level: "cautious" })
++    // 引用命令与标志绕过raw匹配，验证token分支保留相同层级语义。
++    expect(bash('"rm" "-r" "/home/alice"')).toMatchObject({ level: "dangerous" })
++    expect(bash('"rm" "-r" "/home/alice/old"')).toMatchObject({ level: "cautious" })
 +  })
 +
 +  test("still protects user-data root and one-level user home as dangerous", () => {
@@ -114,6 +117,7 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect(bash("rm -rf /Users/../etc")).toMatchObject({ level: "dangerous" })
 +    // 深层 .. 穿越到保护目标 → 仍 dangerous
 +    expect(bash("rm -rf /root/../etc")).toMatchObject({ level: "dangerous" })
++    expect(bash('"rm" "-rf" "/root/../etc"')).toMatchObject({ level: "dangerous" })
 +    expect(bash("rm -rf /home/sunbenteng/../alice")).toMatchObject({ level: "dangerous" })
 +    // /Users 本身和 /Users/<user> → dangerous
 +    expect(bash("rm -rf /Users")).toMatchObject({ level: "dangerous" })
@@ -123,6 +127,8 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    // 系统根子目录仍 dangerous
 +    expect(bash("rm -rf /etc/passwd")).toMatchObject({ level: "dangerous" })
 +    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "dangerous" })
++    // raw的..折叠不能跨操作数空白，否则会把前一个受保护目标拼进普通目录。
++    expect(bash("rm -rf /home/alice /../tmp/cache")).toMatchObject({ level: "dangerous" })
 +  })
 +
 +  // sudo 包装器应提取内层命令递归评估，而非短路。

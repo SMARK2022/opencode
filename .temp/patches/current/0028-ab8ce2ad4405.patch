@@ -2053,6 +2053,14 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
  })
  
  test("keeps locked deferred parity TODOs visible", async () => {
+@@ -502,5 +720,6 @@
+     "Persist background job status and define restart recovery before exposing remote observation.",
+     "Revisit process-group cleanup and platform coverage with shell-specific tests if current AppProcess semantics do not fully cover it.",
+     "Revisit binary output handling if stdout/stderr decoding is text-only.",
+-    "Stream full shell output into managed storage while retaining only a bounded in-memory preview.",
++    // 原文流写已由 capture/onOutput 完成；后台任务观察仍是上游待迁移能力。
++    "Re-add model-facing background launch only with owner-bound get/wait/cancel tools and completion delivery.",
+   ]) {
 
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts

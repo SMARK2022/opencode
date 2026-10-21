@@ -231,18 +231,10 @@ diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/sessio
 index a99f8acff2..a97e43b15c 100644
 --- a/packages/opencode/src/session/llm.ts
 +++ b/packages/opencode/src/session/llm.ts
-@@ -371,7 +371,10 @@ const live: Layer.Layer<
-             // already returns one; AI SDK streams are converted here.
-             const state = LLMAISDK.adapterState()
-             return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
--              e instanceof Error ? e : new Error(String(e)),
-+              e instanceof Error
-+                ? e
-+                : // #192：保真 stream 错误 cause
-+                  new Error(String(e), { cause: e }),
-             ).pipe(
-               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-               Stream.flatMap((events) => Stream.fromIterable(events)),
+@@ -389,1 +389,2 @@ const live: Layer.Layer<
+-              onError: (e) => e instanceof Error ? e : new Error(String(e)),
++              // #192：保留结构化错误 cause；reader 的既有释放责任不随错误转换迁移。
++              onError: (e) => e instanceof Error ? e : new Error(String(e), { cause: e }),
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 index 12c7e266f5..9ac84716c5 100644
 --- a/packages/opencode/src/session/message-v2.ts
@@ -892,8 +884,8 @@ index db170d2b62..61be0c4b6f 100644
 +      cancelNewSessionNavigation = true
 +      if (newSessionNavigation) clearTimeout(newSessionNavigation)
 +      if (store.prompt.input || store.prompt.parts.length > 0) return
-+      setStore("prompt", prompt)
-+      setStore("mode", mode)
++      // #192：复用 set 同步输入框与附件标记，避免再次提交时把恢复的草稿同步为空。
++      ref.set({ ...prompt, mode })
 +    }
 +
      if (store.mode === "shell") {
@@ -1142,7 +1134,7 @@ new file mode 100644
 index 0000000000..971e4b2d8e
 --- /dev/null
 +++ b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
-@@ -0,0 +1,454 @@
+@@ -0,0 +1,466 @@
 +/** @jsxImportSource @opentui/solid */
 +// #192：prompt 提交传输层行为测试——失败保留 draft / 成功清除 / shell 后台 / slash / 新会话
 +import { expect, test } from "bun:test"
@@ -1284,6 +1276,12 @@ index 0000000000..971e4b2d8e
 +
 +      // #192：shell 失败后 draft 和 mode 都必须保留
 +      expect(prompt.current.input).toBe(draft)
++
++      // #192：不重新 set，直接重试以验证输入框与 shell 模式都已恢复。
++      prompt.submit()
++      await wait(() => attempts === 2)
++      await Bun.sleep(20)
++      expect(prompt.current.input).toBe(draft)
 +    },
 +    tmp.path,
 +  )
@@ -1405,6 +1403,12 @@ index 0000000000..971e4b2d8e
 +      await Bun.sleep(20)
 +
 +      // #192：slash 命令失败后 draft 保留
++      expect(prompt.current.input).toBe(draft)
++
++      // #192：直接重试必须再次到达 command 端点，不能被空输入框抹掉草稿。
++      prompt.submit()
++      await wait(() => attempts === 2)
++      await Bun.sleep(20)
 +      expect(prompt.current.input).toBe(draft)
 +    },
 +    tmp.path,
@@ -1601,10 +1605,7 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 index 8a1829fe50..faf06f1209 100644
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
-@@ -1,8 +1,8 @@
- /** @jsxImportSource @opentui/solid */
- import { describe, expect, test } from "bun:test"
- import { tmpdir } from "../../../fixture/fixture"
+@@ -7,5 +7,5 @@
 -import { directory, mount, wait, worktree } from "./sync-fixture"
 -import type { AssistantMessage, GlobalEvent, ToolPart } from "@opencode-ai/sdk/v2"
 +import { directory, json, mount, wait, worktree } from "./sync-fixture"
@@ -1612,7 +1613,7 @@ index 8a1829fe50..faf06f1209 100644
  
  function branchEvent(branch: string, workspace?: string): GlobalEvent {
    return {
-@@ -17,7 +17,380 @@ function branchEvent(branch: string, workspace?: string): GlobalEvent {
+@@ -17,3 +17,80 @@ function branchEvent(branch: string, workspace?: string): GlobalEvent {
    }
  }
  
@@ -1693,6 +1694,7 @@ index 8a1829fe50..faf06f1209 100644
 +  }
 +}
 +
+@@ -71,4 +148,300 @@
  describe("tui sync", () => {
 +  // #192：重连后恢复 pending permission/question 请求——bootstrap refresh 从 API 拉取
 +  // #192：reconnected 标志控制 API 返回——初始为空，重连后返回 pending 请求

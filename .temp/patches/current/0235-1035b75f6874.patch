@@ -11,107 +11,231 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+diff --git a/packages/core/src/session/activity.ts b/packages/core/src/session/activity.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/activity.ts
+@@ -0,0 +1,35 @@
++import { EventEmitter } from "events"
++
++const emitter = new EventEmitter()
++const active = new Set<symbol>()
++
++// #235：进程内统一跟踪 V1 session/shell 与 Native drain，保留 begin/end 契约。
++export function begin(id: string) {
++  // #235：不同 listener 可并行处理同一 ID，每次登记独占令牌，避免互相提前释放。
++  const token = Symbol(id)
++  active.add(token)
++  emitter.emit("change", active.size)
++
++  let done = false
++  return () => {
++    if (done) return
++    done = true
++    active.delete(token)
++    emitter.emit("change", active.size)
++  }
++}
++
++// #152：当前活跃 runner 数量
++export function count() {
++  return active.size
++}
++
++// #152：数量变化订阅，供 worker 重武装 idle 计时器
++export function onChange(cb: (count: number) => void) {
++  emitter.on("change", cb)
++  return () => {
++    emitter.off("change", cb)
++  }
++}
++
++export * as SessionActivity from "./activity"
+diff --git a/packages/core/src/session/execution/local.ts b/packages/core/src/session/execution/local.ts
+--- a/packages/core/src/session/execution/local.ts
++++ b/packages/core/src/session/execution/local.ts
+@@ -1,5 +1,6 @@
+ import { Cause, Effect, Layer } from "effect"
+ import { LocationServiceMap } from "../../location-service-map"
+ import { makeGlobalNode } from "../../effect/app-node"
++import { SessionActivity } from "../activity"
+ import { SessionRunCoordinator } from "../run-coordinator"
+ import { SessionRunner } from "../runner"
+@@ -15,7 +16,12 @@
+     const locations = yield* LocationServiceMap.Service
+     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError>({
+       drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force) {
++        // #235：登记实际 drain（含 Session 读取），独立 scope 在失败、中断和收尾时释放。
++        yield* Effect.acquireRelease(
++          Effect.sync(() => SessionActivity.begin(`native:${sessionID}`)),
++          (end) => Effect.sync(end),
++        )
+         const session = yield* store.get(sessionID)
+         if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
+         return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force })).pipe(
+           Effect.provide(locations.get(session.location)),
+@@ -25,5 +31,5 @@
+               : Effect.logError("Failed to drain Session", cause).pipe(Effect.annotateLogs({ sessionID })),
+           ),
+         )
+-      }),
++      }, Effect.scoped),
+     })
+diff --git a/packages/core/test/session-execution-local.test.ts b/packages/core/test/session-execution-local.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/test/session-execution-local.test.ts
+@@ -0,0 +1,91 @@
++import { expect } from "bun:test"
++import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Scope } from "effect"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Location } from "@opencode-ai/core/location"
++import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
++import type { LocationServices } from "@opencode-ai/core/location-services"
++import { SessionActivity } from "@opencode-ai/core/session/activity"
++import { SessionExecution } from "@opencode-ai/core/session/execution"
++import { SessionExecutionLocal } from "@opencode-ai/core/session/execution/local"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { SessionStore } from "@opencode-ai/core/session/store"
++import { testEffect } from "./lib/effect"
++
++const it = testEffect(Layer.empty)
++
++// #235：只构建真实 Native 执行服务，在 Session 读取处阻塞，不启动模型、HTTP 或 daemon。
++it.effect("tracks Native drains across isolated runtimes and releases activity", () =>
++  Effect.gen(function* () {
++    const baseline = SessionActivity.count()
++    const counts: number[] = []
++    yield* Effect.acquireRelease(
++      Effect.sync(() => SessionActivity.onChange((count) => counts.push(count))),
++      (off) => Effect.sync(off),
++    )
++    const firstStarted = yield* Deferred.make<void>()
++    const secondStarted = yield* Deferred.make<void>()
++    const scopeStarted = yield* Deferred.make<void>()
++    const gate = yield* Deferred.make<void>()
++    let lookups = 0
++    const layer = LayerNode.compile(SessionExecutionLocal.node, [
++      [
++        SessionStore.node,
++        Layer.mock(SessionStore.Service, {
++          get: () =>
++            Effect.gen(function* () {
++              const lookup = lookups++
++              if (lookup === 2) {
++                yield* Deferred.succeed(scopeStarted, undefined)
++                return yield* Effect.never
++              }
++              yield* Deferred.succeed(lookup === 0 ? firstStarted : secondStarted, undefined)
++              yield* Deferred.await(gate)
++              return yield* Effect.die("lookup failed")
++            }),
++        }),
++      ],
++      [LocationServiceMap.node, Layer.effect(LocationServiceMap.Service, LayerMap.make((_ref: Location.Ref) => Layer.unwrap<LocationServices, never, never, never, never>(Effect.die("unexpected Location lookup"))))],
++    ])
++    const scope = yield* Effect.acquireRelease(Scope.make(), (scope) => Scope.close(scope, Exit.void))
++    // #235：复用层定义但隔离 MemoMap，贴近内部/外部监听分别装配服务的边界。
++    const first = Context.get(
++      yield* Layer.buildWithMemoMap(layer, Layer.makeMemoMapUnsafe(), scope),
++      SessionExecution.Service,
++    )
++    const second = Context.get(
++      yield* Layer.buildWithMemoMap(layer, Layer.makeMemoMapUnsafe(), scope),
++      SessionExecution.Service,
++    )
++    const sessionID = SessionSchema.ID.make("ses_native_activity")
++
++    const resumed = yield* first.resume(sessionID).pipe(Effect.forkChild)
++    yield* Deferred.await(firstStarted)
++    expect(SessionActivity.count()).toBe(baseline + 1)
++    const other = yield* second.resume(sessionID).pipe(Effect.forkChild)
++    yield* Deferred.await(secondStarted)
++    expect(SessionActivity.count()).toBe(baseline + 2)
++
++    yield* first.interrupt(sessionID)
++    const interrupted = yield* Fiber.await(resumed)
++    expect(Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause)).toBe(true)
++    expect(SessionActivity.count()).toBe(baseline + 1)
++    yield* Deferred.succeed(gate, undefined)
++    const failed = yield* Fiber.await(other)
++    expect(Exit.isFailure(failed) && Cause.hasDies(failed.cause)).toBe(true)
++    expect(SessionActivity.count()).toBe(baseline)
++
++    yield* first.wake(sessionID)
++    yield* Deferred.await(scopeStarted)
++    expect(SessionActivity.count()).toBe(baseline + 1)
++    yield* Scope.close(scope, Exit.void)
++    expect(SessionActivity.count()).toBe(baseline)
++    expect(counts).toEqual([
++      baseline + 1,
++      baseline + 2,
++      baseline + 1,
++      baseline,
++      baseline + 1,
++      baseline,
++    ])
++  }),
++)
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -200,6 +200,9 @@
-           ...env,
-           OPENCODE_PROCESS_ROLE: "worker",
-           ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
-+          // #235：launcher PID 供 daemon 判活——首个 SSE client 前的孤儿清理
-+          // #235：daemon 侧据此启动 watcher；TUI 直连模式不 spawn 即无此值
-+          OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
-           ...(external
-             ? {
-                 OPENCODE_EXTERNAL_PORT: String(network.port),
+@@ -212,3 +212,5 @@
+             ...env,
+             OPENCODE_PROCESS_ROLE: "worker",
++            // 首个订阅前由daemon判断启动方是否仍存活，不改变监听与锁路径运输。
++            OPENCODE_DAEMON_LAUNCHER_PID: String(process.pid),
+             ...(lockPath ? { OPENCODE_LOCK_PATH: lockPath } : {}),
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -75,8 +75,13 @@
+@@ -27,4 +27,8 @@
  if (isDaemon) {
-   // 安装全局 fetch 代理路由，使 daemon 内未显式 routedFetch 的请求也走系统代理
+   // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
    NetworkProxy.installGlobalFetch()
-+  // #235：daemon 结构化日志——stdout 在非 print-logs 时被 launcher 丢弃，语义与 Log.init 一致
++  // 非print-logs启动时stdout由launcher丢弃；生命周期消息仍携带结构化原因。
 +  const log = {
 +    info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
 +  }
-   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
-   // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
-+  // #235：内部回环服务器先于锁写入——launcher 健康轮询依赖锁中端口
-   const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
- 
-   // 当启动方 TUI 请求时，额外启动一个外部可访问的 HTTP 服务器
-@@ -97,7 +102,15 @@
-   // daemon 启动后写锁，token 用于优雅退出清锁
-   
-   const lockToken = await ServerLock.write(internalServer.port, externalUrl)
-+  // #235：锁写入日志带 launcher PID——孤儿判定排障的一手证据
-+  log.info("daemon lock written", {
-+    pid: process.pid,
-+    port: internalServer.port,
-+    externalUrl,
-+    launcherPID: process.env.OPENCODE_DAEMON_LAUNCHER_PID,
-+  })
-   // 延迟预热外部插件：不阻塞锁/健康检查，失败仅 best-effort
-+  // #235：预热与空闲保护解耦——慢插件不得影响 startup idle 计时起点
-   setTimeout(() => void warmupExternalPlugins(), 0).unref?.()
- 
-   // ── 优雅关闭 ───────────────────────────────────────────────────────────
-@@ -105,28 +118,46 @@
- 
-   // 优雅关闭：清锁、停 HTTP、关库，避免陈旧锁残留
-   
--  async function gracefulShutdown() {
-+  async function gracefulShutdown(reason = "unknown") {
+   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
+@@ -40,3 +44,5 @@
+   // idle/upgrade timer 先于首次 await 声明，启动期间致命退出也可安全取消它们。
+   let idleTimer: ReturnType<typeof setTimeout> | undefined
+   let upgradeTimer: ReturnType<typeof setTimeout> | undefined
++  let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
++  let launcherTimer: ReturnType<typeof setInterval> | undefined
+@@ -49,8 +55,11 @@
+-  async function gracefulShutdown(exitCode = 0) {
++  async function gracefulShutdown(exitCode = 0, reason = "unknown") {
      if (shutdownInProgress) return
      shutdownInProgress = true
-+    // #235：关闭前取消全部退出保护——避免关闭过程中 timer 再次触发递归关闭
 +    cancelIdleTimer("shutdown")
 +    cancelStartupIdleTimer("shutdown")
 +    cancelLauncherWatcher("shutdown")
-+    log.info("daemon shutting down", {
-+      reason,
-+      hadClient,
-+      sseClients,
-+      sessionActivity: SessionActivity.count(),
-+    })
-     // 仅当 token 匹配时删除锁，防止误删不再属于自己的锁
-     await ServerLock.clearIfOwner(lockToken)
--    await InstanceRuntime.disposeAllInstances()
--    if (externalServer) await externalServer.stop(true)
--    await internalServer.stop(true)
-+    // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
-+    // #235：（Effect scope closeScopeOnce/实例清理等残留句柄）。
-+    // #235：整个清理序列包在 3s 总超时内——不论哪步挂起，daemon 都能完成 exit(0)
-+    await Promise.race([
-+      Promise.resolve().then(async () => {
-+        await InstanceRuntime.disposeAllInstances()
-+        if (externalServer) await externalServer.stop(true)
-+        await internalServer.stop(true)
-+      }),
-+      Bun.sleep(3_000),
-+    ])
-     // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
-     Database.close()
-     process.exit(0)
-   }
- 
-   // SIGTERM 触发优雅关闭
++    log.info("daemon shutting down", { reason, hadClient, sseClients, sessionActivity: SessionActivity.count() })
+     // 致命关闭也有上限；只退出当前 daemon，不向其他 owner 发终止信号。
+     const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
+     shutdownTimer.unref?.()
+-    if (idleTimer) clearTimeout(idleTimer)
+     if (upgradeTimer) clearTimeout(upgradeTimer)
+@@ -69,13 +78,13 @@
+   // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
 -  process.on("SIGTERM", () => void gracefulShutdown())
-+  process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
++  process.on("SIGTERM", () => void gracefulShutdown(0, "signal:SIGTERM"))
  
-   // daemon 致命路径：覆盖空实现并 prepend，确保清锁
+   // daemon 致命路径替换线程空监听，启动与空闲阶段共享同一资源清理闭包。
+   process.off("unhandledRejection", onUnhandledRejection)
+   process.off("uncaughtException", onUncaughtException)
    onUnhandledRejection = (_error: unknown) => {
--    void gracefulShutdown()
-+    void gracefulShutdown("unhandledRejection")
+-    void gracefulShutdown(1)
++    void gracefulShutdown(1, "unhandledRejection")
    }
    onUncaughtException = (_error: Error) => {
--    void gracefulShutdown()
-+    void gracefulShutdown("uncaughtException")
+-    void gracefulShutdown(1)
++    void gracefulShutdown(1, "uncaughtException")
    }
    process.prependListener("unhandledRejection", onUnhandledRejection)
-   process.prependListener("uncaughtException", onUncaughtException)
-@@ -154,46 +185,166 @@
+@@ -100,36 +109,162 @@
      // #173：NaN/负数回退默认；0 合法（尽快 idle 退出，便于测试）
      return Number.isFinite(value) && value >= 0 ? value : 30_000
    })()
@@ -130,9 +254,6 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
  
    let hadClient = false
    let sseClients = 0
-   let idleTimer: ReturnType<typeof setTimeout> | undefined
-+  let startupIdleTimer: ReturnType<typeof setTimeout> | undefined
-+  let launcherTimer: ReturnType<typeof setInterval> | undefined
 +
 +  // #235：活跃判定统一收敛——SSE client 或 session runner 任一活跃即阻止退出
 +  function isActive() {
@@ -160,14 +281,14 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +    log.info("daemon launcher watcher cancelled", { reason, launcherPID: LAUNCHER_PID })
 +  }
  
+   // 全部连接断开后仍须等待实际工作结束，不能因 TUI 断线关闭正在生成的会话。
    const armIdleTimer = () => {
      if (idleTimer) {
        clearTimeout(idleTimer)
        idleTimer = undefined
      }
--    if (!hadClient) return
--    if (sseClients > 0) return
--    if (SessionActivity.count() > 0) return
+-    if (shutdownInProgress || !hadClient || sseClients > 0 || SessionActivity.count() > 0) return
++    if (shutdownInProgress) return
 +    if (!hadClient) {
 +      // #235：启动期未接 client 时改走 startup idle——常规 timer 只服务运行期
 +      maybeScheduleStartupIdleShutdown()
@@ -180,10 +301,9 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
      idleTimer = setTimeout(() => {
 +      // #235：fire 时先置空句柄——重排逻辑不依赖旧句柄引用
 +      idleTimer = undefined
-       // #152：触发时再确认，避免 runner 刚启动被误杀
--      if (sseClients > 0 || SessionActivity.count() > 0) return
+-      if (shutdownInProgress || sseClients > 0 || SessionActivity.count() > 0) return
 -      void gracefulShutdown()
-+      if (isActive()) {
++      if (shutdownInProgress || isActive()) {
 +        log.info("daemon idle shutdown skipped", {
 +          reason: "active-at-fire",
 +          sseClients,
@@ -191,7 +311,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +        })
 +        return
 +      }
-+      void gracefulShutdown("idle-timeout")
++      void gracefulShutdown(0, "idle-timeout")
      }, IDLE_TIMEOUT_MS)
      idleTimer.unref?.()
 +    log.info("daemon idle shutdown scheduled", { timeoutMs: IDLE_TIMEOUT_MS })
@@ -199,7 +319,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +
 +  function maybeScheduleStartupIdleShutdown() {
 +    // #235：已接 client 或已有 timer——不重复排程
-+    if (hadClient || startupIdleTimer) return
++    if (shutdownInProgress || hadClient || startupIdleTimer) return
 +    startupIdleTimer = setTimeout(() => {
 +      startupIdleTimer = undefined
 +      if (hadClient || isActive()) {
@@ -220,7 +340,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +        maybeScheduleStartupIdleShutdown()
 +        return
 +      }
-+      void gracefulShutdown("startup-idle-timeout")
++      void gracefulShutdown(0, "startup-idle-timeout")
 +    }, STARTUP_IDLE_TIMEOUT_MS)
 +    // #235：startup timer 同样 unref——不阻止进程在正常路径退出
 +    startupIdleTimer.unref?.()
@@ -232,7 +352,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +
 +  function startLauncherWatcher() {
 +    // #235：无 launcher 语义（直连模式）或已启动则跳过
-+    if (!LAUNCHER_PID || launcherTimer) return
++    if (shutdownInProgress || hadClient || !LAUNCHER_PID || launcherTimer) return
 +    launcherTimer = setInterval(() => {
 +      if (hadClient) {
 +        cancelLauncherWatcher("first-client")
@@ -250,44 +370,53 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +        })
 +        return
 +      }
-+      void gracefulShutdown("launcher-exited-before-first-client")
++      void gracefulShutdown(0, "launcher-exited-before-first-client")
 +    }, LAUNCHER_POLL_MS)
 +    launcherTimer.unref?.()
 +    log.info("daemon launcher watcher started", { launcherPID: LAUNCHER_PID, intervalMs: LAUNCHER_POLL_MS })
    }
  
-   onSseClientCountChange((count) => {
+ 
+   // 内外 listener 继续共用一个计数源，活动变更只重算退出时机。
+   const eventClients = EventClients.make((count) => {
++    log.info(count > sseClients ? "global event connected" : "global event disconnected", { sseClientCount: count })
      sseClients = count
-     if (count > 0) {
-       hadClient = true
--      if (idleTimer) {
--        clearTimeout(idleTimer)
--        idleTimer = undefined
--      }
--      return
+-    if (count > 0) hadClient = true
++    if (count > 0) {
++      hadClient = true
 +      // #235：首个 client 到达——启动期保护不再需要
 +      cancelStartupIdleTimer("first-client")
 +      cancelLauncherWatcher("first-client")
-     }
++    }
 +    log.info("daemon sse client count changed", { count, hadClient })
      armIdleTimer()
    })
  
-   SessionActivity.onChange(() => {
+-  SessionActivity.onChange(armIdleTimer)
++  SessionActivity.onChange(() => {
 +    log.info("daemon session activity changed", { count: SessionActivity.count() })
-     armIdleTimer()
-   })
++    armIdleTimer()
++  })
  
-+  // #235：启动即注册两段保护——startup idle 与 launcher watcher 并行
-+  maybeScheduleStartupIdleShutdown()
-+  startLauncherWatcher()
-+
-   // ── 启动任务 ───────────────────────────────────────────────────────────
-   // 启动 1 秒后非阻塞地检查升级，unref 避免阻止进程退出
-+  // #235：升级检查保持非阻塞——unref 保证不拖延 idle 退出
-   setTimeout(async () => {
-     await InstanceRuntime.load({ directory: process.cwd() })
-     await upgrade().catch(() => {})
+   try {
+     const sharedServices = HttpApiApp.createSharedServices()
+     // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
+     // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
+     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
+@@ -144,3 +279,7 @@
+     lockToken = await ServerLock.write(internalServer.port, externalUrl, network)
++    log.info("daemon lock written", { pid: process.pid, port: internalServer.port, externalUrl, launcherPID: LAUNCHER_PID })
++    // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
++    maybeScheduleStartupIdleShutdown()
++    startLauncherWatcher()
+     // #71：锁可见后再做 best-effort 外部插件预热，避免 npm/代理阻塞 TUI 健康等待。
+     setTimeout(() => void AppRuntime.runPromise(Effect.gen(function* () {
+@@ -168,4 +307,4 @@
+   } catch {
+     // 启动失败走相同资源清理，明确非零退出，不伪造成功锁。
+-    await gracefulShutdown(1)
++    await gracefulShutdown(1, "startup-failed")
+   }
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
@@ -307,31 +436,45 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
  )
  
  // #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
---- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -60,7 +60,10 @@
- function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-   // SSE 客户端连接计数 +1，通知守护进程空闲计时器
-   sseClientCount++
-   onSseCountChange?.(sseClientCount)
-+  // #235：计数进日志——daemon 空闲退出调试需要连接数上下文
-+  // #235：eventResponse 为同步函数——日志经 runSync 即时落盘，不改变 SSE 返回形态
-+  Effect.logInfo("global event connected", { sseClientCount }).pipe(Effect.runSync)
-   const stream = new PassThrough()
-   const write = (event: GlobalBusEvent) => {
-     // abort 竞态下 close 可能已跑但 GlobalBus 仍派发，此时静默丢弃写入
-@@ -83,7 +86,10 @@
-     GlobalBus.off("event", handler)
-     unsubscribeRequestAbort()
-     if (!stream.destroyed) stream.end()
-     // 下限保护：close 幂等触发（abort 与 stream close 双路）时不得把计数扣成负数
-     sseClientCount = Math.max(0, sseClientCount - 1)
-     onSseCountChange?.(sseClientCount)
-+    // #235：断开计数进日志——与 connected 日志配对，空闲退出调试可观测断开时刻
-+    // #235：closed 标志保证 abort 与 stream close 双触发去重后日志只发一次
-+    Effect.logInfo("global event disconnected", { sseClientCount }).pipe(Effect.runSync)
-   }
+diff --git a/packages/opencode/src/session/activity.ts b/packages/opencode/src/session/activity.ts
+--- a/packages/opencode/src/session/activity.ts
++++ b/packages/opencode/src/session/activity.ts
+@@ -1,33 +1,2 @@
+-import { EventEmitter } from "events"
+-
+-const emitter = new EventEmitter()
+-const active = new Set<string>()
+-
+-// #152：begin 返回 end；进程内跟踪 session/shell 活跃 runner
+-export function begin(id: string) {
+-  active.add(id)
+-  emitter.emit("change", active.size)
+-
+-  let done = false
+-  return () => {
+-    if (done) return
+-    done = true
+-    active.delete(id)
+-    emitter.emit("change", active.size)
+-  }
+-}
+-
+-// #152：当前活跃 runner 数量
+-export function count() {
+-  return active.size
+-}
+-
+-// #152：数量变化订阅，供 worker 重武装 idle 计时器
+-export function onChange(cb: (count: number) => void) {
+-  emitter.on("change", cb)
+-  return () => {
+-    emitter.off("change", cb)
+-  }
+-}
+-
+-export * as SessionActivity from "./activity"
++// #235：旧入口显式转发 Core 的同一账本，worker 与 Native drain 共享活动和通知。
++export { begin, count, onChange, SessionActivity } from "@opencode-ai/core/session/activity"
 diff --git a/packages/opencode/test/cli/cmd/tui/exit.test.tsx b/packages/opencode/test/cli/cmd/tui/exit.test.tsx
 new file mode 100644
 --- /dev/null
@@ -377,7 +520,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +        expect(exitCode).toBe(0)
 +        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill()
++        if (ServerLock.alive(proc.pid)) proc.kill()
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -401,7 +544,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +        expect(exitCode).toBe(0)
 +        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeUndefined()
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill()
++        if (ServerLock.alive(proc.pid)) proc.kill()
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -422,10 +565,10 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +
 +      try {
 +        await Bun.sleep(750)
-+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
++        expect(ServerLock.alive(proc.pid)).toBe(true)
 +        expect(await Bun.file(lockPath).text().catch(() => undefined)).toBeDefined()
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },

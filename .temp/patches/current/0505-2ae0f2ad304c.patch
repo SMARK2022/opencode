@@ -804,7 +804,7 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 index b46bb838d..f5ee2d74b 100644
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -841,8 +841,8 @@ describe("prompt voice input", () => {
+@@ -883,8 +883,8 @@ describe("prompt voice input", () => {
  })
  
  describe("voiceInputStatusText compact", () => {
@@ -814,8 +814,8 @@ index b46bb838d..f5ee2d74b 100644
 +  // recording 仍保留 stop 快捷键，缩短阶段词不能牺牲用户如何停止录音的信息。
    test("provides compact variants while keeping the stop shortcut visible", () => {
      const idle = { type: "idle" as const }
-     expect(PromptVoiceInput.voiceInputStatusText(idle, "alt+v")).toBe("")
-@@ -859,4 +859,15 @@ describe("voiceInputStatusText compact", () => {
+     expect(voiceInputStatusText(idle, "alt+v")).toBe("")
+@@ -901,4 +901,15 @@ describe("voiceInputStatusText compact", () => {
        "Transcribing...",
      )
    })

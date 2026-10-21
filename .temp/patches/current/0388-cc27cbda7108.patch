@@ -1,13 +1,35 @@
-diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
---- a/packages/opencode/src/session/system.ts
-+++ b/packages/opencode/src/session/system.ts
-@@ -117,7 +117,8 @@
-   if (process.platform === "win32") items.push(` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`)
-   if (has("todo")) items.push(``, `Keep todo state current while working: only one item should be in_progress at a time.`, `Move an item to in_progress before completing it; do not jump directly from pending to completed.`, `If your understanding changes, update the todo list before continuing implementation.`)
-   items.push(
--    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-+  // bash 后必须切回专用工具：管道文本会被 shell 压缩破坏 diff/edit 的精确匹配
-+    ` - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to dedicated tools (read, grep, glob) for all subsequent file operations — do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.`,
-     // SMARK：首批工具调用应覆盖已知的读/搜/glob/目录列举/状态检查，避免串行发现
-     `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
-     // SMARK：禁止在已有多条独立调用时只发一条 discovery，必须同响应并行
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -48,7 +48,8 @@
+     // 通用 Windows 文件操作约束不猜测 shell，也不点名未广告的工具。
+     ...(process.platform === "win32" && ids.includes("bash") ? [" - On Windows, prefer available dedicated tools for file operations; use shell-native commands only when terminal execution is truly required."] : []),
+-    " - Reserve bash for system commands and terminal operations requiring shell execution",
++    // 终端操作结束后回到当前可用的专用工具，不因示例虚构被权限过滤的能力。
++    " - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to available dedicated tools for all subsequent file operations; do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.",
+     // 分段分隔是格式契约，避免指引紧贴前面的能力列表。
+     "",
+     "PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.",
+     "THINK FIRST before using tools. Decide the FULL first batch of independent reads, searches, directory listings, and status checks you already know you need.",
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -125,5 +125,5 @@
+ Do NOT use the bash tool when a dedicated tool is available.
+ Using dedicated tools lets the user review and track your work:
+- - Reserve bash for system commands and terminal operations requiring shell execution
++ - Reserve bash for system commands and terminal operations requiring shell execution. After a bash operation (e.g. git, build), switch back to available dedicated tools for all subsequent file operations; do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation.
+ 
+ PARALLELIZE tool calls whenever possible, especially independent file reads, searches, and status checks.
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -319,5 +319,8 @@
+   const guidance = SystemContextBuiltIns.toolUsage(["read", "apply_patch", "todowrite"])
++  // 只有read的请求不能被切回指引凭空广告grep/glob，原有能力过滤断言仍保留。
++  expect(guidance).toContain("After a bash operation (e.g. git, build), switch back to available dedicated tools")
++  expect(guidance).toContain("do not chain grep, sed, cat, head, or tail inside bash when a dedicated tool can perform the same operation")
+   // patch-only 模式应广告 patch，而不是隐式补回已过滤的 edit/write。
+   expect(guidance).toContain("use the apply_patch tool")
+   expect(guidance).not.toContain("use the edit tool")
+   expect(guidance).not.toContain("use the write tool")

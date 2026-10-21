@@ -109,10 +109,75 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -334,7 +334,13 @@
-   ps.setLanguage(psLanguage)
-   return { bash, ps }
+@@ -5,11 +5,9 @@
+ import path from "path"
+ import { containsPath, type InstanceContext } from "../project/instance-context"
+ import { InstanceState } from "@/effect/instance-state"
+-import { lazy } from "@/util/lazy"
+-import { Language, type Node } from "web-tree-sitter"
++import type { Node } from "web-tree-sitter"
+ 
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+-import { fileURLToPath } from "url"
+ import { Config } from "@/config/config"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Shell } from "@opencode-ai/core/shell"
+@@ -81,13 +79,6 @@
+   size: number
+ }
+ 
+-const resolveWasm = (asset: string) => {
+-  if (asset.startsWith("file://")) return fileURLToPath(asset)
+-  if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
+-  const url = new URL(asset, import.meta.url)
+-  return fileURLToPath(url)
+-}
+-
+ function parts(node: Node) {
+   const out: Part[] = []
+   for (let i = 0; i < node.childCount; i++) {
+@@ -255,10 +246,8 @@
+ }
+ 
+ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
+-  const tree = yield* Effect.promise(() => parser().then((p) => (ps ? p.ps : p.bash).parse(command)))
+-  if (!tree) throw new Error("Failed to parse command")
+-  return tree
++  return yield* Effect.promise(() => Shell.parse(command, ps))
  })
+ 
+ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string }) {
+   if (scan.dirs.size > 0) {
+@@ -308,33 +297,13 @@
+     detached: process.platform !== "win32",
+   })
+ }
+-const parser = lazy(async () => {
+-  const { Parser } = await import("web-tree-sitter")
+-  const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
+-    with: { type: "wasm" },
+-  })
+-  const treePath = resolveWasm(treeWasm)
+-  await Parser.init({
+-    locateFile() {
+-      return treePath
+-    },
+-  })
+-  const { default: bashWasm } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, {
+-    with: { type: "wasm" },
+-  })
+-  const { default: psWasm } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, {
+-    with: { type: "wasm" },
+-  })
+-  const bashPath = resolveWasm(bashWasm)
+-  const psPath = resolveWasm(psWasm)
+-  const [bashLanguage, psLanguage] = await Promise.all([Language.load(bashPath), Language.load(psPath)])
+-  const bash = new Parser()
+-  bash.setLanguage(bashLanguage)
+-  const ps = new Parser()
+-  ps.setLanguage(psLanguage)
+-  return { bash, ps }
+-})
  
 +// 只检查解析出的命令头，不能把 echo 参数或路径里的 grep 当成执行工具。
 +function shellCompatibilityError(root: Node, shellName: string) {
@@ -123,7 +188,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
  export const ShellTool = Tool.define(
    ShellID.ToolID,
    Effect.gen(function* () {
-@@ -622,7 +628,10 @@
+@@ -622,7 +591,10 @@
                    const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
                      Effect.sync(() => tree.delete()),
                    )
@@ -298,14 +363,103 @@ diff --git a/packages/opencode/src/tool/todowrite.txt b/packages/opencode/src/to
 +- Update the list when your understanding changes before continuing implementation.
  - Items should be specific and actionable; break large work into smaller steps
 
+diff --git a/packages/core/package.json b/packages/core/package.json
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -120,9 +120,12 @@
+     "minimatch": "10.2.5",
+     "npm-package-arg": "13.0.2",
+     "semver": "^7.6.3",
++    "tree-sitter-bash": "0.25.0",
++    "tree-sitter-powershell": "0.25.10",
+     "turndown": "7.2.0",
+     "venice-ai-sdk-provider": "2.1.1",
++    "web-tree-sitter": "0.25.10",
+     "which": "6.0.1",
+     "xdg-basedir": "5.1.0",
+     "zod": "catalog:"
+   },
+
+
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -353,10 +353,13 @@ "packages/core": {
+         "minimatch": "10.2.5",
+         "npm-package-arg": "13.0.2",
+         "semver": "^7.6.3",
++        "tree-sitter-bash": "0.25.0",
++        "tree-sitter-powershell": "0.25.10",
+         "turndown": "7.2.0",
+         "venice-ai-sdk-provider": "2.1.1",
++        "web-tree-sitter": "0.25.10",
+         "which": "6.0.1",
+         "xdg-basedir": "5.1.0",
+         "zod": "catalog:",
+       },
+       "devDependencies": {
+
+
 diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
 --- a/packages/core/src/shell.ts
 +++ b/packages/core/src/shell.ts
-@@ -223,4 +223,103 @@
+@@ -7,7 +7,9 @@
+ import { setTimeout as sleep } from "node:timers/promises"
++import { fileURLToPath } from "url"
+ import { Flag } from "./flag/flag"
+ import { FSUtil } from "./fs-util"
++import { lazy } from "./util/lazy"
+ import { which } from "./util/which"
+ 
+ const SIGKILL_TIMEOUT_MS = 200
+ const META: Record<string, { deny?: boolean; login?: boolean; posix?: boolean; ps?: boolean }> = {
+@@ -223,4 +225,147 @@
  export async function list(): Promise<Item[]> {
    const shells = process.platform === "win32" ? win() : await unix()
    return shells.filter((s) => resolve(s)).map(info)
  }
++
++const resolveWasm = (asset: string) => {
++  if (asset.startsWith("file://")) return fileURLToPath(asset)
++  if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
++  const url = new URL(asset, import.meta.url)
++  return fileURLToPath(url)
++}
++
++// 两套语法共用一次惰性初始化，V1 与 Core 使用同一缓存。
++const parser = lazy(async () => {
++  const { Parser, Language } = await import("web-tree-sitter")
++  const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
++    with: { type: "wasm" },
++  })
++  const treePath = resolveWasm(treeWasm)
++  await Parser.init({
++    locateFile() {
++      return treePath
++    },
++  })
++  const { default: bashWasm } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, {
++    with: { type: "wasm" },
++  })
++  const { default: psWasm } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, {
++    with: { type: "wasm" },
++  })
++  const bashPath = resolveWasm(bashWasm)
++  const psPath = resolveWasm(psWasm)
++  const [bashLanguage, psLanguage] = await Promise.all([Language.load(bashPath), Language.load(psPath)])
++  const bash = new Parser()
++  bash.setLanguage(bashLanguage)
++  const ps = new Parser()
++  ps.setLanguage(psLanguage)
++  return { bash, ps }
++})
++
++export async function parse(command: string, ps: boolean) {
++  const p = await parser()
++  const tree = (ps ? p.ps : p.bash).parse(command)
++  if (!tree) throw new Error("Failed to parse command")
++  return tree
++}
 +
 +// 只渲染已选择的 shell，调用方继续拥有各自的配置优先级与 fallback。
 +export function guidance(file: string, platform: NodeJS.Platform) {
@@ -347,6 +501,8 @@ diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
 +      while (index < command.length && command[index] !== "\n") index++
 +      continue
 +    }
++    // cmd 在命令起点的括号是命令组，不应遮掉组内首个实际命令。
++    if (!powershell && head && character === "(") { index++; continue }
 +    // 嵌套表达式和脚本块不属于此浅层检查，避免把标签、数组值或哈希键当命令。
 +    if ("({".includes(character)) { depth++; head = false; index++; continue }
 +    if (")}".includes(character)) { depth = Math.max(0, depth - 1); index++; continue }
@@ -520,20 +676,40 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
            output: Output,
            structured: StructuredOutput,
            toStructuredOutput: ({ output }) => ({
-@@ -141,6 +148,12 @@
+@@ -141,6 +148,32 @@
            execute: (input, context) =>
              Effect.gen(function* () {
 +              // 配置只采样一次，兼容检查和最终 spawn 必须使用同一个实际 shell。
 +              const entries = yield* config.entries()
 +              const shell = selectedShell(entries)
-+              const compatibility = Shell.compatibilityError(Shell.commandHeads(input.command, Shell.name(shell)), Shell.name(shell))
++              // Windows PowerShell 递归检查命令节点；解析失败不能退回浅层扫描，Tree 在检查后释放。
++              const heads = process.platform === "win32" && Shell.ps(shell)
++                ? yield* Effect.gen(function* () {
++                    const tree = yield* Effect.acquireRelease(
++                      Effect.tryPromise({
++                        try: () => Shell.parse(input.command, true),
++                        catch: () => new ToolFailure({ message: `Unable to execute command: ${input.command}` }),
++                      }),
++                      (tree) => Effect.sync(() => tree.delete()),
++                    )
++                    return tree.rootNode
++                      .descendantsOfType("command")
++                      .flatMap((node) => {
++                        if (!node) return []
++                        // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
++                        const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
++                        return escaped && escaped.length % 2 ? [] : [...Shell.commandHeads(node.text, Shell.name(shell))]
++                      })
++                  }).pipe(Effect.scoped)
++                : Shell.commandHeads(input.command, Shell.name(shell))
++              const compatibility = Shell.compatibilityError(heads, Shell.name(shell))
 +              // 在目录授权和命令授权之前返回已有 ToolFailure，不执行任何进程。
 +              if (compatibility) return yield* new ToolFailure({ message: compatibility })
                const source = {
                  type: "tool" as const,
                  messageID: context.assistantMessageID,
                  callID: context.toolCallID,
-@@ -170,9 +183,8 @@
+@@ -170,9 +198,8 @@
                if ((yield* fs.stat(target.canonical)).type !== "Directory")
                  return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
  
@@ -544,7 +720,7 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
                  cwd: target.canonical,
                  shell,
                  stdin: "ignore",
-@@ -210,7 +222,9 @@
+@@ -210,7 +237,9 @@
 +                  // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
                  truncated: result.outputTruncated === true,
                  ...(warnings.length ? { warnings } : {}),
@@ -622,7 +798,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 -            expect(yield* settleTool(registry, call({ command: "pwd" }))).toEqual({
 +            // 真实 settlement 接纳说明字段，但授权与进程仍只收到原始 pwd 命令。
 +            expect(yield* settleTool(registry, call({ command: "pwd", description: "Shows the current working directory" }))).toEqual({
-@@ -173,9 +183,72 @@
+@@ -173,9 +183,75 @@
                maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
              })
              expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
@@ -649,6 +825,8 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +                  cmd ? 'call "grep.exe" missing' : ". 'grep.exe' missing",
 +                  cmd ? "@g^rep.exe missing" : "gre`p.exe missing",
 +                  cmd ? "echo ok&head missing" : "Write-Output ok;head missing",
++                  // cmd 命令组与 PowerShell 条件块都应在授权前拒绝内部 Unix 命令。
++                  ...(cmd ? ["(head)", "(head -n 1 missing)", "echo ok && (head -n 1 missing)"] : ["Write-Output ok; if ($?) { head -n 1 missing }"]),
 +                  "echo ok&&grep.exe missing",
 +                  "echo ok|awk missing",
 +                  "echo ok||sed missing",
@@ -662,9 +840,10 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +                  expect(assertions).toEqual([])
 +                  expect(runs).toEqual([])
 +                }
-+                // 与源守卫一样区分程序与参数；复杂脚本不承诺由此浅层扫描完整解释。
++                // PowerShell 递归检查命令节点；引号内的脚本文本仍然只是参数。
 +                const allowed = cmd ? ["echo head grep", 'echo "head&grep.exe"', "echo head^&grep.exe", "find needle input", '" head" missing'] : [
 +                  "Write-Output head grep", "Write-Output 'head;grep.exe'", 'Write-Output "head|grep.exe"',
++                  "Write-Output 'if ($true) { head -n 1 missing }'",
 +                  "Write-Output head`;grep.exe", "Write-Output 'it''s head; grep'", "'head'", "ls",
 +                  "g`rep.exe missing",
 +                  "& ' head' missing",

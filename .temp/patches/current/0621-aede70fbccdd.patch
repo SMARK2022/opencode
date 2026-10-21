@@ -987,54 +987,33 @@ index 0000000000000000000000000000000000000000..5161ed042daa7d92a004f168599c910c
 +| 3 | R4 | yes | No blocking findings（R4 文本与已交付代码逐行一致；diff 与第 2 轮审计版本逐字节相同；E=747/C=127=17.0% 独立重算通过；验证复现：typecheck 零错误、edit/apply_patch/write/patch 251/251、test/tool 731/731） | 4 条记录级（均已在本轮记录时处理：§23 数字刷新、§24 轮次行补齐、残余 seam 名引用更正、§10 示例措辞与落盘文案对齐） | APPROVE | ses_f6b72fbc1ffew0VQ404367P9o8 |
 +
 +第 1 轮返工记录（R3 不变，纯实施修正）：①read.ts 新增 `visibleReadMeta` 作为可见性协议的唯一 part 级判定（completed+未 compacted+非 stub+metadata.read 合法），collectVisibleReads 改经它表达；edit.ts 的 scanFileTouchHistory 全量改用它（readRanges/lastReadEnd/同名判定全部来自可见 read），collectVisibleReads/isReadMetadata 回滚为私有，edit.ts 只导入 canonicalReadPath/visibleReadMeta；新增红绿用例「does not count compacted reads as visible history」。②apply_patch.txt 改回合同措辞「more than 3 lines」，测试断言同步。返工后 edit 96/96、apply_patch 71/71、read 82/82、typecheck 零错误。
-diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
---- a/packages/opencode/src/patch/index.ts
-+++ b/packages/opencode/src/patch/index.ts
-@@ -5,7 +5,8 @@ import * as Bom from "../util/bom"
- import { convertToLineEnding, detectLineEnding, splitLines } from "../util/line-ending"
- // #131：patch 逻辑行匹配，写回保留原行尾
- // #533：locateContext 是 chunk 局部导航下界，与 old block 候选判定分离
--import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./match"
-+import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset, type AmbiguityCandidates } from "./match"
-+import { formatAmbiguityHint, uniqueExtensionHint } from "../tool/edit-apply"
- 
- export const PatchSchema = Schema.Struct({
-   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
-@@ -376,7 +377,14 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
-     if (result.type === "ambiguous") {
-       // #533：ambiguity 的修正动作是补充 context；重复打印已在 Tool input 中的 old block 不增加决策信息。
-       throw new Error(
--        `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
-+        withAmbiguityAdvice(
-+          `Found multiple matches for expected lines in ${filePath}. Provide more context to make the match unique.`,
-+          originalLines,
-+          chunk.old_lines,
-+          result.candidates,
-+          searchFrom,
-+          terminated,
-+        ),
-       )
-     }
-     if (result.type === "not-found") {
-@@ -438,6 +446,32 @@ function applyChunks(originalLines: string[], filePath: string, chunks: UpdateFi
-   return lines
- }
- 
-+// 歧义失败合同（INV-03）：候选行号来自 locateExact 载荷（唯一性 owner 产出）；
-+// 扩展建议经同域核验——同一 locateExact、同一 cursorOffset（change_context 收窄后的
-+// 合格域），核验失败的建议不得展示，否则模型按错误建议重试只会再失败一次。
+diff --git a/packages/core/src/patch.ts b/packages/core/src/patch.ts
+--- a/packages/core/src/patch.ts
++++ b/packages/core/src/patch.ts
+@@ -2 +2 @@
+-import { closestWindow, lineOffset, locateContext, locateExact, nextLineOffset } from "./patch-match"
++import { closestWindow, formatAmbiguityHint, lineOffset, locateContext, locateExact, nextLineOffset, uniqueExtensionHint, type AmbiguityCandidates } from "./patch-match"
+@@ -152,4 +152,7 @@
+     const result = locateExact(originalLines, chunk.oldLines, searchFrom, chunk.endOfFile, terminated)
+     if (result.type === "ambiguous")
+-      throw new Error(`Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`)
++      throw new Error(withAmbiguityAdvice(
++        `Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`,
++        originalLines, chunk.oldLines, result.candidates, searchFrom, terminated,
++      ))
+     if (result.type === "not-found")
+@@ -187,0 +191,21 @@
++// 失败诊断只消费唯一性owner携带的候选，并用相同cursor/行尾语义核验扩展，不能另建成功matcher。
 +function withAmbiguityAdvice(
 +  message: string,
 +  originalLines: string[],
-+  oldLines: string[],
++  oldLines: ReadonlyArray<string>,
 +  candidates: AmbiguityCandidates | undefined,
 +  cursorOffset: number,
 +  terminated: boolean,
 +) {
 +  if (!candidates || candidates.lines.length === 0) return message
-+  // old block 是整行域输入，lineAligned 恒成立。
-+  // terminated=false（文件在 old block 之前结束）时不存在向下扩展空间，
-+  // 建议只能来自向上扩展；此时盲目拼装双向文案会让模型去取不存在的行。
++  // old block本身是整行域输入；展示数量仍用完整枚举总数，不把封顶列表冒充全部候选。
 +  const hint = uniqueExtensionHint(
 +    originalLines,
 +    candidates.lines,
@@ -1042,26 +1021,14 @@ diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/
 +    (extended) => locateExact(originalLines, extended, cursorOffset, false, terminated).type === "found",
 +    true,
 +  )
-+  // total 以 owner 的完整枚举为准：载荷 lines 有封顶，不能只报截断后的数量。
 +  return message + formatAmbiguityHint(hint && { ...hint, total: candidates.total })
 +}
 +
- function formatLineReplacement(
-   newLines: string[],
-   span: { start: number; end: number },
 
-diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
---- a/packages/opencode/src/patch/match.ts
-+++ b/packages/opencode/src/patch/match.ts
-@@ -1,6 +1,6 @@
- import { diffChars } from "diff"
- // #533：Patch 与 Edit 共用同一 PI normalization contract（edit-apply 无反向依赖，无环）
--import { normalizeForMatch } from "../tool/edit-apply"
-+import { AMBIGUITY_MAX_CANDIDATES, normalizeForMatch } from "../tool/edit-apply"
- 
- // #533：normalized raw view 的逐 grapheme 分段器——模块级单例避免每次定位重建 Segmenter
- const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" })
-@@ -9,10 +9,15 @@ export type ExactLocation =
+diff --git a/packages/core/src/patch-match.ts b/packages/core/src/patch-match.ts
+--- a/packages/core/src/patch-match.ts
++++ b/packages/core/src/patch-match.ts
+@@ -9,10 +9,19 @@ export type ExactLocation =
    | { kind: "line"; startLine: number; endLine: number }
    | { kind: "substring"; startOffset: number; endOffset: number }
  
@@ -1069,6 +1036,10 @@ diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/
 +// 抛出点拿不到多层候选域（exact/normalized whole-line、substring、unsafeNormalized），
 +// 自行重扫要么构成第二 matcher，要么用更弱域给出与真实唯一性矛盾的建议。
 +export type AmbiguityCandidates = { lines: number[]; total: number }
++
++// 候选展示和扩展步数有界；两代工具只在失败路径共用诊断，不扩大匹配成功域。
++export const AMBIGUITY_MAX_CANDIDATES = 8
++const AMBIGUITY_MAX_EXTENSION = 10
 +
  export type ExactResult =
    | { type: "found"; location: ExactLocation }
@@ -1145,7 +1116,7 @@ diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/
          continue
        }
        // #533：whole-line 或 exact occurrence 已代表同一 normalized identity 时，不重复增加候选计数。
-@@ -144,9 +181,11 @@ export function locateExact(
+@@ -144,9 +185,93 @@ export function locateExact(
    }
  
    // #533：unsafe occurrence 不可写，但仍是 normalized 域的第二候选；忽略它会破坏全局唯一性。
@@ -1160,7 +1131,88 @@ diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/
    if (candidates.length === 0) return { type: "not-found" }
    return { type: "found", location: candidates[0].location }
  }
-
++
++// 行级扩展只提出最便宜方向，仍须调用方用自己的唯一性域验证；同行重复/mid-line只能报告行号。
++export function uniqueExtensionHint(
++  lines: ReadonlyArray<string>,
++  candidateStartLines: number[],
++  patternLineCount: number,
++  verifyUnique: (extended: string[]) => boolean,
++  lineAligned: boolean,
++): { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined {
++  const distinct = [...new Set(candidateStartLines)].sort((a, b) => a - b)
++  if (distinct.length === 0) return undefined
++  const shown = distinct.slice(0, AMBIGUITY_MAX_CANDIDATES).map((line) => line + 1)
++  if (!lineAligned || distinct.length < 2) return { lines: shown, total: distinct.length }
++
++  let best: { direction: "above" | "below"; count: number; start: number } | undefined
++  for (const start of distinct) {
++    const end = start + patternLineCount - 1
++    let up = 0
++    let down = 0
++    for (const other of distinct) {
++      if (other === start) continue
++      const otherEnd = other + patternLineCount - 1
++      let shared = 0
++      while (
++        shared < AMBIGUITY_MAX_EXTENSION &&
++        start - 1 - shared >= 0 &&
++        other - 1 - shared >= 0 &&
++        lines[start - 1 - shared] === lines[other - 1 - shared]
++      ) {
++        shared++
++      }
++      up = Math.max(up, shared + 1)
++      shared = 0
++      while (
++        shared < AMBIGUITY_MAX_EXTENSION &&
++        end + 1 + shared < lines.length &&
++        otherEnd + 1 + shared < lines.length &&
++        lines[end + 1 + shared] === lines[otherEnd + 1 + shared]
++      ) {
++        shared++
++      }
++      down = Math.max(down, shared + 1)
++    }
++    // 不能建议不存在的上下文行；扩展上限只限制诊断工作，不改变旧块成功域。
++    if (up <= AMBIGUITY_MAX_EXTENSION && start - up >= 0 && (!best || up < best.count)) {
++      best = { direction: "above", count: up, start }
++    }
++    if (down <= AMBIGUITY_MAX_EXTENSION && end + down < lines.length && (!best || down < best.count)) {
++      best = { direction: "below", count: down, start }
++    }
++  }
++
++  if (best) {
++    const extended =
++      best.direction === "above"
++        ? lines.slice(best.start - best.count, best.start + patternLineCount)
++        : lines.slice(best.start, best.start + patternLineCount + best.count)
++    // normalized或被截断候选可能破坏行级推理，原matcher拒绝的建议不允许展示。
++    if (!verifyUnique(extended)) best = undefined
++  }
++  return {
++    lines: shown,
++    total: distinct.length,
++    ...(best ? { extension: { direction: best.direction, count: best.count } } : {}),
++  }
++}
++
++// 两代抛出点共享同一格式；lines已经转换为面向用户的1-based行号。
++export function formatAmbiguityHint(
++  hint: { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined,
++) {
++  if (!hint) return ""
++  const listing =
++    hint.total === 1
++      ? `line ${hint.lines[0]}`
++      : `lines ${hint.lines.join(", ")}${hint.total > hint.lines.length ? `, … (${hint.total} total)` : ""}`
++  const advice = hint.extension
++    ? ` Including ${hint.extension.count} more line(s) ${hint.extension.direction} makes the match unique.`
++    : ""
++  return `\n\nMatches at ${listing}.${advice}`
++}
++
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
@@ -1341,7 +1393,12 @@ index 9a927631f661a386eb486b4776bab92a0fb35370..eac1e3522dfeb562e711f99311ee5d5b
 diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
 --- a/packages/opencode/src/tool/edit-apply.ts
 +++ b/packages/opencode/src/tool/edit-apply.ts
-@@ -169,6 +169,152 @@ export function applyReplacementsPreservingUnchangedLines(
+@@ -1,2 +1,4 @@
+ import { normalizeForMatch } from "@opencode-ai/core/util/normalize-for-match"
+ export { normalizeForMatch } from "@opencode-ai/core/util/normalize-for-match"
++import { formatAmbiguityHint, uniqueExtensionHint } from "@opencode-ai/core/patch-match"
++export { AMBIGUITY_MAX_CANDIDATES, formatAmbiguityHint, uniqueExtensionHint } from "@opencode-ai/core/patch-match"
+@@ -169,6 +171,55 @@ export function applyReplacementsPreservingUnchangedLines(
    return result
  }
  
@@ -1349,11 +1406,6 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
 +// 以下逻辑只服务失败文本，永不进入成功替换域（模块不变量 8）。
 +// 候选行号让模型不必为定位重复段再跑一次 grep；最小唯一扩展直接回答
 +// 「oldString 再带多少上下文行才唯一」，避免模型盲目试探。
-+
-+// 诊断预算：候选与扩展都封顶，全部计算是 indexOf/行比较的线性扫描，
-+// 不启动第二 matcher，也不引入超时状态机。match.ts 的歧义载荷复用同一上限。
-+export const AMBIGUITY_MAX_CANDIDATES = 8
-+const AMBIGUITY_MAX_EXTENSION = 10
 +
 +// 偏移→行号（0-based）。候选偏移天然升序，双指针一次划过不同行起点的重复扫描。
 +function offsetsToLines(starts: number[], offsets: number[]) {
@@ -1364,98 +1416,6 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
 +    lines.push(cursor)
 +  }
 +  return lines
-+}
-+
-+/**
-+ * 最小唯一扩展提示：对同一行的多个候选去重后，逐对比较候选块的向上/向下公共上下文，
-+ * 取「比最长公共上下文再多一行」作为该候选该方向的去歧成本，全局取最便宜者。
-+ * 扩展模式必然包含原块，其命中只能是原候选之一，因此行域两两比较在数学上完备；
-+ * 但 mid-line 候选与 normalized 域可能破坏行级推理，所以最终建议必须经调用方注入的
-+ * 同域唯一性核验（verifyUnique）后才允许展示——核验不过则只给候选行号。
-+ */
-+export function uniqueExtensionHint(
-+  lines: string[],
-+  candidateStartLines: number[],
-+  patternLineCount: number,
-+  verifyUnique: (extended: string[]) => boolean,
-+  lineAligned: boolean,
-+): { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined {
-+  const distinct = [...new Set(candidateStartLines)].sort((a, b) => a - b)
-+  if (distinct.length === 0) return undefined
-+  const shown = distinct.slice(0, AMBIGUITY_MAX_CANDIDATES).map((line) => line + 1)
-+
-+  // 扩展建议的语义是「多带 N 个完整行」，只在块行对齐且候选确在多行上时才有意义：
-+  // 同行重复（distinct=1 但多次出现）或 mid-line 块都无法用整行扩展表达，直接降级为只报行号。
-+  if (!lineAligned || distinct.length < 2) return { lines: shown, total: distinct.length }
-+
-+  let best: { direction: "above" | "below"; count: number; start: number } | undefined
-+  for (const start of distinct) {
-+    const end = start + patternLineCount - 1
-+    let up = 0
-+    let down = 0
-+    for (const other of distinct) {
-+      if (other === start) continue
-+      const otherEnd = other + patternLineCount - 1
-+      let shared = 0
-+      while (
-+        shared < AMBIGUITY_MAX_EXTENSION &&
-+        start - 1 - shared >= 0 &&
-+        other - 1 - shared >= 0 &&
-+        lines[start - 1 - shared] === lines[other - 1 - shared]
-+      ) {
-+        shared++
-+      }
-+      up = Math.max(up, shared + 1)
-+      shared = 0
-+      while (
-+        shared < AMBIGUITY_MAX_EXTENSION &&
-+        end + 1 + shared < lines.length &&
-+        otherEnd + 1 + shared < lines.length &&
-+        lines[end + 1 + shared] === lines[otherEnd + 1 + shared]
-+      ) {
-+        shared++
-+      }
-+      down = Math.max(down, shared + 1)
-+    }
-+    // 超出文件边界或预算的方向不可能去歧，不参与择优。
-+    if (up <= AMBIGUITY_MAX_EXTENSION && start - up >= 0 && (!best || up < best.count)) {
-+      best = { direction: "above", count: up, start }
-+    }
-+    if (down <= AMBIGUITY_MAX_EXTENSION && end + down < lines.length && (!best || down < best.count)) {
-+      best = { direction: "below", count: down, start }
-+    }
-+  }
-+
-+  if (best) {
-+    const extended =
-+      best.direction === "above"
-+        ? lines.slice(best.start - best.count, best.start + patternLineCount)
-+        : lines.slice(best.start, best.start + patternLineCount + best.count)
-+    // 核验与抛出点的唯一性判定同域；核验失败的建议会变成模型的下一次失败，必须丢弃。
-+    if (!verifyUnique(extended)) best = undefined
-+  }
-+
-+  return {
-+    lines: shown,
-+    total: distinct.length,
-+    ...(best ? { extension: { direction: best.direction, count: best.count } } : {}),
-+  }
-+}
-+
-+// 歧义文案尾部是 edit 与 apply_patch 的共享合同（同一措辞、同一格式），
-+// 禁止两处各自拼装导致漂移。hint.lines 已是 1-based 展示行号。
-+export function formatAmbiguityHint(
-+  hint: { lines: number[]; total: number; extension?: { direction: "above" | "below"; count: number } } | undefined,
-+) {
-+  if (!hint) return ""
-+  const listing =
-+    hint.total === 1
-+      ? `line ${hint.lines[0]}`
-+      : `lines ${hint.lines.join(", ")}${hint.total > hint.lines.length ? `, … (${hint.total} total)` : ""}`
-+  const advice = hint.extension
-+    ? ` Including ${hint.extension.count} more line(s) ${hint.extension.direction} makes the match unique.`
-+    : ""
-+  return `\n\nMatches at ${listing}.${advice}`
 +}
 +
 +// 失败错误尾部：候选行号 + 经同域核验的最小唯一扩展。
@@ -1683,7 +1643,7 @@ diff --git a/packages/opencode/src/tool/edit.txt b/packages/opencode/src/tool/ed
 index 89d945cfefb1f8c6b96c057c51cc06408406fae7..174de35da0ec76dfd45f713fa8143ba9939644a2 100644
 --- a/packages/opencode/src/tool/edit.txt
 +++ b/packages/opencode/src/tool/edit.txt
-@@ -1,15 +1,16 @@
+@@ -1,13 +1,14 @@
  Performs string replacements in files. Supports one or more disjoint edits in a single call.
  
  Usage:
@@ -1700,18 +1660,15 @@ index 89d945cfefb1f8c6b96c057c51cc06408406fae7..174de35da0ec76dfd45f713fa8143ba9
 -- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context to make it unique or set `replaceAll` on that edit item.
 +- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context (more than 3 lines) to make it unique or set `replaceAll` on that edit item.
  - Use `replaceAll` on an edit item to rename a string across the file.
- - Create/overwrite: single edit with empty `oldString` only (raw empty string). Whitespace-only oldString is not create and will fail.
- - If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins when non-empty.
-diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
---- a/packages/opencode/src/tool/file-diff.ts
-+++ b/packages/opencode/src/tool/file-diff.ts
-@@ -27,6 +27,22 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
+diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-diff.ts
+--- a/packages/core/src/tool/file-diff.ts
++++ b/packages/core/src/tool/file-diff.ts
+@@ -19,6 +19,21 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
  
  export type RenderedFileDiff = { patch: string; additions: number; deletions: number }
  
-+// 连续前缀裁剪（INV-08；C01 教训）：text 永远是 patch 的逐字节前缀，omitted 等于真实
-+// 剩余行数。旧 edit.ts 内联循环用 continue 跳过超放行、后续短行仍进入，展示中间出洞
-+// 却把「只裁尾部」的印象留给模型——这里只许切一刀，长行处即整体截止。
++// 三工具共用连续前缀裁剪：长行放不下立即截止，不能跳过它后再显示短行而制造中间空洞。
++// UTF-8预算按实际保留前缀计算；omitted是全部未显示行，不只计算超长行。
 +export function boundDiff(patch: string, budget: { maxLines: number; maxBytes: number }) {
 +  const lines = patch.split("\n")
 +  let bytes = 0
@@ -1728,17 +1685,12 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
  
  function isBinaryText(text: string) {
-@@ -96,8 +112,40 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
+@@ -81,7 +96,34 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
    }
  }
  
-+// 行多重集对称差 |old\\new| + |new\\old| 是行级编辑距离 D 的下界：只在单侧出现的每个
-+// 行实例都必须被删除/插入，任何编辑脚本都受其约束。行尾差异（CRLF/尾换行空 token）
-+// 会让下界偏松（strip 后一致性更粗、所需编辑更少），永不偏紧——因此对称差严格大于
-+// MAX_DIFF_EDIT_LINES 时，jsdiff 探测（diff.js 同步循环按 editLength 递增穷举到 K+1）
-+// 必然中止，直接走 rewriteMarker 与探测中止的决策逐字节一致。
-+// 动机实测：jsdiff 中止路径自身是 O(K²) 且每步分配路径对象（事故 fixture 纯探测
-+// ~1280ms），慢机器上会越过性能回归测试的 1000ms 预算；本过滤是 O(N) 哈希计数。
++// 行多重集对称差是编辑距离下界；严格大于K时原jsdiff必然中止，线性预过滤不改变预算决策。
++// 去除尾换行空token只放松下界；行内CR仍保留，不把大跨度或重排行数误认成大编辑距离。
 +function exceedsEditBudgetByLineMultiset(oldText: string, newText: string) {
 +  // 分词对齐 jsdiff 行分词的 strip 形态：split("\n") 后去尾部空 token（尾换行产生），
 +  // 行尾 \r 归入行内容（strip 只让一致性更粗，保持下界方向安全）。
@@ -1766,9 +1718,16 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
 +    const { oldMid, newMid } = trimCommonLines(oldText, newText)
 +    return rewriteMarker(filePath, oldMid, newMid, oldText, newText)
 +  }
-   // 门B（R2）：带预算的真实计算取代中段体积猜测。探测即主路径计算本身（jsdiff 原生
-   // maxEditLength，预算耗尽同步返回 undefined），不是失败后备路径。
+   // 直接用jsdiff原生预算探测；跨度大但改动小的文本仍走真实行级diff。
    const probe = diffLines(oldText, newText, { maxEditLength: MAX_DIFF_EDIT_LINES })
+
+diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
+--- a/packages/opencode/src/tool/file-diff.ts
++++ b/packages/opencode/src/tool/file-diff.ts
+@@ -2,2 +2,3 @@
+ export {
++  boundDiff,
+   BINARY_SCAN_CHARS,
 
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 --- a/packages/opencode/src/tool/read.ts
@@ -1784,7 +1743,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
    return process.platform === "win32" ? FSUtil.normalizePath(filepath).toLowerCase() : filepath
  }
  
-@@ -265,16 +267,33 @@ function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
+@@ -248,17 +250,33 @@ function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
  
  // #142：从会话历史收集同文件、未 stub 的可见读取
  // #142：扫描 assistant 已完成 read
@@ -1797,11 +1756,11 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +  state?: { status?: string; time?: { start?: number; end?: number; compacted?: number }; metadata?: { read?: unknown } }
 +}): ReadRangeMeta | undefined {
 +  if (part.type !== "tool" || part.tool !== "read") return undefined
-+  if (part.state?.status !== "completed" || part.state?.time?.compacted) return undefined
-+  // Use metadata rather than parsing XML so the visible-context decision
-+  // stays stable even if the human-facing formatting changes later.
++  if (part.state?.status !== "completed" || part.state?.time?.compacted !== undefined) return undefined
++  // 元数据是可见性唯一协议；展示XML改变时不应让已压缩或非空零行读取变成可见正文。
 +  const meta = part.state?.metadata?.read
 +  if (!isReadRangeMeta(meta) || meta.stub) return undefined
++  if (meta.returned === 0 && meta.size > 0) return undefined
 +  return meta
 +}
 +
@@ -1814,9 +1773,10 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
      if (msg.info.role !== "assistant") continue
      for (const part of msg.parts) {
 -      if (part.type !== "tool" || part.tool !== "read") continue
--      if (part.state.status !== "completed" || part.state.time.compacted) continue
+-      if (part.state.status !== "completed" || part.state.time.compacted !== undefined) continue
 -      const meta = (part.state.metadata as { read?: unknown } | undefined)?.read
 -      if (!isReadRangeMeta(meta) || meta.stub) continue
+-      if (meta.returned === 0 && meta.size > 0) continue
 +      const meta = visibleReadMeta(part)
 +      if (!meta) continue
        if (meta.canonicalPath !== canonicalPath) continue
@@ -1881,24 +1841,66 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
              output,
            }
 
+diff --git a/packages/opencode/test/fixture/edit-feedback.ts b/packages/opencode/test/fixture/edit-feedback.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/fixture/edit-feedback.ts
+@@ -0,0 +1,20 @@
++import { Effect, Layer } from "effect"
++import { LSP } from "@/lsp/lsp"
++import { Format } from "@/format"
++
++// 反馈测试替换外部进程边界，仍执行真实mutation/formatter结果投影；意外调用其它能力会显式失败。
++export const feedbackLsp = Layer.mock(LSP.Service, {
++  init: () => Effect.void,
++  status: () => Effect.succeed([]),
++  hasClients: () => Effect.succeed(false),
++  touchFile: () => Effect.void,
++  diagnostics: () => Effect.succeed({}),
++})
++
++// 常态分支不执行外部formatter；需要文本变化的切片使用各文件已有的受控格式化层。
++export const feedbackFormat = Layer.mock(Format.Service, {
++  init: () => Effect.void,
++  status: () => Effect.succeed([]),
++  file: () => Effect.succeed(false),
++})
++
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -18,6 +18,7 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
+@@ -18,6 +18,11 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
  import { Truncate } from "@/tool/truncate"
  import { TestInstance } from "../fixture/fixture"
- import { SessionID, MessageID } from "../../src/session/schema"
+-import { SessionID, MessageID } from "../../src/session/schema"
++import { SessionID, MessageID, PartID } from "../../src/session/schema"
 +import { canonicalReadPath } from "../../src/tool/read"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import type { Context } from "../../src/tool/tool"
++import { feedbackFormat, feedbackLsp } from "../fixture/edit-feedback"
  import { testEffect } from "../lib/effect"
  
  const it = testEffect(
-@@ -287,6 +288,176 @@ describe("tool.apply_patch freeform", () => {
+@@ -47,3 +52,8 @@
+ 
++// 新反馈切片只用真实工具/隔离文件及受控服务；构建层就替换LSP，不靠扩展名或环境开关避开进程。
++const feedbackGroup = LayerNode.group([LSP.node, FSUtil.node, Format.node, EventV2Bridge.node, Truncate.node, Agent.node])
++const itFeedback = testEffect(LayerNode.compile(feedbackGroup, [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]]))
++const itFeedbackFormatted = testEffect(LayerNode.compile(feedbackGroup, [[LSP.node, feedbackLsp], [Format.node, lineEndingFormatLayer]]))
++
+ const baseCtx = {
+   sessionID: SessionID.make("ses_test"),
+@@ -77 +87 @@
+-type ToolCtx = typeof baseCtx & {
++type ToolCtx = Omit<Context, "ask"> & {
+@@ -287,6 +298,175 @@ describe("tool.apply_patch freeform", () => {
      }),
    )
  
 +  // 歧义失败的合同（INV-03）：候选行号由唯一性判定 owner（locateExact）产出，
 +  // 扩展建议必须经同域核验后才展示；文本不得泄露 old block 内容（上行既有契约）。
-+  it.instance("reports candidate lines and verified unique extension on ambiguity", () =>
++  itFeedback.instance("reports candidate lines and verified unique extension on ambiguity", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const { ctx } = makeCtx()
@@ -1924,7 +1926,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +
 +  // INV-04 时效事实：自写晚于自读时，全失败错误必须点明时效并指向作用后结果。
 +  // 与 edit 侧同一判定与文案（scanFileTouchHistory 共享 seam）。
-+  it.instance("notes own-write-after-read staleness on all-hunks failure", () =>
++  itFeedback.instance("notes own-write-after-read staleness on all-hunks failure", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const { ctx } = makeCtx()
@@ -1932,7 +1934,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +      yield* writeText(target, "current content\n")
 +
 +      const messageID = MessageID.make("msg_history")
-+      const history = {
++      const history: ToolCtx = {
 +        ...ctx,
 +        messages: [
 +          {
@@ -1946,13 +1948,13 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +              path: { cwd: ".", root: "." },
 +              cost: 0,
 +              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+              modelID: "test",
-+              providerID: "test",
++              modelID: ModelV2.ID.make("test"),
++              providerID: ProviderV2.ID.make("test"),
 +              time: { created: 0 },
 +            },
 +            parts: [
 +              {
-+                id: "prt_h0",
++                id: PartID.make("prt_h0"),
 +                messageID,
 +                sessionID: ctx.sessionID,
 +                type: "tool",
@@ -1985,7 +1987,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +                },
 +              },
 +              {
-+                id: "prt_h1",
++                id: PartID.make("prt_h1"),
 +                messageID,
 +                sessionID: ctx.sessionID,
 +                type: "tool",
@@ -2006,8 +2008,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +      }
 +
 +      const patchText = "*** Begin Patch\n*** Update File: stale.txt\n@@\n-missing line\n+changed\n*** End Patch"
-+      // messages 在 ToolCtx 上是 never[]（baseCtx 字面量推导），fixture 先经 unknown 过渡。
-+      const exit = yield* execute({ patchText }, history as unknown as typeof ctx).pipe(Effect.exit)
++      const exit = yield* execute({ patchText }, history).pipe(Effect.exit)
 +
 +      expect(Exit.isFailure(exit)).toBe(true)
 +      if (Exit.isFailure(exit)) {
@@ -2020,7 +2021,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +
 +  // INV-07/H02：成功 output 必须携带 post-formatter 的 Changed 段，metadata.diff 与其一致；
 +  // 模型需要一个「落盘真值」错点对凑陈旧（G01），formatter 前 diff 会在 formatter 改动后说谎。
-+  it.instance("echoes the post-formatter diff in output and metadata", () =>
++  itFeedback.instance("echoes the post-formatter diff in output and metadata", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const { ctx, calls } = makeCtx()
@@ -2039,7 +2040,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +    }),
 +  )
 +
-+  itLineEndingFormatted.instance("reflects formatter results in the echoed diff and metadata.diff", () =>
++  itFeedbackFormatted.instance("reflects formatter results in the echoed diff and metadata.diff", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const { ctx } = makeCtx()
@@ -2057,7 +2058,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +  )
 +
 +  // INV-10：description 必须携带陈旧转写禁令与 more-than-3-lines 诱导。文案即合同。
-+  it.instance("description carries staleness and context-size guidance", () =>
++  itFeedback.instance("description carries staleness and context-size guidance", () =>
 +    Effect.gen(function* () {
 +      const info = yield* ApplyPatchTool
 +      const tool = yield* info.init()
@@ -2073,12 +2074,13 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -20,6 +20,8 @@ import { testEffect } from "../lib/effect"
+@@ -20,6 +20,9 @@ import { testEffect } from "../lib/effect"
  import { Watcher } from "@opencode-ai/core/filesystem/watcher"
  // #522：oracle 测试直接消费公开 closestWindow；不读取 production 私有 helper。
  import { closestWindow } from "@/patch/match"
 +import { canonicalReadPath } from "../../src/tool/read"
 +import { renderFileDiff } from "@/tool/file-diff"
++import { feedbackFormat, feedbackLsp } from "../fixture/edit-feedback"
  
  const ctx = {
    sessionID: SessionID.make("ses_test-edit-session"),
@@ -2091,15 +2093,21 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
          }),
        ],
      ],
-@@ -150,6 +154,24 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
+@@ -150,6 +155,30 @@ function ctxWithPriorRead(filePath: string): Tool.Context {
    }
  }
  
 +// [local-smark] 中档预算层：diff 预算（limits−2048B/10行 保留额）落在「部分可显示」
 +// 区间，C01 前缀测试才能区分连续前缀与跳行截断；itTruncated 的 1024B 会裁到 0 行。
++const itFeedback = testEffect(LayerNode.compile(
++  LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]),
++  [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]],
++))
 +const itMidBudget = testEffect(
 +  LayerNode.compile(
 +    LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, Agent.node, Truncate.node]), [
++      [LSP.node, feedbackLsp],
++      [Format.node, feedbackFormat],
 +      [
 +        Truncate.node,
 +        Layer.mock(Truncate.Service, {
@@ -2225,7 +2233,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
  
 +    // 歧义诊断的用户可观察合同：候选行号 + 最小唯一扩展建议（INV-03）。
 +    // 该断言锁死失败文本的信息量，不断言内部枚举实现。
-+    it.instance("reports candidate lines and minimal unique extension on ambiguity", () =>
++    itFeedback.instance("reports candidate lines and minimal unique extension on ambiguity", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "ambiguous.txt")
@@ -2241,7 +2249,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +    )
 +
 +    // 同一行内重复无法通过行扩展去歧：此时只给候选行号，不得给出会再次失败的扩展建议。
-+    it.instance("degrades to candidate lines when line extension cannot disambiguate", () =>
++    itFeedback.instance("degrades to candidate lines when line extension cannot disambiguate", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "sameline.txt")
@@ -2257,7 +2265,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +
 +    // INV-04 时效事实：自写晚于自读时，失败错误必须点明时效并指向作用后结果；
 +    // 文案不得诱导 re-read（用户决策）。控制组证明无陈旧时句子不出现。
-+    it.instance("notes own-write-after-read staleness on mismatch failure", () =>
++    itFeedback.instance("notes own-write-after-read staleness on mismatch failure", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "stale.txt")
@@ -2276,7 +2284,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +      }),
 +    )
 +
-+    it.instance("omits staleness note when the last read is newer than the last write", () =>
++    itFeedback.instance("omits staleness note when the last read is newer than the last write", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "fresh.txt")
@@ -2293,7 +2301,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +    )
 +
 +    // INV-05 已读区间：融合同 canonicalPath 的全部可见 read metadata，只陈述事实。
-+    it.instance("lists previously read line ranges on mismatch failure", () =>
++    itFeedback.instance("lists previously read line ranges on mismatch failure", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "paged.txt")
@@ -2310,7 +2318,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +    )
 +
 +    // 已压缩读取的内容不在模型上下文中（可见性协议）：不得计入已读区间与时效判定。
-+    it.instance("does not count compacted reads as visible history", () =>
++    itFeedback.instance("does not count compacted reads as visible history", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "compacted.txt")
@@ -2328,7 +2336,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +    )
 +
 +    // INV-09 同名异路径提醒：存在同 basename 异路径已读文件时提示一次。
-+    it.instance("notes a same-named read from a different path on mismatch failure", () =>
++    itFeedback.instance("notes a same-named read from a different path on mismatch failure", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const original = path.join(test.directory, "original", "x.patch")
@@ -2377,7 +2385,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +
 +    // INV-10：工具 description 必须携带三条用户可观察合同——陈旧转写禁令、
 +    // 门禁不认可 bash 输出、歧义条目的 more-than-3-lines 诱导。文案即合同。
-+    it.instance("description carries staleness, bash-gate, and context-size guidance", () =>
++    itFeedback.instance("description carries staleness, bash-gate, and context-size guidance", () =>
 +      Effect.gen(function* () {
 +        const tool = yield* init()
 +        expect(tool.description).toContain("latest read")
@@ -2393,14 +2401,23 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
-@@ -124,6 +124,32 @@ const run = Effect.fn("WriteToolTest.run")(function* (
+@@ -17,3 +17,4 @@
+ import { testEffect } from "../lib/effect"
++import { feedbackFormat, feedbackLsp } from "../fixture/edit-feedback"
+ 
+ const ctx = {
+@@ -124,6 +125,36 @@ const run = Effect.fn("WriteToolTest.run")(function* (
  })
  
++// 同一真实Write入口分别配“不格式化”和受控formatter，两个分支都不构建真实LSP服务。
++const itFeedback = testEffect(LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, Format.node, CrossSpawnSpawner.node, Truncate.node, Agent.node]), [[LSP.node, feedbackLsp], [Format.node, feedbackFormat]]))
++const itFeedbackFormatted = testEffect(LayerNode.compile(LayerNode.group([LSP.node, FSUtil.node, EventV2Bridge.node, mockFormatNode, CrossSpawnSpawner.node, Truncate.node, Agent.node]), [[LSP.node, feedbackLsp]]))
++
  describe("tool.write", () => {
 +  // INV-06/G04：formatter 实际改变内容时，output 必须回显「提交内容→最终落盘」的
 +  // 差异段并置 formattedChanged；未改变时 output 与 metadata 逐字节保持现状（常态零成本）。
 +  describe("formatter feedback", () => {
-+    itFormatted.instance("echoes the formatted delta when auto-format changes the content", () =>
++    itFeedbackFormatted.instance("echoes the formatted delta when auto-format changes the content", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "fmt.txt")
@@ -2411,7 +2428,7 @@ diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/
 +      }),
 +    )
 +
-+    it.instance("keeps output and metadata unchanged when no formatter adjustment happens", () =>
++    itFeedback.instance("keeps output and metadata unchanged when no formatter adjustment happens", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
 +        const filepath = path.join(test.directory, "plain.txt")

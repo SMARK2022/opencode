@@ -8,15 +8,14 @@ Content-Transfer-Encoding: 8bit
 
 移除 fork 自产的 README 文案锁定测试：字面正则把一次正常的散文化改写（不负责→无法负责）误报为回归，正则锁定与"语义概念"注释自相矛盾；风险披露由产品文档与人工 review 承载。
 
-适配说明：目标现存文件为 0319 迁移后的 101 行漂移版（README 三元组与 pre-image 不同且根 README 中文化后该测试本已红）——按状态版整删即完整语义等价，不回灌 pre-image；test/docs/ 目录随删除清空，全仓零引用（CI/shard/bunfig 均 grep 证实）。
+适配说明：移除目标现存的旧九项文案正则锁定及专用配置/helper；575新增的双入口提示顺序/发布身份用例并非这些正则，保留它及readReadme。按真实117行前像收敛为23行，不删README、不改CI动态发现，不以删除测试掩盖功能退化。
 
 diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test/docs/readme.test.ts
-deleted file mode 100644
 --- a/packages/opencode/test/docs/readme.test.ts
-+++ /dev/null
-@@ -1,101 +0,0 @@
--import { describe, expect, test } from "bun:test"
--
++++ b/packages/opencode/test/docs/readme.test.ts
+@@ -1,117 +1,23 @@
+ import { describe, expect, test } from "bun:test"
+ 
 -const readmes = [
 -  { file: "docs/readme/README.zh.md",
 -    // 安装标题是用户执行命令前的边界；数据库风险必须落在这个边界之前，才算真正的安装前提示。
@@ -35,7 +34,8 @@ deleted file mode 100644
 -      mcp: [/chatgpt-browser-agent-smark/i, /ChatGPT[^\n]{0,20}ask|ask[^\n]{0,20}ChatGPT/i, /图片生成|image generation/i],
 -    },
 -  },
--  { file: "README.md",
+-  // 英文文档随本次改名迁移；继续在实际英文入口验证原有承诺，不用英文规则检查中文首页。
+-  { file: "README.en.md",
 -    // 三语种 README 结构保持一致，所以每份文档都用本地化安装标题切分“安装前”区域。
 -    installHeading: "### Installation",
 -    concepts: {
@@ -65,7 +65,22 @@ deleted file mode 100644
 -  },
 -]
 -
--describe("README branch onboarding", () => {
+ describe("README branch onboarding", () => {
+   test("root readmes show migration and branch notices before the screenshot", async () => {
+     for (const file of ["README.md", "README.en.md"]) {
+       const content = await readReadme(file)
+       const warning = content.indexOf("> [!WARNING]")
+       const tip = content.indexOf("> [!TIP]", warning)
+       const screenshot = content.indexOf("[![OpenCode Terminal UI]")
+       // 根入口是用户首次接触迁移风险的位置，两个语种都必须在截图前依次展示风险与分支提示。
+       expect(warning).toBeGreaterThan(content.indexOf("</p>", content.indexOf('href="README.md"')))
+       expect(tip).toBeGreaterThan(warning)
+       expect(screenshot).toBeGreaterThan(tip)
+       // 分支身份仍沿用目标发布版本，不能随文案重排退回 source 的旧版本。
+       expect(content.slice(tip, screenshot)).toContain("1.18.44-smark")
+     }
+   })
+-
 -  for (const readme of readmes) {
 -    test(`${readme.file} warns before installation about database migration risk`, async () => {
 -      const content = await readReadme(readme.file)
@@ -98,12 +113,12 @@ deleted file mode 100644
 -      expectConcept(mcpParagraph, readme.concepts.voice)
 -    })
 -  }
--})
--
--async function readReadme(file: string) {
--  // 测试文件位于 packages/opencode/test/docs；相对 repo root 读取可避免依赖当前 shell 的启动目录。
--  return Bun.file(new URL(`../../../../${file}`, import.meta.url)).text()
--}
+ })
+ 
+ async function readReadme(file: string) {
+   // 测试文件位于 packages/opencode/test/docs；相对 repo root 读取可避免依赖当前 shell 的启动目录。
+   return Bun.file(new URL(`../../../../${file}`, import.meta.url)).text()
+ }
 -
 -function expectConcept(content: string, patterns: RegExp[]) {
 -  for (const pattern of patterns) {

@@ -5,47 +5,11 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E4=BC=9A=E8=AF=9D?=
  =?UTF-8?q?=E5=92=8C=E6=B4=BB=E5=8A=A8=E7=AE=A1=E7=90=86=EF=BC=8C=E4=BC=98?=
  =?UTF-8?q?=E5=8C=96=E5=BF=83=E8=B7=B3=E6=9C=BA=E5=88=B6=E5=92=8C=E5=AE=88?=
 
-diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
-index 6eba89b86e..2421953d87 100644
---- a/packages/opencode/src/cli/cmd/tui.ts
-+++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -128,8 +128,9 @@ export async function discoverOrSpawnDaemon(
-   // 快速路径：锁存活且 ping 成功则跳过竞选
-   
-   const quickCheck = await deps.read()
--  const quickAlive = quickCheck && deps.alive(quickCheck.pid) && (await deps.ping(quickCheck.port))
--  let existingUrl: string | null = quickAlive ? `http://127.0.0.1:${quickCheck!.port}` : null
-+  // #152：pid 存活即复用 URL；ping 失败视为 unresponsive，禁止第二 daemon
-+  let existingUrl: string | null =
-+    quickCheck && deps.alive(quickCheck.pid) ? `http://127.0.0.1:${quickCheck.port}` : null
-   let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
-   let fwdPid: number | undefined
- 
-@@ -145,10 +146,12 @@ export async function discoverOrSpawnDaemon(
-       staleMs: deps.electionStaleMs,
-     })
-     const lock = await deps.read()
--    existingUrl =
--      lock && deps.alive(lock.pid) && (await deps.ping(lock.port)) ? `http://127.0.0.1:${lock.port}` : null
--    // 持锁后仍不可用则清理陈旧锁，避免阻塞新 daemon
--    if (!existingUrl && lock) await deps.clear()
-+    // #152：alive 即可复用；仅 dead/orphan 清锁
-+    if (lock && deps.alive(lock.pid)) {
-+      existingUrl = `http://127.0.0.1:${lock.port}`
-+    } else if (lock) {
-+      await deps.clear()
-+    }
- 
-     if (existingUrl) {
-       await electionLease.release()
 diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/src/cli/tui/server-lock.ts
 index 071f2fc68e..725fe837c5 100644
 --- a/packages/opencode/src/cli/tui/server-lock.ts
 +++ b/packages/opencode/src/cli/tui/server-lock.ts
-@@ -15,6 +15,14 @@ export type ServerLock = {
-   externalUrl?: string
- }
- 
+@@ -36,1 +36,9 @@
 +// #152：写锁前若已有存活 pid，拒绝覆盖
 +export class ExistingLiveServerError extends Error {
 +  constructor(public readonly lock: ServerLock) {
@@ -54,81 +18,66 @@ index 071f2fc68e..725fe837c5 100644
 +  }
 +}
 +
- // 可覆盖以用于测试；undefined 表示使用默认路径
- let _lockPath: string | undefined
- export function _setLockPath(p: string | undefined) {
-@@ -29,6 +37,11 @@ function getLockPath() {
- // 原子写入锁文件（tmp → rename），返回新 token 供 clearIfOwner 安全删除
- // 原子写锁：记录 pid/port/token，供 clearIfOwner 安全删除
- export async function write(port: number, externalUrl?: string): Promise<string> {
+ // 测试覆盖只影响发现文件；不改写 Global 路径或打开临时数据库连接。
+@@ -54,1 +62,6 @@
+ export async function write(port: number, externalUrl?: string, network?: ServerLock["network"]): Promise<string> {
 +  // #152：已有存活 owner 时拒绝写锁，防止双 daemon
 +  const existing = await read()
 +  if (existing && alive(existing.pid) && existing.pid !== process.pid) {
 +    throw new ExistingLiveServerError(existing)
 +  }
-   const token = randomUUID()
-   const lock: ServerLock = {
-     pid: process.pid,
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 index ab8046ebcc..1bf227c1fb 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -17,6 +17,7 @@ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecy
- import { Database } from "@opencode-ai/core/database/database"
- import { ServerLock } from "@/cli/tui/server-lock"
- import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
+@@ -16,1 +16,2 @@
+ import { EventClients } from "@opencode-ai/server/event-clients"
 +import { SessionActivity } from "@/session/activity"
- 
- Heap.start()
- 
-@@ -205,12 +206,31 @@ if (isDaemon) {
-   // ── 空闲超时 ───────────────────────────────────────────────────────────
-   // 最后一个 SSE 客户端断开 30 秒后退出。计时器仅在首次有客户端连接后启动，
-   // 避免启动缓慢的 TUI 与守护进程退出产生竞态。
-+  // #152：SSE 全断且无活跃 session/shell 后 30s 才退出
-   const IDLE_TIMEOUT_MS = 30_000
- 
+@@ -177,1 +178,17 @@
    let hadClient = false
 +  let sseClients = 0
-   let idleTimer: ReturnType<typeof setTimeout> | undefined
- 
++
++  // 全部连接断开后仍须等待实际工作结束，不能因 TUI 断线关闭正在生成的会话。
 +  const armIdleTimer = () => {
 +    if (idleTimer) {
 +      clearTimeout(idleTimer)
 +      idleTimer = undefined
 +    }
-+    if (!hadClient) return
-+    if (sseClients > 0) return
-+    if (SessionActivity.count() > 0) return
++    if (shutdownInProgress || !hadClient || sseClients > 0 || SessionActivity.count() > 0) return
 +    idleTimer = setTimeout(() => {
-+      // #152：触发时再确认，避免 runner 刚启动被误杀
-+      if (sseClients > 0 || SessionActivity.count() > 0) return
++      if (shutdownInProgress || sseClients > 0 || SessionActivity.count() > 0) return
 +      void gracefulShutdown()
 +    }, IDLE_TIMEOUT_MS)
 +    idleTimer.unref?.()
 +  }
 +
-   onSseClientCountChange((count) => {
-+    sseClients = count
-     if (count > 0) {
-       hadClient = true
-       if (idleTimer) {
-@@ -219,10 +239,11 @@ if (isDaemon) {
-       }
-       return
-     }
--    // 从未有客户端连接过，不启动退出计时器
--    if (!hadClient) return
+@@ -179,18 +196,8 @@
+-  // 所有协议与 listener 共用客户端计数，native App 不被 global-event 专属计数误判为空闲。
+-  const eventClients = EventClients.make((count) => {
+-    if (shutdownInProgress) return
+-    if (count > 0) {
+-      hadClient = true
+-      if (idleTimer) {
+-        // 任一 listener 重连便取消归零后的宽限 timer，继续保留共享 daemon。
+-        clearTimeout(idleTimer)
+-        idleTimer = undefined
+-      }
+-      return
+-    }
+-    // 首次订阅前不计 idle；重复零通知也不重设 timer 或延长宽限期。
+-    if (!hadClient || idleTimer) return
+-    // 最后一个订阅释放后留出重连宽限，持续空闲才关闭 daemon。
 -    idleTimer = setTimeout(() => void gracefulShutdown(), IDLE_TIMEOUT_MS)
 -    idleTimer.unref?.()
+-  })
++  // 内外 listener 继续共用一个计数源，活动变更只重算退出时机。
++  const eventClients = EventClients.make((count) => {
++    sseClients = count
++    if (count > 0) hadClient = true
 +    armIdleTimer()
 +  })
 +
-+  SessionActivity.onChange(() => {
-+    armIdleTimer()
-   })
- 
-   // ── 启动任务 ───────────────────────────────────────────────────────────
++  SessionActivity.onChange(armIdleTimer)
 diff --git a/packages/opencode/src/session/activity.ts b/packages/opencode/src/session/activity.ts
 new file mode 100644
 index 0000000000..60b575c22e
@@ -180,32 +129,38 @@ index 5cefdd04a3..116c7a9dee 100644
  import { SessionStatus } from "./status"
  
  export interface Interface {
-@@ -90,7 +91,11 @@ const layer = Layer.effect(
+@@ -90,7 +91,14 @@ const layer = Layer.effect(
        onInterrupt: Effect.Effect<SessionV1.WithParts>,
        work: Effect.Effect<SessionV1.WithParts>,
      ) {
 -      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
-+      // #152：runner 生命周期计入 SessionActivity，供 worker 空闲判定
-+      const end = SessionActivity.begin(`session:${sessionID}`)
-+      return yield* (yield* runner(sessionID, onInterrupt))
-+        .ensureRunning(work)
-+        .pipe(Effect.ensuring(Effect.sync(end)))
++      // 登记实际 work 而非等待者，排队或取消等待不提前释放活动标记。
++      const tracked = Effect.acquireUseRelease(
++        Effect.sync(() => SessionActivity.begin(`session:${sessionID}`)),
++        () => work,
++        (end) => Effect.sync(end),
++      )
++      const current = yield* runner(sessionID, onInterrupt)
++      return yield* current.ensureRunning(tracked)
      })
  
      const startShell = Effect.fn("SessionRunState.startShell")(function* (
-@@ -99,9 +104,14 @@ const layer = Layer.effect(
+@@ -99,9 +107,15 @@ const layer = Layer.effect(
        work: Effect.Effect<SessionV1.WithParts>,
        ready?: Latch.Latch,
      ) {
-+      // #152：shell runner 同样计入 activity
-+      const end = SessionActivity.begin(`shell:${sessionID}`)
-       return yield* (yield* runner(sessionID, onInterrupt))
-         .startShell(work, ready)
+-      return yield* (yield* runner(sessionID, onInterrupt))
+-        .startShell(work, ready)
 -        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
-+        .pipe(
-+          Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))),
-+          Effect.ensuring(Effect.sync(end)),
-+        )
++      // Shell 与 loop 独立标记，拒绝启动的 shell 不影响已有运行。
++      const tracked = Effect.acquireUseRelease(
++        Effect.sync(() => SessionActivity.begin(`shell:${sessionID}`)),
++        () => work,
++        (end) => Effect.sync(end),
++      )
++      const current = yield* runner(sessionID, onInterrupt)
++      return yield* current.startShell(tracked, ready)
++        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
      })
  
      return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
@@ -229,67 +184,6 @@ index 4da9bc3ca8..1c4b009ad4 100644
  
                for (let i = 0; i < rows.length; i += step) {
                  const run = rows.slice(i, i + step)
-diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
-index 2cf01c7c01..9d1453fa26 100644
---- a/packages/opencode/test/cli/tui/thread.test.ts
-+++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -172,42 +172,31 @@ describe("tui thread", () => {
-       expect(result.url).toBe("http://127.0.0.1:9999")
-     })
- 
--    test("lock exists + pid alive but HTTP ping fails: clears stale lock and spawns", async () => {
-+    test("lock exists + pid alive but HTTP ping fails: reuses URL without spawn", async () => {
-+      // #152：unresponsive 存活 owner 必须复用，禁止清锁再 spawn
-       let daemonSpawnCount = 0
-       let clearCalled = false
--      let readCount = 0
--      let pingCount = 0
-       const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
--        read: async () => {
--          readCount++
--          if (readCount <= 2) {
--            return {
--              pid: process.pid,
--              port: 9999,
--              token: "stale",
--              dbPath: "/tmp/test.db",
--              channel: "local",
--              startedAt: new Date().toISOString(),
--            }
--          }
--          return fakeLock
--        },
--        ping: async () => {
--          pingCount++
--          // 前两次（quick+under-lock）失败，spawn 后成功
--          return pingCount > 2
--        },
-+        read: async () => ({
-+          pid: process.pid,
-+          port: 9999,
-+          token: "stale",
-+          dbPath: "/tmp/test.db",
-+          channel: "local",
-+          startedAt: new Date().toISOString(),
-+        }),
-+        ping: async () => false,
-         clear: async () => {
-           clearCalled = true
-         },
-         spawn: ((_cmd, _opts) => {
-           daemonSpawnCount++
--          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
-+          return { pid: 12345, unref() {}, kill() {} } as never
-         }) as DiscoverDaemonDeps["spawn"],
-       }))
--      expect(daemonSpawnCount).toBe(1)
--      expect(clearCalled).toBe(true)
-       expect(result.url).toBe("http://127.0.0.1:9999")
-+      expect(daemonSpawnCount).toBe(0)
-+      expect(clearCalled).toBe(false)
-     })
- 
-     test("lock exists but pid dead (orphan): clears and spawns new daemon", async () => {
 diff --git a/packages/tui/src/context/sdk.tsx b/packages/tui/src/context/sdk.tsx
 index ddf8810d0f..3520c0e518 100644
 --- a/packages/tui/src/context/sdk.tsx

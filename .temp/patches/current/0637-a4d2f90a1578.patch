@@ -1273,8 +1273,8 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
              label: packages/opencode
              os_label: Linux
              runner: ubuntu-latest
--            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+-            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
              # opencode 分片产出 junit-core.xml 与 junit-tui.xml——消费侧一律 glob 拾取。
              junit: packages/opencode/.artifacts/unit/*.xml
            # 独立 runner 三分片，净增两个 Windows job；每片保留相同安装图与依赖构建。
@@ -1282,8 +1282,8 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
              label: packages/opencode
              os_label: macOS
              runner: macos-latest
--            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
+-            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=dependencies-successful --log-order=stream
              junit: packages/opencode/.artifacts/unit/*.xml
            - id: core-macos
              label: packages/core
@@ -1292,20 +1292,22 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
        - name: Setup Bun
          uses: ./.github/actions/setup-bun
 +        with:
-+          # root 提供 Turbo 等执行工具；包路径过滤保留本 job 的声明闭包与原 root hooks。
-+          install-flags: --filter './' --filter './${{ matrix.label }}'
-+          cache-scope: test-${{ matrix.label }}-root-v1
++          # root 保留执行工具与 hooks；SDK 的 ^build 反向读取 CLI，安装图须覆盖其运行依赖。
++          install-flags: --filter './' --filter './${{ matrix.label }}' --filter './packages/opencode'
++          cache-scope: test-${{ matrix.label }}-opencode-root-v1
  
        - name: Configure git identity
          run: |
-@@ -132,7 +136,12 @@ jobs:
+@@ -150,10 +154,14 @@ jobs:
  
        - name: Run required package tests
          id: test
--        run: ${{ matrix.command }}
 +        # 预留 job 剩余时间上传证据；超时仍失败，不把收尾截止当作挂起修复。
 +        timeout-minutes: 45
-+        run: |
+         run: |
+           # Bun reporter不创建父目录；保留矩阵原有的JUnit产物路径。
+           mkdir -p "$(dirname "${{ matrix.junit }}")"
+-          ${{ matrix.command }}
 +          mkdir -p "${{ matrix.label }}/.artifacts/ci"
 +          # 默认 bash 启用 pipefail；tee 不覆盖测试真实失败，日志不依赖 JUnit 完成。
 +          ${{ matrix.command }} 2>&1 | tee "${{ matrix.label }}/.artifacts/ci/test.log"
@@ -1343,26 +1345,31 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
  
        - name: Run HttpApi exerciser gate
          id: test
-@@ -362,15 +378,17 @@ jobs:
+@@ -381,24 +397,19 @@ jobs:
  
        - name: Setup Bun
          uses: ./.github/actions/setup-bun
-+        with:
-+          # SDK 的 ^build 会反向执行 OpenCode generate，排除 CLI 测试仍须保留其源码依赖。
-+          install-flags: --filter './' --filter './packages/app' --filter './packages/opencode'
-+          cache-scope: test-app-cli-root-v1
  
        - name: Run upstream unit compatibility tests
          id: upstream
          continue-on-error: true
--        # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
--        # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
--        # Windows 的 OpenCode 已由必过三分片完整覆盖，此处只跑其余包，避免重复占据约 30m。
--        # 其余包仍在同机串行；Linux 保留原有全量兼容性检查，Windows 实时日志保留卡点。
--        run: bun turbo test:ci --continue=always --summarize --concurrency=1 ${{ matrix.runner == 'windows-latest' && '--filter=!opencode --log-order=stream' || '' }}
-+        # 三个核心包在同平台 required job 验证；这里保留 App/UI 与原 SDK build 的兼容性链。
-+        # 保持同机串行，避免在没有新生命周期证据时恢复历史有问题的并发方式。
-+        run: bun turbo test:ci --filter=@opencode-ai/app --filter=@opencode-ai/ui --continue=always --summarize --concurrency=1 --log-order=stream
+         run: |
+           # 所有现有test任务共用相同相对报告路径，各包目录先准备好。
+           for package in packages/* packages/console/* packages/stats/*; do
+             if [ -f "$package/package.json" ]; then mkdir -p "$package/.artifacts/unit"; fi
+           done
+-          # 其余包沿原test；opencode仅运行隔离runner，任一侧失败均传播且不阻止另一侧出报告。
+-          status=0
+-          GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml || status=$?
+-          # Windows已由必过三片覆盖；其他包仍执行原test，不把它们误换为test:ci。
+-          if [ '${{ matrix.runner }}' != 'windows-latest' ]; then
+-            GITHUB_ACTIONS=false bun turbo test:ci --filter=opencode --continue=always --summarize --concurrency=1 || status=$?
+-          fi
+-          exit "$status"
++          # 只去掉同平台必过项，目标新增包继续走test与原有^build链，不误裁成App/UI。
++          # 单条串行命令保留真实退出码、JUnit和流式日志，安装图仍覆盖全部兼容消费者。
++          GITHUB_ACTIONS=false bun turbo test --filter='!opencode' --filter='!@opencode-ai/core' --filter='!@opencode-ai/http-recorder' --filter='!@opencode-ai/tui' --continue=always --summarize --concurrency=1 --log-order=stream -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
+ 
  
        - name: Warn on upstream unit failures
          if: always() && steps.upstream.outcome != 'success'
@@ -1371,7 +1378,7 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
              echo "| 范围 | 平台 | 结果 | 说明 |"
              echo "| --- | --- | --- | --- |"
 -            echo "| ${{ matrix.runner == 'windows-latest' && '其他包（OpenCode 由必过三分片覆盖）' || '全量单元测试' }} | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
-+            echo "| App/UI（OpenCode、Core、HTTP recorder 由同平台必过 job 覆盖） | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
++            echo "| 其余包（OpenCode、Core、HTTP recorder、TUI由同平台必过job覆盖） | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
            } >> "$GITHUB_STEP_SUMMARY"
  
    upstream-extra-warning:
@@ -1546,8 +1553,8 @@ diff --git a/patches/effect@4.0.0-beta.83.patch b/patches/effect@4.0.0-beta.83.p
 ++    // 中断恢复会同步移除等待者；遍历快照才能通知同一次完成的全部订阅者。
 ++    for (const resume of self.resumes.slice()) {
 ++      resume(effect)
-+    }
-+    self.resumes = undefined
-+  }
-+  return true
++     }
++     self.resumes = undefined
++   }
++   return true
 + }

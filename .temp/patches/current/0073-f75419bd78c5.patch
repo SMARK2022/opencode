@@ -333,9 +333,9 @@ diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/sessi
 +++ b/packages/core/src/session/runner/model.ts
 @@ -74,6 +74,7 @@
  export interface Interface {
--  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
+-  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model; readonly pricing: ModelV2.Info["cost"] }, Error>
 +  // 期限仅在 Core resolver/runner 间携带，不进入公开 Model Schema 或 provider JSON。
-+  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model & { readonly timeout?: number | false }, Error>
++  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model & { readonly timeout?: number | false }; readonly pricing: ModelV2.Info["cost"] }, Error>
  }
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionRunnerModel") {}

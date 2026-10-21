@@ -222,9 +222,13 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
      console.log(renderDashboard(yield* loadReport(args), { color: colorMode(args.color), limit }))
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,7 @@
 +// #180：SQL 会话预过滤 + 工具事件单遍生成
- import { Effect } from "effect"
+-import { Effect } from "effect"
++import { Effect, Schema } from "effect"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { MessageID } from "@/session/schema"
  import { Session } from "@/session/session"
  // #174：assistant 表优先费用
 @@ -34,12 +35,18 @@ export type TokenTotals = {
@@ -341,7 +345,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
  // #174：tokenTotal 写回 total
 @@ -224,9 +277,14 @@ const addTokens = (target: TokenTotals, value: TokenTotals) => {
  // #174：addUsage 同步 cost 与次数
- const addUsage = (target: UsageTotals, event: UsageEvent) => {
+ const addUsage = (target: UsageTotals, event: UsageTotals | UsageEvent) => {
    addTokens(target.tokens, event.tokens)
 +  // #176：组件与结局计量随事件同步累加，不事后补算
 +  addComponents(target.components, event.components)
@@ -705,7 +709,45 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +
  const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
    const svc = yield* Session.Service
-   const messages = yield* svc
+-  const messages = yield* svc
++  const legacyMessages = yield* svc
+@@ -406,6 +766,35 @@
+     .messages({ sessionID: session.id })
+     .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
+-  const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
+   const { db } = yield* Database.Service
+   const requestUsageRows = yield* db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all().pipe(Effect.orDie)
+   const assistantUsageRows = yield* db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
++  const legacyIDs = new Set(legacyMessages.map((message) => String(message.info.id)))
++  const projected = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, session.id)).all().pipe(Effect.orDie)
++  // 两种历史共享账本，但原生工具只在 session_message；同 ID 的迁移投影不能重复计数。
++  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user")).map((row) => {
++    const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
++    const assistant = message.type === "assistant" ? message : undefined
++    const estimate = assistant?.inputEstimate
++    return {
++      info: {
++        id: MessageID.make(row.id), role: assistant ? "assistant" as const : "user" as const,
++        time: { created: row.time_created }, tokens: assistant?.tokens ?? emptyTokens(), cost: assistant?.cost ?? 0,
++        // 精确账本关联用于既有去重；无记录时不猜测相邻请求或模型。
++        parentID: assistantUsageRows.find((usage) => usage.assistant_message_id === MessageID.make(row.id))?.request_id,
++        modelID: assistant?.model.id, providerID: assistant?.model.providerID,
++      },
++      parts: [
++        ...(assistant?.content ?? []).flatMap((part) => part.type !== "tool" ? [] : [{
++          type: "tool" as const, tool: part.name, state: {
++            status: part.state.status, input: part.state.input,
++            raw: typeof part.state.input === "string" ? part.state.input : undefined,
++            output: part.state.status === "completed" ? part.state.content.filter((item) => item.type === "text").map((item) => item.text).join("\n") : undefined,
++            error: part.state.status === "error" ? part.state.error.message : undefined,
++            attachments: part.state.status === "completed" ? part.state.content.flatMap((item) => item.type === "file" ? [{ url: item.uri }] : []) : [],
++          },
++        }]),
++        ...(estimate?.confirmed ? [{ type: "step-finish" as const, tokens: assistant?.tokens, inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown }] : []),
++      ],
++    }
++  })
++  const visibleMessages = [...legacyMessages, ...nativeMessages].filter((message) => includeTime(cutoff, message.info.time.created))
 @@ -420,7 +776,12 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
      if (assistantRows.length > 0) {
  // #174：request_id 用于跳过双计
@@ -766,7 +808,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
          })),
        )
        breakdownEvents.push(...assistantEvents)
-@@ -471,38 +855,112 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -471,47 +855,119 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
          cost: row.cost_micros / MICROS,
          requests: 1,
          assistantCalls: row.assistant_count || 1,
@@ -781,31 +823,40 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
        totalEvents.push(...requestEvents)
        breakdownEvents.push(...requestEvents)
      }
-   } else {
-+    // #176：无 request_usage 时走 legacy 消息路径
-     for (const message of visibleMessages) {
-       if (message.info.role !== "assistant") continue
-       const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
-       const event = {
-         time: message.info.time.created,
-         sessionID: session.id,
--        providerID: message.info.providerID,
--        modelID: message.info.modelID,
-+        providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
-+        modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
-         tokens,
-         cost: message.info.cost ?? 0,
-         requests: 0,
-         assistantCalls: 1,
-+        // #176：legacy 路径无 usage 行，结局计量取零基、组件取消息实况
-+        components: componentsFromAssistant(message),
-+        errors: 0,
-+        aborted: 0,
-+        durationMs: 0,
-       }
-       totalEvents.push(event)
-       breakdownEvents.push(event)
+   }
+   // #174：助手 ID 去重后补历史消息，新请求账本不能遮蔽旧模型。
+   const tracked = new Set(assistantUsageRows.map((row) => row.assistant_message_id))
+   // #174：缺明细的已确认请求由汇总行计量；零用量 noReply 不覆盖历史消息。
+   const fallbackRequests = new Set(
+     requestUsageRows
+       .filter((row) => row.assistant_count > 0 || row.tokens_total > 0 || row.cost_micros > 0)
+       .map((row) => row.request_id),
+   )
+   assistantUsageRows.forEach((row) => fallbackRequests.delete(row.request_id))
+   for (const message of visibleMessages) {
+     if (message.info.role !== "assistant") continue
+-    if (tracked.has(message.info.id) || fallbackRequests.has(message.info.parentID)) continue
++    if (tracked.has(message.info.id) || (message.info.parentID && fallbackRequests.has(message.info.parentID))) continue
+     const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
+     const event = {
+       time: message.info.time.created,
+       sessionID: session.id,
+-      providerID: message.info.providerID,
+-      modelID: message.info.modelID,
++      providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
++      modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
+       tokens,
+       cost: message.info.cost ?? 0,
+       requests: 0,
+       assistantCalls: 1,
++      // #176：补入的历史助手没有账本明细，组件取消息实况、请求结局计量保持零基。
++      components: componentsFromAssistant(message),
++      errors: 0,
++      aborted: 0,
++      durationMs: 0,
      }
+     totalEvents.push(event)
+     breakdownEvents.push(event)
    }
  
 -  const toolUsage: Record<string, number> = {}
@@ -852,25 +903,24 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +    })
 +        // #180：单点推入，避免循环内重复展开逻辑
 +    toolEvents.push(...toolEventsFromAssistants(seeds, visibleMessages))
-+  } else {
-+        // #180：legacy 路径同样先收集再单遍
-+    const seeds = visibleMessages
-+      .filter((message) => message.info.role === "assistant")
-+      .map((message) => ({
-+        message,
-+        event: {
-+          time: message.info.time.created,
-+          sessionID: session.id,
-+          projectID: session.projectID,
-+          providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
-+          modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
-+          source: "legacy-message",
-+          agent: session.agent ?? "unknown",
-+          status: "completed",
-+        },
-+      }))
-+    toolEvents.push(...toolEventsFromAssistants(seeds, visibleMessages))
 +  }
++  // #176：工具上下文沿用同一助手覆盖集合，混合历史只补未入账消息。
++  const seeds = visibleMessages
++    .filter((message) => message.info.role === "assistant" && !tracked.has(message.info.id) && !(message.info.parentID && fallbackRequests.has(message.info.parentID)))
++    .map((message) => ({
++      message,
++      event: {
++        time: message.info.time.created,
++        sessionID: session.id,
++        projectID: session.projectID,
++        providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
++        modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
++        source: "legacy-message",
++        agent: session.agent ?? "unknown",
++        status: "completed",
++      },
++    }))
++  toolEvents.push(...toolEventsFromAssistants(seeds, visibleMessages))
 +
 +  // #176：request 维已在构造时精确 join，此处只补 project 维与缺失默认值
 +  for (const event of [...totalEvents, ...breakdownEvents]) {
@@ -884,7 +934,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
  })
  
  // #174：aggregateStats 唯一写路径
-@@ -510,7 +968,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -519,7 +975,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
  // #174：aggregateStats 生成只读 StatsReport 快照
  export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input: StatsFilter = {}) {
    const cutoff = cutoffFromDays(input.days)
@@ -894,7 +944,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
    const filteredSessions = sessions
  // #174：time.updated 过滤会话
      .filter((session) => includeTime(cutoff, session.time.updated))
-@@ -521,6 +980,9 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -530,6 +987,9 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
        if (input.projectFilter === "") return session.projectID === input.currentProject?.id
        return session.projectID === input.projectFilter
      })
@@ -904,7 +954,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
  
    if (filteredSessions.length > 1000) {
      process.stderr.write(`Large dataset detected (${filteredSessions.length} sessions). This may take a while...\n`)
-@@ -541,13 +1003,33 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -550,13 +1010,33 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
    const providerSeries = new Map<string, Map<number, DailyUsage>>()
    const models = new Map<string, UsageGroupAccumulator>()
    const providers = new Map<string, UsageGroupAccumulator>()
@@ -940,7 +990,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
      const sessionUsage: SessionUsage = {
        id: aggregate.session.id,
        title: aggregate.session.title,
-@@ -556,7 +1038,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -565,7 +1045,7 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
        created: aggregate.session.time.created,
        updated: aggregate.session.time.updated,
        messages: aggregate.messageCount,
@@ -949,7 +999,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
        providers: [],
        models: [],
        ...emptyUsage(),
-@@ -566,21 +1048,38 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -575,26 +1055,43 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
  
      totalMessages += aggregate.messageCount
      totalTools += sessionUsage.tools
@@ -965,10 +1015,16 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
  
 -    for (const event of aggregate.totalEvents) {
 +    for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
-       addUsage(total, event)
        addUsage(sessionUsage, event)
        addUsage(getDaily(daily, event.time), event)
      }
+     // 未筛选日期时沿用持久 Session 全历史累计，部分 request 账本只负责明细与次数。
+-    if (cutoff === 0) {
++    if (cutoff === 0 && ![input.modelFilter, input.providerFilter, input.sourceFilter, input.agentFilter, input.statusFilter, input.toolFilter].some(value => value !== undefined)) {
+       sessionUsage.tokens = normalizeTokens(aggregate.session.tokens ?? emptyTokens())
+       sessionUsage.cost = aggregate.session.cost ?? 0
+     }
+     addUsage(total, sessionUsage)
  
 -    for (const event of aggregate.breakdownEvents) {
 +    for (const event of aggregate.breakdownEvents.filter((event) => eventMatches(event, input))) {
@@ -993,7 +1049,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
        sessionProviders.add(event.providerID)
        sessionModels.add(event.modelID)
      }
-@@ -599,9 +1098,14 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -608,9 +1105,14 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
      Date.now(),
    )
    const fallbackLatest = filteredSessions.reduce((latest, session) => Math.max(latest, session.time.updated), 0)
@@ -1011,7 +1067,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
    const sortedSessionTotals = sessionTokenTotals.sort((a, b) => a - b)
    const mid = Math.floor(sortedSessionTotals.length / 2)
    const medianTokensPerSession =
-@@ -612,7 +1116,9 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -621,7 +1123,9 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
          : sortedSessionTotals[mid]
  
    return {
@@ -1022,7 +1078,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
      sessionsWithUsage: sessionsWithUsage.length,
      totalMessages,
      totalTools,
-@@ -622,14 +1128,28 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -631,14 +1135,28 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
      total,
      models: finalizeGroups(models),
      providers: finalizeGroups(providers),
@@ -1060,8 +1116,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
    } satisfies StatsReport
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -1,5 +1,6 @@
+@@ -1,6 +1,7 @@
  
+ import { renderCompositionDonut, renderPercentStack, renderStreamStackChart, renderWaterfall, renderHistogram } from "./stats-charts"
  import type { StatsReport } from "./stats-data"
 +import { emptyComponents } from "./stats-data"
  // #174：render 再导出 formatNumber 方便调用
@@ -1086,7 +1143,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
  
  // #174：auto 非 TTY=never
  // #174：color=auto 在非 TTY 视为 never，避免管道脏码
-@@ -64,9 +75,68 @@ const header = (report: StatsReport, title: string) => [
+@@ -64,9 +75,80 @@ const header = (report: StatsReport, title: string) => [
  
  // #174：dashboard 固定模型榜后日线
  // #174：dashboard 固定先模型榜后日线
@@ -1144,6 +1201,18 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +      )
 +    }
 +  }
++  if (by !== "tool") {
++    // 数据层的各维度序列与输入组件必须有实际输出入口，不能只保留在报告对象中。
++    const series = { model: report.modelSeries, provider: report.providerSeries, agent: report.agentSeries, source: report.sourceSeries, project: report.projectSeries, status: report.statusSeries }[by]
++    lines.push("", ...renderUsageSeries(series, options, `${by} usage over time`))
++    lines.push(...renderGroupDetails(groups, options))
++    if (by === "source") {
++      lines.push("Input components by source")
++      for (const group of limitRows(groups, options.limit)) {
++        lines.push(`  ${group.label || group.id} ${Object.entries(group.components).map(([key, value]) => `${key}=${formatNumber(value)}`).join(" ")}`)
++      }
++    }
++  }
 +  return lines.join("\n")
 +}
 +
@@ -1155,7 +1224,14 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
      ...renderCallout("models", `top ${Math.min(5, report.models.length)}`),
      ...renderRankBars({
        rows: limitRows(report.models, options.limit ?? 5).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
-@@ -124,11 +194,12 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
+@@ -116,4 +197,6 @@
+     ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
++    // 每日结局与时长来自同一报告，保留错误/中止集中日期的诊断能力。
++    ...report.daily.map((day) => `${day.label} completed=${Math.max(0, day.requests - day.errors - day.aborted)} error=${day.errors} aborted=${day.aborted} avg=${Math.round(day.durationMs / Math.max(1, day.requests))}ms`),
+   ].join("\n")
+ 
+ // #174：sessions 按 sort 键排序再切片
+@@ -124,11 +207,12 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
    })
    return [
      ...header(report, "stats sessions"),
@@ -1263,6 +1339,164 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
  }
  // #174：fitVisible 先截断再垫到目标可见宽
  export const fitVisible = (text: string, width: number) => padEndVisible(truncateVisible(text, width), width)
+diff --git a/packages/opencode/test/cli/stats-mixed-history.test.ts b/packages/opencode/test/cli/stats-mixed-history.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/cli/stats-mixed-history.test.ts
+@@ -0,0 +1,153 @@
++import { expect } from "bun:test"
++import { Effect } from "effect"
++import { Database } from "@opencode-ai/core/database/database"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProjectV2 } from "@opencode-ai/core/project"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import type { SessionV1 } from "@opencode-ai/core/v1/session"
++import { RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
++import { MessageTable, PartTable, SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { Session } from "../../src/session/session"
++import { MessageID, PartID, SessionID } from "../../src/session/schema"
++import { aggregateStats } from "../../src/cli/cmd/stats-data"
++import { renderBreakdown, renderTimeline } from "../../src/cli/cmd/stats-render"
++import { testEffect } from "../lib/effect"
++
++// #176：只构建实际查询所需服务，独立内存连接随 testEffect scope 释放。
++const it = testEffect(
++  LayerNode.compile(LayerNode.group([Session.node, Database.node]), [
++    [Database.node, Database.layerFromPath(":memory:")],
++  ]),
++)
++
++it.effect("stats merges mixed history after noReply without double counting ledger usage", () =>
++  Effect.gen(function* () {
++    const database = yield* Database.Service
++    const sessionID = SessionID.descending()
++    const projectID = ProjectV2.ID.make("stats-mixed-history")
++    const directory = AbsolutePath.make(process.cwd())
++    const now = Date.now()
++    const old = now - 3 * 24 * 60 * 60 * 1000
++    yield* database.db.insert(ProjectTable).values({
++      id: projectID, worktree: directory, sandboxes: [], time_created: old, time_updated: now,
++    }).run().pipe(Effect.orDie)
++    // #176：持久总额故意不同于可见事件之和，锁定未筛选时的权威口径。
++    yield* database.db.insert(SessionTable).values({
++      id: sessionID, project_id: projectID, directory, slug: "mixed-history", title: "mixed history",
++      version: "test", agent: "history-agent", cost: 0.875, tokens_input: 111, time_created: old, time_updated: now,
++    }).run().pipe(Effect.orDie)
++    const messages = [
++      { model: "legacy-model", provider: "legacy-provider", input: 10, cost: 0.125, time: old },
++      { model: "tracked-model", provider: "tracked-provider", input: 999, cost: 99, time: now },
++      { model: "fallback-model", provider: "fallback-provider", input: 30, cost: 0.375, time: now },
++    ].map((message) => ({
++      id: MessageID.ascending(), sessionID, parentID: MessageID.ascending(), role: "assistant" as const,
++      time: { created: message.time, completed: message.time }, agent: "history-agent", mode: "build",
++      providerID: ProviderV2.ID.make(message.provider), modelID: ModelV2.ID.make(message.model),
++      path: { cwd: directory, root: directory }, cost: message.cost,
++      tokens: { input: message.input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    }))
++    const rows = messages.map(({ id, sessionID, ...data }) => ({
++      id, session_id: sessionID, time_created: data.time.created, time_updated: now, data,
++    }))
++    yield* database.db.insert(MessageTable).values(rows.slice(0, 1)).run().pipe(Effect.orDie)
++    yield* database.db.insert(PartTable).values([
++      {
++        id: PartID.ascending(), message_id: messages[0].id, session_id: sessionID, time_created: old, time_updated: now,
++        data: {
++          type: "step-finish", reason: "stop", cost: 0.125, tokens: messages[0].tokens, inputChars: 10,
++          inputBreakdown: {
++            system: 4, instructions: 0, skills: 0, tools: 0,
++            messages: { userText: 3, assistantText: 0, reasoning: 0, toolInput: 2, toolOutput: 1, attachments: 0, total: 6 },
++          },
++        } as Omit<SessionV1.StepFinishPart, "id" | "messageID" | "sessionID">,
++      },
++      {
++        id: PartID.ascending(), message_id: messages[0].id, session_id: sessionID, time_created: old, time_updated: now,
++        data: {
++          type: "tool", callID: "old-call", tool: "historical-tool",
++          state: { status: "completed", input: {}, output: "x", title: "history", metadata: {}, time: { start: old, end: old } },
++        } as Omit<SessionV1.ToolPart, "id" | "messageID" | "sessionID">,
++      },
++    ]).run().pipe(Effect.orDie)
++    expect((yield* aggregateStats({ projectFilter: projectID })).models.find((row) => row.id === "legacy-model")?.tokens.total).toBe(10)
++    // #176：先复现旧会话新增零用量 noReply，再加入已跟踪助手与请求汇总兜底。
++    const requests = SessionRequestUsage.make(database.db)
++    const noReplyID = MessageID.ascending()
++    yield* requests.begin({
++      sessionID, requestID: noReplyID, source: "prompt", agent: "build", providerID: "new-provider", modelID: "no-reply-model", timeCreated: now,
++    })
++    yield* requests.complete({ sessionID, requestID: noReplyID, timeCompleted: now })
++    const upgraded = yield* aggregateStats({ projectFilter: projectID })
++    expect(upgraded.models.find((row) => row.id === "legacy-model")).toMatchObject({ tokens: { total: 10 }, cost: 0.125 })
++    expect(upgraded.total.requests).toBe(1)
++
++    yield* database.db.insert(MessageTable).values(rows.slice(1)).run().pipe(Effect.orDie)
++    yield* requests.begin({
++      sessionID, requestID: messages[1].parentID, source: "command", agent: "ledger-agent",
++      providerID: messages[1].providerID, modelID: messages[1].modelID, timeCreated: now,
++    })
++    yield* requests.recordAssistant({
++      sessionID, requestID: messages[1].parentID, assistant: messages[1],
++      usage: { count: 1, tokens: { ...messages[1].tokens, input: 20, total: 20 }, costMicros: 250_000 },
++    })
++    // #176：确认过的请求汇总与同 parentID 消息并存且缺少助手行，必须只计一次。
++    yield* database.db.insert(RequestUsageTable).values({
++      session_id: sessionID, request_id: messages[2].parentID, root_request_id: messages[2].parentID,
++      source: "prompt", status: "completed", agent: "fallback-agent", provider_id: messages[2].providerID, model_id: messages[2].modelID,
++      assistant_count: 1, step_count: 1, tokens_input: 30, tokens_total: 30, cost_micros: 375_000,
++      time_created: now, time_updated: now, time_completed: now,
++    }).run().pipe(Effect.orDie)
++
++    const report = yield* aggregateStats({ projectFilter: projectID })
++    expect(report.models.find((row) => row.id === "legacy-model")).toMatchObject({ tokens: { total: 10 }, cost: 0.125, assistantCalls: 1 })
++    expect(report.models.find((row) => row.id === "tracked-model")).toMatchObject({ tokens: { total: 20 }, cost: 0.25, assistantCalls: 1 })
++    expect(report.models.find((row) => row.id === "fallback-model")).toMatchObject({ tokens: { total: 30 }, cost: 0.375, assistantCalls: 1 })
++    expect(report.providers.find((row) => row.id === "legacy-provider")).toMatchObject({ tokens: { total: 10 }, cost: 0.125 })
++    expect(report.modelSeries.find((row) => row.id === "legacy-model")?.tokens.total).toBe(10)
++    expect(report.sessions[0]?.models).toContain("legacy-model")
++    expect(report.total).toMatchObject({ tokens: { total: 111 }, cost: 0.875, requests: 3, assistantCalls: 4 })
++    expect(report.sessions[0]).toMatchObject({ tokens: { total: 111 }, cost: 0.875, requests: 3 })
++    expect(report.daily.reduce((total, day) => total + day.tokens.total, 0)).toBe(60)
++    expect(report.daily.reduce((total, day) => total + day.cost, 0)).toBe(0.75)
++    expect(report.toolUsage.find((tool) => tool.id === "historical-tool")).toMatchObject({ count: 1, contextTokens: 3 })
++    expect(renderBreakdown(report, { by: "source" })).toContain("toolCalls=")
++    expect(renderBreakdown(report, { by: "agent" })).toContain("agent usage over time")
++    expect(renderTimeline(report)).toContain("completed=")
++
++    const legacy = yield* aggregateStats({
++      projectFilter: projectID, modelFilter: "legacy-model", providerFilter: "legacy-provider", sourceFilter: "legacy-message",
++    })
++    expect(legacy.total).toMatchObject({ tokens: { total: 10 }, cost: 0.125, requests: 0, assistantCalls: 1, components: { system: 4 } })
++    const tracked = yield* aggregateStats({
++      projectFilter: projectID, sourceFilter: "command", agentFilter: "ledger-agent", statusFilter: "completed",
++    })
++    expect(tracked.total).toMatchObject({ tokens: { total: 20 }, cost: 0.25, requests: 1, assistantCalls: 1 })
++    const recent = yield* aggregateStats({ projectFilter: projectID, days: 1 })
++    expect(recent.models.some((row) => row.id === "legacy-model")).toBe(false)
++    expect(recent.total).toMatchObject({ tokens: { total: 50 }, cost: 0.625, requests: 3 })
++    // 原生助手只写入 session_message；账本计量与工具/组件历史必须仍能精确合并。
++    const native = { ...messages[1], id: MessageID.ascending(), parentID: MessageID.ascending(), cost: 0.5, tokens: { ...messages[1].tokens, input: 40 } }
++    yield* requests.begin({ sessionID, requestID: native.parentID, source: "prompt", agent: "native-agent", providerID: native.providerID, modelID: native.modelID, timeCreated: now })
++    yield* requests.recordAssistant({ sessionID, requestID: native.parentID, assistant: native, usage: { count: 1, tokens: { ...native.tokens, total: 40 }, costMicros: 500_000 } })
++    const data = { agent: "native-agent", model: { id: native.modelID, providerID: native.providerID }, time: { created: now, completed: now }, cost: 0.5, tokens: native.tokens,
++        inputEstimate: { input: 40, bodyChars: 40, confirmed: true, inputBreakdown: { system: 20, instructions: 0, skills: 0, tools: 0, messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 10, toolOutput: 10, attachments: 0, total: 20 } } },
++        content: [{ id: "native-tool-call", type: "tool", name: "native-tool", time: { created: now, completed: now }, state: { status: "completed", input: {}, content: [{ type: "text", text: "native output" }], structured: {} } }],
++    }
++    yield* database.db.insert(SessionMessageTable).values({
++      id: SessionMessage.ID.make(native.id), session_id: SessionSchema.ID.make(sessionID), type: "assistant", seq: 1, time_created: now, time_updated: now, data,
++    }).run().pipe(Effect.orDie)
++    const withNative = yield* aggregateStats({ projectFilter: projectID, toolFilter: "native-tool" })
++    expect(withNative.sessions).toHaveLength(1)
++    expect(withNative.toolUsage.find((tool) => tool.id === "native-tool")).toMatchObject({ count: 1, inputChars: 2, outputChars: 13 })
++    expect(withNative.toolUsage.find((tool) => tool.id === "native-tool")?.contextTokens).toBeGreaterThan(0)
++    const nativeAgent = yield* aggregateStats({ projectFilter: projectID, agentFilter: "native-agent" })
++    expect(nativeAgent.total).toMatchObject({ tokens: { total: 40 }, cost: 0.5, components: { system: 20, toolCalls: 10, toolResults: 10 } })
++  }),
++)
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
 new file mode 100644
 --- /dev/null

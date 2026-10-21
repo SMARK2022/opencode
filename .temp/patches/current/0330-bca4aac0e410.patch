@@ -47,68 +47,6 @@ diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/se
    // finish 枚举语义：stop/end_turn 是终态；tool-calls/unknown/undefined 表示回合仍在推进
 
 
-diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
---- a/packages/tui/src/component/prompt/index.tsx
-+++ b/packages/tui/src/component/prompt/index.tsx
-@@ -53,7 +53,7 @@ import { DialogAlert } from "../../ui/dialog-alert"
- import { useToast } from "../../ui/toast"
- import { useKV } from "../../context/kv"
- import { createFadeIn, createRefreshClock, createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
--import { activeTurnDuration } from "../../util/session-pending"
-+import { activeTurnDuration, activeTurnPair } from "../../util/session-pending"
- import { DialogSkill } from "../dialog-skill"
- import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
- import { useArgs } from "../../context/args"
-@@ -302,11 +302,12 @@ export function Prompt(props: PromptProps) {
- 
-     const getParts = (id: string) => sync.data.part[id] ?? []
-     // #122：整会话消息交给 tokenAccounting 一次算清 step/request/session
--    const lastUser = msg.findLast((item) => item.role === "user")
--    const last = lastUser
--      ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id)
--      : undefined
--    if (!last) return
-+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-+    // 避免 footer usage 在后台任务注入 orphan user 期间归零（旧逻辑按 lastUser.id
-+    // 反查 assistant 找不到时直接 return undefined）。
-+    const pair = activeTurnPair(msg)
-+    if (!pair?.assistant) return
-+    const last = pair.assistant
- 
-     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-     // #122：整会话一次 accounting，避免 UI 重复 sumConfirmed/computeFinalTokens
-
-
-diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
---- a/packages/tui/src/routes/session/subagent-footer.tsx
-+++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -8,6 +8,7 @@ import { Locale } from "../../util/locale"
- import { tokenAccounting } from "../../util/token-accounting"
- // #122：subagent footer 共用 accounting
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-+import { activeTurnPair } from "../../util/session-pending"
- import { useTerminalDimensions } from "@opentui/solid"
- import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
- 
-@@ -60,11 +61,11 @@ export function SubagentFooter() {
- 
-     const getParts = (id: string) => sync.data.part[id] ?? []
-     // #122：子代理页脚与主提示栏共用 tokenAccounting
--    const lastUser = msg.findLast((item) => item.role === "user")
--    const last = lastUser
--      ? msg.findLast((item) => item.role === "assistant" && (item as any).parentID === lastUser.id)
--      : undefined
--    if (!last) return
-+    // 以活跃轮次对解析当前 assistant，跳过尚未派生 assistant 的 queued orphan user，
-+    // 避免 subagent footer usage 在 orphan 窗口期归零。
-+    const pair = activeTurnPair(msg)
-+    if (!pair?.assistant) return
-+    const last = pair.assistant
- 
-     const model = sync.data.provider.find((item) => item.id === (last as any).providerID)?.models[(last as any).modelID]
-     // #122：子代理页脚与主提示栏同一 accounting 口径
-
-
 diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/token-accounting.ts
 --- a/packages/tui/src/util/token-accounting.ts
 +++ b/packages/tui/src/util/token-accounting.ts
@@ -134,38 +72,15 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
      : undefined
 
 
-diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
---- a/packages/tui/src/feature-plugins/sidebar/context.tsx
-+++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -161,7 +161,13 @@ const latencyDisplay = createMemo(() => {
-     const getParts = (id: string) => props.api.state.part(id)
- 
-     // 无助手消息时显示零值，等待服务端写入 tokens.input 后再显示
--    const lastUser = users.at(-1)
-+    // 以活跃轮次对解析当前轮：锁定最新 assistant 的 parent user，跳过其后尚未派生
-+    // assistant 的 queued orphan user（如 TaskTool 后台 noReply 注入），避免 orphan
-+    // 窗口期 sidebar context 显示全 0（旧逻辑按 users.at(-1) 反查 assistant 落空）。
-+    const latestAssistant = assistants.at(-1)
-+    const lastUser = latestAssistant
-+      ? users.findLast((item) => item.id === latestAssistant.parentID)
-+      : users.at(-1)
-     // 侧边栏上下文同样按 parentID 过滤当前请求的助手消息
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
-
-
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -1199,7 +1199,16 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-   // 消息按时间倒序过滤压缩历史，再反转回正序
+@@ -1135,6 +1135,12 @@ export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
+   // filter 接受新到旧的序列，源数组仍保持原顺序，不能原位 reverse 改掉 Sync 的消息顺序。
    const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
    const compacted = filterCompactedMessages(raw.toReversed())
 -  const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
-+  // 以活跃轮次取 user：锁定最新 assistant 的 parent user，跳过其后尚未派生 assistant 的
-+  // queued orphan user（如 TaskTool 后台 noReply 注入），避免 model 解析漂移到 orphan 的
-+  // 未定义 model。computeContextData 不因无 assistant 早退——无 breakdown 时仍走文件系统
-+  // 兜底估算分支，故只取 user，assistant 缺失时退回最新 user（fail-closed 语义）。
++  // 旧数据按已配对助手选择模型，避免排队中的 user 改变当前轮；无助手时保留首次输入估算。
 +  const latestAssistantMsg = compacted.findLast((msg) => msg.info.role === "assistant")
 +  const latestAssistantInfo = latestAssistantMsg?.info
 +  const latestAssistantParentID = latestAssistantInfo && latestAssistantInfo.role === "assistant" ? latestAssistantInfo.parentID : undefined
@@ -173,8 +88,7 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 +    ? compacted.findLast((msg) => msg.info.role === "user" && msg.info.id === latestAssistantParentID)?.info
 +    : compacted.findLast((msg) => msg.info.role === "user")?.info
    const modelInfo = currentModel(input, lastUser)
-   const maxTokens = modelInfo.model?.limit.context ?? 0
-   // 历史 step-finish 输入字符校准 chars/token；无历史时回落 4
+   // 请求投影包含 native 首包前与确认后的细分；只有没有投影的旧 V1 才读取确认 part。
 
 
 diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
@@ -402,14 +316,135 @@ index 0000000000000000000000000000000000000000..40349c2bab19910ae29b307054c94d40
 +  })
 +})
 
-diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
---- a/packages/tui/src/util/context-usage.ts
-+++ b/packages/tui/src/util/context-usage.ts
-@@ -1358,5 +1358,6 @@
-     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
-     { name: "Skills", tokens: skillTokens, color: "success" },
--    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
-+  // 049 source 语义：Tool definitions 与 Input Messages 需视觉区分（secondary，非同色 warning）
-+    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
-     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
-     // Conversation 组细分为四桶：工具结果/调用单独可见
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -23,5 +23,9 @@
+-      -- V1 身份取完整持久用户消息，窗口淘汰不会触发新请求零值。
+-      SELECT id, time_created, NULL AS promoted_seq, 'v1' AS kind
+-      FROM message WHERE session_id = "session"."id" AND json_extract(data, '$.role') = 'user'
+-      ORDER BY time_created DESC, id DESC LIMIT 1
++      -- 优先最新助手的父用户，跳过无回复输入；首次输入仍有独立零值投影。
++      SELECT m.id, m.time_created, NULL AS promoted_seq, 'v1' AS kind
++      FROM message m WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'user'
++      ORDER BY (m.id = (
++        SELECT json_extract(a.data, '$.parentID') FROM message a
++        WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
++        ORDER BY a.time_created DESC, a.id DESC LIMIT 1
++      )) DESC, m.time_created DESC, m.id DESC LIMIT 1
+     ), native_request AS (
+@@ -30,4 +34,5 @@
+       SELECT id, time_created, promoted_seq, 'native' AS kind, coalesce(promoted_seq, admitted_seq) AS position
+       FROM session_input WHERE session_id = "session"."id"
+-      ORDER BY coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
++      -- 未提升的queue/steer不能接管当前轮；没有提升记录时仍显示首次admission。
++      ORDER BY (promoted_seq IS NOT NULL) DESC, coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
+     ), current_request AS (
+@@ -42,4 +47,8 @@
+-        UNION ALL SELECT * FROM native_request)
+-      -- admission 或 promotion 决定最新身份；新 admission 等待时不能借用旧轮次。
+-      ORDER BY position DESC, time_created DESC, id DESC LIMIT 1
++        UNION ALL SELECT * FROM native_request) candidates
++      -- 混合入口同样优先已开始的请求；无回复V1输入不能压过正在执行的native轮次。
++      ORDER BY CASE WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
++        SELECT 1 FROM message a WHERE a.session_id = "session"."id"
++          AND json_extract(a.data, '$.role') = 'assistant'
++          AND json_extract(a.data, '$.parentID') = candidates.id
++      ) END DESC, position DESC, time_created DESC, id DESC LIMIT 1
+     ), assistants AS (
+diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/test/session/session.test.ts
+--- a/packages/opencode/test/session/session.test.ts
++++ b/packages/opencode/test/session/session.test.ts
+@@ -239,12 +239,12 @@
+-      // 旧请求仍有 100 个助手，加入新用户必须立即生成独立零请求快照。
++      // 旧请求仍有100个助手，无回复的新用户不能让完整请求累计归零。
+       const nextUserID = MessageID.ascending()
+       yield* session.updateMessage({
+         id: nextUserID, sessionID: created.id, role: "user", time: { created: 1000 },
+         agent: "build", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+       })
+-      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: nextUserID, input: 0, output: 0, cost: 0 })
+-      expect((yield* session.get(created.id)).request?.assistantID).toBeUndefined()
++      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: userID, input: 1400, output: 400, cost: 1 })
++      expect((yield* session.get(created.id)).request?.assistantID).toBeDefined()
+       // 身份切换只改变请求投影，已确认 Session.tokens 仍保留完整历史。
+       expect((yield* session.get(created.id)).tokens?.input).toBe(200)
+-      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
+-      expect(snapshots.at(-1)?.request?.cost).toBe(0)
++      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
++      expect(snapshots.at(-1)?.request?.cost).toBe(1)
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -272,3 +272,4 @@
+       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, cost: 1 })
++      const activeRequest = (yield* sessions.get(sessionID)).request
+       yield* events.publish(SessionEvent.PromptAdmitted, {
+         sessionID, messageID: SessionMessage.ID.make("msg_waiting_request"), timestamp: DateTime.makeUnsafe(6),
+@@ -277,9 +278,3 @@
+-      // 尚未 promoted 的最新 admission 是独立零值请求，不能消费旧助手。
++      // 入队只增加待处理输入，当前轮的累计、模型和未确认状态均保持原快照。
+-      expect((yield* sessions.get(sessionID)).request).toMatchObject({
+-        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
+-        // 新 admission 没有回复时 step 也必须为零，不能沿用最后一次旧结算。
+-        stepInput: 0, stepOutput: 0,
+-        // 保留 assistantID 缺省，避免把“无回复”与“已有未结算回复”混为一类。
+-      })
+-      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request).toEqual(activeRequest)
+       expect((yield* sessions.get(sessionID)).cost).toBe(1.5)
+@@ -292,7 +287,3 @@
+-      expect((yield* sessions.get(sessionID)).request).toMatchObject({
+-        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
+-      })
+-      // get/list 同用一个 SQL owner，等待请求没有模型，也没有可借用的助手。
+-      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+-      expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request).toEqual(activeRequest)
++      // get/list共用同一活跃请求，模型与助手不能被未提升的queue清空。
+       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
+@@ -340,7 +338,7 @@
+-      // 新用户立即换请求范围，上一请求的确认不得成为它的在途基数。
++      // 无回复用户仍属排队窗口，不应抹去配对轮次的确认值；首包前估算不复活。
+       yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
+         id: SessionV1.MessageID.ascending(), sessionID, role: "user", time: { created: 13 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
+       } })
+       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+-      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
+-      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, stepInput: 0, stepOutput: 0 })
++      expect((yield* sessions.get(sessionID)).request?.assistantID).toBe(next.id)
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -2759,3 +2759,3 @@
+-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue first" }), delivery: "queue" })
++      const active = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue first" }), delivery: "queue" })
+       const queued = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
+       streamGate = secondGate
+@@ -2764,4 +2764,4 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Steer before next queued input" }) })
+-      const steer = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
+-      // gate 内的新 admission 尚未提升，必须有独立零请求，不能显示 Queue first 的回复。
+-      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: steer.id, input: 0, output: 0, cost: 0 })
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
++      // gate内的新steer尚未提升，显示继续属于已开始的Queue first。
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: active.id, input: 0, output: 0, cost: 0 })
+@@ -2835,8 +2835,8 @@
+-      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: nextLegacyID, input: 0, output: 0, cost: 0 })
+-      // 混合入口之后的新 admission 仍是独立零值，不能固定 native 优先或永远保留 V1 候选。
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
++      // 混合入口的无回复用户和未提升queue都不能接管已有配对请求。
+       const waiting = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed waiting" }), delivery: "queue", resume: false })
+-      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: waiting.id, input: 0, output: 0, cost: 0 })
+-      // 再接纳等待请求后 step 也清零，不能借用刚完成的 native step。
+-      expect((yield* session.get(sessionID)).request).toMatchObject({ stepInput: 0, stepOutput: 0 })
+-      expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
+-      expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
++      expect(waiting.id).not.toBe(queued.id)
++      expect((yield* session.get(sessionID)).request).toMatchObject({ stepInput: 10, stepOutput: 4 })
++      expect((yield* session.get(sessionID)).request?.assistantID).toBe(messages.findLast((message) => message.type === "assistant")?.id)
++      expect((yield* session.get(sessionID)).request?.model).toBeDefined()
+

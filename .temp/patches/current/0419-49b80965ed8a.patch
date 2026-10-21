@@ -532,29 +532,25 @@ index 0000000000000000000000000000000000000000..d911f1637ac20469405f2009ce4aa0c4
 +| 5 | 阻塞解决确认 | subagent：无阻塞性意见，放行；N1 source-content sanity check 已采纳并写入 §5.3 |
 +| 6 | 全库历史 SyntaxError/ParserError 无执行回放 | 536/536 条经真实 ShellTool 预执行链并在 permission gate 中断；发现并修复 compound quote 吸收、合法 Python 分号误拒与 conda run 缺口。独立复核后又收紧动态 conda/backtick 边界并补齐 attached flags。最终 97 条转译均通过 PowerShell 7/5.1 AST，94 条 Python compile 成功，3 条为原始模型源码错误 |
 +| 7 | 实现独立复核（3 轮上限） | 第 1-2 轮的动态 conda、flags、backtick 和 operator-in-value 阻塞均已修复；第 3 轮发现 PowerShell `@args` splatting 未拒绝，已在共享 static validator 中修复并补测试。按实现复核三轮上限不再追加第 4 轮，因此该最后一项只有本地主测试证据，没有新的 subagent 放行结论 |
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
-@@ -237,7 +237,10 @@ function bashEffect(input: {
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
+@@ -237,7 +237,8 @@ function bashEffect(input: {
    const patternCommand = input.patterns.join(" && ")
    if (!command) return evaluateShell(patternCommand, 0)
  
 -  const raw = evaluateShell(command, 0)
-+  // [local-smark] 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据
-+  // 风险取 max。inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的
-+  // 源码证据，只能提高风险不能降低：dangerous source 在任何 gate 都 deterministic deny
++  // 原始命令、canonical与最终inline源码取最高风险，附加证据不能降低既有判断。
 +  const raw = shellEvidenceRisk(command, input.metadata)
    if (!patternCommand.trim() || patternCommand === command) return raw
    // #285：canonical 与原始命令相同时无需二次评估，避免重复解析
  
-@@ -247,6 +250,22 @@ function bashEffect(input: {
+@@ -247,6 +248,20 @@ function bashEffect(input: {
    return maxRisk(raw, evaluateShell(patternCommand, 0))
  }
  
-+// [local-smark] inline_scripts 附加证据风险：在原命令风险之上单调叠加每个字符串
-+// source 的 evaluateShell 结果。inline_scripts 是 Python 源码而非 shell 命令，除
-+// evaluateShell 常规模式外还需 RE_C_PYTHON_FILE_REMOVE_CALL：该模式正常需要
-+// python -c 前缀才能命中，而 inline_scripts 源码没有该前缀
++// 附加证据是没有python -c前缀的源码；补单文件删除分类，畸形项不降低原风险。
++// 复用既有classifier和maxRisk，不建立另一套Python执行或审批路径。
 +function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>): Decision {
 +  const scripts = Array.isArray(metadata.inline_scripts)
 +    ? metadata.inline_scripts.filter((item): item is string => typeof item === "string")
@@ -584,23 +580,15 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
      )
      // #232：已经确定性的危险 shell 载荷必须在 external_directory 门禁保持 deny——
      // #232：否则 rm -rf / 仅因同时跨越外部路径边界就会变成 reviewer 可审批。
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -380,7 +380,204 @@ const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boole
-   return tree
- })
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -213,3 +213,192 @@
+ }
  
--const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string }) {
-+// ============================================================
-+// PowerShell inline Python 命令规范化
-+// ============================================================
-+// PowerShell 对 python -c "..." 内双引号源码做二次解析：剥离 \"、展开 $()、
-+// 处理反引号。规范化把源码移入 PowerShell 单引号 literal，使 Python 收到原始源码。
-+// 仅在 Windows PowerShell 下对高置信的单一 inline Python 命令生效；
-+// 不替换解释器、不改变 flags/env/cwd/stdin；模糊命令原样 fallback。
++// 只修Windows PowerShell高置信inline Python的native引号，不替换解释器、环境或stdin。
 +
-+const INLINE_PYTHON_TAG = "powershell-inline-python-quoting-v1" as const
++export const INLINE_PYTHON_TAG = "powershell-inline-python-quoting-v1" as const
 +// EncodedCommand 的 Base64 参数长度上限：Windows 命令行 32,767 字符减去 shell
 +// path、固定 flags 和 terminating NUL 的余量。历史最大 normalized 长度为 31,024。
 +const INLINE_PYTHON_MAX_ENCODED = 31_500
@@ -631,7 +619,8 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +  return value.length > 0 && !/[\s"'`$@;&|<>(){}]/.test(value)
 +}
 +
-+function normalizePowerShellInlinePython(command: string): InlinePythonNormalization | undefined {
++export function normalizePowerShellInlinePython(command: string, shell: string, platform: string = process.platform): InlinePythonNormalization | undefined {
++  if (platform !== "win32" || !ps(shell)) return undefined
 +  let pos = 0
 +  let callOperator = false
 +  // 跳过前导空白
@@ -779,13 +768,19 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +  // 在子作用域中设置 Legacy native argument passing，兼容 PS 5.1 和 PS 7
 +  const normalizedCommand = `$PSNativeCommandArgumentPassing = 'Legacy'; ${audit}`
 +
-+  // 长度门限：超过则放弃规范化，原样执行
-+  if (psEncoded(normalizedCommand).length > INLINE_PYTHON_MAX_ENCODED) return undefined
++  // 使用真实transport连同固定flags计长度，不能复建已经移除的第二编码器。
++  if (cmd(shell, normalizedCommand, platform).args.join(" ").length > INLINE_PYTHON_MAX_ENCODED) return undefined
 +
 +  return { command: normalizedCommand, source: normalizedSource, audit }
 +}
 +
 +
+ export function args(file: string, command: string, cwd: string) {
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -349,4 +349,7 @@
+-const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string }) {
 +const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan, input: { command: string; cwd: string; shell: string; inline_scripts?: string[] }) {
 +  // [local-smark] shared evidence：两个 permission request 必须从同一对象展开，
 +  // 确保 inline_scripts 附加证据同时到达 external_directory 和 bash gate
@@ -793,7 +788,13 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
    if (scan.dirs.size > 0) {
      const directories = Array.from(scan.dirs)
      const globs = directories.map((dir) => {
-@@ -424,6 +621,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+@@ -368,4 +371,5 @@
+         agent: ctx.agent,
+         directories,
+         patterns: globs,
++        ...sharedEvidence,
+       },
+@@ -387,6 +391,7 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
        cwd: input.cwd,
        shell: input.shell,
        agent: ctx.agent,
@@ -801,7 +802,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
      },
    })
  })
-@@ -909,6 +1107,10 @@ export const ShellTool = Tool.define(
+@@ -551,6 +556,10 @@ export const ShellTool = Tool.define(
        input: {
          shell: string
          command: string
@@ -812,54 +813,28 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
          cwd: string
          env: NodeJS.ProcessEnv
          timeout: number
-@@ -970,7 +1172,7 @@ export const ShellTool = Tool.define(
-       const code: number | null = yield* Effect.scoped(
-         Effect.gen(function* () {
-           yield* Effect.addFinalizer(closeSink)
+@@ -619,1 +628,1 @@
 -          const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 +          const handle = yield* spawner.spawn(cmd(input.shell, input.executeCommand ?? input.command, input.cwd, input.env))
- 
-           // #126：按字节喂给自动解码器，避免 UTF-16 被 decodeText 当 UTF-8 破坏
-           // #126：按字节喂解码器，解决 PowerShell/重定向 UTF-16 输出
-@@ -1224,6 +1426,8 @@ export const ShellTool = Tool.define(
-           exit: code,
+@@ -824,1 +833,3 @@
            truncated: cut,
-           ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
 +          // [local-smark] 规范化生效时记录 adaptation tag，便于数据库度量和后续诊断
 +          ...(input.adaptation ? { commandAdaptation: input.adaptation } : {}),
-           // 包含压缩统计信息：applied、removedLines 等
-           ...bashCompressionMetadata(compressed.stats),
-           // 诊断元数据：暴露执行时长和错误/警告行数
-@@ -1273,6 +1477,10 @@ export const ShellTool = Tool.define(
-               }
-               const timeout = params.timeout ?? defaultTimeoutMs
+@@ -871,1 +882,3 @@
                const ps = Shell.ps(shell)
-+              // [local-smark] PowerShell inline Python 规范化：只在 Windows PowerShell
-+              // 下对高置信的单一 python -c "..." 命令做引号修复。不命中返回 undefined，
-+              // 原命令原样执行，不产生 compatibility error 或 adaptation metadata
-+              const normalization = ps ? normalizePowerShellInlinePython(params.command) : undefined
-               // 从配置和参数决定是否启用输出压缩，默认启用
-               const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
-               yield* Effect.scoped(
-@@ -1285,7 +1493,16 @@
-               if (compatibility) throw new Error(compatibility)
-               const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
++              // 只在共享owner确认Windows PowerShell静态边界后适配，原命令仍用于分析和授权。
++              const normalization = Shell.normalizePowerShellInlinePython(params.command, shell)
+@@ -882,3 +895,8 @@
+                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                    if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
 -                  yield* ask(ctx, scan, { command: params.command, cwd, shell: name })
-+                  // [local-smark] 规范化的 audit 命令加入 scan.raw，只参与 explicit deny 规则
++                  // 原始command继续授权；audit只补充拒绝证据，不生成allow/always键。
 +                  if (normalization) scan.raw.add(normalization.audit)
 +                  yield* ask(ctx, scan, {
-+                    command: params.command,
-+                    cwd,
-+                    shell: name,
-+                    // inline_scripts 是 Python 最终实际执行的源码，作为 deny-only
-+                    // 附加证据同时进入 external_directory 和 bash 两个 permission gate
++                    command: params.command, cwd, shell: name,
 +                    ...(normalization ? { inline_scripts: [normalization.source] } : {}),
 +                  })
-                 }),
-               )
- 
-@@ -1295,11 +1513,16 @@ export const ShellTool = Tool.define(
+@@ -891,11 +909,16 @@ export const ShellTool = Tool.define(
                  {
                    shell,
                    command: params.command,
@@ -872,24 +847,51 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
                    compressOutput,
                    encoding,
 +                  // 规范化生效时在 result metadata 中记录 adaptation tag，便于数据库度量
-+                  ...(normalization ? { adaptation: INLINE_PYTHON_TAG } : {}),
++                  ...(normalization ? { adaptation: Shell.INLINE_PYTHON_TAG } : {}),
                  },
                  ctx,
                )
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -599,6 +599,10 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
-         agent: ctx.agent,
-         directories,
-         patterns: globs,
-+        // [local-smark] 第一道权限门禁同样携带 inline_scripts（源 :819 sharedEvidence
-+        // 展开）：dangerous inline source 必须在 external_directory 就 deterministic
-+        // deny，不能只给后发生的 bash request 加源码证据
-+        ...sharedEvidence,
-       },
-     })
-   }
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -70,1 +70,3 @@
+   durationMs: Schema.Number.pipe(Schema.optional),
++  // typed输出与投影共同保留适配标记，不能只写一个会被Schema丢弃的临时属性。
++  commandAdaptation: Schema.String.pipe(Schema.optional),
+@@ -179,1 +181,2 @@
+             ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
++            ...(output.commandAdaptation === undefined ? {} : { commandAdaptation: output.commandAdaptation }),
+@@ -189,1 +192,4 @@
+               const shell = selectedShell(entries)
++              const normalization = Shell.normalizePowerShellInlinePython(input.command, shell)
++              // 两道权限门共享最终源码；原始command仍是授权与保存资源，audit只用于拒绝。
++              const evidence = normalization ? { inline_scripts: [normalization.source], raw_patterns: [normalization.audit] } : {}
+@@ -227,1 +233,1 @@
+-                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
++                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
+@@ -242,1 +248,1 @@
+-                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
++                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
+@@ -262,1 +268,1 @@
+-              const invocation = Shell.cmd(shell, input.command)
++              const invocation = Shell.cmd(shell, normalization?.command ?? input.command)
+@@ -313,1 +319,2 @@
+                   durationMs,
++                  ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
+@@ -347,1 +354,2 @@
+                 durationMs,
++                ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -161,3 +161,6 @@
+     function denied(input: AssertInput, rules: Permission.Ruleset) {
+-      return input.resources.some((resource) => evaluate(input.action, resource, rules).effect === "deny")
++      const raw = input.action === "bash" && Array.isArray(input.metadata?.raw_patterns) ? input.metadata.raw_patterns.filter((value): value is string => typeof value === "string") : []
++      // 新audit仅命中具体deny，不使用保存批准、不扩大allow，也不让兜底*吞掉规范化证据。
++      const adapted = raw.some((resource) => rules.some((rule) => rule.effect === "deny" && rule.resource !== "*" && Wildcard.match(input.action, rule.action) && Wildcard.match(resource, rule.resource)))
++      return adapted || input.resources.some((resource) => evaluate(input.action, resource, rules).effect === "deny")
+     }
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
@@ -985,125 +987,15 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -192,7 +192,9 @@ const mustTruncate = (result: {
- 
- describe("tool.shell", () => {
-   // #155：BEL 测试只注册一次，勿放进 each() 避免按 shell 组合重复
--  it.live("sanitizes BEL and control characters in shell output", () =>
-+    // [local-smark] 输出消毒回归：BEL/C0 控制字符不得原样进入 transcript，
-+  // 否则会污染 TUI 渲染和下游日志聚合。
-+it.live("sanitizes BEL and control characters in shell output", () =>
-     runIn(
-       projectRoot,
-       Effect.gen(function* () {
-@@ -254,7 +256,9 @@ describe("tool.shell", () => {
-     )
-   }
- 
--  it.live("falls back from terminal-only configured shell", () =>
-+    // [local-smark] shell 回退链：配置的 shell 不可用时按平台默认值降级，
-+  // 而不是让 spawn 失败暴露给模型。
-+it.live("falls back from terminal-only configured shell", () =>
-     Effect.gen(function* () {
-       const tmp = yield* tmpdirScoped({ config: { shell: "fish" } })
-       yield* runIn(
-@@ -302,7 +306,9 @@ describe("tool.shell permissions", () => {
-   )
- 
-   if (bash) {
--    it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
-+      // [local-smark] POSIX env 赋值不属于权限语义：FOO=1 rm -rf 的审批 pattern
-+  // 必须是 rm -rf，否则用户批准的模式与真实执行脱节。
-+it.live("omits leading environment assignments from bash permission patterns [bash]", () =>
-     // #285：permission pattern 不含 CI=true 前缀，规则只需匹配真实命令；
-     // 原始命令进 raw_patterns 供 deny 检查
-       withShell(
-@@ -389,7 +395,9 @@ describe("tool.shell permissions", () => {
-   )
- 
-   for (const item of ps) {
--    it.live(`parses PowerShell conditionals for permission prompts [${item.label}]`, () =>
-+      // [local-smark] PowerShell 条件分支（if/&&/||）需要逐段提取权限 pattern，
-+  // 每个分支都是一次独立的潜在副作用。
-+it.live(`parses PowerShell conditionals for permission prompts [${item.label}]`, () =>
-       withShell(
-         item,
-         runIn(
-@@ -414,7 +422,8 @@ describe("tool.shell permissions", () => {
-   }
- 
-   for (const item of ps) {
--    it.live(`uses PowerShell cmdlet prefixes for always-allow prompts [${item.label}]`, () =>
-+      // [local-smark] always-allow 按 cmdlet 前缀聚合，减少重复弹窗但不放宽 deny。
-+it.live(`uses PowerShell cmdlet prefixes for always-allow prompts [${item.label}]`, () =>
-       withShell(
-         item,
-         Effect.gen(function* () {
-@@ -500,7 +509,9 @@ describe("tool.shell permissions", () => {
- 
-   // #158：ssh 引号内 Unix 管道视为远程载荷，不触发本地兼容拦截
-   for (const item of ps) {
--    it.live(`does not reject Unix commands inside remote ssh string [${item.label}]`, () =>
-+      // [local-smark] ssh/wsl 远程字符串内的 Unix 命令由远端解释：
-+  // 本地 PowerShell 分类器不得误判为危险管道头（归因边界）。
-+it.live(`does not reject Unix commands inside remote ssh string [${item.label}]`, () =>
-       withShell(
-         item,
-         runIn(
-@@ -492,7 +503,9 @@ describe("tool.shell permissions", () => {
-   // #158：本地管道 head 仍拦截，并提示 Select-Object
-   // #158：错误文案必须含 local command 与 Select-Object -First N
-   for (const item of ps) {
--    it.live(`rejects local Unix pipeline head on PowerShell [${item.label}]`, () =>
-+      // [local-smark] 与 ssh/wsl 相对：本地 PowerShell 里直接出现的 Unix 管道头
-+  // 是真实的解析歧义，必须保守拒绝。
-+it.live(`rejects local Unix pipeline head on PowerShell [${item.label}]`, () =>
-       withShell(
-         item,
-         runIn(
-@@ -617,7 +630,8 @@ each("asks for external_directory permission for wildcard external paths", () =>
- 
-   if (process.platform === "win32") {
-     if (bash) {
--      it.live("asks for nested bash command permissions [bash]", () =>
-+        // [local-smark] 嵌套命令的权限展开：内层命令也要进入审批 pattern 集合。
-+it.live("asks for nested bash command permissions [bash]", () =>
-         withShell(
-           { label: "bash", shell: bash },
-           Effect.gen(function* () {
-@@ -1058,7 +1072,9 @@ each("asks for external_directory permission for wildcard external paths", () =>
-   )
- 
-   if (process.platform === "win32") {
--    it.live("normalizes external_directory workdir variants on Windows", () =>
-+      // [local-smark] Windows 路径形态归一（正斜杠/盘符大小写/尾部斜杠）
-+  // 不得造成 external_directory 门禁的旁路差异。
-+it.live("normalizes external_directory workdir variants on Windows", () =>
-       Effect.gen(function* () {
-         const err = new Error("stop after permission")
-         const outerTmp = yield* tmpdirScoped()
-@@ -1093,7 +1109,9 @@ each("asks for external_directory permission for wildcard external paths", () =>
-     )
- 
-     if (bash) {
--      it.live("uses Git Bash /tmp semantics for external workdir", () =>
-+        // [local-smark] Git Bash 的 /tmp 映射到 Windows 临时目录：
-+  // external_directory 判定必须使用映射后的真实路径。
-+it.live("uses Git Bash /tmp semantics for external workdir", () =>
-         withShell(
-           { label: "bash", shell: bash },
-           runIn(
-@@ -2709,4 +2727,371 @@ describe("tool.shell execution notice policy", () => {
+@@ -2766,4 +2766,376 @@ describe("tool.shell execution notice policy", () => {
      expect(notice).toContain('reason="completed"')
-     expect(notice).toContain('elapsed_ms="121000"')
+     expect(notice).toContain('elapsed_ms="120000"')
    })
 -})
 +})
 +
-+// 内双引号源码做二次解析，导致 Bash 风格的 \" 转义被剥离、$() 被展开。
-+// 规范化把源码移入 PowerShell 单引号 literal，使 Python 收到原始源码。
-+// 仅在 Windows PowerShell 下生效；非 Windows 或无 PowerShell 时跳过。
-+describe("tool.shell inline python normalization", () => {
++// Windows PowerShell使用单引号literal保留源码；真实反斜杠用String.raw构造，不把JS转义当覆盖。
++describe.skipIf(process.platform !== "win32")("tool.shell inline python normalization", () => {
 +  // 最小复现：Bash 风格 \" 在 PowerShell 双引号内被剥离，导致 Python SyntaxError
 +  for (const item of ps) {
 +    it.live(`preserves escaped quotes in python -c [${item.label}]`, () =>
@@ -1113,7 +1005,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +          projectRoot,
 +          Effect.gen(function* () {
 +            const result = yield* run({
-+              command: `python -c "print('{\"key\":1}')"`,
++              command: String.raw`python -c "print('{\"key\":1}')"`,
 +            })
 +            expect(result.metadata.exit).toBe(0)
 +            // Python 应输出 {"key":1}，而非 SyntaxError: unterminated string literal
@@ -1124,7 +1016,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +            // 静态绝对路径必须保留模型选择的解释器，只修复同一个 -c 参数。
 +            const interpreter = Bun.which("python")!
 +            const pathResult = yield* run({
-+              command: `& "${interpreter}" -c "import sys; print(sys.executable); print('{\"path\":1}')"`,
++              command: String.raw`& "${interpreter}" -c "import sys; print(sys.executable); print('{\"path\":1}')"`,
 +            })
 +            expect(pathResult.metadata.exit).toBe(0)
 +            expect(pathResult.output).toContain('{"path":1}')
@@ -1146,7 +1038,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +          projectRoot,
 +          Effect.gen(function* () {
 +            const result = yield* run({
-+              command: `python -c "print('{\"key\":1}'); print(2)"`,
++              command: String.raw`python -c "print('{\"key\":1}'); print(2)"`,
 +            })
 +            expect(result.metadata.exit).toBe(0)
 +            expect(result.output).toContain('{"key":1}')
@@ -1191,7 +1083,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +          Effect.gen(function* () {
 +            // 混合单双引号和 Unicode 在 -c 源码内，验证规范化后逐字符一致
 +            const result = yield* run({
-+              command: `python -c "print('{\"k\":\"v\"} 汉字')"`,
++              command: String.raw`python -c "print('{\"k\":\"v\"} 汉字')"`,
 +            })
 +            expect(result.metadata.exit).toBe(0)
 +            // Python 应输出原始源码中的 JSON 和 Unicode
@@ -1261,7 +1153,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +            expect(
 +              yield* fail(
 +                {
-+                  command: `conda run -n agent python -c "print('{\"key\":1}')"`,
++                  command: String.raw`conda run -n agent python -c "print('{\"key\":1}')"`,
 +                },
 +                capture(requests, stop),
 +              ),
@@ -1448,16 +1340,23 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +          projectRoot,
 +          Effect.gen(function* () {
 +            const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++            const outside = yield* tmpdirScoped()
 +            yield* run(
 +              {
 +                command: `python -c "print(1)"`,
++                workdir: outside,
 +              },
 +              capture(requests),
 +            )
 +            const bashReq = requests.find((r) => r.permission === "bash")
 +            expect(bashReq).toBeDefined()
 +            // bash gate 必须携带 inline_scripts 附加证据
-+            expect(bashReq!.metadata).toHaveProperty("inline_scripts")
++            expect(bashReq?.metadata).toHaveProperty("inline_scripts")
++            const externalReq = requests.find((request) => request.permission === "external_directory")
++            expect(externalReq).toBeDefined()
++            expect(externalReq?.metadata.inline_scripts).toEqual(bashReq?.metadata.inline_scripts)
++            expect(bashReq?.metadata.inline_scripts).toEqual(["print(1)"])
++            expect(externalReq?.metadata.command).toBe('python -c "print(1)"')
 +          }),
 +        ),
 +      ),
@@ -1466,3 +1365,74 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +  }
 +})
 +
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -56,1 +56,23 @@
++  test("normalizes only bounded Windows PowerShell inline Python through the real transport", () => {
++    const command = String.raw`python -c "print('{\"key\":1}')"`
++    const normalized = Shell.normalizePowerShellInlinePython(command, "pwsh", "win32")
++    if (!normalized) throw new Error("expected static Python adaptation")
++    expect(normalized.source).toBe(`print('{"key":1}')`)
++    expect(normalized.command).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
++    const encoded = Shell.cmd("pwsh", normalized.command, "win32").args.at(-1)
++    if (!encoded) throw new Error("expected EncodedCommand")
++    expect(Buffer.from(encoded, "base64").toString("utf16le")).toContain(normalized.command)
++    // 显式平台输入沿用Shell.cmd风格，不伪造全局platform，也不启动任何解释器。
++    for (const platform of ["linux", "darwin"]) expect(Shell.normalizePowerShellInlinePython(command, "pwsh", platform)).toBeUndefined()
++    expect(Shell.normalizePowerShellInlinePython(command, "cmd.exe", "win32")).toBeUndefined()
++    for (const prefix of ["python3.12 -B -Wdefault -Xutf8", "py -3.12 -B", '& "C:\\Python312\\python3.12.exe"', "conda run --name=agent --live-stream python"]) {
++      expect(Shell.normalizePowerShellInlinePython(`${prefix} -c "print(1)"`, "pwsh", "win32")?.source).toBe("print(1)")
++    }
++    for (const value of [
++      'python -i -c "print(1)"', 'python -c "print(1)" extra', 'python -c "print(1)"; Write-Output done',
++      'python -c "print(1)" > output.txt', 'conda run --name=$env:ENV python -c "print(1)"',
++    ]) expect(Shell.normalizePowerShellInlinePython(value, "pwsh", "win32")).toBeUndefined()
++    expect(Shell.normalizePowerShellInlinePython(`python -c "${"x".repeat(20_000)}"`, "pwsh", "win32")).toBeUndefined()
++  })
++
+   test("normalizes shell names", () => {
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -199,1 +199,9 @@
+       expect(yield* service.list()).toEqual([])
++      // audit仅触发具体deny；不能获得allow，也不能把通配兜底deny变成新阻塞。
++      const adapted = assertion({ action: "bash", resources: ["python-original"], metadata: { raw_patterns: ["python-adapted"] } })
++      yield* setRules([{ action: "bash", resource: "python-adapted", effect: "deny" }, { action: "bash", resource: "*", effect: "allow" }])
++      expect(yield* service.ask(adapted)).toMatchObject({ effect: "deny" })
++      yield* setRules([{ action: "bash", resource: "*", effect: "deny" }, { action: "bash", resource: "python-original", effect: "allow" }])
++      expect(yield* service.ask(adapted)).toMatchObject({ effect: "allow" })
++      yield* setRules([{ action: "bash", resource: "python-adapted", effect: "allow" }])
++      expect(yield* service.ask(adapted)).toMatchObject({ effect: "ask" })
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -329,2 +329,27 @@
+                 }
++                if (!cmd) {
++                  reset()
++                  const command = String.raw`python -c "print('{\"native\":1}')"`
++                  const input = { command, workdir: path.dirname(tmp.path) }
++                  // 真实leaf/registry配已有process替身，验证双门、执行串和typed输出而不运行Python。
++                  const settled = yield* settleTool(registry, call(input))
++                  expect(settled.result.type).toBe("content")
++                  expect(settled.output?.structured).toMatchObject({ commandAdaptation: "powershell-inline-python-quoting-v1" })
++                  expect(assertions.map((request) => request.action)).toEqual(["external_directory", "bash"])
++                  for (const request of assertions) expect(request.metadata).toMatchObject({ command, inline_scripts: [`print('{"native":1}')`] })
++                  expect(assertions[1]?.resources).toEqual([command])
++                  expect(assertions[1]?.save).toEqual([command])
++                  expect(runs).toHaveLength(1)
++                  const encoded = runs[0]?.args.at(-1)
++                  if (!encoded) throw new Error("expected captured transport")
++                  const script = Buffer.from(encoded, "base64").toString("utf16le")
++                  expect(script).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
++                  expect(script).not.toContain(command)
++                  for (const action of ["external_directory", "bash"]) {
++                    reset()
++                    denyAction = action
++                    expect((yield* settleTool(registry, call(input))).result.type).toBe("error")
++                    expect(runs).toEqual([])
++                  }
++                }
+               }), appProcess, shell)

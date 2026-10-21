@@ -63,9 +63,9 @@ diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/p
  }
 
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -216,7 +216,33 @@
    // #232：默认回到 general allow，除非上方的结构化边界（如 workspace delete metadata）
    // #232：先把它们提升到 cautious。
@@ -115,7 +115,13 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
    always: Set<string>
  }
  
-@@ -192,10 +193,32 @@
+@@ -150,3 +151,5 @@
+       child.type !== "command_name" &&
+       child.type !== "command_name_expr" &&
++      // Bash将-5等实参标为number，canonical pattern必须保留完整参数。
++      child.type !== "number" &&
+       child.type !== "word" &&
+@@ -192,10 +195,32 @@
    return out
  }
  
@@ -177,7 +183,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +          const raw = rawPattern(node)
 +          if (raw && raw !== pattern) scan.raw.add(raw)
 +          // #285：raw 与 canonical pattern 相同时不加重复证据；只有差异（如 env 赋值）才进 raw
-           // 高风险 git 写操作不自动加入 always-allow 前缀建议
+           // 仍保留完整请求 pattern，只撤销危险写操作的自动前缀建议。
            const always = BashArity.prefix(tokens)
            // #197：高风险 git 写操作与宽泛 wrapper 前缀不自动加入 always-allow
 

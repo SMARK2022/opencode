@@ -1092,18 +1092,38 @@ diff --git a/packages/core/src/session/compaction-boundary.ts b/packages/core/sr
  
    // #0500：最新失败候选不会遮挡更早仍合法的 completed boundary。
 
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -22,10 +22,19 @@ export const selection = {
+     WITH v1_request AS (
+       -- 优先最新助手的父用户，跳过无回复输入；首次输入仍有独立零值投影。
++      -- 按父ID点查后再取最新用户，避免为每个用户排序重查同一助手；保留缺失父行时的原投影。
+       SELECT m.id, m.time_created, NULL AS promoted_seq, 'v1' AS kind
+       FROM message m WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'user'
+-      ORDER BY (m.id = (
+-        SELECT json_extract(a.data, '$.parentID') FROM message a
+-        WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
+-        ORDER BY a.time_created DESC, a.id DESC LIMIT 1
+-      )) DESC, m.time_created DESC, m.id DESC LIMIT 1
++      AND m.id = coalesce((
++        SELECT u.id FROM message u
++        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
++          AND u.id = (
++            SELECT json_extract(a.data, '$.parentID') FROM message a
++            WHERE a.session_id = "session"."id" AND json_extract(a.data, '$.role') = 'assistant'
++            ORDER BY a.time_created DESC, a.id DESC LIMIT 1
++          )
++      ), (
++        SELECT u.id FROM message u
++        WHERE u.session_id = "session"."id" AND json_extract(u.data, '$.role') = 'user'
++        ORDER BY u.time_created DESC, u.id DESC LIMIT 1
++      ))
+     ), native_request AS (
+
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -25,7 +25,7 @@ import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessag
- import { Database } from "@opencode-ai/core/database/database"
- import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { NotFoundError } from "@/storage/storage"
--import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
-+import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
- import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
- // #0500：boundary-first 读取的权威——compaction 边界决定 hydrate 范围，message-v2 不得自行扫描 marker。
- import { CompactionBoundary } from "@opencode-ai/core/session/compaction-boundary"
 @@ -116,6 +116,14 @@ const Cursor = Schema.Struct({
  })
  type Cursor = typeof Cursor.Type
@@ -1240,7 +1260,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +const atOrNewer = (row: Cursor) =>
 +  or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gte(MessageTable.id, row.id)))
  
- function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
+ function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[], includeHidden = true) {
    // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
 @@ -709,6 +753,16 @@ export function toModelMessages(
  ): Promise<ModelMessage[]> {
@@ -1259,37 +1279,47 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  
  export const page = Effect.fn("MessageV2.page")(function* (input: {
    sessionID: SessionID
-@@ -727,11 +781,20 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-     return { items, more: false }
-   }
-   const before = input.before ? cursor.decode(input.before) : undefined
--  // fromMessageID 裁剪：MessageID 单调递增（见 message-v2.ts ascending），
--  // gte(id, fromMessageID) 等价于"该消息及之后的所有消息"，与 revert.ts 中
--  // `msg.info.id >= rev.messageID` 的字符串比较语义一致。
-+  // #557：MessageID 是 caller 可选标识；inclusive suffix 先把 public ID 解析回 canonical tuple，
-+  // lexical-low ID 仍可成为后来写入的合法边界；row 缺失时退回原 eq 语义（不猜半个窗口）。
-+  const from = input.fromMessageID
-+    ? yield* db
-+        .select({ id: MessageTable.id, time: MessageTable.time_created })
-+        .from(MessageTable)
-+        .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.fromMessageID)))
-+        .get()
-+        .pipe(Effect.orDie)
+@@ -725,7 +779,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+   // 导入及回绕ID不保证时间单调，范围必须与现有(time_created,id)分页顺序一致。
+   const lower = input.fromMessageID
+     ? anchor
+-      ? or(gt(MessageTable.time_created, anchor.time), and(eq(MessageTable.time_created, anchor.time), gte(MessageTable.id, anchor.id)))
++      ? atOrNewer(anchor)
+       : sql`0`
+     : undefined
+   const where = and(eq(MessageTable.session_id, input.sessionID), lower, before ? older(before) : undefined)
+@@ -844,9 +898,14 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+-  const conditions = [eq(MessageTable.session_id, input.sessionID)]
+-  if (input.messageID) conditions.push(lt(MessageTable.id, input.messageID))
++  const anchor = input.messageID
++    ? db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
++        .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.messageID))).get()
 +    : undefined
-   const base = input.fromMessageID
--    ? and(eq(MessageTable.session_id, input.sessionID), gte(MessageTable.id, input.fromMessageID))
-+    ? from
-+      ? and(eq(MessageTable.session_id, input.sessionID), atOrNewer(from))
-+      : and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.fromMessageID))
-     : eq(MessageTable.session_id, input.sessionID)
-   const where = before ? and(base, older(before)) : base
-   // #553：raw page 保留 indexed limit 与 structural caller 合同；visible page 在相同 physical cursor 上 refill，
-@@ -1047,7 +1110,8 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
++  // 已有边界按持久时间/ID截取；缺失边界保留原ID范围合同，raw读取仍不解码冷payload。
++  const before = input.messageID ? anchor ? older(anchor) : lt(MessageTable.id, input.messageID) : undefined
++  const conditions = and(eq(MessageTable.session_id, input.sessionID), before)
+   const messages = db
+     .select({ id: MessageTable.id })
+     .from(MessageTable)
+-    .where(and(...conditions))
++    .where(conditions)
+     .orderBy(MessageTable.time_created, MessageTable.id)
+     .all()
+@@ -854,7 +913,7 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+         .select({ id: PartTable.id, message_id: PartTable.message_id })
+         .from(PartTable)
+         .where(
+           input.messageID
+-            ? and(eq(PartTable.session_id, input.sessionID), lt(PartTable.message_id, input.messageID))
++            ? and(eq(PartTable.session_id, input.sessionID), inArray(PartTable.message_id, db.select({ id: MessageTable.id }).from(MessageTable).where(conditions)))
+             : eq(PartTable.session_id, input.sessionID),
+         )
+@@ -1010,7 +1073,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
+ export function filterCompacted(msgs: Iterable<WithParts>) {
    // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
-   // #204：调用方传入顺序不一（流式 newest-first 或按时序数组），此处归一化把安全边界留在过滤器内部
-   // #204：MessageID.ascending() 是持久化顺序不变量；依赖调用方顺序会复活 summary 前历史并撑爆下次压缩
--  const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
-+  // #557：持久化时间是主序（compareChronology），ID 只作同毫秒平局——lexical-low 导入 ID 不能复活 summary 前历史。
+   // #204：沿用分页的时间/ID顺序；导入消息的ID未必单调，不能覆盖它们真实的创建顺序。
+-  const ordered = Array.from(msgs).toSorted((a, b) => b.info.time.created - a.info.time.created || b.info.id.localeCompare(a.info.id))
 +  const ordered = Array.from(msgs).toSorted((a, b) => compareChronology(b.info, a.info))
    const result = [] as WithParts[]
    const completed = new Map<MessageID, boolean>()
@@ -1312,7 +1342,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +  // #557：proof 是 cache 唯一 admission 依据——不读 thaw 后的业务对象，避免自身成为预热源。
 +export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(function* (sessionID: SessionID) {
 +  const { db, sync } = yield* Database.Service
-+  const boundary = CompactionBoundary.latest(sync, sessionID)
++  const boundary = yield* Database.withSync({ db, sync }, () => CompactionBoundary.latest(sync, sessionID))
 +  const cutoffID = boundary?.tailStartID ?? boundary?.markerID
 +  const cutoff = cutoffID
 +    ? yield* db
@@ -1482,19 +1512,13 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
          blocked: false,
          needsCompaction: false,
          currentText: undefined,
-@@ -203,6 +207,12 @@ const layer = Layer.effect(
-       // 防止上一轮 runner 的 late 终态写入误杀 replacement loop 的新工具状态。
-       // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的
+@@ -236,1 +241,6 @@ const layer = Layer.effect(
        const toolPermit = Semaphore.makeUnsafe(1)
-+      // #557：cached gate 让并发 Tool calls 共享同一 in-flight baseline；
-+      // failure 同样共享，不能让第二个 Tool 绕过首次 Snapshot 失败。
-+      // #557：in-flight baseline 共享——第二个副作用 Tool 不得绕过首次 Snapshot 失败。
++      // 并发副作用工具共享同一基线及失败；等待者取消不能让另一工具绕过捕获。
++      // 基线在真实执行前建立，不能依赖稍后才到达的provider step事件。
 +      const captureToolSnapshot = yield* Effect.cached(
 +        snapshot.track().pipe(Effect.tap((hash) => Effect.sync(() => (ctx.snapshot = hash)))),
 +      )
- 
-       // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
-       // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
 @@ -259,23 +269,43 @@ const layer = Layer.effect(
          toolCallID: string,
          update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -1612,7 +1636,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 -            if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
 +            // #557：懒快照——start-step 不再兜底 track；baseline 由首个副作用 Tool 的 captureToolSnapshot 建立。
              // #124：把 daemon 请求前快照写入 step-start，供 streaming 展示分类
-             // #519：step-start 也属于当前 attempt；失败时与 text/reasoning 一起撤回，避免孤立成功步骤。
+             // 本次 step-start 随失败前缀一起撤回，不制造孤立的成功步骤。
              const stepPartID = PartID.ascending()
 @@ -699,8 +740,11 @@ const layer = Layer.effect(
              })
@@ -1627,10 +1651,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
              yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
              // Anthropic reports thinking blocks it removed before the model saw the
              // prompt. Prefix mismatches mean opencode changed history behind a signed
-@@ -763,9 +807,10 @@ const layer = Layer.effect(
-                 requestID: ctx.assistantMessage.parentID,
-                 assistant: ctx.assistantMessage,
-               }) as any as Effect.Effect<void, never, never>)
+@@ -775,6 +819,7 @@ const layer = Layer.effect(
 -            if (ctx.snapshot && !aborted) {
 +            if (ctx.snapshot && completedSnapshot && !aborted) {
            // #139：中断时跳过慢 git snapshot，优先完成终端态清理
@@ -1692,22 +1713,25 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
    const turns = Array.from(messages)
      .flatMap((message) => {
        // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
-@@ -1913,28 +1915,102 @@ const layer = Layer.effect(
+@@ -314,2 +316,13 @@ const layer = Layer.effect(
+     const cancelFlights = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
++    // 只保留一个可替换entry，使后续loop复用前缀而不为每个Session累积缓存。
++    // admission仍核对Session、模型及持久proof，控制面与请求装饰不进入缓存。
++    let retainedMessages:
++      | {
++          sessionID: SessionID
++          model: string
++          proof: MessageV2.PromptWindowProof
++          canonical: MessageV2.WithParts[]
++          chunks: Map<MessageID, ModelMessage[]>
++        }
++      | undefined
+     const database = yield* Database.Service
+@@ -1913,28 +1915,91 @@ const layer = Layer.effect(
          // 同一 eligible user 下的 assistant/provider steps 共享同一个 context 和 read snapshot。
          // 新 eligible user turn 时重建，确保 blocked streak 不被同一 user 的多个 step 伪造。
          let goalTurn: GoalTurnContext | undefined
 -        const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
-+        // #557：InstanceState 生命周期内只保留一个 retained entry；切换 Session 直接替换。
-+        // entry 不跨 Project；retained 保存 canonical DB view，request-only decoration 永不回写。
-+        let retainedMessages:
-+          | {
-+              sessionID: SessionID
-+              model: string
-+              proof: MessageV2.PromptWindowProof
-+              canonical: MessageV2.WithParts[]
-+              chunks: Map<MessageID, ModelMessage[]>
-+            }
-+          | undefined
  
          while (true) {
            yield* status.set(sessionID, { type: "busy" })
@@ -1832,52 +1856,23 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
  
            const msg: SessionV1.Assistant = {
              id: MessageID.ascending(),
-@@ -2162,15 +2253,24 @@ const layer = Layer.effect(
-             sessionID,
-           }
- 
--          const finalizeInterruptedAssistant = Effect.gen(function* () {
--            if (msg.time.completed) return
--            msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
--              providerID: msg.providerID,
--              aborted: true,
-+          // #557：零 token 首写移除——首笔持久化即携带 estimate/inputBreakdown；
-+          // persisted guard 表示 lifecycle publication，不以 token 是否为零判断。
-+          let assistantPersisted = false
-+
-+          const finalizePreDispatchAssistant = (error: unknown, aborted: boolean) =>
-+            Effect.gen(function* () {
-+              // typed error 与 completed 同次 durable write，TUI 不会留下 dangling Assistant。
-+              if (assistantPersisted || msg.time.completed) return
-+              msg.error ??= MessageV2.fromError(error, {
-+                providerID: msg.providerID,
-+                aborted,
-+              })
-+              msg.time.completed = Date.now()
-+              // 先置 guard 再 await DB，防止 interrupt finalizer 重入发布第二条 lifecycle event。
-+              // #557：guard 先于 await——interrupt finalizer 不得重入第二条 lifecycle 事件。
-+            assistantPersisted = true
-+              yield* sessions.updateMessage(msg)
-             })
--            msg.time.completed = Date.now()
--            yield* sessions.updateMessage(msg)
--          })
+@@ -1836,6 +1927,6 @@ const layer = Layer.effect(
+           const own = yield* SessionProcessor.ownAssistant({ sessionID, requestID: msg.parentID }, { events, db })
+           own(msg)
+-          yield* SessionProcessor.publishAssistant(msg, events)
++          // 首笔快照由真实prepared回调原子提交；更早的失败沿已有owner闭合账本，不制造零用量助手。
  
            const handle = yield* processor
              .create({
-@@ -2178,7 +2278,11 @@ const layer = Layer.effect(
-               sessionID,
-               model,
-             })
--            .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
-+            .pipe(
-+              Effect.onInterrupt(() =>
-+                finalizePreDispatchAssistant(new DOMException("Aborted", "AbortError"), true),
-+              ),
-+            )
- 
-           // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
-           const outcome: "break" | "continue" | "terminal-error" = yield* Effect.gen(function* () {
+@@ -1853,6 +1944,8 @@ const layer = Layer.effect(
+             const notice = disabledToolNotice(msgs, agent.permission, session.permission ?? [])
+             if (notice && lastUserMsg) {
++              // 此producer晚于reminder，必须独立失效请求装饰，不能缓存旧权限提示。
++              conversionDirty = Math.min(conversionDirty, msgs.indexOf(lastUserMsg))
+               lastUserMsg.parts.push({
+                 id: PartID.ascending(),
+                 messageID: lastUserMsg.info.id,
+                 sessionID: lastUserMsg.info.sessionID,
 @@ -2217,6 +2321,8 @@ const layer = Layer.effect(
                    goalSvc,
                    // [local-smark] 注入当前 Goal turn context，使 GoalTool 能校验 read snapshot
@@ -1925,32 +1920,9 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 +                      : []),
 +                  ]
 +                })
-             // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
-             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
-             // #175：消毒后文本用于估计；raw 单独保留线长
-@@ -2393,6 +2522,9 @@ const layer = Layer.effect(
-             handle.message.inputChars = inputChars
-             handle.message.inputTokens = estimatedInput
-             handle.message.inputBreakdown = inputBreakdown
-+            // #557：guard 在 await 前置位，避免 interrupt finalizer 与同一 durable write 竞争重复发布。
-+            // #557：guard 先于 await——interrupt finalizer 不得重入第二条 lifecycle 事件。
-+            assistantPersisted = true
-             yield* sessions.updateMessage(handle.message)
-             // #127：同步到 handle，processor 复制到 step-start/step-finish part
-             handle.inputChars = inputChars
-@@ -2506,7 +2638,11 @@ const layer = Layer.effect(
-             return "continue" as const
-           }).pipe(
-             Effect.ensuring(instruction.clear(handle.message.id)),
--            Effect.onInterrupt(() => finalizeInterruptedAssistant),
-+            Effect.onExit((exit) => {
-+              // #557：successful preflight Compaction 不产生未 dispatch Assistant；只有 failure/interrupt 进入 finalizer。
-+              if (Exit.isSuccess(exit) || assistantPersisted) return Effect.void
-+              return finalizePreDispatchAssistant(Cause.squash(exit.cause), Cause.hasInterruptsOnly(exit.cause))
-+            }),
-           )
-           if (outcome === "break") break
-           // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。
+             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
+             if (!isLastStep) {
+               const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
 
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
 --- a/packages/opencode/src/session/revert.ts
@@ -2064,16 +2036,15 @@ diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/sess
  }) {
    const tools: Record<string, AITool> = {}
    const run = yield* EffectBridge.make()
-@@ -165,6 +167,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+@@ -165,6 +167,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
        execute(args, options) {
          return run.promise(
            Effect.gen(function* () {
-+            // #557：goal Tool 启动时才加载 Goal turn context——普通对话不支付历史查询。
-+            // #557：普通对话不为 Goal 支付历史查询成本。
++            // 普通对话不读取Goal历史；真实goal adapter共享本轮受信上下文。
 +            if (item.id === "goal" && input.loadGoalTurn) input.goalTurn = yield* input.loadGoalTurn
              const ctx = context(args, options)
+             const adapterStartedAt = Date.now()
              const timing = {
-               source: "local" as const,
 @@ -172,6 +177,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                sessionID: ctx.sessionID,
                callID: ctx.callID,
@@ -2164,7 +2135,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +++ b/packages/opencode/src/tool/shell.ts
 @@ -1470,6 +1470,8 @@ export const ShellTool = Tool.define(
          return {
-           description: enhancedDescription,
+           description: prompt.description + (compressionGuidance ? "\n\n" + compressionGuidance : ""),
            parameters: prompt.parameters,
 +          // #557：shell 命令副作用不透明，只能使用短窗口 Patch best-effort 归因。
 +          worktree: "ambient",
@@ -2208,7 +2179,7 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
    }
    return ids
  })
-@@ -251,50 +256,82 @@ describe("MessageV2.page", () => {
+@@ -251,72 +256,105 @@ describe("MessageV2.page", () => {
      ),
    )
    it.instance(
@@ -2217,12 +2188,30 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 +    "bounded Goal query cost does not grow with old history",
 +    () =>
        Effect.gen(function* () {
--        // #553：固定 6326/364 cohort 让 page refill 与 chronology projection 在真实 production seam 上可复测。
--        const ids = yield* fill(sessionID, 6326)
--        for (const id of ids.filter((_, index) => index % 17 === 0).slice(0, 364)) {
--          const message = yield* MessageV2.get({ sessionID, messageID: id })
--          yield* session.updateMessage({ ...message.info, hidden: { time: Date.now(), reason: "undo" } })
--        }
+-        // 此处测量读取而非事件生产；批量建立同一6326/364持久cohort，保留真实page/chronology及全部时限。
+-        const database = yield* Database.Service
+-        const ids = Array.from({ length: 6326 }, () => MessageID.ascending())
+-        const hidden = new Set(ids.filter((_, index) => index % 17 === 0).slice(0, 364))
+-        yield* Database.withSync(database, (sync) => sync.transaction((tx) => {
+-          for (let offset = 0; offset < ids.length; offset += 250) {
+-            const batch = ids.slice(offset, offset + 250)
+-            tx.insert(MessageTable).values(batch.map((id, index) => ({
+-              id, session_id: sessionID,
+-              time_created: offset + index,
+-              data: {
+-                role: "user" as const,
+-                time: { created: offset + index },
+-                agent: "test",
+-                model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+-                ...(hidden.has(id) ? { hidden: { time: 1, reason: "undo" as const } } : {}),
+-              },
+-            }))).run()
+-            tx.insert(PartTable).values(batch.map((id, index) => ({
+-              id: PartID.ascending(), session_id: sessionID, message_id: id,
+-              data: { type: "text" as const, text: `m${offset + index}` },
+-            }))).run()
+-          }
+-        }))
 -
 -        // page/chronology 都是需服务上下文的 Effect——计时在 generator 内以 yield* 采样，保持 production seam。
 -        const timed = function* <A, E, R>(run: Effect.Effect<A, E, R>) {
@@ -2235,8 +2224,31 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 +        const sessions = yield* SessionNs.Service
 +        const smallSession = yield* sessions.create({})
 +        const largeSession = yield* sessions.create({})
-+        const smallIDs = yield* fill(smallSession.id, 256, (i: number) => Date.now() + i, 4)
-+        const largeIDs = yield* fill(largeSession.id, 6326, (i: number) => Date.now() + i, 4)
++        // 本基准只读Goal locator；两个cohort批量建数，不计逐条事件通知成本。
++        const database = yield* Database.Service
++        const fillCohort = (sessionID: SessionID, count: number) =>
++          Database.withSync(database, (sync) => sync.transaction((tx) => {
++            const now = Date.now()
++            const ids = Array.from({ length: count }, () => MessageID.ascending())
++            for (let offset = 0; offset < ids.length; offset += 250) {
++              const batch = ids.slice(offset, offset + 250)
++              tx.insert(MessageTable).values(batch.map((id, index) => ({
++                id, session_id: sessionID, time_created: now + offset + index,
++                data: { role: "user" as const, agent: "test", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++                  time: { created: now + offset + index } },
++              }))).run()
++              // 保留每条消息四个独立Part及原文本大小，不能用减少payload伪造有界查询收益。
++              tx.insert(PartTable).values(batch.flatMap((id, index) =>
++                Array.from({ length: 4 }, (_, part) => ({
++                  id: PartID.ascending(), message_id: id, session_id: sessionID,
++                  data: { type: "text" as const, text: part === 0 ? `m${offset + index}` : `m${offset + index}-${part}` },
++                })),
++              )).run()
++            }
++            return ids
++          }))
++        const smallIDs = yield* fillCohort(smallSession.id, 256)
++        const largeIDs = yield* fillCohort(largeSession.id, 6326)
 +
 +        const measure = function* (sessionID: SessionID) {
 +          const p95s: number[] = []
@@ -2295,7 +2307,12 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 +        expect(largeIDs.slice(-2)).toEqual((yield* MessageV2.goalChronology(largeSession.id)).map((message) => message.info.id))
 +        expect(large.p95 - small.p95).toBeLessThanOrEqual(45)
 +        expect(large.p95).toBeLessThanOrEqual(100)
-       }),
+-      }).pipe(Effect.ensuring(Database.Service.use((database) => Database.withSync(database, (sync) => {
+-        // 与批量建数对称清理本fixture的热行；读基准不把数千行Session级删除延迟混进时限。
+-        sync.delete(PartTable).where(eq(PartTable.session_id, sessionID)).run()
+-        sync.delete(MessageTable).where(eq(MessageTable.session_id, sessionID)).run()
+-      })))),
++      }),
 -    ),
      90_000,
    )
@@ -2332,23 +2349,26 @@ diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packag
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -20,6 +20,8 @@ import { Agent as AgentSvc } from "../../src/agent/agent"
+@@ -20,6 +20,10 @@ import { Agent as AgentSvc } from "../../src/agent/agent"
  import { BackgroundJob } from "@/background/job"
  import { Command } from "../../src/command"
  import { Config } from "@/config/config"
 +// #557：observedSnapshot decorator 的 Snapshot 基础层依赖（AppProcess）。
 +import { AppProcess } from "@opencode-ai/core/process"
++import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
++import { Auth } from "@/auth"
  import { LSP } from "@/lsp/lsp"
  import { MCP } from "../../src/mcp"
  import { Permission } from "../../src/permission"
-@@ -69,17 +71,30 @@ import { InstanceState } from "@/effect/instance-state"
+@@ -40,1 +42,1 @@
+-import { SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+@@ -69,17 +71,28 @@ import { InstanceState } from "@/effect/instance-state"
  import { InstanceRef } from "@/effect/instance-ref"
  import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
  import { httpError, reply, TestLLMServer } from "../lib/llm-server"
-+// #557：providerExecuted LLM 流与动态 MCP 工具需要 Stream/LLMEvent/Usage/AI tool 构造。
-+import { Stream } from "effect"
-+import { LLMEvent, Usage } from "@opencode-ai/llm"
-+import { jsonSchema, tool, type Tool as AITool } from "ai"
++// 原生事件fixture复用目标已导入的Schema/Stream，不重复引入旧AI SDK流类型。
++import { LLMEvent } from "@opencode-ai/llm"
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { ProviderV2 } from "@opencode-ai/core/provider"
  import { ModelV2 } from "@opencode-ai/core/model"
@@ -2373,7 +2393,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
    }),
  )
  
-@@ -161,6 +176,100 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
+@@ -161,6 +176,123 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
    )
  }
  
@@ -2448,6 +2468,26 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  ).pipe(Layer.provide(Snapshot.node.implementation as Layer.Layer<Snapshot.Service>)),
 +  deps: [FSUtil.node, AppProcess.node, Config.node],
 +})
++// 观察公开LLM调用入口，准备预算不混入目标新增的wire估算与持久账本结算。
++const llmDispatchTimes = new Map<string, number>()
++const measuredLLM = LayerNode.make({
++  service: LLM.Service,
++  layer: Layer.effect(
++    LLM.Service,
++    Effect.gen(function* () {
++      const base = yield* LLM.Service
++      return LLM.Service.of({
++        stream: (input) => {
++          // 小模型后台任务不属于被测用户请求，仍原样转交真实实现。
++          if (!input.small) llmDispatchTimes.set(input.sessionID, performance.now())
++          return base.stream(input)
++        },
++      })
++    }),
++  ).pipe(Layer.provide(LLM.node.implementation as Layer.Layer<LLM.Service>)),
++  deps: [Auth.node, Config.node, ProviderSvc.node, Plugin.node, Permission.node, EventV2Bridge.node, llmClient, RuntimeFlags.node],
++})
++
 +const providerUsage = {
 +  inputTokens: 1,
 +  outputTokens: 1,
@@ -2460,13 +2500,16 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +const providerExecutedLLM = Layer.succeed(
 +  LLM.Service,
 +  LLM.Service.of({
-+    stream: () =>
-+      Stream.make(
++    stream: (input) =>
++      Stream.unwrap(
++        // fixture也履行prepared交接，不能让工具Part早于父Message而测到无关的外键失败。
++        (input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void).pipe(Effect.as(Stream.make(
 +        LLMEvent.stepStart({ index: 0 }),
 +        LLMEvent.toolInputStart({ id: "provider-call", name: "provider_search" }),
 +        LLMEvent.toolCall({ id: "provider-call", name: "provider_search", input: {}, providerExecuted: true }),
 +        LLMEvent.stepFinish({ index: 0, reason: "stop", usage: providerUsage }),
 +        LLMEvent.finish({ reason: "stop", usage: providerUsage }),
++        ))),
 +      ),
 +  }),
 +)
@@ -2539,11 +2582,11 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  plugin?: "mutate" | "fail-transform" | "transform-history" | "fail-tool"
 +  snapshot?: "observe"
 +  mcp?: "mutating"
-+  llm?: "provider-executed"
++  llm?: "provider-executed" | "measure-preflight"
  }) {
    const root = LayerNode.group([promptRoot, testLLMServerNode])
    // #485：resizer 不可用注入——normalize 必然失败，验证 prompt 在持久化前 fail-closed
-@@ -318,6 +480,14 @@ function makeHttp(input?: {
+@@ -318,6 +480,15 @@ function makeHttp(input?: {
      ...(input?.image === "unavailable" ? [[Image.node, unavailableImage] as const] : []),
      ...(input?.image === "counting" ? [[Image.node, countingImage] as const] : []),
      ...(input?.plugin === "mutate" ? [[Plugin.node, mutatingPlugin] as const] : []),
@@ -2554,11 +2597,12 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +    // #557：Snapshot 计数 observer 与 providerExecuted LLM 流。
 +    ...(input?.snapshot === "observe" ? [[Snapshot.node, observedSnapshot] as const] : []),
 +    ...(input?.llm === "provider-executed" ? [[LLM.node, providerExecutedLLM] as const] : []),
++    ...(input?.llm === "measure-preflight" ? [[LLM.node, measuredLLM] as const] : []),
 +    ...(input?.mcp === "mutating" ? [[MCP.node, mutatingMcp] as const] : []),
    ] as const
    if (input?.processor === "blocking") {
      return LayerNode.compile(root, [...replacements, [SessionProcessor.node, blockingProcessor]])
-@@ -345,6 +515,13 @@ const withMcpInstructions = testEffect(
+@@ -345,6 +515,14 @@ const withMcpInstructions = testEffect(
  )
  const unix = process.platform !== "win32" ? it.instance : it.instance.skip
  const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
@@ -2569,6 +2613,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +const observed = testEffect(makeHttp({ snapshot: "observe" }))
 +const observedProvider = testEffect(makeHttp({ snapshot: "observe", llm: "provider-executed" }))
 +const observedDenied = testEffect(makeHttp({ snapshot: "observe", plugin: "fail-tool" }))
++const measuredPreflight = testEffect(makeHttp({ llm: "measure-preflight" }))
  // #534：resizer 不可用环境——坏图片降级为 synthetic omission text，消息仍原子落库
  const unavailable = testEffect(makeHttp({ image: "unavailable" }))
  // #534：counting 环境——记录每次 normalize URL，锁定单次 decode 与 proof 消费/失效。
@@ -2598,7 +2643,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  const succeedVoid = (deferred: Deferred.Deferred<void>) => {
    Effect.runSync(Deferred.succeed(deferred, void 0).pipe(Effect.ignore))
  }
-@@ -791,6 +987,21 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
+@@ -791,6 +987,22 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
    return { user: msg, assistant }
  })
  
@@ -2614,13 +2659,126 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +
 +// #557：断言面是 Provider 实际请求体，不是 cache 内部状态。
 +const lastProviderInput = Effect.fn("test.lastProviderInput")(function* () {
-+  return (yield* (yield* TestLLMServer).inputs).at(-1)
++  const llm = yield* TestLLMServer
++  return (yield* llm.inputs).at(-1)
 +})
 +
  const addCompletedTool = (sessionID: SessionID, messageID: MessageID) =>
    Effect.gen(function* () {
      const session = yield* Session.Service
-@@ -5588,3 +5799,433 @@ it.instance(
+@@ -1488,4 +1725,4 @@
+-      const assistant = (yield* sessions.messages({ sessionID: chat.id })).find(message => message.info.role === "assistant")
+-      if (!assistant || assistant.info.role !== "assistant") return yield* Effect.die("Missing owned assistant")
+-      expect(assistant.info).toMatchObject({ parentID: id, error: { name: "UnknownError", data: { message: transformFailure.message } }, time: { completed: expect.any(Number) } })
+-      expect(yield* usage.get({ sessionID: chat.id, requestID: id })).toMatchObject({ rootRequestID: id, status: "error", assistantCount: 1, stepCount: 0, cost: 0, tokens: zero, error: transformFailure.message })
++      // prepared之前失败只结算已admit的请求；原cause与零消费不能靠空助手占位证明。
++      expect((yield* sessions.messages({ sessionID: chat.id })).filter(message => message.info.role === "assistant")).toHaveLength(0)
++      expect(yield* usage.get({ sessionID: chat.id, requestID: id })).toMatchObject({ rootRequestID: id, status: "error", assistantCount: 0, stepCount: 0, cost: 0, tokens: zero, error: transformFailure.message, time: { completed: expect.any(Number) } })
++      expect(yield* usage.assistants({ sessionID: chat.id, requestID: id })).toEqual([])
+@@ -3122,1 +3359,1 @@
+-  "finalizes assistant when cancelled before processor creation completes",
++  "settles admitted requests without an assistant when cancelled before processor creation completes",
+@@ -3132,73 +3369,30 @@
+       const prompt = yield* SessionPrompt.Service
+       const sessions = yield* Session.Service
+       const chat = yield* sessions.create({ title: "Processor creation race" })
+-
+-      yield* prompt.prompt({
+-        sessionID: chat.id,
+-        agent: "build",
+-        noReply: true,
+-        parts: [{ type: "text", text: "first" }],
+-      })
+-
+-      const firstCreate = defer<void>()
+-      processorCreateStarted.push(firstCreate.resolve)
+-      const first = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+-      yield* Effect.promise(() => firstCreate.promise)
+-
+-      yield* prompt.cancel(chat.id)
+-      const firstExit = yield* Fiber.await(first)
+-      expect(Exit.isSuccess(firstExit)).toBe(true)
+-
+-      let messages = yield* sessions.messages({ sessionID: chat.id })
+-      const firstInterrupted = messages.at(-1)
+-      expect(firstInterrupted?.info.role).toBe("assistant")
+-      expect(firstInterrupted?.parts).toHaveLength(0)
+-      if (firstInterrupted?.info.role === "assistant") {
+-        expect(firstInterrupted.info.finish).toBeUndefined()
+-        expect(firstInterrupted.info.time.completed).toBeNumber()
+-        expect(firstInterrupted.info.error?.name).toBe("MessageAbortedError")
+-      }
+-
+-      yield* prompt.prompt({
+-        sessionID: chat.id,
+-        agent: "build",
+-        noReply: true,
+-        parts: [{ type: "text", text: "second" }],
+-      })
+-
+-      const secondCreate = defer<void>()
+-      processorCreateStarted.push(secondCreate.resolve)
+-      const second = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+-      yield* Effect.promise(() => secondCreate.promise)
+-
+-      yield* prompt.cancel(chat.id)
+-      const secondExit = yield* Fiber.await(second)
+-      expect(Exit.isSuccess(secondExit)).toBe(true)
+-
+-      messages = yield* sessions.messages({ sessionID: chat.id })
+-      const poisonMessages = messages.filter(
+-        (message) =>
+-          message.info.role === "assistant" &&
+-          message.parts.length === 0 &&
+-          !message.info.finish &&
+-          !message.info.time.completed &&
+-          !message.info.error,
+-      )
+-      expect(poisonMessages).toHaveLength(0)
+-
+-      const interruptedMessages = messages.filter(
+-        (message) =>
+-          message.info.role === "assistant" &&
+-          message.parts.length === 0 &&
+-          message.info.time.completed &&
+-          message.info.error?.name === "MessageAbortedError",
+-      )
+-      expect(interruptedMessages).toHaveLength(2)
+-
+-      const lastUser = messages.at(-2)
+-      const lastAssistant = messages.at(-1)
+-      expect(lastUser?.info.role).toBe("user")
+-      expect(lastAssistant?.info.role).toBe("assistant")
+-      if (lastUser?.info.role === "user" && lastAssistant?.info.role === "assistant") {
+-        expect(lastAssistant.info.parentID).toBe(lastUser?.info.id)
++      const usage = yield* SessionRequestUsage.Service
++      const status = yield* SessionStatus.Service
++      const ids = [MessageID.ascending(), MessageID.ascending()]
++      // 两次真实admission分别进入阻塞create；不复用已被noReply结算的请求冒充取消。
++      for (const [index, messageID] of ids.entries()) {
++        const ready = defer<void>()
++        processorCreateStarted.push(ready.resolve)
++        const run = yield* prompt.prompt({
++          sessionID: chat.id, messageID, agent: "build", parts: [{ type: "text", text: index === 0 ? "first" : "second" }],
++        }).pipe(Effect.forkChild)
++        yield* Effect.promise(() => ready.promise)
++        // create始终不返回，因此尚未进入LLM；取消由真实请求owner闭合，而不是构造助手。
++        yield* prompt.cancel(chat.id)
++        const exit = yield* Fiber.await(run)
++        expect(Exit.isSuccess(exit)).toBe(true)
++        if (Exit.isSuccess(exit)) expect(exit.value.info).toMatchObject({ id: messageID, role: "user" })
++        const messages = yield* sessions.messages({ sessionID: chat.id })
++        expect(messages.filter(message => message.info.role === "assistant")).toHaveLength(0)
++        expect(messages.filter(message => message.info.role === "user").map(message => message.info.id)).toEqual(ids.slice(0, index + 1))
++        expect(yield* usage.get({ sessionID: chat.id, requestID: messageID })).toMatchObject({
++          rootRequestID: messageID, status: "aborted", assistantCount: 0, stepCount: 0, cost: 0,
++          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 }, total: 0 },
++          error: expect.stringMatching(/interrupt|abort/i), time: { completed: expect.any(Number) },
++        })
++        expect(yield* usage.assistants({ sessionID: chat.id, requestID: messageID })).toEqual([])
++        expect((yield* status.get(chat.id)).type).toBe("idle")
+       }
+@@ -5588,3 +5756,496 @@ it.instance(
    60_000,
  )
  
@@ -2635,46 +2793,60 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      yield* useServerConfig(providerCfg)
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Pinned" })
++      const events = yield* EventV2Bridge.Service
++      const seen: SessionV1.Assistant[] = []
++      const off = yield* events.listen(event => {
++        if (event.type !== MessageV2.Event.Updated.type) return Effect.void
++        const data = event.data as typeof MessageV2.Event.Updated.data.Type
++        if (data.info.sessionID === chat.id && data.info.role === "assistant") seen.push(structuredClone(data.info))
++        return Effect.void
++      })
 +      yield* textTurn(chat.id, "estimate this request", "estimated")
-+      // 目标无 Bus 面：以持久化单行验证 INV——首笔 durable 写入即携带 estimate，
-+      // 不存在全零 token 的先遗 Assistant 行（零 token 首写已移除）。
++      yield* off
++      // EventV2在commit后通知；保存独立快照，不能让后续usage更新伪装成首次估算。
++      expect(seen.length).toBeGreaterThan(0)
++      expect(seen[0]?.inputEstimate?.input).toBeGreaterThan(0)
++      expect(seen[0]?.inputEstimate?.bodyChars).toBeGreaterThan(0)
++      expect(seen[0]?.inputEstimate?.inputBreakdown?.messages.userText).toBeGreaterThan(0)
++      expect(seen[0]?.inputEstimate?.confirmed).not.toBe(true)
 +      const assistants = (yield* sessions.messages({ sessionID: chat.id })).filter(
 +        (message) => message.info.role === "assistant",
 +      )
 +      expect(assistants).toHaveLength(1)
 +      const first = assistants[0]?.info
 +      if (first?.role !== "assistant") throw new Error("Expected assistant")
-+      expect(first.tokens.input).toBeGreaterThanOrEqual(0)
-+      // tokens.input 由 step-finish 真实 usage 覆盖（TestLLM 默认 0）；
-+      // 首笔 estimate 的持久化证据在 inputTokens/inputBreakdown（estimate publication 写入且不被覆盖）。
-+      expect(first.inputTokens ?? 0).toBeGreaterThan(0)
-+      expect(first.inputBreakdown?.messages.userText ?? first.inputChars).toBeGreaterThan(0)
++      expect(first.inputEstimate?.input).toBeGreaterThan(0)
++      expect(first.inputEstimate?.inputBreakdown?.messages.userText).toBeGreaterThan(0)
 +    }),
 +  { git: true },
 +)
 +
 +failingTransform.instance(
-+  "persists one typed Assistant when pre-dispatch assembly fails",
++  "settles pre-dispatch failure without publishing a zero-estimate Assistant",
 +  () =>
 +    Effect.gen(function* () {
 +      const { llm } = yield* useServerConfig(providerCfg)
 +      const prompt = yield* SessionPrompt.Service
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Pinned" })
-+      yield* user(chat.id, "fail before dispatch")
++      const usage = yield* SessionRequestUsage.Service
++      const requestID = MessageID.ascending()
++      const exit = yield* prompt.prompt({
++        sessionID: chat.id, messageID: requestID, agent: "build", parts: [{ type: "text", text: "fail before dispatch" }],
++      }).pipe(Effect.exit)
 +
-+      const exit = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.exit)
 +      // transform defect 位于 estimate publication 前，Provider 绝不能收到请求。
 +      expect(Exit.isFailure(exit)).toBe(true)
 +      expect(yield* llm.calls).toBe(0)
 +      const assistants = (yield* sessions.messages({ sessionID: chat.id })).filter(
 +        (message) => message.info.role === "assistant",
 +      )
-+      expect(assistants).toHaveLength(1)
-+      const assistant = assistants[0]?.info
-+      // failure owner 复用 error 分类；不能为了移除零写而留下 dangling user。
-+      expect(assistant?.role === "assistant" ? assistant.time.completed : undefined).toBeNumber()
-+      expect(assistant?.role === "assistant" ? assistant.error : undefined).toBeDefined()
++      // 目标已有零助手请求终态；保留错误和完成语义，不为兼容旧测试制造幽灵助手。
++      expect(assistants).toHaveLength(0)
++      const request = yield* usage.get({ sessionID: chat.id, requestID })
++      expect(request?.status).toBe("error")
++      expect(request?.error).toContain("pre-dispatch transform failed")
++      expect(request?.assistantCount).toBe(0)
 +    }),
 +  { git: true },
 +)
@@ -2851,7 +3023,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  { git: true },
 +)
 +
-+it.instance(
++measuredPreflight.instance(
 +  "reuses a 2048-turn prefix before Provider dispatch",
 +  () =>
 +    Effect.gen(function* () {
@@ -2859,10 +3031,37 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      const prompt = yield* SessionPrompt.Service
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Large retained prefix" })
-+      yield* Effect.forEach(Array.from({ length: 2_048 }), () => seed(chat.id, { finish: "stop" }), {
-+        concurrency: 1,
-+        discard: true,
-+      })
++      // 计时对象是读取及转换；造数不经逐条事件fanout，避免把账本维护成本当成缓存回归。
++      const database = yield* Database.Service
++      // 历史早于后续真实输入，保持2048个闭合turn的创建顺序而不依赖ID比较。
++      const created = Date.now() - 4_096
++      const rows = Array.from({ length: 2_048 }, (_, index) => {
++        const id = MessageID.ascending()
++        const assistantID = MessageID.ascending()
++        return [
++          { id, session_id: chat.id, time_created: created + index * 2,
++            data: { role: "user" as const, agent: "build", model: ref,
++              time: { created: created + index * 2 } } },
++          // 与seed保持同一stop、父消息及零usage形状；本fixture不伪造确认样本。
++          { id: assistantID, session_id: chat.id, time_created: created + index * 2 + 1,
++            data: { role: "assistant" as const, parentID: id, mode: "build", agent: "build", cost: 0, finish: "stop",
++              path: { cwd: "/tmp", root: "/tmp" },
++              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++              modelID: ref.modelID, providerID: ref.providerID, time: { created: created + index * 2 + 1 } } },
++        ]
++      }).flat()
++      // 分批限制SQLite参数数量，单事务只负责建立本次hot历史，不改变产品写入owner。
++      yield* Database.withSync(database, (sync) => sync.transaction((tx) => {
++        for (let offset = 0; offset < rows.length; offset += 250) {
++          const batch = rows.slice(offset, offset + 250)
++          tx.insert(MessageTable).values(batch).run()
++          // 每条Message保留与原seed一致的单个文本Part，后续混合样本仍独立比较真实converter。
++          tx.insert(PartTable).values(batch.map((row) => ({
++            id: PartID.ascending(), session_id: chat.id, message_id: row.id,
++            data: { type: "text" as const, text: row.data.role === "user" ? "hello" : "hi there" },
++          }))).run()
++        }
++      }))
 +      const providers = yield* ProviderSvc.Service
 +      const model = yield* providers.getModel(ref.providerID, ref.modelID)
 +      const history = yield* MessageV2.filterCompactedEffect(chat.id)
@@ -2870,6 +3069,23 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      const chunks = yield* MessageV2.toModelMessageChunksEffect(history, model)
 +      // cache 只改变转换分块，不允许改变 Provider body 的 role/content/tool 顺序。
 +      expect(chunks.flat()).toEqual(full)
++      const shaped = structuredClone(history.slice(0, 2))
++      // 不改持久性能样本；混合Part必须与完整converter保持同一字面结果。
++      const shapeUser = shaped.find((message) => message.info.role === "user")
++      const shapeAssistant = shaped.find((message) => message.info.role === "assistant")
++      if (!shapeUser || !shapeAssistant) throw new Error("Expected shape pair")
++      shapeUser.parts.push(
++        { id: PartID.ascending(), messageID: shapeUser.info.id, sessionID: chat.id, type: "file", mime: "image/png", url: `data:image/png;base64,${tinyPng}` },
++        { id: PartID.ascending(), messageID: shapeUser.info.id, sessionID: chat.id, type: "compaction", auto: true },
++      )
++      shapeAssistant.parts.push(
++        { id: PartID.ascending(), messageID: shapeAssistant.info.id, sessionID: chat.id, type: "tool", tool: "shape", callID: "completed", state: { status: "completed", input: {}, output: "tool output", title: "", metadata: {}, time: { start: 0, end: 1 } } },
++        { id: PartID.ascending(), messageID: shapeAssistant.info.id, sessionID: chat.id, type: "tool", tool: "shape", callID: "error", state: { status: "error", input: {}, error: "tool error", metadata: {}, time: { start: 0, end: 1 } } },
++      )
++      // 覆盖completed/error、媒体和压缩标记，不复制转换算法构造expected。
++      // 每条Message的工具调用及结果不得因分块改变角色或顺序。
++      const shapeFull = yield* MessageV2.toModelMessagesEffect(shaped, model)
++      expect((yield* MessageV2.toModelMessageChunksEffect(shaped, model)).flat()).toEqual(shapeFull)
 +
 +      yield* user(chat.id, "cold suffix")
 +      yield* llm.text("cold response")
@@ -2883,7 +3099,13 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      const warmStarted = performance.now()
 +      yield* prompt.loop({ sessionID: chat.id })
 +      // warm 仍包含 Provider HTTP 与 durable Assistant 写入，不是 private helper 计时。
-+      expect(performance.now() - warmStarted).toBeLessThan(cold)
++      const warm = performance.now() - warmStarted
++      const dispatchedAt = llmDispatchTimes.get(chat.id)
++      if (dispatchedAt === undefined) throw new Error("Expected public LLM dispatch")
++      // 整轮保持冷暖对比；1秒约束消息准备至公开入口，prepared估算和确认账本仍走真实路径。
++      expect(warm).toBeLessThan(cold)
++      expect(dispatchedAt).toBeGreaterThanOrEqual(warmStarted)
++      expect(dispatchedAt - warmStarted).toBeLessThan(1_000)
 +
 +      // 首次无新消息调用先 admit 刚完成的 Assistant；第二次才是 proof 完全不变的 exact full hit。
 +      yield* prompt.loop({ sessionID: chat.id })
@@ -2898,8 +3120,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      yield* prompt.loop({ sessionID: chat.id })
 +      const rebuild = performance.now() - rebuildStarted
 +      // 两条路径均不 dispatch Provider，时间差只来自 admission/hydration/conversion。
-+      // 目标 calibration：proof 对 2048×N 行的原始 tuple stringify 在两条路径同量级且占主导，
-+      // 加性常量从 40 上调到 120 以保留相对结构而不被 stringify 噪声淹没。
++      // 沿用本轮起点既有120ms跨架构余量；无缓存整段重载仍会违反0.65比例。
 +      expect(fullHit).toBeLessThan(rebuild * 0.65 + 120)
 +      expect(yield* llm.calls).toBe(2)
 +    }),
@@ -3055,6 +3276,24 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +)
 +
 
+diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/test/session/session.test.ts
+--- a/packages/opencode/test/session/session.test.ts
++++ b/packages/opencode/test/session/session.test.ts
+@@ -250,1 +250,13 @@ describe("step-finish token propagation via event", () => {
+       expect(snapshots.at(-1)?.request?.cost).toBe(1)
++      const latest = yield* session.findMessage(created.id, (info) => info.role === "assistant")
++      if (latest._tag !== "Some" || latest.value.info.role !== "assistant") throw new Error("Expected latest assistant")
++      const saved = latest.value.info
++      // 父行缺失或不是用户时，仍按原语义投影最新用户；不能把任意已有ID当作请求。
++      for (const parentID of [MessageID.ascending(), saved.id]) {
++        yield* session.updateMessage({ ...saved, parentID })
++        expect((yield* session.get(created.id)).request?.messageID).toBe(nextUserID)
++      }
++      // 恢复原父用户后重新显示完整请求，确认点与Session累计均保留。
++      yield* session.updateMessage(saved)
++      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: userID, input: 1400, output: 400, cost: 1 })
++      expect((yield* session.get(created.id)).tokens?.input).toBe(200)
+
 diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/opencode/test/session/revert-compact.test.ts
 --- a/packages/opencode/test/session/revert-compact.test.ts
 +++ b/packages/opencode/test/session/revert-compact.test.ts
@@ -3076,3 +3315,90 @@ diff --git a/packages/opencode/test/session/revert-compact.test.ts b/packages/op
      state: {
        status: "completed" as const,
        input: { filePath: absFile },
+
+diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/event-v2-bridge.ts
+--- a/packages/opencode/src/event-v2-bridge.ts
++++ b/packages/opencode/src/event-v2-bridge.ts
+@@ -89,1 +89,2 @@
+-              payload: { type: "session.updated", properties: { sessionID: row.id, info } },
++              // 元数据只标识已提交行的非持久化投影，供兼容SSE补转，不能再次执行projector。
++              payload: { type: "session.updated", metadata: { projection: true }, properties: { sessionID: row.id, info } },
+
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
+@@ -44,19 +44,24 @@
+-    const disposed = Stream.callback<{ id: string; type: string; properties: unknown }>((queue) => {
+-      const listener = (event: {
+-        directory?: string
+-        payload: { id?: string; type?: string; properties?: unknown }
+-      }) => {
+-        if (event.directory !== instance.directory || event.payload.type !== "server.instance.disposed") return
+-        Queue.offerUnsafe(queue, {
+-          id: event.payload.id ?? eventID(),
+-          type: "server.instance.disposed",
+-          properties: event.payload.properties ?? {},
+-        })
+-      }
+-      return Effect.acquireRelease(
+-        Effect.sync(() => GlobalBus.on("event", listener)),
+-        () => Effect.sync(() => GlobalBus.off("event", listener)),
+-      )
+-    })
++    const compatibility = yield* Queue.unbounded<{ id: string; type: string; properties: unknown }>()
++    const listener = (event: {
++      directory?: string
++      workspace?: string
++      payload: { id?: string; type?: string; properties?: unknown; metadata?: { projection?: boolean } }
++    }) => {
++      if (event.directory !== instance.directory) return
++      // 普通事件已由EventV2送达；这里只补转bridge的读投影与原有销毁通知，避免双重投递。
++      const snapshot = event.payload.type === "session.updated" && event.payload.metadata?.projection === true
++      if (!snapshot && event.payload.type !== "server.instance.disposed") return
++      if (snapshot && event.workspace !== undefined && event.workspace !== workspaceID) return
++      Queue.offerUnsafe(compatibility, {
++        id: event.payload.id ?? eventID(),
++        type: snapshot ? "session.updated" : "server.instance.disposed",
++        properties: event.payload.properties ?? {},
++      })
++    }
++    // 与Core listener一样在响应前注册；退出随同一Scope退订，不丢首包前的请求投影。
++    yield* Effect.acquireRelease(
++      Effect.sync(() => GlobalBus.on("event", listener)),
++      () => Effect.sync(() => GlobalBus.off("event", listener)),
++    )
+     const output = stream.pipe(
+-      Stream.merge(disposed, { haltStrategy: "left" }),
++      Stream.merge(Stream.fromQueue(compatibility), { haltStrategy: "left" }),
+
+diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/opencode/test/server/httpapi-event.test.ts
+--- a/packages/opencode/test/server/httpapi-event.test.ts
++++ b/packages/opencode/test/server/httpapi-event.test.ts
+@@ -2,1 +2,2 @@
+ import { Effect, Layer, Queue, Schema, Stream } from "effect"
++import { Sse } from "effect/unstable/encoding"
+@@ -25,1 +26,1 @@
+-const readEvent = (reader: Queue.Dequeue<Uint8Array>) =>
++const readEvent = (reader: Queue.Dequeue<typeof EventData.Type>) =>
+@@ -33,1 +34,1 @@
+-    return Schema.decodeUnknownSync(EventData)(JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")))
++    return value
+@@ -39,3 +40,6 @@
+-    const reader = yield* Queue.unbounded<Uint8Array>()
++    const reader = yield* Queue.unbounded<typeof EventData.Type>()
++    // 网络chunk可以合并或拆分事件；使用实际SSE分帧后才逐条解码请求快照。
+     yield* response.stream.pipe(
+-      Stream.runForEach((value) => Queue.offer(reader, value)),
++      Stream.decodeText(),
++      Stream.pipeThroughChannel(Sse.decodeDataSchema(EventData)),
++      Stream.runForEach((event) => Queue.offer(reader, event.data)),
+@@ -114,1 +118,8 @@
+-        expect(yield* readEvent(reader)).toMatchObject({
++        // Session读投影可与原message事件交错，但不能替代原终态及其错误内容。
++        const terminalEvent = yield* Effect.gen(function* () {
++          while (true) {
++            const event = yield* readEvent(reader)
++            if (event.type !== "session.updated") return event
++          }
++        })
++        expect(terminalEvent).toMatchObject({

@@ -10,6 +10,82 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -279,2 +279,43 @@
+ 
++// 同时覆盖正常导航与先空后有的预取，必须看到子会话正文而不只检查路由值。
++test.each([false, true])("task opens its current child after stale prefetch: %s", async (stale) => {
++  const childID = "ses_task_child"
++  let requests = 0
++  const parent: AssistantMessage = {
++    id: "msg_task", sessionID, role: "assistant", parentID: "msg_user",
++    time: { created: 1, completed: 2 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const task: Part = {
++    id: "part_task", sessionID, messageID: parent.id, type: "tool", tool: "task", callID: "task_call",
++    state: { status: "completed", input: { description: "inspect child", subagent_type: "general" },
++      output: "", title: "inspect child", metadata: { sessionId: childID }, time: { start: 1, end: 2 } },
++  }
++  await withRenderedReview([{ info: parent, parts: [task] }], async (app) => {
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("inspect child") && requests > 0) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    await app.renderOnce()
++    await app.renderOnce()
++    const lines = app.captureCharFrame().split("\n")
++    const y = lines.findIndex((line) => line.includes("inspect child"))
++    expect(y).toBeGreaterThanOrEqual(0)
++    await app.mockMouse.click(lines[y].indexOf("inspect child"), y)
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("child session refreshed")) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    expect(requests).toBeGreaterThan(1)
++  }, {}, { [childID]: () => {
++    requests++
++    if (stale && requests === 1) return []
++    return [{ info: { ...parent, id: "msg_child", sessionID: childID, agent: "general" },
++      parts: [{ id: "part_child", sessionID: childID, messageID: "msg_child", type: "text", text: "child session refreshed" }] }]
++  } })
++})
++
+ // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
+@@ -292,6 +333,7 @@
+   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
+   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
+   dimensions: { width?: number; height?: number } = {},
++  children: Record<string, () => typeof messages> = {},
+ ) {
+   await using tmp = await tmpdir()
+   await Bun.write(`${tmp.path}/kv.json`, "{}")
+@@ -303,10 +345,17 @@
+   }
+   const events = createEventSource()
++  // 默认审查子会话和Task子会话共用按ID分发的真实响应形状。
++  const sessions: Record<string, () => typeof messages> = { [sessionID]: () => messages, ses_reviewer_child: () => [], ...children }
+   const calls = createFetch((url) => {
+-    if (url.pathname === "/session") return json([info])
+-    if (url.pathname === `/session/${sessionID}` || url.pathname === "/session/ses_reviewer_child") return json(info)
+-    if (url.pathname === `/session/${sessionID}/message`) return json(messages)
++    const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }) })
++    if (url.pathname === "/session") return json(Object.keys(sessions).map(details))
++    const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
++    if (match && sessions[match[1]]) {
++      if (!match[2]) return json(details(match[1]))
++      if (match[2] === "message") return json(sessions[match[1]]())
++      return json([])
++    }
+     if (url.pathname.startsWith("/session/")) return json([])
+   }, events)
+   const observed: { route?: ReturnType<typeof useRoute> } = {}
+   const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} />, {
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index fd79e3861e..21fa77517b 100644
 --- a/packages/tui/src/routes/session/index.tsx

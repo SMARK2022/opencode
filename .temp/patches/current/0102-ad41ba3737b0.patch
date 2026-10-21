@@ -30,7 +30,7 @@ diff --git a/package.json b/package.json
 index fa950adcb6..3c36b2255a 100644
 --- a/package.json
 +++ b/package.json
-@@ -138,7 +138,9 @@
+@@ -138,7 +138,8 @@
      "@ai-sdk/anthropic": "3.0.111",
      "@opentui/core": "catalog:",
      "@opentui/keymap": "catalog:",
@@ -38,7 +38,6 @@ index fa950adcb6..3c36b2255a 100644
      "@types/bun": "catalog:",
 -    "@types/node": "catalog:"
 +    "@types/node": "catalog:",
-+    // #102：钉死 poe-oauth 0.0.6，避免 * 解析到不兼容次版本
 +    "poe-oauth": "0.0.6"
    },
    "patchedDependencies": {

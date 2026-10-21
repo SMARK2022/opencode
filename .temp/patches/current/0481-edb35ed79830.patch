@@ -1,331 +1,224 @@
 From edb35ed798301f36c32908fb3eb2a2963be40ca1 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Sun, 12 Jul 2026 10:30:00 +0800
-Subject: [PATCH] feat(tui): reasoning 可见性主键恢复与 per-Part disclosure
+Date: Sun, 12 Jul 2026 03:42:00 +0800
+Subject: [PATCH] fix(tui): separate thinking visibility and run disclosure
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-适配：SUPERSEDE 决策 (a)——恢复 thinking_visibility 主键并保留上游 reasoningSummary；
-per-Part 重表达替代 ReasoningRun 聚合；overflow 由 word-wrap 实测驱动；含 3 场景行为测试与 proposal 状态节改写。
+
+沿真实 ReasoningRun/ReasoningBody 适配，保留稳定分组、共享预算、原宽度、
+独立 Part 生命周期及常驻正文；不恢复旧 per-Part 重表达。
+
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -56,6 +56,10 @@ import {
-   TextAttributes,
-   RGBA,
-   MouseButton,
-+  TextBuffer,
-+  type ChunkRenderContext,
-+  type TextChunk,
-+  TextBufferView,
-   type MouseEvent as TuiMouseEvent,
-   type OptimizedBuffer,
+@@ -61,1 +61,4 @@
    type Renderable,
-@@ -129,7 +133,8 @@ import { sessionEpilogue } from "../../util/presentation"
- import { setPreLayoutSiblingMargin } from "../../util/layout"
- import { useTuiConfig } from "../../config"
- import { useClipboard } from "../../context/clipboard"
++  TextBuffer,
++  TextBufferView,
++  type WidthMethod,
+@@ -130,1 +133,1 @@
 -import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
-+// #481：visibility（kv 持久化）恢复为整块 Show/Hide 主键；mode 语义随源移出主 Session。
 +import { reasoningSummary } from "../../context/thinking"
- import { getScrollAcceleration } from "../../util/scroll"
- import { collapseToolOutput } from "../../util/collapse-tool-output"
- import { usePluginRuntime } from "../../plugin/runtime"
-@@ -210,11 +215,11 @@ const sessionGlobalBindingCommands = [
- 
- const sessionGlobalUnfocusedBindingCommands = ["session.first", "session.last"] as const
- 
+@@ -211,1 +214,1 @@
 -const context = createContext<{
-+// #481：导出供行为测试直接渲染 ReasoningPart（同 BlockTool 测试模式）
 +export const context = createContext<{
-   width: number
-   sessionID: string
-   conceal: () => boolean
+@@ -215,1 +218,0 @@
 -  thinkingMode: () => ThinkingMode
-   showThinking: () => boolean
-   showTimestamps: () => boolean
-   showDetails: () => boolean
-@@ -361,9 +366,9 @@ export function Session() {
-   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
-   const [sidebarOpen, setSidebarOpen] = createSignal(false)
-   const [conceal, setConceal] = createSignal(true)
+@@ -350,3 +352,2 @@
 -  const thinking = useThinkingMode()
 -  const thinkingMode = thinking.mode
 -  const showThinking = createMemo(() => true)
-+  // #481：恢复 thinking_visibility 为整块 Show/Hide 主键（持久化），命令只翻转它；
-+  // 折叠 disclosure 是 per-run 局部状态，二者正交。
++  // 整块可见性沿历史主键持久化；局部disclosure不再受thinking_mode驱动。
 +  const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
-   const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
-   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
-   const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
-@@ -915,11 +920,7 @@ export function Session() {
-       },
-     },
-     {
+@@ -908,5 +909,1 @@
 -      title: (() => {
 -        const next = nextThinkingMode(thinkingMode())
 -        if (next === "hide") return "Collapse thinking"
 -        return "Expand thinking"
 -      })(),
 +      title: showThinking() ? "Hide thinking" : "Show thinking",
-       value: "session.toggle.thinking",
-       category: "Session",
-       slash: {
-@@ -927,7 +928,7 @@ export function Session() {
-         aliases: ["toggle-thinking"],
-       },
-       run: () => {
+@@ -920,1 +917,1 @@
 -        thinking.set(nextThinkingMode(thinkingMode()))
-+        setShowThinking((prev) => !prev)
-         dialog.clear()
-       },
-     },
-@@ -1391,7 +1392,6 @@ export function Session() {
-           },
-           sessionID: route.sessionID,
-           conceal,
++        setShowThinking((visible) => !visible)
+@@ -1371,1 +1368,0 @@
 -          thinkingMode,
-           showThinking,
-           showTimestamps,
-           showDetails,
-@@ -1868,9 +1868,10 @@ const footerVisible = createMemo(() => {
- }
- 
- const PART_MAPPING = {
-+  // #481：part 渲染器映射——reasoning 用 per-Part 视图，visibility 过滤发生在上游
-   text: TextPart,
-   tool: ToolPart,
--  reasoning: ReasoningPart,
-+  reasoning: ReasoningPartView,
- }
- 
- const INLINE_TOOL_ICON_WIDTH = 2
-@@ -1878,12 +1879,19 @@ const INLINE_TOOL_ICON_WIDTH = 2
- // [local-smark] 折叠预览行数：由 maxHeight/overflow 裁剪，而不是重挂更短的正文树
- const REASONING_PREVIEW_ROWS = 5
- 
--function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
-+// #481：导出供行为测试直接渲染（disclosure/overflow 行为契约锁定）；
-+// 本地名避开 import type 的 ReasoningPart（SDK 类型）在值空间的遮蔽歧义
-+export function ReasoningPartView(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
-   const { theme } = useTheme()
-   const ctx = use()
-+  // #481：visibility 决定整块可见性（由 Session 层 showThinking 提供）；disclosure
-+  // （expanded/overflow）是本 run 局部状态，visibility 切换不重置它。
-   // Collapsed by default in hide mode: a single line throughout, so the
-   // layout never shifts. Click to open the full markdown block, click to close.
-   const [expanded, setExpanded] = createSignal(false)
-+  // post-conceal 渲染文本缓存：Code 的 onChunks 在高亮渲染期上报实际可见文本，
-+  // conceal 变更使缓存失效（下方 effect 重置）。
-+  const [rendered, setRendered] = createSignal<string[] | undefined>(undefined)
- 
-   const content = createMemo(() => {
-     // OpenRouter encrypts some reasoning blocks; drop the placeholder.
-@@ -1901,7 +1909,53 @@ const renderedContent = createMemo(() => displayContent() || content())
-   const isDone = createMemo(() => props.part.time.end !== undefined)
-   // #137：完成后 remount 推理块，避免高度测量粘滞
-   const completedKey = createMemo(() => `${ctx.width}@${renderedContent()}`)
--  const inMinimal = createMemo(() => ctx.thinkingMode() === "hide")
-+  // #481：word-wrap 实测行数——TextBufferView 按终端宽度做真实换行测量，替代
-+  // 字符数/宽度的启发式估算（估算会低估 CJK/长词换行的真实行数）。句柄用后即毁，
-+  // 避免 native 内存滞留。
-+  const measureReasoningRows = (text: string) => {
-+    if (!text) return 0
-+    const buffer = TextBuffer.create("wcwidth")
-+    const view = TextBufferView.create(buffer)
-+    try {
-+      view.setWrapMode("word")
-+      // #481：无显式宽度时 native 端可能用默认值，换行测量必须与当前终端列数一致
-+      view.setWrapWidth(Math.max(1, ctx.width))
+@@ -1906,11 +1902,17 @@
+-function reasoningRows(text: string, width: number) {
+-  const bodyWidth = Math.max(width, 1)
+-  return text.split("\n").reduce((total, line) => {
+-    // 与char-wrap使用相同终端cell口径；tab/control保守占一行，CJK不按字符个数算。
+-    const cells = [...line].reduce((sum, char) => {
+-      const code = char.codePointAt(0) ?? 0
+-      return sum + (char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char))
+-    }, 0)
+-    return total + Math.max(1, Math.ceil(cells / bodyWidth))
+-  }, 0)
++function reasoningRowsTotal(content: string[], width: number, widthMethod: WidthMethod) {
++  const buffer = TextBuffer.create(widthMethod)
++  const view = TextBufferView.create(buffer)
++  try {
++    view.setWrapWidth(Math.max(width, 1))
++    view.setWrapMode("word")
++    // 按真实终端宽度与宽字算法测量，每个Part的高亮chunk先拼回完整可见文本。
++    return content.reduce((total, text) => {
 +      buffer.setText(text)
-+      return view.getVirtualLineCount()
-+    } finally {
-+      buffer.destroy()
-+      view.destroy()
-+    }
++      return total + view.getVirtualLineCount()
++    }, 0)
++  } finally {
++    // view借用buffer，先释放view，流式重算不得积累native句柄。
++    view.destroy()
++    buffer.destroy()
 +  }
-+  // overflow：post-conceal 渲染文本实测行数 > 五行预算。高亮分段数不是视觉行数，
-+  // 必须逐段 word-wrap 实测求和；渲染未就绪（异步高亮未上报）时按 false 处理——
-+  // 无依据不显示 toggle，防止短内容点击预写状态。
+ }
+@@ -1918,1 +1920,1 @@
+-function ReasoningRun(props: { parts: ReasoningPart[] }) {
++export function ReasoningRun(props: { parts: ReasoningPart[] }) {
+@@ -1922,1 +1924,3 @@
+-  const [override, setOverride] = createSignal<boolean>()
++  // 局部选择留在稳定run root内，隐藏视觉树不重置已展开状态。
++  const [expanded, setExpanded] = createSignal(false)
++  const [rendered, setRendered] = createSignal<Record<string, string | undefined>>({})
+@@ -1929,7 +1933,6 @@
+-  // 流式hide默认从首帧折叠；opaque只留标题，完成或显式选择后恢复真实行数规则。
+-  const overflow = createMemo(() =>
+-    !done() && !opaque() && override() === undefined && ctx.thinkingMode() === "hide"
+-      ? true
+-      : parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS,
+-  )
+-  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
++  // 高亮未就绪时不伪造toggle；外层始终限高，首帧也不会先泄漏尾部再收回。
 +  const overflow = createMemo(() => {
-+    const chunks = rendered()
-+    if (!chunks) return false
-+    return reasoningRowsTotal(chunks) > REASONING_PREVIEW_ROWS
++    const content = parts().map((part) => rendered()[part.id])
++    if (content.some((text) => text === undefined)) return false
++    return reasoningRowsTotal(content.filter((text): text is string => text !== undefined), ctx.width, renderer.widthMethod) > REASONING_PREVIEW_ROWS
 +  })
-+  // #481：Code 高亮渲染回调——generation 边界（context.content）防止旧回调覆盖新 delta；
-+  // 上报的 post-conceal 文本作为 overflow 实测依据。参数类型与 Code 属性签名结构兼容。
-+  const handleChunks = (chunks: TextChunk[], context: ChunkRenderContext) => {
-+    if (context.content !== renderedContent()) return chunks
-+    setRendered(chunks.map((chunk) => chunk.text))
-+    return chunks
-+  }
-+  // #481：word-wrap 总行数——分段测量求和近似整段换行（高亮分段边界通常即词边界，
-+  // 求和与整段测量的偏差不跨五行阈值时无影响）
-+  const reasoningRowsTotal = (chunks: string[]) => {
-+    let total = 0
-+    for (const chunk of chunks) total += measureReasoningRows(chunk)
-+    return total
-+  }
-+  createEffect(
-+    on(ctx.conceal, () => {
-+      // #481：conceal 变更使 post-conceal 文本缓存失效——重置后 overflow 暫回 false，
-+      // 展开入口先消失再等新渲染上报；disclosure（expanded）刻意不重置
-+      setRendered(undefined)
-+    }),
-+  )
-   const duration = createMemo(() => {
-     const end = props.part.time.end
-     return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
-@@ -1910,12 +1964,14 @@ const renderedContent = createMemo(() => displayContent() || content())
-   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
- 
-   const toggle = () => {
--    if (!inMinimal() || opaque()) return
-+    // #481：无 overflow 依据时点击不预写折叠状态，防止后续内容增长/resize 绕过五行上限。
-+    if (opaque() || !overflow()) return
-     setExpanded((prev) => !prev)
-   }
- 
-   return (
--    <Show when={content() || opaque()}>
-+    // #481：visibility 主键——showThinking=false 时整块隐藏（标题与正文一起）
-+    <Show when={ctx.showThinking() && (content() || opaque())}>
-       <box
-         ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-         paddingLeft={3}
-@@ -1925,8 +1981,8 @@ const renderedContent = createMemo(() => displayContent() || content())
-       >
-         <box onMouseUp={toggle}>
-           <ReasoningHeader
--            toggleable={inMinimal() && !opaque()}
--            open={!inMinimal() || expanded()}
-+            toggleable={!opaque()}
-+            open={expanded()}
-             done={isDone()}
-             title={summary().title}
-             duration={isDone() ? Locale.duration(duration()) : undefined}
-@@ -1939,10 +1995,10 @@ const renderedContent = createMemo(() => displayContent() || content())
-             content() 门合并旧预览/展开双门的可见语义：加密（opaque）part 只留 header */}
-         <Show when={content()}>
-           <box
--            paddingLeft={inMinimal() ? 2 : 0}
-+            paddingLeft={2}
-             marginTop={1}
--            maxHeight={!inMinimal() || expanded() ? undefined : REASONING_PREVIEW_ROWS}
--            overflow={!inMinimal() || expanded() ? "visible" : "hidden"}
-+            maxHeight={expanded() || !overflow() ? undefined : REASONING_PREVIEW_ROWS}
-+            overflow={expanded() || !overflow() ? "visible" : "hidden"}
-           >
-             <code
-               filetype="markdown"
-@@ -1951,8 +2007,9 @@ const renderedContent = createMemo(() => displayContent() || content())
-               syntaxStyle={syntax()}
-               content={renderedContent()}
-               conceal={ctx.conceal()}
-+              onChunks={handleChunks}
-               fg={theme.textMuted}
--              wrapMode={!inMinimal() || expanded() ? "word" : "char"}
-+              wrapMode={expanded() || !overflow() ? "word" : "char"}
-             />
-           </box>
-           {/* [local-smark] 展开入口必须位于正文裁剪区之外，避免按钮也被五行上限隐藏。
-@@ -1960,16 +2017,9 @@ const renderedContent = createMemo(() => displayContent() || content())
-               行数判断会让 footer 闪烁；流式中默认收缩语义要求 footer 与裁剪同步 */}
-           <Show
-             when={
--              inMinimal() &&
-               !expanded() &&
--              (!isDone() ||
--                renderedContent().split(String.fromCharCode(10)).length > 5 ||
--                renderedContent()
--                  .split(String.fromCharCode(10))
--                  .reduce(
--                    (rows, line) => rows + Math.max(1, Math.ceil(Bun.stringWidth(line) / Math.max(1, ctx.width - 5))),
--                    0,
--                  ) > 5)
-+              // #481：toggle 出现与否按 word-wrap 实测 overflow 判定（渲染未就绪=false）。
-+              overflow()
-             }
-           >
-             <box paddingLeft={2} flexShrink={0} onMouseUp={toggle}>
-
+@@ -1937,2 +1940,0 @@
+-  // 全局模式变化才清除局部选择；普通delta不得把已展开的run折回。
+-  createEffect(on(() => ctx.thinkingMode(), () => setOverride(undefined), { defer: true }))
+@@ -1944,1 +1945,1 @@
+-          setOverride(!expanded())
++          setExpanded((value) => !value)
+@@ -1954,2 +1955,3 @@
+-            return <ReasoningBody id={`text-${id}`} part={part} separator={index() > 0} expanded={expanded()}
+-              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
++            return <ReasoningBody id={`text-${id}`} part={part} separator={index() > 0} expanded={expanded() || !overflow()}
++              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()}
++              onContent={(content) => setRendered((current) => current[id] === content ? current : { ...current, [id]: content })} />
+@@ -1964,1 +1966,1 @@
+-function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
++function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean; onContent: (content: string | undefined) => void }) {
+@@ -1970,1 +1972,3 @@
+   })
++  // conceal改变会立即使旧可见文本失效，普通delta则保留已知文本直到新generation回报。
++  createEffect(on(() => props.conceal, () => props.onContent(undefined)))
+@@ -1977,1 +1981,7 @@
+-        syntaxStyle={props.syntaxStyle} content={content()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.expanded ? "word" : "char"} />
++        syntaxStyle={props.syntaxStyle} content={content()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.expanded ? "word" : "char"}
++        onChunks={(chunks, context) => {
++          // 只接受当前正文的高亮回报，旧异步结果不能覆盖新delta的测量依据。
++          if (context.content !== content()) return chunks
++          props.onContent(chunks.map((chunk) => chunk.text).join(""))
++          return chunks
++        }} />
 diff --git a/docs/Proposal/tui-reasoning-run-rendering-proposal.md b/docs/Proposal/tui-reasoning-run-rendering-proposal.md
 --- a/docs/Proposal/tui-reasoning-run-rendering-proposal.md
 +++ b/docs/Proposal/tui-reasoning-run-rendering-proposal.md
-@@ -2,7 +2,9 @@
+@@ -2,10 +2,16 @@
  
  Date: 2026-07-11
  
 -Status: proposed
-+Status: partially implemented
++Status: implemented
+ 
+-Scope: `packages/opencode` 的主 TUI Session Message 区域。本文只设计渲染阶段行为，不修改 Message、Part、事件、SDK、数据库或 Provider 协议。
++Scope: `packages/tui` 的主 TUI Session Message 区域。本文只设计渲染阶段行为，不修改 Message、Part、事件、SDK、数据库或 Provider 协议。
+ 
++## 当前实施状态
 +
-+> 实施状态（#481 落地记录）：可见性与折叠正交、`thinking_visibility` 主键恢复（Session 级 kv signal）、disclosure 局部状态、word-wrap 实测 overflow、防预写 toggle、conceal 重置与流式 generation 边界已按 **per-Part 形态**落地于 `session/index.tsx`；跨 Part 的 `ReasoningRun` 聚合、`[seg N/M]` marker 与共享 preview 预算尚未实施。落地采用 per-Part 重表达：每个 ReasoningPart 独立拥有 disclosure 状态与 word-wrap 五行预算，visibility 由 Session 级主键统一驱动，两者正交。下文凡描述 ReasoningRun 聚合行为的小节仍属设计稿；与已落地 per-Part 行为冲突处以本节为准。
- 
- Scope: `packages/opencode` 的主 TUI Session Message 区域。本文只设计渲染阶段行为，不修改 Message、Part、事件、SDK、数据库或 Provider 协议。
- 
-@@ -25,6 +27,8 @@ Scope: `packages/opencode` 的主 TUI Session Message 区域。本文只设计
- 
- 调研还发现一个相关但独立的现状缺陷：主 Session renderer 把 `showThinking` 固定为 `true`，`ReasoningPart` 又没有读取 `thinkingMode`，所以 `/thinking` 虽然会更新持久化的 `thinking_mode`，正常 Session 视图并不会随之展开或收缩。实验性 v2 debug renderer 已经读取该模式。实现 `ReasoningRun` 时应同时收敛这两个状态源，但不能顺手改变 transcript/export 是否包含 reasoning 的语义。
- 
-+> #481 更新：此缺陷已修复——`thinking_visibility` 恢复为 Session 级主键（kv signal），`/thinking` 循环 hide→summary→show，ReasoningPart 按 visibility 直接决定渲染形态，transcript/export 语义未变。
++当前生产实现沿用稳定 `ReasoningRun`、单正文树、共享五行视觉预算和 Markdown `---` source 分隔。
++历史 `thinking_visibility` 只控制整个 Thinking 是否可见；run-local `expanded=false` 只控制真实 overflow 正文的 disclosure。
++短 run 自然全文且无 toggle；post-conceal 文本经真实终端宽字算法的 native word-wrap 测量；`thinking_mode` 不再驱动主 Session。第1–20节保留调研历史，当前规范以本节及第21–22节为准。
 +
- ## 2. 术语
+ ## 1. 结论摘要
  
- | 术语 | 本文定义 | 是否持久化 |
-
+ 问题确认存在，而且根因不是当前 5 行阈值设置得不合适，而是阈值、展开状态和渲染容器都绑定在单个 `ReasoningPart` 上。
+@@ -900,1 +906,1 @@
+-4. 多 source run 使用单一 Thinking 主标题和紧凑 `[seg N/M]` source ordinal；不显示重复的 `Segment N/M` 标题。
++4. 多 source run 使用单一 Thinking 主标题和 Markdown `---` 水平分隔线；不显示重复的 `Segment N/M` 标题。
+@@ -907,4 +913,4 @@
+-11. transcript 和 export 仍基于原始 Part，屏幕折叠不会隐式过滤内容。
+-12. `/thinking` 的文案和实际主 Session 行为一致。
+-13. 任意一帧出现 `[seg N/M]` 时，其后的对应成员已经有 post-conceal 可见 glyph；完全 conceal 的成员没有孤立 marker。
+-14. preview 的实际 `CodeRenderable.width` 经 layout test 证明等于 allocator 使用的 `ctx.width`。
++11. transcript 和 export 仍基于原始 Part，local expand/collapse 不会截断或过滤内容。
++12. `/thinking` 的 Show/Hide 文案和整个 Thinking visibility 行为一致。
++13. 短 run 无 toggle；长 run 默认收缩；visibility hide/show 不重置同一 run 的局部 disclosure。
++14. preview 的实际 `CodeRenderable.width` 与 overflow measurement 使用相同的 `ctx.width`。
+@@ -915,1 +921,1 @@
+-采用 `ReasoningRun` 显示聚合，并把它作为生产 TUI `session/index.tsx` 内部的私有渲染抽象。它接收原始有序 Part，隐藏最大连续 run、硬边界、稳定 key、共享 preview、compact source marker 和流式状态保持；不新增文件或公开接口。
++采用 `ReasoningRun` 显示聚合，并把它作为生产 TUI `session/index.tsx` 内部的渲染抽象。它接收原始有序 Part，隐藏最大连续 run、硬边界、稳定 key、共享五行预算和流式状态保持；不新增生产文件或公共协议。
+@@ -920,2 +926,2 @@
+-2. 共用折叠外壳但不拼接成员 Markdown，使用紧凑 `[seg N/M]` 明确 source Part 边界，同时让 Thinking 保持唯一视觉主体。
+-3. 对整个 run 应用一个 5 行硬视觉预算，使用经实测的正文宽度，并让所有 marker 受预算和 post-conceal readiness 约束。
++2. 共用折叠外壳但不拼接成员 Markdown，非首 source 在自己的 renderer 中使用 Markdown `---`，同时让 Thinking 保持唯一视觉主体。
++3. 对整个 run 应用一个 5 行硬视觉预算，以 post-conceal 文本的 OpenTUI native word-wrap 判断 overflow，让 visibility 与 local disclosure 保持正交。
 diff --git a/packages/tui/test/routes/session/reasoning-disclosure.test.tsx b/packages/tui/test/routes/session/reasoning-disclosure.test.tsx
 new file mode 100644
-index 0000000000000000000000000000000000000000..696d706f7274207b206578706563742c20746573
 --- /dev/null
 +++ b/packages/tui/test/routes/session/reasoning-disclosure.test.tsx
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,168 @@
 +import { expect, test } from "bun:test"
 +import { randomUUID } from "node:crypto"
 +import { mkdir, writeFile } from "node:fs/promises"
 +import { tmpdir } from "node:os"
 +import path from "node:path"
 +import { testRender } from "@opentui/solid"
++import { engine } from "@opentui/core"
++import { createSignal } from "solid-js"
++import type { ReasoningPart } from "@opencode-ai/sdk/v2"
 +import { TuiPathsProvider, TuiStartupProvider } from "../../../src/context/runtime"
 +import { KVProvider } from "../../../src/context/kv"
 +import { TuiConfigProvider } from "../../../src/config"
 +import { ThemeProvider } from "../../../src/context/theme"
 +import { RouteProvider } from "../../../src/context/route"
-+// #481：ReasoningPart 行为契约锁定——
-+// 短内容零展开入口、无 overflow 依据时点击不预写折叠状态、visibility 主键整块隐藏。
-+// overflow 的 word-wrap 实测依赖 code 高亮回调（headless 下不上报），
-+// 因此本文件锁定可稳定复现的三个契约面；overflow 数值路径由生产流式链路覆盖。
-+import { ReasoningPartView, context as SessionContext } from "../../../src/routes/session"
++import { ReasoningRun, context } from "../../../src/routes/session"
 +
-+const makeCtx = (showThinking: () => boolean) => ({
-+  width: 60,
-+  sessionID: "ses_test",
-+  conceal: () => false,
-+  showThinking,
-+  showTimestamps: () => false,
-+  showDetails: () => true,
-+  showGenericToolOutput: () => true,
-+  diffWrapMode: () => "word" as const,
-+  providers: () => new Map(),
-+  sync: {} as never,
-+  tui: {} as never,
-+})
++function makePart(text: string, id = "prt_test", done = true): ReasoningPart {
++  return { id, sessionID: "ses_test", messageID: "msg_test", type: "reasoning", text, time: { start: 0, end: done ? 10 : undefined } }
++}
 +
-+const makePart = (text: string) => ({
-+  id: "prt_test",
-+  type: "reasoning" as const,
-+  text,
-+  metadata: undefined,
-+  time: { start: Date.now(), end: Date.now() },
-+})
++async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => boolean) {
++  // 手动renderer空闲时内置wait提前结束；主动驱动帧并等待真实KV/高亮I/O。
++  for (let pass = 0; pass < 300; pass++) {
++    await app.renderOnce()
++    if (predicate(app.captureCharFrame())) return
++    await Bun.sleep(10)
++  }
++  expect(predicate(app.captureCharFrame())).toBe(true)
++}
 +
 +async function setup() {
 +  const stateDir = path.join(tmpdir(), `reasoning-kv-${randomUUID()}`)
 +  await mkdir(stateDir, { recursive: true })
-+  await writeFile(path.join(stateDir, "kv.json"), "{}")
++  await writeFile(path.join(stateDir, "kv.json"), JSON.stringify({ thinking_mode: "show" }))
 +  return stateDir
 +}
 +
-+function Harness(props: { showThinking: () => boolean; text: string; stateDir: string }) {
++function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; stateDir: string; width?: number; conceal?: () => boolean }) {
++  const value = {
++    get width() { return props.width ?? 60 },
++    sessionID: "ses_test",
++    conceal: () => props.conceal?.() ?? false,
++    showThinking: props.showThinking,
++    showTimestamps: () => false,
++    showDetails: () => true,
++    showGenericToolOutput: () => true,
++    diffWrapMode: () => "word" as const,
++    providers: () => new Map(),
++    sync: {} as never,
++    tui: {} as never,
++  }
 +  return (
 +    <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: props.stateDir, worktree: "/work" }}>
 +      <TuiStartupProvider value={{ skipInitialLoading: true }}>
@@ -333,9 +226,10 @@ index 0000000000000000000000000000000000000000..696d706f7274207b206578706563742c
 +          <TuiConfigProvider config={{ theme: undefined } as never}>
 +            <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
 +              <RouteProvider>
-+                <SessionContext.Provider value={makeCtx(props.showThinking)}>
-+                  <ReasoningPartView last part={makePart(props.text) as never} message={{} as never} />
-+                </SessionContext.Provider>
++                <context.Provider value={value}>
++                  <ReasoningRun parts={props.parts} />
++                  <text>answer remains visible</text>
++                </context.Provider>
 +              </RouteProvider>
 +            </ThemeProvider>
 +          </TuiConfigProvider>
@@ -347,48 +241,98 @@ index 0000000000000000000000000000000000000000..696d706f7274207b206578706563742c
 +
 +test("done reasoning renders Thought header for short content", async () => {
 +  const stateDir = await setup()
-+  const app = await testRender(() => <Harness showThinking={() => true} text={"第一行推理\n第二行推理"} stateDir={stateDir} />, { width: 60, height: 30 })
-+  await new Promise((resolve) => setTimeout(resolve, 100))
++  const app = await testRender(() => <Harness showThinking={() => true} parts={[makePart("第一行推理\n第二行推理")]} stateDir={stateDir} />, { width: 60, height: 30, useThread: false })
 +  try {
-+    await app.waitForFrame((frame) => frame.includes("Thought"))
-+    const frame = app.captureCharFrame()
-+    // header 出现（done 态折叠词汇），短内容无展开入口
-+    expect(frame).toContain("Thought")
-+    expect(frame).not.toContain("展开查看完整推理")
++    await waitForFrame(app, (frame) => frame.includes("Thought"))
++    expect(app.captureCharFrame()).not.toContain("展开查看完整推理")
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
 +  }
 +})
 +
-+test("clicking header without overflow evidence does not preset expanded state", async () => {
++test("clicking short reasoning does not preset disclosure", async () => {
 +  const stateDir = await setup()
-+  const app = await testRender(() => <Harness showThinking={() => true} text={"第一行推理\n第二行推理"} stateDir={stateDir} />, { width: 60, height: 30 })
-+  await new Promise((resolve) => setTimeout(resolve, 100))
++  const app = await testRender(() => <Harness showThinking={() => true} parts={[makePart("短内容")]} stateDir={stateDir} />, { width: 60, height: 30, useThread: false })
 +  try {
-+    await app.waitForFrame((frame) => frame.includes("Thought"))
-+    // #481 防预写契约：无 overflow 依据（渲染未上报）时点击 toggle 是 no-op，
-+    // header 保持折叠词汇 "+"，不能因点击而翻转或泄露展开入口
-+    await app.mockMouse.click(10, 5)
-+    await new Promise((resolve) => setTimeout(resolve, 50))
-+    const frame = app.captureCharFrame()
-+    expect(frame).toContain("Thought")
-+    expect(frame).not.toContain("展开查看完整推理")
++    await waitForFrame(app, (frame) => frame.includes("Thought"))
++    const row = app.captureCharFrame().split("\n").findIndex((line) => line.includes("Thought"))
++    await app.mockMouse.click(5, row)
++    expect(app.captureCharFrame()).toContain("Thought")
++    expect(app.captureCharFrame()).not.toContain("展开查看完整推理")
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
 +  }
 +})
 +
-+test("visibility off hides the whole reasoning block including header", async () => {
++test("visibility off hides header and body without hiding the answer", async () => {
 +  const stateDir = await setup()
-+  const app = await testRender(() => <Harness showThinking={() => false} text={"第一行推理\n第二行推理"} stateDir={stateDir} />, { width: 60, height: 30 })
-+  await new Promise((resolve) => setTimeout(resolve, 100))
++  const app = await testRender(() => <Harness showThinking={() => false} parts={[makePart("隐藏推理")]} stateDir={stateDir} />, { width: 60, height: 30, useThread: false })
 +  try {
-+    // visibility 主键为 false：标题与正文一起消失（整块 Show 门）
-+    await new Promise((resolve) => setTimeout(resolve, 100))
-+    const frame = app.captureCharFrame()
-+    expect(frame).not.toContain("Thought")
-+    expect(frame).not.toContain("展开查看完整推理")
++    await waitForFrame(app, (frame) => frame.includes("answer remains visible"))
++    expect(app.captureCharFrame()).not.toContain("Thought")
++    expect(app.captureCharFrame()).not.toContain("隐藏推理")
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
++  }
++})
++
++test("real run preserves word-wrap, shared budget, streaming and conceal disclosure", async () => {
++  const stateDir = await setup()
++  const [visible, setVisible] = createSignal(true)
++  const [conceal, setConceal] = createSignal(true)
++  const [parts, setParts] = createSignal([makePart("short stream thought", "prt_test", false)])
++  const app = await testRender(() => <Harness showThinking={visible} conceal={conceal} parts={parts()} width={21} stateDir={stateDir} />, { width: 31, height: 30, useThread: false })
++  const click = async (label: string) => {
++    const row = app.captureCharFrame().split("\n").findIndex((line) => line.includes(label))
++    expect(row).toBeGreaterThanOrEqual(0)
++    await app.mockMouse.click(5, row)
++  }
++  try {
++    await waitForFrame(app, (frame) => frame.includes("short stream thought"))
++    expect(app.captureCharFrame()).not.toContain("展开查看完整推理")
++    await click("short stream thought")
++    const grown = "short stream thought" + Array.from({ length: 6 }, (_, index) => `\nstream line ${index + 2}`).join("")
++    setParts([makePart(grown, "prt_test", false)])
++    await app.renderOnce()
++    // 不等待最终toggle才检查首帧，避免漏掉流式增长时的短暂尾部泄漏。
++    expect(app.captureCharFrame()).not.toContain("stream line 7")
++    await waitForFrame(app, (frame) => frame.includes("展开查看完整推理"))
++    setParts([makePart(grown)])
++    await waitForFrame(app, (frame) => frame.includes("Thought") && frame.includes("展开查看完整推理"))
++    expect(app.captureCharFrame()).not.toContain("stream line 7")
++
++    // 此宽度下char-wrap仅五行而word-wrap超过五行，必须仍然提供真实展开入口。
++    const wrapped = "abcdefghijkl 123456789012 longword12xx reasoningxxx abcdefghijkl 123456789012 longword12xx"
++    setParts([makePart(wrapped)])
++    await waitForFrame(app, (frame) => frame.includes("abcdefghijkl") && frame.includes("展开查看完整推理"))
++    await click("展开查看完整推理")
++    await waitForFrame(app, (frame) => frame.includes("收起推理"))
++    expect(app.captureCharFrame().replace(/\s/g, "")).toContain(wrapped.replace(/\s/g, ""))
++    await click("收起推理")
++    setParts(Array.from({ length: 8 }, (_, index) => makePart(`mode source ${index + 1}`, index === 0 ? "prt_test" : `prt_${index}`)))
++    await waitForFrame(app, (frame) => frame.includes("mode source 1") && frame.includes("展开查看完整推理"))
++    expect(app.captureCharFrame()).not.toContain("mode source 8")
++    await click("展开查看完整推理")
++    await waitForFrame(app, (frame) => frame.includes("mode source 8") && frame.includes("收起推理"))
++    setVisible(false)
++    await waitForFrame(app, (frame) => frame.includes("answer remains visible") && !frame.includes("Thought"))
++    setVisible(true)
++    await waitForFrame(app, (frame) => frame.includes("mode source 8") && frame.includes("收起推理"))
++    await click("收起推理")
++
++    const privateURL = `private-url/${"hidden-path/".repeat(20)}image.png`
++    setParts([makePart("visible first source"), makePart(`![](${privateURL})`, "prt_concealed")])
++    await waitForFrame(app, (frame) => frame.includes("visible first source") && !frame.includes("展开查看完整推理"))
++    expect(app.captureCharFrame()).not.toContain("private-url")
++    setConceal(false)
++    await waitForFrame(app, (frame) => frame.includes("private-url") && frame.includes("展开查看完整推理"))
++    setConceal(true)
++    await waitForFrame(app, (frame) => !frame.includes("private-url") && !frame.includes("展开查看完整推理"))
++  } finally {
++    app.renderer.destroy()
++    engine.detach()
 +  }
 +})

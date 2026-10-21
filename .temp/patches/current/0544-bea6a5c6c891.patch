@@ -504,7 +504,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 index bae4467f2..c8cda1f05 100644
 --- a/packages/tui/src/component/dialog-session-list.tsx
 +++ b/packages/tui/src/component/dialog-session-list.tsx
-@@ -19,10 +19,17 @@ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
+@@ -19,11 +19,18 @@ import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
  import { useCommandShortcut } from "../keymap"
  import { useEvent } from "../context/event"
  import {
@@ -517,14 +517,19 @@ index bae4467f2..c8cda1f05 100644
 +  shouldStopSearchScan,
 +  SESSION_LIST_CONTENT_BATCH,
 +  SESSION_LIST_CONTENT_DELAY_MS,
+   SESSION_LIST_BROWSE_LIMIT,
    SESSION_LIST_LOOKBACK_MS,
    SESSION_LIST_SEARCH_LIMIT,
 +  type SearchPhase,
  } from "../util/session-list-params"
  
- type SessionListFilter = { scope?: "project"; path?: string }
-@@ -96,6 +103,178 @@ export function DialogSessionList() {
-   const [search, setSearch] = createDebouncedSignal("", 150)
+-type SessionListFilter = { scope?: "project"; path?: string }
++type SessionListFilter = { directory?: string; scope?: "project"; path?: string }
+@@ -96,6 +103,179 @@ export function DialogSessionList() {
+-  const [search, setSearch] = createDebouncedSignal("", 150)
++  const [rawSearch, setSearch] = createDebouncedSignal("", 150)
++  // 与既有查询构造器同样归一空白，避免只含空格的输入启动全表扫描。
++  const search = createMemo(() => rawSearch().trim())
    // #120：sessionID -> 多行用户消息预览（非单行再折词）
    const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
 +  // #544 progressive search 状态：generation 与 Abort 绑定 committed query。
@@ -538,17 +543,15 @@ index bae4467f2..c8cda1f05 100644
 +  const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
 +  let searchGeneration = 0
 +  let searchController: AbortController | undefined
++  // 删除后refetch也会更换controller，卸载必须取消最新请求而非只捕获初次搜索。
++  onCleanup(() => searchController?.abort())
 +
 +  // Hit 形状与 browse 同源（Session.Info）——visibleSessions/options 管道无需分支适配。
 +  type SessionHit = (typeof sync.data.session)[number]
 +
-+  // #544：与 browse 路径相同 start/scope，保证 progressive 候选宇宙一致
-+  // sync.session.query() 返回 {scope,path} 过滤——start 由 lookback 常量统一注入。
-+  function sessionListScopeParams() {
-+    return {
-+      start: Date.now() - SESSION_LIST_LOOKBACK_MS,
-+      ...sync.session.query(),
-+    }
++  // 复用列表已有roots、时间窗与目录过滤，标题首屏和scan不能另建候选宇宙。
++  function sessionListScopeParams(query: string) {
++    return createDialogSessionListQuery({ search: query, filter: sync.session.query() })
 +  }
 +
 +  // #544：POST/手写 GET 都需 directory query，workspace routing 才能定位实例
@@ -566,7 +569,7 @@ index bae4467f2..c8cda1f05 100644
 +   * generation+Abort 保证改词/清空时丢弃过期响应。
 +   */
 +  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
-+    const scope = sessionListScopeParams()
++    const scope = sessionListScopeParams(query)
 +    // 起始即 awaiting_first：首个 title 响应到达前列表显示 Searching… 而非 Not Found。
 +    setSearchPhase("awaiting_first")
 +    setSearchTerminal(undefined)
@@ -579,7 +582,8 @@ index bae4467f2..c8cda1f05 100644
 +      directoryQuery(titleUrl)
 +      titleUrl.searchParams.set("search", query)
 +      titleUrl.searchParams.set("searchMode", "title")
-+      titleUrl.searchParams.set("start", String(scope.start))
++      if ("start" in scope) titleUrl.searchParams.set("start", String(scope.start))
++      titleUrl.searchParams.set("roots", String(scope.roots))
 +      titleUrl.searchParams.set("limit", String(SESSION_LIST_SEARCH_LIMIT))
 +      if (scope.scope) titleUrl.searchParams.set("scope", scope.scope)
 +      if (scope.path) titleUrl.searchParams.set("path", scope.path)
@@ -624,7 +628,8 @@ index bae4467f2..c8cda1f05 100644
 +          search: query,
 +          cursor: cursor ?? undefined,
 +          batch: SESSION_LIST_CONTENT_BATCH,
-+          start: scope.start,
++          start: "start" in scope ? scope.start : undefined,
++          roots: scope.roots,
 +          scope: scope.scope,
 +          path: scope.path,
 +          directory: "directory" in scope ? scope.directory : undefined,
@@ -677,8 +682,8 @@ index bae4467f2..c8cda1f05 100644
 +  // onCleanup 兜底 abort：组件卸载时进行中的请求不允许写回已销毁的信号图。
 +  createEffect(
 +    on(
-+      () => search(),
-+      (query) => {
++      () => ({ query: search(), filter: sync.session.query() }),
++      ({ query }) => {
 +        searchController?.abort()
 +        if (!query) {
 +          // 清空是显式回 browse：自增 generation 使任何 in-flight 写回立即过期。
@@ -694,7 +699,6 @@ index bae4467f2..c8cda1f05 100644
 +        const generation = ++searchGeneration
 +        const controller = new AbortController()
 +        searchController = controller
-+        onCleanup(() => controller.abort())
 +        void runProgressiveSearch(query, generation, controller.signal)
 +      },
 +    ),
@@ -1097,7 +1101,7 @@ index ade7baa26..33807fcd6 100644
 +          }),
 +        ),
        )
- .annotateMerge(
+       .annotateMerge(
          OpenApi.annotations({
 
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
@@ -1285,7 +1289,7 @@ index 25af18936..44d3296b8 100644
        listGlobal,
        create,
        fork,
-@@ -1046,6 +1076,129 @@ function listByProject(
+@@ -1046,6 +1076,126 @@ function listByProject(
      worktree: string
    },
  ) {
@@ -1301,11 +1305,13 @@ index 25af18936..44d3296b8 100644
 +  const limit = input.limit ?? 100
 +
 +  return db
-+    .select()
++    // 继续使用前项的请求投影，搜索结果不能丢失已落盘的token与费用字段。
++    .select(selection)
 +    .from(SessionTable)
 +    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
 +    .where(conditions.length > 0 ? and(...conditions) : undefined)
-+    .orderBy(desc(SessionTable.time_updated))
++    // 与scan的keyset完全同序，同毫秒更新的top-400也保持一致。
++    .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
 +    .limit(limit)
 +    .all()
 +    .pipe(
@@ -1376,23 +1382,18 @@ index 25af18936..44d3296b8 100644
 +  const full = searchCondition(input.search, { mode: "all" })
 +  const ids = page.map((row) => row.id)
 +  // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
-+  const matchedIds = full
-+    ? new Set(
-+        (
-+          yield* db
-+            .select({ id: SessionTable.id })
-+            .from(SessionTable)
-+            .where(and(inArray(SessionTable.id, ids), full))
-+            .all()
-+            .pipe(Effect.orDie)
-+        ).map((row) => row.id),
-+      )
-+    : new Set(ids)
-+
-+  // 保持候选页 recency 顺序，只输出 full-condition 命中
-+  // 不在 SQL 侧 LIMIT 命中数：候选窗推进量必须与 batch 一致，否则翻页进度失真。
-+  // fromRow 与 list 同一映射：scan 结果的字段形状与 list 完全一致，TUI 无需分支。
-+  const sessions = page.filter((row) => matchedIds.has(row.id)).map(fromRow)
++  const matched = yield* db
++    .select(selection)
++    .from(SessionTable)
++    .where(and(inArray(SessionTable.id, ids), full))
++    .all()
++    .pipe(Effect.orDie)
++  // 命中行保留同一请求投影，输出仍按候选页排序而非第二次SQL的返回顺序。
++  const byID = new Map(matched.map((row) => [row.id, row]))
++  const sessions = page.flatMap((row) => {
++    const match = byID.get(row.id)
++    return match ? [fromRow(match)] : []
++  })
 +  const last = page[page.length - 1]!
 +  // done 判定只看候选页是否填满：命中为 0 的满页仍要继续翻，直到宇宙耗尽。
 +  const done = page.length < batch
@@ -1415,7 +1416,7 @@ index 25af18936..44d3296b8 100644
    // #143：path 过滤时不预置 project_id，以便 OR 全局父会话
    const conditions: ReturnType<typeof eq>[] = []
  
-@@ -1121,28 +1274,9 @@ function listByProject(
+@@ -1062,29 +1212,9 @@ function listByProject(
    if (input.start) {
      conditions.push(gte(SessionTable.time_updated, input.start))
    }
@@ -1428,7 +1429,8 @@ index 25af18936..44d3296b8 100644
 -  const limit = input.limit ?? 100
  
 -  return db
--    .select()
+-    // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
+-    .select(selection)
 -    .from(SessionTable)
 -    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
 -    .where(conditions.length > 0 ? and(...conditions) : undefined)
@@ -1584,7 +1586,7 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
 index e01a842ba..578591c0d 100644
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts
-@@ -792,6 +792,105 @@ describe("session.list", () => {
+@@ -792,6 +792,115 @@ describe("session.list", () => {
      { git: true },
    )
  
@@ -1632,6 +1634,7 @@ index e01a842ba..578591c0d 100644
 +    () =>
 +      Effect.gen(function* () {
 +        const cross = yield* withSession({ title: "alpha-in-title" })
++        const child = yield* withSession({ parentID: cross.id, title: "alpha beta child" })
 +        const msg = yield* createSearchUserMessage(cross.id)
 +        yield* SessionNs.Service.use((session) =>
 +          session.updatePart({
@@ -1645,15 +1648,21 @@ index e01a842ba..578591c0d 100644
 +
 +        // title AND 逐 token 命中标题——alpha/beta 分居两字段时必须整体漏掉。
 +        const titleIDs = (
-+          yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", searchMode: "title" }))
++          yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", searchMode: "title", roots: true }))
 +        ).map((session) => session.id)
 +        expect(titleIDs).not.toContain(cross.id)
++        expect(titleIDs).not.toContain(child.id)
 +
 +        // scan 固定 mode=all：候选窗过滤用完整三路 union，跨字段 AND 召回必须可见。
 +        const scan = yield* SessionNs.Service.use((session) =>
-+          session.searchScan({ search: "alpha beta", batch: 50 }),
++          session.searchScan({ search: "alpha beta", batch: 50, roots: true }),
 +        )
 +        expect(scan.sessions.map((session) => session.id)).toContain(cross.id)
++        // scan和普通list必须保留同一请求身份，不能因改成原始Session行而丢失投影。
++        expect(scan.sessions.map((session) => session.id)).not.toContain(child.id)
++        expect(scan.sessions.find((session) => session.id === cross.id)?.request?.messageID).toBe(msg)
++        const listed = yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", roots: true }))
++        expect(listed.find((session) => session.id === cross.id)?.request?.messageID).toBe(msg)
 +      }),
 +    { git: true },
 +    30_000,
@@ -1667,10 +1676,10 @@ index e01a842ba..578591c0d 100644
 +        for (let i = 0; i < 3; i++) {
 +          yield* withSession({ title: `scan-page-holder-${i}` })
 +        }
-+        // batch=2 迫使翻页：夹具 3 个 holder 让第一页必然不满窗（done=false 可断言）。
++        // batch=2且存在3个holder，第一页必须填满候选窗并继续，不能提前返回绕过分页断言。
 +        const first = yield* SessionNs.Service.use((session) => session.searchScan({ search: "scan-page", batch: 2 }))
 +        expect(first.sessions.length).toBeGreaterThan(0)
-+        if (first.done) return
++        expect(first.done).toBe(false)
 +        expect(first.nextCursor).not.toBeNull()
 +        const second = yield* SessionNs.Service.use((session) =>
 +          session.searchScan({
@@ -1681,7 +1690,10 @@ index e01a842ba..578591c0d 100644
 +        )
 +        // 两页合集无重复（Set 大小不缩水）——keyset 游标与 orderBy 同序的直接证据。
 +        const ids = new Set([...first.sessions, ...second.sessions].map((session) => session.id))
-+        expect(ids.size).toBeGreaterThanOrEqual(first.sessions.length)
++        expect(ids.size).toBe(first.sessions.length + second.sessions.length)
++        // 满候选页即使命中为空也不能标记done，否则后续正文命中会被截断。
++        const empty = yield* SessionNs.Service.use((session) => session.searchScan({ search: "absent-token", batch: 2 }))
++        expect([empty.sessions.length, empty.done, empty.nextCursor !== null]).toEqual([0, false, true])
 +      }),
 +    { git: true },
 +    30_000,
@@ -1690,3 +1702,47 @@ index e01a842ba..578591c0d 100644
    // #529：多关键词空格分词后取交集：每 token 各自 title∨内容命中，而不是整串 "A B" 子串。
    // 跨字段命中（title 含 alpha、body 含 beta）也必须保留——AND 是 token 级不是字段级。
    it.instance(
+diff --git a/packages/opencode/src/server/shared/workspace-routing.ts b/packages/opencode/src/server/shared/workspace-routing.ts
+--- a/packages/opencode/src/server/shared/workspace-routing.ts
++++ b/packages/opencode/src/server/shared/workspace-routing.ts
+@@ -6,6 +6,8 @@ const RULES: Array<Rule> = [
+   { path: "/experimental/workspace", action: "local" },
+   { path: "/session/status", action: "forward" },
+   { method: "GET", path: "/session", action: "local" },
++  // scan与列表查询同一控制平面候选集，不应因POST而被转发到另一个workspace。
++  { method: "POST", path: "/session/search/scan", exact: true, action: "local" },
+ ]
+ 
+ export function isLocalWorkspaceRoute(method: string, path: string) {
+@@ -22,6 +24,8 @@ export function getWorkspaceRouteSessionID(url: URL) {
+   // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
+   // 不能让 SessionID.make("preview") 触发品牌校验异常
+   if (url.pathname === "/session/preview") return null
++  // search是列表端点路径而非Session ID，必须在品牌解析前排除。
++  if (url.pathname === "/session/search/scan") return null
+ 
+   const id =
+     url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??
+diff --git a/packages/opencode/test/server/workspace-routing.test.ts b/packages/opencode/test/server/workspace-routing.test.ts
+--- a/packages/opencode/test/server/workspace-routing.test.ts
++++ b/packages/opencode/test/server/workspace-routing.test.ts
+@@ -18,5 +18,7 @@ describe("isLocalWorkspaceRoute", () => {
+-  test("POST /session is not local (method mismatch)", () => {
++  test("POST list scan is local without changing session creation routing", () => {
+     expect(isLocalWorkspaceRoute("POST", "/session")).toBe(false)
++    // 仅豁免新列表扫描端点，不能把其他Session写入变成本地操作。
++    expect(isLocalWorkspaceRoute("POST", "/session/search/scan")).toBe(true)
+   })
+ 
+   test("/session/status is forwarded regardless of method", () => {
+@@ -49,7 +51,9 @@ describe("getWorkspaceRouteSessionID", () => {
+-  test("returns null for /session/status", () => {
++  test("returns null for list endpoints without a session ID", () => {
+     const url = new URL("http://localhost/session/status")
+     expect(getWorkspaceRouteSessionID(url)).toBeNull()
++    // 不把search交给SessionID.make，覆盖真实middleware调用前的解析边界。
++    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/scan"))).toBeNull()
+   })
+ 
+   test("returns null for non-session paths", () => {
+     const url = new URL("http://localhost/config")

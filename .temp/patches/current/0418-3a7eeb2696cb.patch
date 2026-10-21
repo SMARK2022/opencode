@@ -1,32 +1,66 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1903,7 +1903,25 @@ const renderedContent = createMemo(() => displayContent() || content())
-             fg={theme.textMuted}
-             wrapMode={!inMinimal() || expanded() ? "word" : "char"}
-           />
--          <Show when={inMinimal() && !expanded()}>
-+          </box>
-+          {/* [local-smark] 展开入口必须位于正文裁剪区之外，避免按钮也被五行上限隐藏。
-+              流式期间折叠提示常显：内容从 1 行向 5 行增长时，
-+              行数判断会让 footer 闪烁；流式中默认收缩语义要求 footer 与裁剪同步 */}
-+          <Show
-+            when={
-+              inMinimal() &&
-+              !expanded() &&
-+              (!isDone() ||
-+                renderedContent().split(String.fromCharCode(10)).length > 5 ||
-+                renderedContent()
-+                  .split(String.fromCharCode(10))
-+                  .reduce(
-+                    (rows, line) => rows + Math.max(1, Math.ceil(Bun.stringWidth(line) / Math.max(1, ctx.width - 5))),
-+                    0,
-+                  ) > 5)
-+            }
-+          >
--            <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
-+            <box paddingLeft={2} flexShrink={0} onMouseUp={toggle}>
-+              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
-+            </box>
-           </Show>
--        </box>
+@@ -1919,5 +1919,9 @@
+-  // 分隔行也计预算；估算不依赖expanded，避免布局反馈改变折叠选择。
+-  const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
++  const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
++  // 流式hide默认从首帧折叠；opaque只留标题，完成或显式选择后恢复真实行数规则。
++  const overflow = createMemo(() =>
++    !done() && !opaque() && override() === undefined && ctx.thinkingMode() === "hide"
++      ? true
++      : parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS,
++  )
+   const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
+-  const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
+   const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -807,1 +807,46 @@
+ })
++
++test.each(["short", "long"] as const)("streaming reasoning defaults to stable collapse: %s", async (scenario) => {
++  const messageID = "msg_stream_default"
++  const source = { id: "part_stream", sessionID, messageID, type: "reasoning" as const, text: "short stream thought", time: { start: 1 } }
++  const info: AssistantMessage = {
++    id: messageID, sessionID, role: "assistant", parentID: "msg_request", time: { created: 1 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const suffix = scenario === "short" ? "\nsecond stream line" : "\nsecond stream line\nline 3\nline 4\nline 5\nline 6\nSTREAM_TAIL"
++  const opaque = { ...source, id: "part_opaque", messageID: "msg_stream_opaque", text: "[REDACTED]", metadata: { encrypted: true } }
++  await withRenderedReview([{ info, parts: [source] }, { info: { ...info, id: opaque.messageID }, parts: [opaque] }], async (app, _route, emit) => {
++    const frame = async (text: string) => {
++      await waitForReviewFrame(app, async (value) => { if (value.includes(text)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
++      return app.captureCharFrame()
++    }
++    // 首个可见正文帧已带入口，不能等到跨过五行后才切换裁剪模式。
++    const initial = await frame("short stream thought")
++    expect(initial).toContain("▼ 展开查看完整推理")
++    expect(initial.split("\n").filter((line) => line.includes("▼ 展开查看完整推理"))).toHaveLength(1)
++    emit({ directory, project: "proj_test", payload: { id: "evt_default_grow", type: "message.part.delta", properties: { sessionID, messageID, partID: source.id, field: "text", delta: suffix } } })
++    const grown = await frame("second stream line")
++    expect(grown).toContain("▼ 展开查看完整推理")
++    if (scenario === "long") expect(grown).not.toContain("STREAM_TAIL")
++    const body = app.renderer.root.findDescendantById(`text-${source.id}`)
++    expect(body?.parent?.parent?.height).toBeLessThanOrEqual(5)
++    // 父Message仍pending，只以原始Part的end解除流式guard。
++    emit({ directory, project: "proj_test", payload: { id: "evt_default_done", type: "message.part.updated", properties: { sessionID, part: { ...source, text: source.text + suffix, time: { start: 1, end: 2 } }, time: 3 } } })
++    await waitForReviewFrame(app, async (value) => {
++      if (value.includes("Thought") && value.includes("second stream line") && (scenario === "long" || !value.includes("▼ 展开查看完整推理"))) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 400 })
++    expect(app.renderer.root.findDescendantById(`text-${source.id}`)).toBe(body)
++    if (scenario === "short") {
++      expect(app.captureCharFrame()).not.toContain("▼ 展开查看完整推理")
++      expect(app.captureCharFrame()).toContain("short stream thought")
++      expect(app.captureCharFrame()).toContain("second stream line")
++      return
++    }
++    expect(app.captureCharFrame()).toContain("▼ 展开查看完整推理")
++    expect(app.captureCharFrame()).not.toContain("STREAM_TAIL")
++    await clickVisibleText(app, "▼ 展开查看完整推理")
++    expect(await frame("STREAM_TAIL")).toContain("STREAM_TAIL")
++  }, { width: 80, height: 48 }, {}, { thinking_mode: "hide", sidebar: "hide" })
++})

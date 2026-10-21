@@ -1,7 +1,7 @@
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1716,15 +1716,15 @@ it.instance(
+@@ -2120,17 +2120,16 @@ it.instance(
        }))
        const prompt = yield* SessionPrompt.Service
        const sessions = yield* Session.Service
@@ -15,11 +15,14 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 -        ],
 +        permission: [{ permission: "bash", pattern: "*", action: "auto" }],
        })
--      const command = "cat ~/.ssh/id_rsa"
+-      const key = path.join(chat.directory, ".ssh", "id_rsa")
+-      yield* Effect.promise(() => Bun.write(key, "fixture-key"))
+-      const command = process.platform === "win32" ? `Get-Content -LiteralPath "${key}"` : `cat "${key}"`
 +      // 本用例只需要触发 SSH 私钥名的 cautious 预审并产生 shell 输出；
 +      // 使用项目内文件避免 Windows runner 上家目录路径和缺失文件错误拖慢到 15s 超时边界。
-+      yield* Effect.promise(() => Bun.write(path.join(test.directory, "id_rsa"), "review-output\n"))
-+      const command = "cat id_rsa"
++      const key = path.join(test.directory, "id_rsa")
++      yield* Effect.promise(() => Bun.write(key, "review-output\n"))
++      const command = process.platform === "win32" ? `Get-Content -LiteralPath "${key}"` : `cat "${key}"`
        yield* prompt.prompt({
          sessionID: chat.id,
          agent: "build",

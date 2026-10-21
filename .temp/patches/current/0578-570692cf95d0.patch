@@ -1094,7 +1094,7 @@ diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/
 diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
 --- a/packages/tui/src/prompt-voice-input.ts
 +++ b/packages/tui/src/prompt-voice-input.ts
-@@ -3,8 +3,8 @@ import { which } from "@opencode-ai/core/util/which"
+@@ -3,7 +3,7 @@ import { which } from "@opencode-ai/core/util/which"
  import path from "path"
  
  export const VOICE_FILE_PLACEHOLDER = "{file}"
@@ -1103,19 +1103,26 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
 +// 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
 +export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
  // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
- // 阈值由 140 下调至 120：usage 分拆阈值降至 90 后，voice 提示相应提前，保持露出梯度。
- // 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
+ // 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
 @@ -172,7 +172,8 @@ export async function transcribeVoiceFile(input: {
  
    // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
    // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
 -  // AbortSignal.any 合并外部取消信号和兜底超时：用户主动取消 或 90s 超时，任一触发都杀进程。
 +  // AbortSignal.any 合并外部取消信号和兜底超时；任一触发都终止 transcriber CLI。
-+  // 用户取消只终止transcriber父进程（tui 私有 runProcess 仅以 signal 杀父）；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
++  // transcriber拥有的daemon/browser自行维护生命周期，取消不得连带递归终止后代。
    const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
    const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
      abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
-
+@@ -276,7 +277,5 @@
+-    // 脚本转写器可能通过cmd再启动Node；必须在父进程退出前清理本次进程树。
++    // 转写器后代由各自owner维护；只终止本调用拥有的CLI，不递归强杀浏览器生命周期。
+     const abort = () => {
+       if (child.exitCode !== null || child.signalCode !== null) return
+-      if (process.platform === "win32" && child.pid)
+-        spawn.sync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
+       child.kill("SIGTERM")
+     }
 diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
@@ -1160,10 +1167,36 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 +    expect(await Bun.file(marker).text()).toBe("alive")
 +  })
 +
-   // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
-   // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
-   // 这里不检查实现函数名，只观察转写器实际收到的参数值，避免测试和实现耦合。
-
+   // Windows脚本入口及带元字符的录音路径仍须保持逐项argv，不能拼接裸shell字符串。
+   test.skipIf(process.platform !== "win32")("transcriber accepts a Windows command shim", async () => {
+     await using tmp = await tmpdir()
+@@ -611,12 +641,12 @@
+-  // 通过真实cmd入口创建隔离Node后代，取消后必须确认后代退出，而不是只观察UI状态。
+-  test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber process tree", async () => {
++  // cmd入口同样不能连带终止独立后代；有界CLI自退保证夹具不制造遗留父进程。
++  test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber without killing its lifecycle child", async () => {
+     await using tmp = await tmpdir()
+     const node = Bun.which("node")!
+     const pidFile = path.join(tmp.path, "child.pid")
+     const script = path.join(tmp.path, "transcriber.cjs")
+     const command = path.join(tmp.path, "transcriber.cmd")
+     const abort = new AbortController()
+     let pid = 0
+-    await Bun.write(script, 'const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(process.argv[2],String(child.pid)); setInterval(()=>{},1000)')
++    await Bun.write(script, 'const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(process.argv[2],String(child.pid)); setTimeout(()=>{},500)')
+     await Bun.write(command, `@echo off\r\n"${node}" "${script}" "${pidFile}" %*\r\n`)
+     const pending = transcribeVoiceFile({ file: "voice.wav", transcriber: { command, args: ["{file}"] }, signal: abort.signal }).catch((error: unknown) => error)
+@@ -630,9 +660,7 @@
+       const running = () => {
+         try { process.kill(pid, 0); return true } catch { return false }
+       }
+-      const stopped = Date.now() + 2_000
+-      while (running() && Date.now() < stopped) await Bun.sleep(20)
+-      expect(running()).toBe(false)
++      expect(running()).toBe(true)
+     } finally {
+       abort.abort()
+       await pending
 diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
 --- a/thirdparty/chatgpt-browser-agent
 +++ b/thirdparty/chatgpt-browser-agent

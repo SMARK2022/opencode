@@ -1,61 +1,29 @@
-From eb439379e2b3ff53f6ba3b8374472b4a89cc1bd5 Mon Sep 17 00:00:00 2001
+From eb439379e2b3cba28fe3d6b85c4593dbbfb3dfc2 Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
-Date: Mon, 6 Jul 2026 14:36:12 +0800
-Subject: [PATCH] =?UTF-8?q?fix(tui,shell):=20=E5=A2=9E=E5=A4=A7=20Dialog?=
- =?UTF-8?q?50=72=6F=6D=70=74=20=74=65=78=74=61=72=65=61=20=E9=AB=98=E5=BA=?=
- =?UTF-8?q?A=20=2B=20=E4=BF=AE=E5=A4=8D=20macOS=20CI=20shell=20stdout?=
- =?UTF-8?q?=20=E7=AB=9E=E6=80=81?=
+Date: Sun, 5 Jul 2026 14:33:36 +0800
+Subject: [PATCH] fix(tui,shell): increase DialogPrompt height; preserve corrected process isolation
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-适配：dialog-prompt owner 迁移至 packages/tui/src/ui/dialog-prompt.tsx（注释中字符上限保留目标
-6400 形态）；shell.ts 同路径，hunk 重锚至 703（前导含 [local-smark] 注释行）。V2 侧
-core/src/tool/bash.ts:162 保留同款 `!== "win32"` 表达式——canonical V2 工具的 spawn 语义
-变更需独立验证，登记为后续观察项不并入本 patch（源 patch 亦未触碰）。
+
+紧邻原始474撤回了本项临时linux-only workaround；按用户授权提前保留该修正，两个真实owner均维持非Windows进程组。
+保留源编辑框增高，并同步既有真实渲染断言，不重复旧shell构造或改变kill/输出归属。
 diff --git a/packages/tui/src/ui/dialog-prompt.tsx b/packages/tui/src/ui/dialog-prompt.tsx
 --- a/packages/tui/src/ui/dialog-prompt.tsx
 +++ b/packages/tui/src/ui/dialog-prompt.tsx
-@@ -150,7 +150,8 @@
-         <textarea
+@@ -150,7 +150,6 @@
 -          // minHeight=3 保证空态有足够视觉空间；maxHeight=9 让长文本（如 6400 字符的 goal objective）
-+          // minHeight=3 保证空态有足够视觉空间；maxHeight=15 让长文本（如 6400 字符的 goal objective）
-           // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
-           // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
-+          // maxHeight=15 在 24 行终端中 title(1)+gap(1)+textarea(15)+footer(2)+padding(2)=21 行仍 fits。
+-          // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
+-          // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
++          // 空态保留3行，长objective最多显示15行；只扩展可见窗口，不限制或截断6400字符正文。
++          // medium宽60时内容宽56；24行终端中标题、15行正文和footer仍有布局余量。
            minHeight={3}
 -          maxHeight={9}
 +          maxHeight={15}
            ref={(val: TextareaRenderable) => {
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -703,13 +704,15 @@
-   // [local-smark] 不使用 spawn 的 shell 选项；改为显式传递 shell 路径和 -c 参数。
-   // Bun macOS 上 shell 选项 + detached 组合存在 stdout 管道未建立的 bug，
-   // 导致 echo test 退出码 0 但输出为空。显式 -c 在所有平台行为等价且避免该 bug。
-   // cmd.exe 需保留 /d（禁用 AutoRun 注册表命令）和 /s（规范引号剥离）标志。
-+  // macOS CI 上 detached:true 仍可能导致 stdout 管道竞态（调度抖动使管道未及时建立），
-+  // 仅 Linux 保留 detached:true（Linux 调度更稳定且需要进程组隔离）。
-   const n = Shell.name(shell)
-   const shellArgs = n === "cmd" ? ["/d", "/s", "/c", command] : ["-c", command]
-   return ChildProcess.make(shell, shellArgs, {
-     cwd,
-     env,
-     stdin: "ignore",
--    detached: process.platform !== "win32",
-+    detached: process.platform === "linux",
-   })
- }
-
-diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
---- a/packages/core/src/tool/bash.ts
-+++ b/packages/core/src/tool/bash.ts
-@@ -160,3 +161,6 @@
-                shell,
-                stdin: "ignore",
--                detached: process.platform !== "win32",
-+                // V2 canonical bash 与 V1 shell.ts 同一产品职责：macOS detached:true 的 stdout
-+                // 管道竞态两侧同步收敛为仅 Linux detach；kill 降级由 spawner 既有
-+                // killGroup→killOne 回退承载，与 V1 接受的权衡同构。
-+                detached: process.platform === "linux",
-                forceKillAfter: Duration.seconds(3),
+             textarea = val
+diff --git a/packages/tui/test/cli/tui/dialog-prompt.test.tsx b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+--- a/packages/tui/test/cli/tui/dialog-prompt.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
+@@ -116,1 +116,1 @@
+-    expect(textarea.height).toBe(9)
++    expect(textarea.height).toBe(15)

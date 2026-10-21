@@ -14,15 +14,6 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -572,7 +572,7 @@
-           ? db
-               .select()
-               .from(SessionTable)
--              .where(and(...conditions))
-+    .where(and(...conditions))
-           : db.select().from(SessionTable)
-       const rows = yield* query
-         .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
 @@ -968,18 +968,60 @@
  
  // #143：directory 列命名空间（path 为空的历史行）
@@ -190,9 +181,10 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
    } else {
      conditions.push(eq(SessionTable.project_id, input.projectID))
      if (input.scope !== "project") {
-@@ -1069,7 +1122,8 @@
+@@ -1017,8 +1070,9 @@
    return db
-     .select()
+     // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
+     .select(selection)
      .from(SessionTable)
 -    .where(and(...conditions))
 +    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤

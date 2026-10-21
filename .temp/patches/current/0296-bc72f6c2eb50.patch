@@ -9,8 +9,8 @@ index 1c5fa6d..c651fc7 100644
 +const DAEMON_STOP_TIMEOUT_MS = 60_000
  
  afterEach(() => {
-   ServerLockModule._setLockPath(undefined)
-@@ -35,6 +36,10 @@ function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
+   ServerLock._setLockPath(undefined)
+@@ -35,9 +36,13 @@ function isolatedDaemonEnv(lockPath: string, env: Record<string, string> = {}) {
      ...process.env,
      OPENCODE_DAEMON_LAUNCHER_PID: "",
      OPENCODE_PROCESS_ROLE: "main",
@@ -18,8 +18,11 @@ index 1c5fa6d..c651fc7 100644
 +    // it reaches the daemon control endpoint. Startup-idle behavior tests pass
 +    // explicit shorter values below; lifecycle tests need the daemon to stay up.
 +    OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "60000",
+     OPENCODE_SERVER_USERNAME: credentials.username,
+     OPENCODE_SERVER_PASSWORD: credentials.password,
      ...env,
      OPENCODE_LOCK_PATH: lockPath,
+     OPENCODE_EXTERNAL_NETWORK: "",
      OPENCODE_DB: path.join(root, "opencode.db"),
 @@ -146,7 +151,7 @@ describe("daemon lifecycle", () => {
          await proc.exited.catch(() => undefined)
@@ -29,11 +32,11 @@ index 1c5fa6d..c651fc7 100644
 +    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
    )
  
-   // #273：daemon stop 应在退出前向已连接 TUI 广播事件
+   // 先等待 connected 再调用 stop，确保观察到主动关闭广播；真实启动用例仅作静态审查。
 @@ -170,7 +175,10 @@ describe("daemon lifecycle", () => {
  
            const stop = runDaemonStop(lockPath)
-           // #273：期望收到带 daemon-stop 原因的 global.disposed 事件
+           // 同一订阅必须收到 global.disposed 及 daemon-stop 原因，五秒内未收到就失败。
 -          const shutdownEvent = await Promise.race([readUntil(reader, "daemon-stop"), Bun.sleep(5_000).then(() => "timeout")])
 +          const shutdownEvent = await Promise.race([
 +            readUntil(reader, "daemon-stop"),
@@ -59,7 +62,7 @@ index 1c5fa6d..c651fc7 100644
 +    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
    )
  
-   // #259：无 lock 时 stop 是 no-op（便于脚本重复调用）
+   test("daemon stop command is a no-op when no daemon lock exists", async () => {
 @@ -323,7 +331,7 @@ describe("daemon lifecycle", () => {
          await Promise.all([nonDaemon.exited.catch(() => undefined), proc.exited.catch(() => undefined)])
        }
@@ -180,18 +183,15 @@ index cd29a84..0112e00 100644
          {autoReviewLabel(props.review)}
        </text>
      </box>
-@@ -2307,14 +2315,21 @@ function autoReviewLineID(review: AutoReviewMetadata) {
+@@ -2291,12 +2299,18 @@ function autoReviewLineID(review: AutoReviewMetadata) {
    return `auto-review-${review.reviewID}`
  }
  
 +function autoReviewLabelID(review: AutoReviewMetadata) {
-+  // OpenTUI 在不同平台可能把 mouse target 设为 text 内部 renderable，而不是
-+  // 外层 row box；label id 与 row id 共用 reviewID，仍只服务本地 hit-test。
++  // 鼠标目标可能是内部文本；标签与外层行共享reviewID，只参与本地命中判断。
 +  return `${autoReviewLineID(review)}-label`
 +}
 +
- // #293：通过 id 在事件 target 的 renderable 子树中查找真实的 review row，
- // 供 openAutoReviewFromToolChrome 做精确命中判断，避免退回 root+1 的布局猜测。
  function autoReviewLineTarget(review: AutoReviewMetadata, target: Renderable | null | undefined) {
    const id = autoReviewLineID(review)
 +  const label = autoReviewLabelID(review)
@@ -205,7 +205,7 @@ index cd29a84..0112e00 100644
  }
  
 @@ -2333,8 +2348,9 @@ function openAutoReviewSession(
-   // 继续冒泡到父 BlockTool/InlineTool 后触发展开、折叠或工具专属点击。
+   // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
    evt?.preventDefault()
    evt?.stopPropagation()
 -  // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
@@ -216,36 +216,23 @@ index cd29a84..0112e00 100644
    navigate({ type: "session", sessionID: review.sessionID })
    return true
  }
-@@ -2347,14 +2363,19 @@ function openAutoReviewFromToolChrome(
-   evt: TuiMouseEvent | undefined,
+@@ -2324,9 +2338,9 @@ function openAutoReviewFromToolChrome(
+   evt: MouseEvent | undefined,
  ) {
-   // #293：OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
--  // root + 1 这类布局猜测，因为 BlockTool 的相邻行可能是标题、body 或
--  // expand affordance；只接受事件命中的 renderable 子树里真实存在的 review row。
-+  // root + 1 这类布局猜测；父卡片兜底必须再经过行坐标校验，因为标题、
-+  // 命令行、body 或 expand affordance 与 review row 是兄弟区域，不能共享导航语义。
+   // 标题换行和 padding 会移动审查行，按稳定 id 查找，避免误中正文。
    if (!review?.sessionID || !evt?.target) return false
 -  const row = autoReviewLineTarget(review, evt.target)
 +  const match = autoReviewLineTarget(review, evt.target)
-   // #293：mockMouse 和真实终端鼠标事件传入的是 char frame 的 0-based y；OpenTUI
--  // renderable.screenY 在当前布局树中是对应行的 1-based 屏幕坐标。先用 id
--  // 找到真实 review row，再做这个坐标归一化，避免退回 root+1 的布局猜测。
--  if (!row || evt.y !== row.screenY - 1) return false
-+  // renderable.screenY 在当前布局树中是对应行的 1-based 屏幕坐标。direct 命中
-+  // 说明事件 target 已在 review row 内，沿用归一化坐标。shell 工具的命令行
-+  // 和 review row 紧邻，父卡片兜底必须只接受真正 status 行；非 shell inline
-+  // 工具在部分 OpenTUI hit-grid 状态下会把 review 文本报告成上一行内部 text。
-+  if (!match) return false
-+  if (match.direct) {
-+    if (evt.y !== match.row.screenY - 1) return false
-+  } else if (evt.y !== match.row.screenY && (review.tool === "bash" || evt.y !== match.row.screenY - 1)) return false
+   // OpenTUI 已把终端坐标转成零基；screenY 与鼠标 y 可直接比较。
+-  if (!row || evt.y !== row.screenY) return false
++  if (!match || evt.y !== match.row.screenY) return false
    return openAutoReviewSession(review, navigate, renderer, evt)
  }
  
-diff --git a/packages/tui/test/routes/session/auto-review-render.test.ts b/packages/tui/test/routes/session/auto-review-render.test.ts
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
 index 0ec89b8..00886ac 100644
---- a/packages/tui/test/routes/session/auto-review-render.test.ts
-+++ b/packages/tui/test/routes/session/auto-review-render.test.ts
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
 @@ -6,15 +6,15 @@ describe("auto review rendering (#209)", () => {
    test("autoReviewMetadata returns undefined for missing autoReview", () => {
      // #209：无 autoReview 字段时返回 undefined
@@ -342,6 +329,33 @@ index 0ec89b8..00886ac 100644
        reviewID: "review_8",
        precheck: { level: "general", reason: "unknown" },
      })
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -338,3 +338,4 @@
+       "autoReviewLineID",
++      "autoReviewLabelID",
+       "autoReviewLineTarget",
+       "AutoReviewLine",
+@@ -372,3 +373,4 @@
+     const review = {
++      tool: kind,
+       reviewID: "review_click", sessionID: "ses_reviewer_child", status: "allowed",
+       result: { risk_level: "high", user_authorization: "high", rationale: "user requested this action" },
+@@ -460,8 +462,9 @@
+-    // 选区消费事件但不导航；无子会话、无 target 或非审查 target 不产生导航。
++    // 明确点击审查入口会清除旧选区；缺少子会话或命中无关目标仍不导航。
+     const effects: string[] = []
+     const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: app.renderer.root, y: -1 }
+-    const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }) }
++    const selected = { getSelection: () => ({ getSelectedText: () => "selected review" }), clearSelection: () => effects.push("clear") }
+     expect(production.openAutoReviewSession(review, navigate, selected, evt)).toBe(true)
+-    expect(effects).toEqual(["default", "bubble"])
+-    expect(navigation).toEqual([])
++    expect(effects).toEqual(["default", "bubble", "clear"])
++    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++    navigation.length = 0
+     expect(production.openAutoReviewSession({ ...review, sessionID: undefined }, navigate, app.renderer, evt)).toBe(false)
 diff --git a/packages/tui/test/context/sdk-reconnect.test.tsx b/packages/tui/test/context/sdk-reconnect.test.tsx
 --- a/packages/tui/test/context/sdk-reconnect.test.tsx
 +++ b/packages/tui/test/context/sdk-reconnect.test.tsx

@@ -9,11 +9,8 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index 5ff309c014..c7cea5405f 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -797,9 +797,15 @@ export const ShellTool = Tool.define(
-         const name = Shell.name(shell)
-         const limits = yield* trunc.limits()
-         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
--        // 压缩指引：仅在启用时告知模型可以使用 compress_output: false
+@@ -677,3 +677,9 @@
+-        // 使用既有 per-shell renderer 的正文，不恢复第二套 shell 语法说明。
 +        // #116：压缩指引；tip 已默认压缩，补全 SMARK 全文案（含 raw 落盘说明）
          const compressionEnabled = cfg.tool_output?.bash_compression ?? true
 -        const compressionGuidance = compressionEnabled ? "Bash output compression is enabled by default. Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting." : ""
@@ -24,9 +21,6 @@ index 5ff309c014..c7cea5405f 100644
 +              "Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting.",
 +            ].join(" ")
 +          : ""
-         // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
-         const shellGuidanceText = shellGuidance(name)
-         const listCmd = listCommand(name)
 diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
 index 621c9b5c34..cced582a38 100644
 --- a/packages/opencode/src/tool/shell/prompt.ts
@@ -34,10 +28,10 @@ index 621c9b5c34..cced582a38 100644
 @@ -20,8 +20,10 @@ export function parameterSchema() {
        description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
      }),
-     // 启用输出压缩以减少 token 用量
+     // false 只关闭有损呈现，不绕过权限、执行限额或原文保留。
 +    // #116：可选关闭压缩，避免快照/二进制等场景被压扁
      compress_output: Schema.optional(Schema.Boolean).annotate({
--      description: "Enable output compression to reduce token usage",
+-      description: "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important.",
 +      description:
 +        "Whether this shell call may compress repetitive output before returning it. Strongly prefer omitting this field to follow the user's default; set false only for exact raw formatting.",
      }),

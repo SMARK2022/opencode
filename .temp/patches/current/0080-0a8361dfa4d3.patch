@@ -476,7 +476,7 @@ diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
    const indices = cells.map((c) => c1(c))
    return `range ${indices[0]}-${indices[indices.length - 1]}`
  }
-@@ -212,58 +204,59 @@
+@@ -212,58 +204,55 @@
  function waitForSingleCell(
    notebook: vscode.NotebookDocument,
    cell: vscode.NotebookCell,
@@ -517,17 +517,19 @@ diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
          // 摘要字段只在执行摘要变更时提供，输出事件不能借用 cell 的历史摘要。
          const summary = change.executionSummary
          if (!summary) continue
-         const timing = summary.timing
-         // success 与 timing 都可省略；未知成败只接受有限且有序的结束时序。
-         if (
-           typeof summary.success !== "boolean" &&
-           (!timing || !Number.isFinite(timing.startTime) || !Number.isFinite(timing.endTime) || timing.endTime < timing.startTime)
-         ) continue
+-        const timing = summary.timing
+-        // success 与 timing 都可省略；未知成败只接受有限且有序的结束时序。
+-        if (
+-          typeof summary.success !== "boolean" &&
+-          (!timing || !Number.isFinite(timing.startTime) || !Number.isFinite(timing.endTime) || timing.endTime < timing.startTime)
+-        ) continue
++        // 时间戳不能证明执行成败，未知结果继续等待，不能推进后续代码格。
++        if (typeof summary.success !== "boolean") continue
          // 满足条件时同时 clearTimeout 和 dispose，不能让已返回请求继续持有监听器。
          clearTimeout(timer)
          subscription?.dispose()
 -        resolve(true)
-+        // 返回观察到的摘要而非成功布尔值，合法未知成败结束不能丢失完成边界。
++        // 保留原生成功或失败摘要，交由串行调用方决定是否继续。
 +        resolve(summary)
          return
        }

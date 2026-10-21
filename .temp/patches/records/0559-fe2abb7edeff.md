@@ -1,5 +1,10 @@
 # Record 0559 — fix(opentui): 升级子模块至 v0.4.3-smark.4 平滑流式 Markdown 高亮
 
+## 2026-10-19 本轮复查
+- original/current保持同一18行gitlink补丁，source身份93098b5189645cb3fa135360625190c10605f6bb→df4bd31caaa1153944b28509ac13610b4a16ca85，mode160000和既有注册不变，不读取或拉取nested源码。
+- 官方`materialize-0559-2026-10-19T14-16-41-338Z.md`累计559/559、复用557并应用558–559。本项仍只认证根gitlink身份；真实.4运行时消费由560完成，历史registry替代口径不适用于本轮前态。
+- 最终560累计和两名全新独立正反全批审计均通过，本项PASS、无未关闭B/G；source pin与运行消费职责分开，未认证nested源码或远端发布链。裁决见`D:/Temp/opencode/batch556-560-20261019-audit-verdicts.md`。
+
 ## 基本信息
 - index: 559 / sha12: fe2abb7edeff
 - 前一状态: `states/v1.18.32/0558-2a325224ffe8/repo`

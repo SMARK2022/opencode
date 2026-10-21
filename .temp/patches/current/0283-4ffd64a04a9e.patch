@@ -16,52 +16,56 @@ Content-Transfer-Encoding: 8bit
 - Enhanced parameter schema documentation for compress_output to emphasize user defaults.
 - Added tests to ensure correct behavior for ANSI-decorated repeated lines and oversized single-line patterns.
 
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index a6c07938cdb966859e0846bb533fd8ee1bb7c04e..e51205e40d5676269d342cf8f62c316269f11658 100644
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -600,7 +600,9 @@
-   const stable = vt.getStableOutput()
-   const frames = vt.getFrameCount()
-   
--  if (frames >= config.minCarriageReturnFrames) {
-+  if (frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable)) {
-+  // #283：frame 计数来自终端重绘，光标定位 CSI 也会计入；
-+  // 与渲染稳定文本比较，避免把普通输出误报成 progress collapse
-     return {
-       text: `... [terminal progress collapsed: ${frames} frames]\n${stable}`,
-       frames
-@@ -610,6 +610,12 @@
-   return { text: stable, frames }
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -719,13 +719,18 @@
+ function normalizeTerminalOutput(text: string, config: CompressionConfig) {
+   const terminal = createTerminalRenderer()
+   if (!terminal.processChunk(text)) return { text, groups: 0 }
+   const frames = terminal.getFrameCount()
+   const stable = terminal.getStableOutput()
+   const replacement = `... [terminal progress collapsed: ${frames} frames]\n${stable}`
+-  return frames >= config.minCarriageReturnFrames && scoreReplacement(text, replacement, config).profitable
++  return frames >= config.minCarriageReturnFrames && terminalRenderCollapsedText(text, stable) && scoreReplacement(text, replacement, config).profitable
+     ? { text: replacement, groups: 1 } : { text, groups: 0 }
  }
  
 +function terminalRenderCollapsedText(text: string, stable: string) {
-+  // 有些 shell 会在普通输出行前写入光标定位或样式 CSI。它们会增加 frame
-+  // 计数，但并没有覆盖进度帧；只有渲染后的稳定画面少于原始可见文本时才提示 progress collapse。
-+  return stripAnsi(text).replace(/\r/g, "\n").split("\n").filter((line) => line.trim().length > 0).join("\n") !== stable
++  // 比较保留空行与末尾换行；普通 CRLF 只计一次换行，CSI 装饰不算进度覆盖。
++  return stripAnsi(text).replace(/\r\n?/g, "\n") !== stable
 +}
 +
  // 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
  function stripAnsi(text: string) {
    return text.replace(ANSI_GLOBAL_RE, "")
-@@ -1163,8 +1169,9 @@
+@@ -1021,15 +1026,15 @@
+ /**
+  * 保守的行内模式压缩。
+- * 在此版本中，有意跳过包含 ANSI 控制字符的行和过长的行。
++ * 有意跳过包含 ANSI 控制字符的行，超长行只检查整行重复。
+  * 主要解决诸如打印大量 "#" 或是 ".........." 的问题。
+  */
  function compressInlineLine(line: string, config: CompressionConfig): { line: string; applied: boolean } {
    // 如果行本身太短，没必要跑正则扫描
    if (line.length < config.minInlineRunBytes) return { line, applied: false }
--  // 如果行超长，为避免性能问题直接跳过
+-  // 超长行原样通过以约束嵌套扫描 CPU 成本，不能切段压缩绕过单行上限。
 -  if (line.length > config.maxInlineLineLength) return { line, applied: false }
-+  // 超长单行只允许检查“整行短周期重复”这种线性安全形态；避免恢复
-+  // 旧的全位置扫描导致 ReDoS/CPU 尖峰，同时保留 abcabcabc 这类高收益压缩。
-+  if (line.length > config.maxInlineLineLength) return compressWholeLineRepeat(line, config)
    // 不处理带有 ANSI 转义序列的行（通常含有颜色代码，强行切割会破坏终端样式）
    if (ANSI_RE.test(line)) return { line, applied: false }
++  // 超长行只检查整行短周期重复，避免恢复逐起点的嵌套扫描。
++  if (line.length > config.maxInlineLineLength) return compressWholeLineRepeat(line, config)
  
-@@ -1222,6 +1229,32 @@
+   let best: InlineCandidate | undefined
+   // 最大模式长度不能超过配置值，也不能超过整行被重复要求的最低倍数能分的份数
+@@ -1086,17 +1091,45 @@
+     line: line.slice(0, best.start) + best.replacement + line.slice(best.end),
+     applied: true,
    }
  }
  
 +function compressWholeLineRepeat(line: string, config: CompressionConfig): { line: string; applied: boolean } {
-+  // #283：整行重复检测复杂度为 O(n×p)，p 为最大 pattern 宽度；远低于全位置正则扫描
++  // 整行重复检测沿用模式宽度与收益门槛，不恢复逐起点扫描。
 +  const maxPattern = Math.min(config.maxInlinePatternLength, Math.floor(line.length / config.minInlineRepeatCount))
 +  for (let width = 1; width <= maxPattern; width++) {
 +    if (line.length % width !== 0) continue
@@ -69,26 +73,39 @@ index a6c07938cdb966859e0846bb533fd8ee1bb7c04e..e51205e40d5676269d342cf8f62c3162
 +    if (!pattern.trim()) continue
 +    const repeats = line.length / width
 +    if (repeats < config.minInlineRepeatCount) continue
-+    // #283：重复次数下限同时约束 pattern 宽度上限，两个常量同口径才能保证性价比
 +    let ok = true
 +    for (let cursor = width; cursor < line.length; cursor += width) {
-+      if (line.slice(cursor, cursor + width) === pattern) continue
++      if (line.startsWith(pattern, cursor)) continue
 +      ok = false
 +      break
 +    }
 +    if (!ok) continue
 +    const replacement = `[repeated ${quotePattern(pattern)} ×${repeats}]`
-+    // #283：整体替换仅在 score 判定盈利时生效，避免长 pattern 平替造成的上下文膨胀
 +    const score = scoreReplacement(line, replacement, config)
 +    if (score.profitable) return { line: replacement, applied: true }
-+    // #283：只有整体替换比原文短才落盘，与内联压缩共用同一 score 阈值
 +  }
 +  return { line, applied: false }
 +}
 +
- // 计算文本熵值
- function calculateEntropy(text: string): number {
-   const freq = new Map<string, number>()
+ // 遍历每一行执行行内压缩
+ function compressInlinePatterns(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
+   let groups = 0
+   const next = lines.map((line) => {
+-    // 专用行内策略也遵守源 ANSI 与长度保护，不以新策略绕过 CPU 上限。
+-    if (ANSI_RE.test(line) || line.length > config.maxInlineLineLength) return line
++    // 专用策略仍受长度保护；超长行只走有界整行重复检测。
++    if (ANSI_RE.test(line)) return line
++    if (line.length > config.maxInlineLineLength) {
++      const result = compressInlineLine(line, config)
++      if (result.applied) groups++
++      return result.line
++    }
+     const bar = compressProgressBars(line, config)
+     const list = bar.applied ? bar : compressLongLists(line, config)
+     const result = list.applied ? list : compressInlineLine(line, config)
+     if (result.applied) groups++
+     // 未命中的行保留原位置，行内策略不会重新排序块压缩后的日志。
+     return result.line
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 index f7fdb4808218a9f004ac09d8c2e5234bb7941e47..69b30355b6b6eab856225ce8a29c143b5864193e 100644
 --- a/packages/opencode/src/tool/shell.ts
@@ -154,7 +171,7 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 index 6624d7e464a96d6a8757d5d5fa33d5321d9b0c7c..31fda4a15fb80cef13858332b54bc831456a44c4 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1817,6 +1817,27 @@
+@@ -1817,6 +1817,29 @@
      ),
    )
  
@@ -162,7 +179,8 @@ index 6624d7e464a96d6a8757d5d5fa33d5321d9b0c7c..31fda4a15fb80cef13858332b54bc831
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
-+        const code = 'console.log("0123456789".repeat(2400))'
++        // #283：cmd 的 evalarg 使用双引号；数字构造保留原始内容及末尾换行。
++        const code = "console.log(String.fromCharCode(48,49,50,51,52,53,54,55,56,57).repeat(2400))"
 +        const command = `${bin} -e ${evalarg(code)}`
 +        const result = yield* run({
 +          command: PS.has(sh()) ? `& ${command}` : command,
@@ -173,6 +191,7 @@ index 6624d7e464a96d6a8757d5d5fa33d5321d9b0c7c..31fda4a15fb80cef13858332b54bc831
 +        expect(result.output).toContain('<opencode_notice type="output_truncated" source="shell"')
 +        expect(result.output).toContain('total="1L/')
 +        expect(result.output).toContain('shown="tail 1L/')
++        expect(result.output).toContain(`path="${result.metadata.outputPath}"`)
 +        expect(result.output).toContain("0123456789")
 +        expect(result.output).not.toContain("(no output)")
 +      }),

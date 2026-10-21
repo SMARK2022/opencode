@@ -58,10 +58,136 @@ index 2055531..1feaa36 100644
            const visible = Object.entries(agents).find(
              ([name, agent]) =>
                agent.mode !== "subagent" && agent.hidden !== true && !EXPLICIT_ONLY_PRIMARY_AGENT_NAMES.has(name),
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/agent.ts b/packages/core/src/agent.ts
+--- a/packages/core/src/agent.ts
++++ b/packages/core/src/agent.ts
+@@ -75,7 +75,7 @@
+       for (const agent of data.agents.values()) {
+         const fallback = selectable(agent)
+-        // Auto 只接受显式选择，禁用其他主代理不应悄悄启用自动权限。
+-        if (fallback && agent.id !== "Auto") return fallback
++        // auto只接受显式选择，与注册键小写化保持一致。
++        if (fallback && agent.id !== "auto") return fallback
+       }
+     }
+ 
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -133,27 +133,27 @@
+       // 注册归属现有 transform 的作用域，卸载或重载不留下第二份代理状态。
+-      for (const id of ["Auto", "interactive", "decide"]) {
++      for (const id of ["auto", "interactive", "decide"]) {
+         draft.update(AgentV2.ID.make(id), (item) => {
+           // runner 同时禁用工具表，避免配置覆盖改变 decide 的无工具语义。
+           if (id === "decide") {
+             item.description = "Decide mode. Produces a decisive plan with bounded recent context and no tools."
+             item.mode = "primary"
+             item.permissions.push({ action: "*", resource: "*", effect: "deny" })
+             return
+           }
+-          item.description = id === "Auto"
++          item.description = id === "auto"
+             ? "Build-like agent that routes shell commands through auto permission review."
+             : "The default agent. Executes tools based on configured permissions."
+           // 使用 build 的基础系统提示；保留更早注册者提供的提示。
+           item.system ??= BUILD_SYSTEM
+           item.mode = "primary"
+           // 配置插件随后追加全局和代理专属规则，保留用户最后覆盖的优先级。
+           item.permissions.push(
+             ...PermissionV2.merge(defaults, [
+               { action: "question", resource: "*", effect: "allow" },
+               { action: "plan_enter", resource: "*", effect: "allow" },
+-              // Auto 只改变shell路由；其余基础权限及后续配置覆盖保持原样。
+-              { action: "bash", resource: "*", effect: id === "Auto" ? "auto" : "ask" },
+-              // Auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
+-              ...(id === "Auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
++              // auto只改变shell路由；其余基础权限及后续配置覆盖保持原样。
++              { action: "bash", resource: "*", effect: id === "auto" ? "auto" : "ask" },
++              // auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
++              ...(id === "auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
+               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
+               ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -34,7 +34,7 @@
+     const sessionID = input.sessionID
+     const selected = Config.latest(entries, "approvals_reviewer")
+-    // 显式user优先；未配置全局reviewer时，Auto仍使用相同的隔离审查路径。
+-    if (!sessionID || selected === "user" || (selected !== "auto_review" && input.metadata.agent !== "Auto")) return yield* new Disabled()
++    // 显式user优先；未配置全局reviewer时，auto仍使用相同的隔离审查路径。
++    if (!sessionID || selected === "user" || (selected !== "auto_review" && input.metadata.agent !== "auto")) return yield* new Disabled()
+     // 按字段合并各层配置，较近文档只覆盖它明确提供的策略项。
+     const options = entries.flatMap((entry) => entry.type === "document" && entry.info.auto_review ? [entry.info.auto_review] : [])
+       .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -120,7 +120,7 @@
+       const agents = yield* agent.all()
+       expect(agents.map((item) => String(item.id)).sort()).toEqual([
+-        "Auto",
++        "auto",
+         "build",
+         "compaction",
+         "decide",
+         "explore",
+@@ -137,12 +137,12 @@
+       // 新增审批代理是唯一例外，既有内置代理仍沿用原来的 bash 策略。
+       for (const item of agents) {
+-        if (item.id === "interactive" || item.id === "Auto") continue
++        if (item.id === "interactive" || item.id === "auto") continue
+         expect(item.permissions.some((rule) => rule.action === "bash" && rule.effect !== "deny")).toBe(false)
+       }
+       // 从实际注册表 resolve 后求值，缺失注册或错误动作会直接使断言失败。
+-      for (const id of ["interactive", "Auto"]) {
++      for (const id of ["interactive", "auto"]) {
+         const item = yield* agent.resolve(id)
+         if (!item) throw new Error(`expected registered ${id} agent`)
+         expect(item).toMatchObject({ id, mode: "primary", hidden: false })
+         expect(item.system).toBe((yield* agent.resolve("build"))?.system)
+-        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
++        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
+@@ -153,14 +153,14 @@
+         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
+         expect(PermissionV2.evaluate("read", ".env", item.permissions).effect).toBe("ask")
+-        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
++        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
+       }
+-      // 显式默认可以选择Auto；仅剩Auto时仍不能成为隐式fallback。
+-      const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("Auto")))
+-      expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("Auto"))
+-      expect((yield* agent.all())[0]?.id).toBe(AgentV2.ID.make("Auto"))
++      // 显式默认可以选择auto；仅剩auto时仍不能成为隐式fallback。
++      const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("auto")))
++      expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("auto"))
++      expect((yield* agent.all())[0]?.id).toBe(AgentV2.ID.make("auto"))
+       yield* explicit.dispose
+       const only = yield* agent.transform((draft) => {
+-        for (const item of draft.list()) if (item.id !== "Auto") draft.remove(item.id)
++        for (const item of draft.list()) if (item.id !== "auto") draft.remove(item.id)
+       })
+       expect(yield* agent.default()).toBeUndefined()
+-      expect((yield* agent.resolve("Auto"))?.id).toBe(AgentV2.ID.make("Auto"))
++      expect((yield* agent.resolve("auto"))?.id).toBe(AgentV2.ID.make("auto"))
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -378,7 +378,7 @@
+     // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
+     const agents = yield* AgentV2.Service
+-    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("Auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
+-    const automatic = assertion({ agent: AgentV2.ID.make("Auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
++    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
++    const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
+     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
+     expect(reviewRequests).toHaveLength(1)
+     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
 index 80ca94a..9d54b3e 100644
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
 @@ -68,7 +68,7 @@ export function evaluate(
      const isShellExternalDirectory = input.permission === "external_directory" && input.metadata.action_kind === "shell"
      // #210：tool-origin external_directory 携带 action_kind/tool/operation 证据——仅凭路径不构成授权上下文

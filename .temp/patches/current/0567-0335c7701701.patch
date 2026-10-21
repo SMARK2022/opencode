@@ -3236,9 +3236,9 @@ diff --git a/packages/opencode/script/smoke-opentui-artifact.ts b/packages/openc
 +      "target cancellation request did not publish a delta",
 +      10_000,
 +    )
-+    // 只有worker实际收到fenced Code请求后才发布ready；daemon事件本身不能证明highlight在途。
++    // waitFor仅以undefined表示未就绪；文件缺席的false必须转换，避免伪造在途高亮证据。
 +    await waitFor(
-+      () => Bun.file(highlightReadyPath).exists(),
++      async () => (await Bun.file(highlightReadyPath).exists()) ? true : undefined,
 +      "target cancellation highlight worker did not publish pending readiness",
 +      10_000,
 +    )
@@ -3422,6 +3422,50 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            const result = search(parts, event.properties.partID, (part) => part.id)
            if (result.found) {
              setStore(
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -148,1 +148,39 @@
++test("unloaded deletion events preserve projection absence and later live delivery", async () => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  const { app, emit, sync } = await mount(undefined, tmp.path)
++  const info = assistantMessage()
++  const hidden = { ...info, id: "msg_unloaded", sessionID: "ses_unloaded", hidden: { time: 1, reason: "undo" } } satisfies AssistantMessage
++  try {
++    // 合法但未加载的投影事件必须走真实队列，不能因缺席数组击穿后续消费。
++    emit(messageEvent(hidden))
++    emit({
++      directory, project: "proj_test",
++      payload: {
++        id: "evt_unloaded_message_removed", type: "message.removed",
++        properties: { sessionID: hidden.sessionID, messageID: hidden.id },
++      },
++    })
++    emit({
++      directory, project: "proj_test",
++      payload: {
++        id: "evt_unloaded_part_removed", type: "message.part.removed",
++        properties: { sessionID: hidden.sessionID, messageID: hidden.id, partID: "part_unloaded" },
++      },
++    })
++    // 正常消息与part都必须到达；仅无异常或daemon事件存在不足以证明投影存活。
++    emit(messageEvent(info))
++    emit(partEvent(textPart("part_post_remove", "still live")))
++    await wait(() => sync.data.message[info.sessionID]?.[0]?.id === info.id)
++    await wait(() => sync.data.part[info.id]?.[0]?.id === "part_post_remove")
++    // no-op不创建幽灵集合，后续正常内容保持真实文本。
++    expect(sync.data.message[hidden.sessionID]).toBeUndefined()
++    expect(sync.data.part[hidden.id]).toBeUndefined()
++    expect(sync.data.message[info.sessionID][0].id).toBe(info.id)
++    expect(sync.data.part[info.id][0]).toMatchObject({ type: "text", text: "still live" })
++  } finally {
++    app.renderer.destroy()
++  }
++})
++
+ describe("tui sync", () => {
 
 diff --git a/thirdparty/opentui b/thirdparty/opentui
 index afd11de829e5745de83695d877b98833219a2f8c..80a46c4d4cf0cb357f353cd52f8e9192f11e5157 160000

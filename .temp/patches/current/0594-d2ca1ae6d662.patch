@@ -8,7 +8,7 @@ Subject: [PATCH] =?UTF-8?q?fix(tui):=20session=20=E8=B4=B4=E5=BA=95?=
  =?UTF-8?q?=E6=B5=8B?=
 MIME-Version: 1.0
 
-适配说明：生产四 hunk 全量落地——路径 A 补滚传 respectUserScroll=true；applySessionOpenScroll/schedule 加 intent 参数并以 pinAllowed 守卫覆盖目标全部三个贴底 site（无锚点/锚点 miss/child miss），reviewID 锚点 scrollBy 不受守卫（源单一 fall-through 语义在目标三分支形态下等价展开）；路径 B 改 defer+箭头包装（箭头防止 solid 把 deps 对象注入成首参使 respectUserScroll 意外为真）。源文件路径重锚至 packages/tui。源测试三段（红测 waitForFrame/RouteProbe fixture/B-01 切换锁）裁记：目标无 session-message-render.test.tsx 与 withRenderedSession harness（grep 0 命中，#212/#0583 先例）；INV-05 回归面由同步更新的 #551 wiring-contract 断言（带参签名/pinAllowed/路径 A true/defer 箭头）与既有 session-viewport-follow.test.ts 承担。
+适配说明：生产owner迁至packages/tui，保留目标三个贴底分支与review锚点优先；路径A尊重用户滚离，路径B以defer及箭头包装保持显式导航意图。复用现有auto-review-render夹具恢复实际离屏等待与A→B贴底行为锁，无需复制RouteProbe或另建harness；同步既有源码合同测试，目标App的keyed重挂不改。
 
 
 diff --git a/docs/plans/tui-session-last-scroll-reachability.md b/docs/plans/tui-session-last-scroll-reachability.md
@@ -124,18 +124,18 @@ new file mode 100644
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -491,7 +491,9 @@ export function Session() {
+@@ -471,7 +471,9 @@ export function Session() {
        editor.reconnect(result.data.directory)
        await sync.session.sync(sessionID)
        // #551：会话打开滚动统一入口——锚点优先，否则贴底。
 -      if (route.sessionID === sessionID) scheduleSessionOpenScroll()
 +      // 594：路径 A 是同会话 sync 完成后的补滚，必须尊重用户已滚离位置（INV-05）；
-+      // 首次打开仍贴底由路径 B defer 后首次发射携带的 stickyStart 初始位置承担。
++      // 首次mount由stickyStart初始化，sync完成后才由带守卫的路径A补滚。
 +      if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)
      })().catch((error) => {
        if (route.sessionID !== sessionID) return
        toast.show({
-@@ -629,11 +631,14 @@ export function Session() {
+@@ -615,11 +617,14 @@ export function Session() {
  
    // #551：会话打开的唯一滚动语义——reviewID 锚点定位到对应 reviewer 返回消息，
    // 无锚点才贴底；defer 50ms 与 toBottom 同拍，防止旧 toBottom 定时器覆盖锚点。
@@ -152,7 +152,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
        return
      }
      const target = resolveReviewAnchorMessageID(
-@@ -643,18 +648,18 @@ export function Session() {
+@@ -629,18 +634,18 @@ export function Session() {
      )
      if (!target) {
        // 锚点 miss（300 条窗口裁剪或消息尚未同步）退化为贴底，不阻断导航。
@@ -175,7 +175,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
      }, 50)
    }
  
-@@ -1425,7 +1430,9 @@ export function Session() {
+@@ -1409,7 +1414,9 @@ export function Session() {
  
    // snap to bottom when session changes
    // #551：会话/reviewID 变化统一走 session-open 滚动——reviewID 存在时锚点优先于贴底。
@@ -184,8 +184,8 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  // 与守卫后的路径 A 承担；dep 变化（真实导航/锚点）仍无条件贴底或锚定（INV-03/04）。
 +  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), () => scheduleSessionOpenScroll(), { defer: true }))
  
-   // #212：流式内容增长时，若视口原本贴底（一行容差），则跟随到新的底部
-   // #212：OpenTUI sticky scroll 仅从精确最大值跟随；一行偏差时不会自动追尾
+   return (
+     <LocationProvider location={location()}>
 
 diff --git a/packages/tui/test/routes/session/auto-review-deep-link.test.ts b/packages/tui/test/routes/session/auto-review-deep-link.test.ts
 --- a/packages/tui/test/routes/session/auto-review-deep-link.test.ts
@@ -217,3 +217,70 @@ diff --git a/packages/tui/test/routes/session/auto-review-deep-link.test.ts b/pa
    })
  
    test("assistant messages expose a scroll-child id for anchor lookup", () => {
+
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -717,11 +717,12 @@
+       return false
+     }, { maxPasses: 300 })
+-    // 首帧可见不代表既有 50ms 会话打开滚动已结束；先完成导航再模拟离底。
+-    await Bun.sleep(60)
+-    await app.renderOnce()
+     // 越过一行粘底容差，不能把自动跟随的行为当作离底浏览。
+     for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
+-    await app.renderOnce()
+-    await app.renderOnce()
++    // 等实际离屏信号，不以固定帧数或避开50ms导航窗口掩盖mount重贴。
++    await waitForReviewFrame(app, async (frame) => {
++      if (!frame.includes("OLD_CULL_TAIL")) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 300 })
+     expect(app.captureCharFrame()).not.toContain("OLD_CULL_TAIL")
+     emit({
+@@ -747,3 +748,36 @@
+ })
+ 
++test("switching sessions after scrolling away still opens the next session pinned to the bottom", async () => {
++  const a: AssistantMessage = {
++    id: "msg_pin_a", sessionID, role: "assistant", parentID: "msg_pin_user", time: { created: 1, completed: 2 },
++    modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const extraID = "ses_extra_pin_b"
++  const b: AssistantMessage = { ...a, id: "msg_pin_b", sessionID: extraID }
++  // B的内容高于A携带的偏移，避免clamp到较短B底部造成空洞通过。
++  const partB: Part = { id: "part_pin_b", sessionID: extraID, messageID: b.id, type: "text", text: `${"beta content ".repeat(420)}B_PIN_TAIL` }
++  await withRenderedReview([{ info: a, parts: [{ id: "part_pin_a", sessionID, messageID: a.id, type: "text", text: `${"alpha content ".repeat(120)}A_PIN_TAIL` }] }], async (app, route) => {
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("A_PIN_TAIL")) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 300 })
++    for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
++    await waitForReviewFrame(app, async (frame) => {
++      if (!frame.includes("A_PIN_TAIL")) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 300 })
++    // 使用公开导航，不直接设置scrollTop或Session私有信号。
++    route.navigate({ type: "session", sessionID: extraID })
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("B_PIN_TAIL")) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 300 })
++    expect(app.captureCharFrame()).toContain("B_PIN_TAIL")
++  }, { width: 100, height: 18 }, { [extraID]: () => [{ info: b, parts: [partB] }] })
++})
++
+ test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)("chronology boundary uses transcript positions: %s", async (scenario) => {
+@@ -906,6 +940,6 @@
+                   <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
+                     <ThemeProvider mode="dark"><LocalProvider><PromptStashProvider><DialogProvider>
+-                      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider>
++                      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider integration={{}}>
+                         <ReviewProbe observe={props.observe} messageIDs={props.messageIDs} onSyncReady={props.onSyncReady} />
+                       </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider>
+                     </DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>

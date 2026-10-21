@@ -11,7 +11,7 @@ Content-Transfer-Encoding: 8bit
 
 Message ID 每 2^36ms 回绕后字典序≠时间序；compareChronology 同毫秒 tie-break 改 UTF-8 字节序（等价 SQLite BINARY）；全部边界消费改 (time_created, BINARY id) tuple 判定；缺失边界响亮失败（CorruptionError/throw/NotFound）而非回退 raw-ID/全域；TUI undo/copy 边界不在 bounded snapshot 时 fail-closed。
 
-适配说明：目标已含 messageKey chronology 投影与 findIndex 线性 remove（等价上游 #40994 主修复）——messageByID 派生索引及 H5/H6/H7/H8 索引生命周期裁记（正确性已由既有设计承载，移植会制造双路径）；truncate.ts cleanup 裁记（0580 状态已是 mtime+stat 语义，上游等价）；TUI pending/queued/messagePositions 裁记（位置基础设施已在上游/目标就位）；projectors-next getCurrentCompaction 裁记（上游已重构为 message-updater appendMessage 模型，缺陷不存在）。生产全量落地：compareChronology Buffer.compare、targetWithAssistantChildren/rawForkRows tuple 封界、session fork admission 先行、summary-cache 四 cursor helper、cold-storage eligibility/invalidate tuple 化、prompt deriveGoalTurn/coalescing、TUI fail-closed；测试落地 compareChronology 单测与四个回绕用例。goal 同毫秒/coalescing 回绕与 TUI 渲染级用例因无渲染/事件 harness 裁记（#212/#506/#550/#551 先例）。
+适配说明：沿用目标数值时间加 UTF-8 BINARY 的 TUI 投影和精确 ID 删除，不新增 messageByID/messagePositions 生命周期；fork 保留 SQL tuple 前缀、Part 子查询、同连接预约与冷 clone，仅补显式缺失边界 admission。summary-cache、cold eligibility/失效与 Goal/coalescing 消费持久 chronology，原生 V2 保留 durable seq owner；truncate 已有 wall-clock mtime/stat 保留语义。原有测试按目标宿主适配，不以旧“无 harness”记录替代行为检查。
 
 
 diff --git a/docs/plans/id-rollover-consumer-repair.md b/docs/plans/id-rollover-consumer-repair.md
@@ -1604,13 +1604,11 @@ new file mode 100644
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -117,11 +117,14 @@ const Cursor = Schema.Struct({
+@@ -117,11 +117,12 @@ const Cursor = Schema.Struct({
  type Cursor = typeof Cursor.Type
  
  // #557：time.created 来自持久 row，不借助进程内事件到达顺序；ID 只解决同毫秒冲突。
-+// 0584：同毫秒 tie-break 用 UTF-8 字节序（等价 SQLite BINARY）而非 localeCompare——
-+// SQL orderBy(time_created, id) 是权威顺序，内存比较器必须与其一致，否则 Revert/page
-+// 边界会分歧。Buffer.compare 对 BMP ID 与码元序等价；非 BMP 记录为已知理论边界。
++// 同毫秒按 UTF-8 字节序与 SQLite BINARY 对齐，避免内存与 SQL 对同一边界分歧。
  export function compareChronology(
    a: { id: MessageID; time: { created: number } },
    b: { id: MessageID; time: { created: number } },
@@ -1620,12 +1618,11 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  }
  
  const decodeCursor = Schema.decodeUnknownSync(Cursor)
-@@ -938,13 +941,27 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
+@@ -888,13 +889,26 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
    throughMessageID: MessageID
  }) {
    const { db, sync } = yield* Database.Service
-+  // #0584：snapshot 封界必须先解析为持久 tuple：回绕后 chronology 最大 ID 是 lexical-low，
-+  // raw id <= 会把全部 pre-wrap 行（含 target user）错误排除或泄漏界后 Tool。
++  // snapshot 上界先解析为同 Session 持久 tuple，不能用回绕后的 raw ID 排除旧轮或泄漏界后 Tool。
 +  const through = yield* db
 +    .select({ id: MessageTable.id, time: MessageTable.time_created })
 +    .from(MessageTable)
@@ -1649,67 +1646,33 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
          or(
            eq(MessageTable.id, input.messageID),
            and(
-@@ -962,29 +979,34 @@ export const targetWithAssistantChildren = Effect.fn("MessageV2.targetWithAssist
- })
- 
- // #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
--// messageID 是 exclusive fork point；Part 按 session+message_id 范围选择，避免超上限的 IN 参数。
-+// #0584：messageID 是 exclusive fork point；边界按持久 chronology 位置切前缀，Part 按已选 Message 精确归属。
- export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
--  const conditions = [eq(MessageTable.session_id, input.sessionID)]
--  if (input.messageID) conditions.push(lt(MessageTable.id, input.messageID))
--  const messages = db
-+  // #0584：先取全量有序行再在内存切前缀：fork 边界是持久 tuple 位置，
-+  // 回绕后 lexical-low 边界不能用 raw id < 比较表达。
-+  const rows = db
-     .select({ id: MessageTable.id })
-     .from(MessageTable)
--    .where(and(...conditions))
-+    .where(eq(MessageTable.session_id, input.sessionID))
-     .orderBy(MessageTable.time_created, MessageTable.id)
-     .all()
-+  const boundary = input.messageID ? rows.findIndex((row) => row.id === input.messageID) : rows.length
-+  // #0584：missing sentinel 供 Session owner 在创建 target 前判定非法边界，
-+  // storage 层不猜错误类型也不越权发错误。
-+  if (input.messageID && boundary < 0) return { messages: [], parts: [], missing: true as const }
-+  const messages = rows.slice(0, boundary)
-+  // #0584：Part 按已选 Message 集合精确归属；message_id 与 Message ID 无共同排序合同，
-+  // 回绕后同值比较会漏拷或错拷其它 user 的 Part。
-+  const selected = new Set(messages.map((row) => row.id))
-   const parts = messages.length
-     ? db
-         .select({ id: PartTable.id, message_id: PartTable.message_id })
-         .from(PartTable)
--        .where(
--          input.messageID
--            ? and(eq(PartTable.session_id, input.sessionID), lt(PartTable.message_id, input.messageID))
--            : eq(PartTable.session_id, input.sessionID),
--        )
-+        .where(eq(PartTable.session_id, input.sessionID))
-         .orderBy(PartTable.message_id, PartTable.id)
+@@ -926,3 +940,4 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+-  // 已有边界按持久时间/ID截取；缺失边界保留原ID范围合同，raw读取仍不解码冷payload。
+-  const before = input.messageID ? anchor ? older(anchor) : lt(MessageTable.id, input.messageID) : undefined
++  // 显式边界缺失交给 Session admission 拒绝，已有 SQL tuple 前缀及 Part 归属查询保持不变。
++  if (input.messageID && !anchor) return { messages: [], parts: [], missing: true as const }
++  const before = anchor ? older(anchor) : undefined
+   const conditions = and(eq(MessageTable.session_id, input.sessionID), before)
+@@ -945,4 +960,4 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
          .all()
-+        .filter((row) => selected.has(row.message_id))
      : []
 -  return { messages, parts }
 +  return { messages, parts, missing: false as const }
  }
- 
- // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取；fromMessageID 供 boundary-first 起点裁剪。
 
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -299,7 +299,9 @@ export function Session() {
+@@ -293,7 +293,8 @@ export function Session() {
+   const messagesBeforeRevert = () => {
      const messageID = session()?.revert?.messageID
      if (!messageID) return messages()
      const index = messages().findIndex((message) => message.id === messageID)
 -    return index === -1 ? messages() : messages().slice(0, index)
-+    // 0584：边界不在 bounded snapshot 内时 fail-closed 返回空——原 fail-open 返回全部消息，
-+    // 会把回绕后已裁出窗口的边界误判为"无回退"，导致 undo/copy 操作错误内容。
++    // 窗口缺少回退边界时不猜可操作前缀，避免 undo/copy 消费已回退内容。
 +    return index === -1 ? [] : messages().slice(0, index)
    }
-   // #212：内容增长信号——跟踪 part 文本/tool-raw 长度（非仅 part 数量），确保 text delta 触发贴底跟随
-   // #212：applyPartDelta 原地修改 part 文本不改 part 数组长度——仅计 part.length 会漏 text delta
+   const foregroundTasks = createMemo(() =>
 @@ -919,7 +921,11 @@ export function Session() {
          dialog.clear()
          const messageID = session()?.revert?.messageID
@@ -1723,13 +1686,12 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          if (!message) {
            void sdk.client.session.unrevert({
              sessionID: route.sessionID,
-@@ -1398,9 +1404,10 @@ export function Session() {
+@@ -1398,9 +1404,9 @@ export function Session() {
      const messageID = revertMessageID()
      if (!messageID) return []
      const index = revertMessageIndex()
 -    if (index === -1) return []
-+    // 0584：boundary 不在 bounded snapshot 内时它必然早于窗口全部消息（窗口取的是最新段），
-+    // 隐藏范围 fail closed：窗口内所有消息都落入已回退区间，而不是全部误显示。
++    // 缺失边界时按本地保守展示合同隐藏窗口，不据此推断边界的真实时间位置。
      return messages()
 -      .slice(index)
 +      .slice(index === -1 ? 0 : index)
@@ -1751,20 +1713,19 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -750,6 +750,12 @@ const layer: Layer.Layer<
+@@ -698,6 +698,11 @@ const layer: Layer.Layer<
        const ctx = yield* InstanceState.context
        const original = yield* get(input.sessionID)
        const title = getForkedTitle(original.title)
 +      // #493：复用 layer 内已解构的 database 服务——避免新增 Effect R 依赖泄漏到 Interface。
 +      const { sync } = database
-+      // #0584：source admission 先于 target 创建：非法边界必须在任何持久化制作用前失败，
-+      // 避免留下空 orphan session 再回滚的第二条成功路径。
-+      const raw = MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID })
++      // 显式 fork 边界缺失须在创建子会话前失败，raw 读取仍占用同一预留连接。
++      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
 +      if (raw.missing) return yield* Effect.fail(new NotFoundError({ message: `Message not found: ${input.messageID}` }))
        const session = yield* createNext({
          directory: ctx.directory,
          path: sessionPath(ctx.worktree, ctx.directory),
-@@ -757,11 +763,8 @@ const layer: Layer.Layer<
+@@ -705,11 +710,8 @@ const layer: Layer.Layer<
          title,
          metadata: structuredClone(original.metadata),
        })
@@ -1772,7 +1733,7 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 -      const { sync } = database
        // #493：source→target 映射在业务 owner 生成，projector 只消费确定映射；父子 ID 永不共享。
        // raw rows 不经过 Message decoder，cold prefix 不会因 fork 被预热后重新压缩。
--      const raw = MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID })
+-      const raw = yield* Database.withSync(database, () => MessageV2.rawForkRows(sync, { sessionID: input.sessionID, messageID: input.messageID }))
        const messageMap = raw.messages.map((row) => ({ sourceID: row.id, targetID: MessageID.ascending() }))
        const partMap = raw.parts.map((row) => ({ sourceID: row.id, targetID: PartID.ascending() }))
        yield* events
@@ -2056,33 +2017,174 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
    const current = turns.at(-1)
    if (!current) return
    // turns 已经只含 canonical source，因此相邻两项就是 distinct eligible turns；
-@@ -1779,12 +1780,23 @@ const layer = Layer.effect(
+@@ -1465,8 +1466,14 @@ const layer = Layer.effect(
          return message
        }
        const result = yield* loop({ sessionID: input.sessionID })
--      // #482：own < parent 表示本请求已被更新 user 合并；先读持久化终态避免二次覆盖。
--      // message id 单调递增——id 比较是合并归属的权威判据，不能依赖时序或内存状态
-+      // #482：own 早于 parent 表示本请求已被更新 user 合并；先读持久化终态避免二次覆盖。
-+      // #0584：parent 缺失属于持久化一致性破坏：保留响亮失败（orDie），不能静默猜测为未合并。
-+      const parent =
-+        result.info.role === "assistant"
-+          ? yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.info.parentID }).pipe(
-+              // 复用 layer 内已解构的 database 服务，与同文件 abortPendingAssistants 同模式，
-+              // 不向 Interface 的 R 泄漏 Database.Service。
-+              Effect.provideService(Database.Service, database),
-+              Effect.orDie,
-+            )
-+          : undefined
-       if (
-         result.info.role === "assistant" &&
-         !result.info.summary &&
--        message.info.id < result.info.parentID
-+        // #0584：用持久 Message 时间和 BINARY ID 判断合并顺序，不能把 caller ID 字典序当作 chronology。
-+        parent &&
-+        MessageV2.compareChronology(message.info, parent.info) < 0
-       ) {
-         const requestUsageCoalesced = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-         if (requestUsageCoalesced) {
+       // 只有被更新parent合并的旧请求需要零计费闭合，既有终态不可二次覆盖。
+-      if (reqUsage && result.info.role === "assistant" && !result.info.summary && message.info.id < result.info.parentID) {
++      if (reqUsage && result.info.role === "assistant" && !result.info.summary) {
+         const request = yield* reqUsage.get({ sessionID: input.sessionID, requestID: message.info.id })
+         if (request?.status === "running") {
++          // 仅待结算请求需要解析实际 parent；缺行响亮失败，不回退 raw ID 或猜测合并关系。
++          const parent = yield* MessageV2.get({ sessionID: input.sessionID, messageID: result.info.parentID }).pipe(
++            Effect.provideService(Database.Service, database),
++            Effect.orDie,
++          )
++          if (MessageV2.compareChronology(message.info, parent.info) >= 0) return result
+           // 不复制assistant账单；取消与provider失败分别保留aborted/error语义。
+
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -16,1 +16,1 @@
+-import { ClipboardProvider } from "../../../src/context/clipboard"
++import { ClipboardProvider, type ClipboardService } from "../../../src/context/clipboard"
+@@ -32,1 +32,1 @@
+-import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
++import { OpencodeKeymapProvider, registerOpencodeKeymap, type OpenTuiKeymap } from "../../../src/keymap"
+@@ -749,2 +749,76 @@
++test.each(["range", "missing", "queued", "undo", "redo", "copy"] as const)("chronology boundary uses transcript positions: %s", async (scenario) => {
++  // ID 顺序与三个持久时间相反，所有帧和命令共用真实 SyncProvider 投影。
++  const messages: Parameters<typeof withRenderedReview>[0] = [
++    {
++      info: { id: "msg_z_user", sessionID, role: "user", time: { created: 1 }, agent: "build", model: { providerID: "provider", modelID: "model" } },
++      parts: [{ id: "part_z", sessionID, messageID: "msg_z_user", type: "text", text: "KEPT_USER_MARKER" }],
++    },
++    {
++      info: {
++        id: "msg_m_asst", sessionID, role: "assistant", parentID: "msg_z_user", time: { created: 2, ...(scenario === "queued" ? {} : { completed: 3 }) },
++        modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      },
++      parts: [{ id: "part_m", sessionID, messageID: "msg_m_asst", type: "text", text: "KEPT_ASST_MARKER" }],
++    },
++    {
++      info: { id: "msg_a_user", sessionID, role: "user", time: { created: 3 }, agent: "build", model: { providerID: "provider", modelID: "model" } },
++      parts: [{ id: "part_a", sessionID, messageID: "msg_a_user", type: "text", text: "REVERTED_USER_MARKER" }],
++    },
++  ]
++  const requests: { operation: string; messageID?: string }[] = []
++  const copies: string[] = []
++  await withRenderedReview(messages, async (app, _route, emit, commands) => {
++    if (scenario === "queued") {
++      emit({ directory, project: "proj_test", payload: { id: "evt_queued_chronology", type: "session.status", properties: { sessionID, status: { type: "busy" } } } })
++      await waitForReviewFrame(app, async (frame) => {
++        if (frame.includes("QUEUED") && frame.includes("REVERTED_USER_MARKER")) return true
++        await Bun.sleep(5)
++        return false
++      }, { maxPasses: 300 })
++      expect(app.captureCharFrame()).toContain("QUEUED")
++      return
++    }
++    if (scenario === "missing") {
++      // 数据已同步后推进实际帧，不能以尚未绘制正文的瞬间证明保守隐藏。
++      for (let pass = 0; pass < 15; pass++) await app.renderOnce()
++      expect(app.captureCharFrame()).not.toContain("KEPT_USER_MARKER")
++      expect(app.captureCharFrame()).not.toContain("KEPT_ASST_MARKER")
++      expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
++      return
++    }
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("message reverted") && (scenario === "redo" || frame.includes("KEPT_ASST_MARKER") && frame.includes("KEPT_USER_MARKER"))) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 300 })
++    if (scenario === "range") {
++      expect(app.captureCharFrame()).toContain("KEPT_USER_MARKER")
++      expect(app.captureCharFrame()).toContain("KEPT_ASST_MARKER")
++      expect(app.captureCharFrame()).not.toContain("REVERTED_USER_MARKER")
++      return
++    }
++    // 公开 keymap 分发调用真实注册命令；观察 SDK 写请求或注入剪贴板，不调用系统剪贴板。
++    commands.dispatchCommand(scenario === "copy" ? "messages.copy" : `session.${scenario}`)
++    await waitForReviewFrame(app, async () => {
++      if (requests.length || copies.length) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 300 })
++    if (scenario === "copy") expect(copies).toEqual(["KEPT_ASST_MARKER"])
++    if (scenario === "undo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_z_user" }])
++    if (scenario === "redo") expect(requests).toEqual([{ operation: "revert", messageID: "msg_a_user" }])
++  }, { width: 110, height: 40 }, {}, {}, {
++    revert: scenario === "queued" ? undefined : { messageID: scenario === "missing" ? "msg_missing_boundary" : scenario === "redo" ? "msg_z_user" : "msg_a_user" },
++    onRequest: async (url, request, init) => {
++      const operation = url.pathname.split("/").at(-1)
++      if (operation !== "revert" && operation !== "unrevert") return
++      const body: { messageID?: string } = await (request?.clone() ?? new Request(url, init)).json()
++      requests.push({ operation, messageID: body.messageID })
++    },
++    clipboard: { write: async (text) => { copies.push(text) } },
++  })
++})
++
+ async function withRenderedReview(
+   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
+@@ -751,11 +823,17 @@
+-  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
++  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"], commands: OpenTuiKeymap) => Promise<void>,
+   dimensions: { width?: number; height?: number } = {},
+   children: Record<string, () => typeof messages> = {},
+   kv: Record<string, unknown> = {},
++  options: {
++    revert?: { messageID: string }
++    onRequest?: (url: URL, request?: Request, init?: RequestInit) => void | Promise<void>
++    clipboard?: ClipboardService
++  } = {},
+ ) {
+   await using tmp = await tmpdir()
+   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
+   const info = {
+     id: sessionID, slug: "review-render", projectID: "proj_test", directory,
+     version: "1", title: "Review render", time: { created: 1, updated: 3 },
++    ...(options.revert ? { revert: options.revert } : {}),
+   }
+@@ -765,3 +843,7 @@
+-  const calls = createFetch((url) => {
++  const calls = createFetch(async (url, request, init) => {
++    await options.onRequest?.(url, request, init)
+     const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }), ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}) })
++    // mutation 响应保持既有 SDK 形状，观察请求不启动 Server 或第二条写入路径。
++    if (url.pathname === `/session/${sessionID}/abort`) return json(true)
++    if (url.pathname === `/session/${sessionID}/revert` || url.pathname === `/session/${sessionID}/unrevert`) return json(info)
+     if (url.pathname === "/session") return json(Object.keys(sessions).map(details))
+@@ -777,3 +859,3 @@
+-  const observed: { route?: ReturnType<typeof useRoute>; syncReady: boolean } = { syncReady: false }
+-  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
++  const observed: { route?: ReturnType<typeof useRoute>; commands?: OpenTuiKeymap; syncReady: boolean } = { syncReady: false }
++  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} onKeymap={(keymap) => { observed.commands = keymap }} clipboard={options.clipboard} messageIDs={messageIDs} onSyncReady={() => { observed.syncReady = true }} />, {
+     width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen", useThread: false,
+@@ -791,2 +873,2 @@
+-    if (!observed.route) throw new Error("review route was not mounted")
+-    await run(app, observed.route, events.emit)
++    if (!observed.route || !observed.commands) throw new Error("review route and commands were not mounted")
++    await run(app, observed.route, events.emit, observed.commands)
+@@ -803,7 +885,10 @@
+   onSyncReady: () => void
+   observe: (route: ReturnType<typeof useRoute>) => void
++  onKeymap: (keymap: OpenTuiKeymap) => void
++  clipboard?: ClipboardService
+ }) {
+   const renderer = useRenderer()
+   const config = createTuiResolvedConfig()
+   const keymap = createDefaultOpenTuiKeymap(renderer)
++  props.onKeymap(keymap)
+   const runtime = createPluginRuntime()
+@@ -815,1 +900,1 @@
+-          <ClipboardProvider value={{}}><KVProvider><ToastProvider>
++          <ClipboardProvider value={props.clipboard ?? {}}><KVProvider><ToastProvider>
+
+diff --git a/packages/tui/test/fixture/tui-sdk.ts b/packages/tui/test/fixture/tui-sdk.ts
+--- a/packages/tui/test/fixture/tui-sdk.ts
++++ b/packages/tui/test/fixture/tui-sdk.ts
+@@ -68,5 +68,6 @@
++// 异步拦截返回 undefined 时沿既有 await 继续默认响应，不改变真实 SDK 请求形状。
+ export type FetchHandler = (
+   url: URL,
+   request?: Request,
+   init?: RequestInit,
+-) => Response | Promise<Response> | undefined
++) => Response | Promise<Response | undefined> | undefined
 
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 --- a/packages/opencode/test/storage/cold.test.ts
@@ -2132,7 +2234,7 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
      })
      const partID = PartID.ascending()
      const additions = input.patch.split("\n").filter((line) => line.startsWith("+")).length
-@@ -878,6 +888,261 @@ describe.serial("ColdStorage", () => {
+@@ -878,6 +888,268 @@ describe.serial("ColdStorage", () => {
      }),
    )
  
@@ -2169,10 +2271,16 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +        model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") },
 +        tools: {},
 +      })
++      yield* sessions.updatePart({
++        id: PartID.ascending(), sessionID: source.id, messageID: boundaryID,
++        type: "text", text: "excluded boundary content",
++      })
 +      const child = yield* sessions.fork({ sessionID: source.id, messageID: boundaryID })
-+      // 通过公开 messages 读取 child：验证前缀内容存在，而不是 raw row 数量。
++      // 公开读取必须恰好保留旧轮及其 Part，不复制边界正文或源身份。
 +      const messages = yield* sessions.messages({ sessionID: child.id })
-+      expect(messages.some((message) => message.info.id !== boundaryID && message.parts.some((part) => part.type === "text" && part.text === "chronologically old"))).toBe(true)
++      expect(messages.map((message) => message.info.time.created)).toEqual([1_000])
++      expect(messages.flatMap((message) => message.parts.flatMap((part) => part.type === "text" ? [part.text] : []))).toEqual(["chronologically old"])
++      expect(messages.every((message) => message.info.id !== oldID && message.info.id !== boundaryID)).toBe(true)
 +      yield* sessions.remove(child.id)
 +      yield* sessions.remove(source.id)
 +    }),
@@ -2232,6 +2340,7 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +    Effect.gen(function* () {
 +      const sessions = yield* SessionNs.Service
 +      const session = yield* sessions.create({ title: "snapshot tuple rollover" })
++      const database = yield* Database.Service
 +      yield* sessions.updateMessage({
 +        id: MessageID.make("msg_z-snap-user"),
 +        sessionID: session.id,
@@ -2268,7 +2377,7 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +        sessionID: session.id,
 +        messageID: MessageID.make("msg_z-snap-user"),
 +        throughMessageID: MessageID.make("msg_a-snap-through"),
-+      }).pipe(Effect.provideService(Database.Service, (yield* Database.Service)))
++      }).pipe(Effect.provideService(Database.Service, database))
 +      // target 与 structural assistant children 都必须落在 tuple 封界内。
 +      expect(rows.map((row) => String(row.info.id)).sort()).toEqual(["msg_z-snap-child", "msg_z-snap-user"])
 +      // 封界行缺失必须响亮失败，而不是回退全域或 raw-ID 过滤。
@@ -2277,7 +2386,7 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +          sessionID: session.id,
 +          messageID: MessageID.make("msg_z-snap-user"),
 +          throughMessageID: MessageID.make("msg_not_persisted"),
-+        }).pipe(Effect.provideService(Database.Service, (yield* Database.Service))),
++        }).pipe(Effect.provideService(Database.Service, database)),
 +      )
 +      expect(Exit.isFailure(missing)).toBe(true)
 +      yield* sessions.remove(session.id)
@@ -2428,57 +2537,58 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -4655,7 +4655,7 @@ it.instance(
- )
- 
+@@ -5008,2 +5008,4 @@
++// 保留 hidden 旧回归，另让两个同毫秒 eligible turn 同时可见，真正经过 Goal tie-break。
++for (const hidePrevious of [true, false]) {
  it.instance(
 -  "late technical Message cannot rewind blocked continuity past a newer real user",
-+  "same-time Unicode Goal turns follow persisted chronology despite a late technical Message",
-   () =>
-     Effect.gen(function* () {
-       const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url), goal_max_turns: 0 }))
-@@ -4666,11 +4666,11 @@ it.instance(
-         title: "Pinned",
-         permission: [{ permission: "*", pattern: "*", action: "allow" }],
-       })
--      const suffix = crypto.randomUUID().replaceAll("-", "")
- 
--      // B 的 caller-selected ID 故意大于后到的 C；Goal turn 顺序必须来自 persisted chronology。
-+      // #0584：同毫秒下 U+E000 的 UTF-8 bytes 小于 U+10000，但 localeCompare 给出相反顺序。
-+      // B/C 因而必须由 SQLite BINARY-compatible tie-break 决定，不能依赖运行时 locale。
-       const b = yield* user(chat.id, "first Goal turn", {
++  hidePrevious ? "late technical Message cannot rewind blocked continuity past a newer real user" : "same-time visible Unicode Goal turns follow persisted chronology",
+@@ -5024,1 +5026,1 @@
 -        id: MessageID.make(`msg_b${suffix}`),
-+        id: MessageID.make("msg_\uE000"),
-         created: 1_000,
-       })
-       yield* goalSvc.set(chat.id, { objective: "finish the Goal" })
-@@ -4685,9 +4685,10 @@ it.instance(
- 
-       // C 刻意不调用 blocked：它必须打断 B 的 pending adjacency；
-       // 后落盘的 S 虽指向 B，也只能传递 lineage，不能把 B 移回 current。
-+      // #0584：C 与 B 同毫秒，顺序完全由 tie-break 决定。
-       yield* user(chat.id, "newer real user turn without a blocked attempt", {
++        id: MessageID.make(hidePrevious ? `msg_b${suffix}` : "msg_\uE000"),
+@@ -5034,2 +5036,2 @@
+       // #553：B 被 undo 隐藏——hidden user 不能回灌 chronology 参与 Goal 排序。
+-      yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
++      if (hidePrevious) yield* sessions.updateMessage({ ...b, hidden: { time: Date.now(), reason: "undo" } })
+@@ -5040,2 +5042,3 @@
 -        id: MessageID.make(`msg_a${suffix}`),
 -        created: 2_000,
-+        id: MessageID.make("msg_\u{10000}"),
-+        created: 1_000,
-       })
- 
-       yield* user(chat.id, "late technical summary for B", {
-@@ -5206,9 +5207,10 @@ it.instance(
++        // 可见分支固定同毫秒 Unicode 顺序，hidden 分支仍保持原始两个时间点。
++        id: MessageID.make(hidePrevious ? `msg_a${suffix}` : "msg_\u{10000}"),
++        created: hidePrevious ? 2_000 : 1_000,
+@@ -5069,2 +5072,3 @@
+   60_000,
+ )
++}
+@@ -5548,9 +5552,9 @@ it.instance(
          .pipe(Effect.forkChild)
        yield* llm.wait(1)
  
 -      // 固定两个 MessageID 可独立证明 middle 早于 latest，不依赖 fiber 调度先后
 -      const middleID = MessageID.ascending()
 -      const latestID = MessageID.ascending()
-+      // #0584：caller-supplied ID 故意让较早 middle 的字典序高于较新的 latest，复现回绕后 raw-ID 判断失效。
-+      // 两条 user Message 仍按真实写入时间形成 chronology，只有 latest 允许成为最终 assistant parent。
++      // caller ID 故意让较早 middle 的字典序高于 latest；时间先后由后面的持久化屏障建立。
 +      const middleID = MessageID.make("msg_z-middle")
 +      const latestID = MessageID.make("msg_a-latest")
        const middle = yield* prompt
          .prompt({
            sessionID: chat.id,
+@@ -5561,6 +5566,15 @@ it.instance(
+         })
+         .pipe(Effect.forkChild)
++      const persistedMiddle = yield* pollWithTimeout(
++        sessions.messages({ sessionID: chat.id }).pipe(Effect.map((messages) => messages.find((message) => message.info.id === middleID))),
++        "middle prompt was not persisted",
++      )
++      // 观察真实写入及毫秒分辨率边界，再接纳 latest；不靠 ID 或 fiber 调度猜测先后。
++      yield* pollWithTimeout(
++        Effect.sync(() => Date.now() > persistedMiddle.info.time.created ? true : undefined),
++        "clock did not advance beyond the persisted middle prompt",
++      )
+       const latest = yield* prompt
+         .prompt({
+           sessionID: chat.id,
+           messageID: latestID,
 
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 --- a/packages/opencode/test/session/compaction.test.ts
@@ -2504,7 +2614,7 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
      })
      yield* ssn.updatePart({
        id: PartID.ascending(),
-@@ -3328,6 +3329,55 @@ describe("SessionNs.getUsage", () => {
+@@ -3328,6 +3329,65 @@ describe("SessionNs.getUsage", () => {
  })
  
  describe("ColdStorage compact eligibility", () => {
@@ -2513,6 +2623,16 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 +  itCompaction.instance("uses persisted Message chronology for a completed Compaction boundary", () =>
 +    Effect.gen(function* () {
 +      const ssn = yield* SessionNs.Service
++      // 与现有 eligibility 用例构造相同的已结算 Tool，不在 fixture 中模拟冻结资格。
++      const addCompletedToolPart = (input: { sessionID: SessionID; messageID: MessageID; tool: string; output: string }) => ssn.updatePart({
++        id: PartID.ascending(), type: "tool",
++        sessionID: input.sessionID, messageID: input.messageID,
++        tool: input.tool, callID: crypto.randomUUID(),
++        state: {
++          status: "completed", input: {}, output: input.output,
++          title: input.tool, metadata: {}, time: { start: 1, end: 2 },
++        },
++      })
 +      // #493：eligibility 走同步 drizzle client，与运行时同连接。
 +      const { sync } = yield* Database.Service
 +      const session = yield* ssn.create({ title: "compact chronology rollover" })

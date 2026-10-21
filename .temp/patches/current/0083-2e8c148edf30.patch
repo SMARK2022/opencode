@@ -5,6 +5,32 @@ Subject: [PATCH] =?UTF-8?q?feat(network-proxy):=20=E5=BC=95=E5=85=A5Networ?=
  =?UTF-8?q?kProxy=E4=BB=A5=E6=94=AF=E6=8C=81=E6=8F=92=E4=BB=B6=E5=92=8C?=
  =?UTF-8?q?=E6=8F=90=E4=BE=9B=E8=80=85=E7=9A=84fetch=E8=AF=B7=E6=B1=82?=
 
+diff --git a/packages/core/src/aisdk.ts b/packages/core/src/aisdk.ts
+--- a/packages/core/src/aisdk.ts
++++ b/packages/core/src/aisdk.ts
+@@ -5,6 +5,7 @@ import type { LanguageModelV3 } from "@ai-sdk/provider"
+ import { Cause, Context, Effect, Layer, Schema, Scope } from "effect"
+ import { ModelV2 } from "./model"
+ import { ProviderV2 } from "./provider"
++import { NetworkProxy } from "./network-proxy"
+ import { State } from "./state"
+ 
+ type SDK = any
+@@ -114,10 +115,10 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
+       }
+     }
+ 
+-    const res = await (typeof customFetch === "function" ? customFetch : fetch)(input, {
+-      ...opts,
+-      timeout: false,
+-    })
++    // 自定义适配器保留运输选项，默认 HTTP 出口显式走统一路由。
++    const res = await (typeof customFetch === "function"
++      ? customFetch(input, { ...opts, timeout: false })
++      : NetworkProxy.fetch(input, { ...opts, purpose: "provider" }))
+     if (!chunkAbortCtl || typeof chunkTimeout !== "number") return res
+     return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+   }
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
 index 2295c89c7f..04de50debd 100644
 --- a/packages/core/src/network-proxy.ts
@@ -147,6 +173,126 @@ index 2295c89c7f..04de50debd 100644
    // registry 与安装请求共用用途，避免 ping 走代理而 Arborist 下载仍走旧 shell 路径。
    // npm 子进程不共享 fetch 包装，每次安装前须读取当前代理设置。
    const route = await resolveProxyRoute(registry, "npm", true)
+diff --git a/packages/core/src/plugin/provider/google-vertex.ts b/packages/core/src/plugin/provider/google-vertex.ts
+--- a/packages/core/src/plugin/provider/google-vertex.ts
++++ b/packages/core/src/plugin/provider/google-vertex.ts
+@@ -1,6 +1,7 @@
+ import { Effect } from "effect"
+ import { define } from "../internal"
+ import { ProviderV2 } from "../../provider"
++import { NetworkProxy } from "../../network-proxy"
+ 
+ function resolveProject(options: Record<string, any>) {
+   // models.dev advertises GOOGLE_VERTEX_PROJECT for Vertex, while Google SDKs
+@@ -50,7 +51,7 @@ function authFetch(fetchWithRuntimeOptions?: unknown) {
+     headers.set("Authorization", `Bearer ${token.token}`)
+     return typeof fetchWithRuntimeOptions === "function"
+       ? fetchWithRuntimeOptions(input, { ...init, headers })
+-      : fetch(input, { ...init, headers })
++      : NetworkProxy.fetch(input, { ...init, headers, purpose: "provider" })
+   }
+ }
+ 
+diff --git a/packages/core/src/plugin/provider/openai.ts b/packages/core/src/plugin/provider/openai.ts
+--- a/packages/core/src/plugin/provider/openai.ts
++++ b/packages/core/src/plugin/provider/openai.ts
+@@ -5,6 +5,7 @@ import { Deferred, Effect } from "effect"
+ import type { Scope } from "effect"
+ import { Credential } from "../../credential"
+ import { InstallationVersion } from "../../installation/version"
++import { NetworkProxy } from "../../network-proxy"
+ import { Integration } from "../../integration"
+ import { ModelV2 } from "../../model"
+ import { OauthCallbackPage } from "../../oauth/page"
+@@ -119,8 +120,9 @@ const headless = {
+           while (true) {
+             const response = yield* Effect.tryPromise({
+               try: (signal) =>
+-                fetch(`${issuer}/api/accounts/deviceauth/token`, {
++                NetworkProxy.fetch(`${issuer}/api/accounts/deviceauth/token`, {
+                   method: "POST",
++                  purpose: "plugin",
+                   headers: headers("application/json"),
+                   body: JSON.stringify({ device_auth_id: device.device_auth_id, user_code: device.user_code }),
+                   signal,
+@@ -226,8 +228,8 @@ function request<A>(url: string, init: RequestInit) {
+ function request<A>(url: string, init: RequestInit) {
+   return Effect.tryPromise({
+     try: async (signal) => {
+-      const response = await fetch(url, { ...init, signal })
++      const response = await NetworkProxy.fetch(url, { ...init, signal, purpose: "plugin" })
+       if (!response.ok) throw new Error(`Request failed: ${response.status}`)
+       return response.json() as Promise<A>
+     },
+     catch: (cause) => cause,
+diff --git a/packages/core/src/plugin/provider/snowflake-cortex.ts b/packages/core/src/plugin/provider/snowflake-cortex.ts
+--- a/packages/core/src/plugin/provider/snowflake-cortex.ts
++++ b/packages/core/src/plugin/provider/snowflake-cortex.ts
+@@ -1,11 +1,12 @@
+ import { Effect } from "effect"
+ import { define } from "../internal"
+ import { ProviderV2 } from "../../provider"
++import { NetworkProxy } from "../../network-proxy"
+ 
+ type FetchLike = (url: string | URL | Request, init?: RequestInit) => Promise<Response>
+ 
+ // Exported for testing: intercepts Cortex-specific request/response quirks.
+-export function cortexFetch(upstream: FetchLike = fetch) {
++export function cortexFetch(upstream?: FetchLike) {
+   return async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+     if (init?.body && typeof init.body === "string") {
+       try {
+@@ -18,7 +19,9 @@ export function cortexFetch(upstream: FetchLike = fetch) {
+       } catch {}
+     }
+ 
+-    const response = await upstream(url, init)
++    const response = await (upstream
++      ? upstream(url, init)
++      : NetworkProxy.fetch(url, { ...init, purpose: "provider" }))
+ 
+     // Cortex returns 400 "conversation complete" as a normal stop condition
+     if (!response.ok && response.status === 400) {
+diff --git a/packages/opencode/src/plugin/azure.ts b/packages/opencode/src/plugin/azure.ts
+--- a/packages/opencode/src/plugin/azure.ts
++++ b/packages/opencode/src/plugin/azure.ts
+@@ -1,3 +1,4 @@
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+ import { which } from "@opencode-ai/core/util/which"
+ import type { Hooks } from "@opencode-ai/plugin"
+@@ -19,7 +20,12 @@ type AzureCommand = (args: string[]) => Promise<unknown>
+ 
+ export async function AzureAuthPlugin(): Promise<Hooks> {
+   const available = Boolean(which("az"))
+-  return createAzureAuthHooks(runAzure, fetch, available)
++  // 工厂注入真实代理出口，独立 serve 无需先包装全局 fetch。
++  return createAzureAuthHooks(
++    runAzure,
++    (input, init) => NetworkProxy.fetch(input, { ...init, purpose: "provider" }),
++    available,
++  )
+ }
+ 
+ export function createAzureAuthHooks(
+diff --git a/packages/opencode/src/plugin/digitalocean.ts b/packages/opencode/src/plugin/digitalocean.ts
+--- a/packages/opencode/src/plugin/digitalocean.ts
++++ b/packages/opencode/src/plugin/digitalocean.ts
+@@ -1,3 +1,4 @@
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+ import type { Model } from "@opencode-ai/sdk/v2"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+@@ -167,7 +168,8 @@ function waitForOAuthCallback(state: string): Promise<ImplicitTokenPayload> {
+ async function listRouters(
+   bearer: string,
+ ): Promise<{ ok: true; routers: RouterEntry[] } | { ok: false; status: number }> {
+-  const res = await fetch(`${DO_GENAI_API}/models/routers`, {
++  const res = await NetworkProxy.fetch(`${DO_GENAI_API}/models/routers`, {
++    purpose: "plugin",
+     headers: {
+       Authorization: `Bearer ${bearer}`,
+       Accept: "application/json",
 diff --git a/packages/opencode/src/plugin/github-copilot/copilot.ts b/packages/opencode/src/plugin/github-copilot/copilot.ts
 index 9c744db89b..726265c590 100644
 --- a/packages/opencode/src/plugin/github-copilot/copilot.ts
@@ -217,6 +363,24 @@ index f3f32a0b0b..23edf99a03 100644
      headers,
      signal: AbortSignal.timeout(5_000),
    }).then(async (res) => {
+diff --git a/packages/opencode/src/plugin/modal/models.ts b/packages/opencode/src/plugin/modal/models.ts
+--- a/packages/opencode/src/plugin/modal/models.ts
++++ b/packages/opencode/src/plugin/modal/models.ts
+@@ -1,3 +1,4 @@
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import type { Model } from "@opencode-ai/sdk/v2"
+ import { Schema } from "effect"
+ 
+@@ -48,7 +49,8 @@ function price(value: string | number | undefined, fallback: number) {
+ }
+ 
+ export async function get(baseURL: string, apiKey: string, existing: Record<string, Model>) {
+-  const data = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
++  const data = await NetworkProxy.fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
++    purpose: "plugin",
+     headers: {
+       Authorization: `Bearer ${apiKey}`,
+     },
 diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
 index d16b749565..e20dbd45f4 100644
 --- a/packages/opencode/src/plugin/openai/codex.ts
@@ -248,7 +412,23 @@ index d16b749565..e20dbd45f4 100644
      headers: { "Content-Type": "application/x-www-form-urlencoded" },
      body: new URLSearchParams({
        grant_type: "refresh_token",
-@@ -362,7 +365,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -330,7 +333,14 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+       async loader(getAuth) {
+         const auth = await getAuth()
+         const websocketFetch = options.experimentalWebSockets
+-          ? OpenAIWebSocketPool.createWebSocketFetch({ httpFetch: fetch })
++          ? OpenAIWebSocketPool.createWebSocketFetch({
++              // 独立 serve 未安装全局包装，池内 HTTP 回退仍须统一选路。
++              httpFetch: Object.assign(
++                (request: RequestInfo | URL, init?: RequestInit) =>
++                  NetworkProxy.fetch(request, { ...init, purpose: "provider" }),
++                { preconnect: fetch.preconnect },
++              ),
++            })
+           : undefined
+         if (websocketFetch) {
+           websocketFetches.push(websocketFetch)
+@@ -362,7 +372,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
  
              const currentAuth = await getAuth()
              if (currentAuth.type !== "oauth")
@@ -257,7 +437,7 @@ index d16b749565..e20dbd45f4 100644
  
              const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
  
-@@ -432,7 +435,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -432,7 +442,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                headers,
              }
              if (websocketFetch && parsed.pathname.endsWith("/responses")) return websocketFetch(url, requestInit)
@@ -266,7 +446,7 @@ index d16b749565..e20dbd45f4 100644
            },
          }
        },
-@@ -471,8 +474,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -471,8 +481,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
            label: "ChatGPT Pro/Plus (headless)",
            type: "oauth",
            authorize: async () => {
@@ -277,7 +457,7 @@ index d16b749565..e20dbd45f4 100644
                headers: {
                  "Content-Type": "application/json",
                  "User-Agent": `opencode/${InstallationVersion}`,
-@@ -495,8 +499,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -495,8 +506,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                method: "auto" as const,
                async callback() {
                  while (true) {
@@ -288,7 +468,7 @@ index d16b749565..e20dbd45f4 100644
                      headers: {
                        "Content-Type": "application/json",
                        "User-Agent": `opencode/${InstallationVersion}`,
-@@ -513,8 +518,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -513,8 +525,9 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
                        code_verifier: string
                      }
  
@@ -299,6 +479,122 @@ index d16b749565..e20dbd45f4 100644
                        headers: { "Content-Type": "application/x-www-form-urlencoded" },
                        body: new URLSearchParams({
                          grant_type: "authorization_code",
+diff --git a/packages/opencode/src/plugin/snowflake-cortex.ts b/packages/opencode/src/plugin/snowflake-cortex.ts
+--- a/packages/opencode/src/plugin/snowflake-cortex.ts
++++ b/packages/opencode/src/plugin/snowflake-cortex.ts
+@@ -1,3 +1,4 @@
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+ import { OAUTH_DUMMY_KEY } from "../auth"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+@@ -103,8 +104,9 @@ function buildAuthorizeUrl(account: string, role: string | undefined, state: str
+ }
+ 
+ async function exchangeCodeForToken(account: string, code: string, pkce: PkceCodes) {
+-  const response = await fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
++  const response = await NetworkProxy.fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
+     method: "POST",
++    purpose: "plugin",
+     headers: {
+       ...authHeaders(),
+       Authorization: authBasicHeader(),
+@@ -134,8 +136,9 @@ async function exchangeCodeForToken(account: string, code: string, pkce: PkceCodes
+ }
+ 
+ async function refreshAccessToken(account: string, refreshToken: string) {
+-  const response = await fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
++  const response = await NetworkProxy.fetch(`https://${account}.snowflakecomputing.com/oauth/token-request`, {
+     method: "POST",
++    purpose: "plugin",
+     headers: {
+       ...authHeaders(),
+       Authorization: authBasicHeader(),
+@@ -321,7 +324,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Hoo
+           apiKey: OAUTH_DUMMY_KEY,
+           async fetch(requestInput: RequestInfo | URL, init?: RequestInit) {
+             let currentAuth = await getAuth()
+-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
++            if (currentAuth.type !== "oauth") return NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
+             let currentOauth = currentAuth as typeof currentAuth & {
+               refresh: string
+               access: string
+@@ -444,11 +447,14 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Hoo
+ 
+             if (expiresSoon) await refresh()
+ 
+-            const response = await fetch(requestInput, prepareRequest())
++            // 401 刷新仍沿原流程，仅替换两次模型请求的实际出口。
++            const response = await NetworkProxy.fetch(requestInput, { ...prepareRequest(), purpose: "provider" })
+ 
+             if (response.status === 401) {
+               await refresh()
+-              return transformResponse(await fetch(requestInput, prepareRequest()))
++              return transformResponse(
++                await NetworkProxy.fetch(requestInput, { ...prepareRequest(), purpose: "provider" }),
++              )
+             }
+ 
+             return transformResponse(response)
+diff --git a/packages/opencode/src/plugin/xai.ts b/packages/opencode/src/plugin/xai.ts
+--- a/packages/opencode/src/plugin/xai.ts
++++ b/packages/opencode/src/plugin/xai.ts
+@@ -1,3 +1,4 @@
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
+ import { OAUTH_DUMMY_KEY } from "../auth"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+@@ -75,8 +76,10 @@ export function accessTokenIsExpiring(
+ }
+ 
+ async function refreshAccessToken(refreshToken: string, options: XaiAuthPluginOptions = {}): Promise<TokenResponse> {
+-  const response = await fetch(options.tokenUrl ?? TOKEN_URL, {
++  // 独立 serve 未安装全局包装，OAuth 也须显式走统一入口。
++  const response = await NetworkProxy.fetch(options.tokenUrl ?? TOKEN_URL, {
+     method: "POST",
++    purpose: "plugin",
+     headers: authHeaders(),
+     body: new URLSearchParams({
+       grant_type: "refresh_token",
+@@ -106,8 +109,9 @@ interface DeviceTokenErrorBody {
+ }
+ 
+ export async function requestDeviceCode(options: XaiAuthPluginOptions = {}): Promise<DeviceCodeResponse> {
+-  const response = await fetch(options.deviceAuthorizationUrl ?? DEVICE_AUTHORIZATION_URL, {
++  const response = await NetworkProxy.fetch(options.deviceAuthorizationUrl ?? DEVICE_AUTHORIZATION_URL, {
+     method: "POST",
++    purpose: "plugin",
+     headers: authHeaders(),
+     body: new URLSearchParams({
+       client_id: CLIENT_ID,
+@@ -159,8 +163,9 @@ export async function pollDeviceCodeToken(
+   )
+ 
+   while (now() < deadline) {
+-    const response = await fetch(options.tokenUrl ?? TOKEN_URL, {
++    const response = await NetworkProxy.fetch(options.tokenUrl ?? TOKEN_URL, {
+       method: "POST",
++      purpose: "plugin",
+       headers: authHeaders(),
+       body: new URLSearchParams({
+         grant_type: DEVICE_CODE_GRANT_TYPE,
+@@ -227,7 +232,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOpt
+             // /connect with a pasted key). When that happens, pass the
+             // request through untouched so the AI SDK's own apiKey-based
+             // Authorization header reaches xAI unmodified.
+-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
++            if (currentAuth.type !== "oauth") return NetworkProxy.fetch(requestInput, { ...init, purpose: "provider" })
+ 
+             // Refresh either when the stored expires timestamp is within the
+             // skew window, or — for JWT access tokens — when the JWT exp
+@@ -290,7 +295,7 @@ export async function XaiAuthPlugin(input: PluginInput, options: XaiAuthPluginOpt
+             headers.set("authorization", `Bearer ${currentAuth.access}`)
+             headers.set("User-Agent", `opencode/${InstallationVersion}`)
+ 
+-            return fetch(requestInput, { ...init, headers })
++            return NetworkProxy.fetch(requestInput, { ...init, headers, purpose: "provider" })
+           },
+         }
+       },
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 index 0a85dd6e0e..1b8c6944a5 100644
 --- a/packages/opencode/src/provider/claudecode.ts
@@ -342,6 +638,15 @@ index 041b522f06..d35b09ebe6 100644
            },
          },
          async getModel(sdk: any, modelID: string) {
+@@ -995,7 +995,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
+             } catch {}
+           }
+ 
+-          const response = await fetch(url, init)
++          const response = await NetworkProxy.fetch(url, { ...init, purpose: "provider" })
+ 
+           if (!response.ok && response.status === 400) {
+             try {
 @@ -1882,7 +1882,6 @@
          delete options["headerTimeout"]
  
@@ -395,6 +700,739 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
            if (!active) return
            // 认证拒绝仍证明网络可达；按源语义仅将三类网关故障记为离线。
            const down = res.status === 502 || res.status === 503 || res.status === 504
+diff --git a/packages/core/test/plugin/provider-google-vertex.test.ts b/packages/core/test/plugin/provider-google-vertex.test.ts
+--- a/packages/core/test/plugin/provider-google-vertex.test.ts
++++ b/packages/core/test/plugin/provider-google-vertex.test.ts
+@@ -1,5 +1,6 @@
+ import { AISDK } from "@opencode-ai/core/aisdk"
+-import { describe, expect, mock } from "bun:test"
++import { describe, expect, mock, spyOn } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { Effect } from "effect"
+ import { Catalog } from "@opencode-ai/core/catalog"
+ import { ModelV2 } from "@opencode-ai/core/model"
+@@ -317,7 +318,8 @@ describe("GoogleVertexPlugin", () => {
+   it.effect("keeps Google auth fetch for OpenAI-compatible Vertex endpoints", () =>
+     Effect.gen(function* () {
+       googleAuthOptions.length = 0
+-      const fetchCalls: { input: Parameters<typeof fetch>[0]; init?: RequestInit }[] = []
++      const fetchCalls: { input: Parameters<typeof fetch>[0]; init?: Parameters<typeof NetworkProxy.fetch>[1] }[] = []
++      const signal = new AbortController().signal
+       const plugin = yield* PluginV2.Service
+       const aisdk = yield* AISDK.Service
+       yield* addPlugin()
+@@ -326,18 +328,15 @@ describe("GoogleVertexPlugin", () => {
+           if (evt.model.providerID !== "google-vertex") return
+           if (evt.package !== "@ai-sdk/openai-compatible") return
+           expect(typeof evt.options.fetch).toBe("function")
+-          await evt.options.fetch("https://vertex.example", {
++          await evt.options.fetch("http://127.0.0.1:9", {
+             headers: { "x-test": "1" },
++            signal,
+           })
+         }),
+       )
+-      const originalFetch = fetch
+-      ;(globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = (async (
+-        input: Parameters<typeof fetch>[0],
+-        init?: RequestInit,
+-      ) => {
++      const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
+         fetchCalls.push({ input, init })
+         return new Response("ok")
+-      }) as typeof fetch
++      })
+       yield* Effect.acquireUseRelease(
+         Effect.void,
+@@ -357,10 +356,12 @@ describe("GoogleVertexPlugin", () => {
+         () =>
+           Effect.sync(() => {
+-            ;(globalThis as typeof globalThis & { fetch: typeof fetch }).fetch = originalFetch
++            fetchSpy.mockRestore()
+           }),
+       )
+       expect(fetchCalls).toHaveLength(1)
+       expect(googleAuthOptions).toEqual([{ scopes: ["https://www.googleapis.com/auth/cloud-platform"] }])
+-      expect(fetchCalls[0].input).toBe("https://vertex.example")
++      expect(fetchCalls[0].input).toBe("http://127.0.0.1:9")
+       expect(new Headers(fetchCalls[0].init?.headers).get("authorization")).toBe("Bearer vertex-token")
+       expect(new Headers(fetchCalls[0].init?.headers).get("x-test")).toBe("1")
++      expect(fetchCalls[0].init?.purpose).toBe("provider")
++      expect(fetchCalls[0].init?.signal).toBe(signal)
+diff --git a/packages/core/test/plugin/provider-openai-compatible.test.ts b/packages/core/test/plugin/provider-openai-compatible.test.ts
+--- a/packages/core/test/plugin/provider-openai-compatible.test.ts
++++ b/packages/core/test/plugin/provider-openai-compatible.test.ts
+@@ -1,5 +1,6 @@
+ import { AISDK } from "@opencode-ai/core/aisdk"
+-import { describe, expect } from "bun:test"
++import { describe, expect, spyOn } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { Effect } from "effect"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { PluginV2 } from "@opencode-ai/core/plugin"
+@@ -62,28 +63,39 @@ describe("OpenAICompatiblePlugin", () => {
+     }),
+   )
+ 
+   it.effect("uses the provider ID as the OpenAI-compatible provider name", () =>
+     Effect.gen(function* () {
+       const plugin = yield* PluginV2.Service
+       const aisdk = yield* AISDK.Service
+       const observed: string[] = []
++      const signal = new AbortController().signal
++      const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response("ok"))
++      yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
+       yield* addPlugin()
+       yield* aisdk.hook.sdk((event) =>
+-        Effect.sync(() => {
++        Effect.promise(async () => {
+           observed.push(event.sdk.languageModel("model").provider)
++          await event.options.fetch("http://127.0.0.1:9/v1/chat/completions", { signal })
+         }),
+       )
+-      yield* aisdk.runSDK({
+-        model: ModelV2.Info.make({
++      yield* aisdk.language(
++        ModelV2.Info.make({
+           ...ModelV2.Info.empty(ProviderV2.ID.make("custom-provider"), ModelV2.ID.make("model")),
+-          api: { id: ModelV2.ID.make("model"), type: "aisdk", package: "test-provider" },
++          api: {
++            id: ModelV2.ID.make("model"),
++            type: "aisdk",
++            package: "@ai-sdk/openai-compatible",
++            url: "http://127.0.0.1:9/v1",
++            settings: { timeout: false },
++          },
+         }),
+-        package: "@ai-sdk/openai-compatible",
+-        options: { name: "custom-provider", baseURL: "https://example.com/v1" },
+-      })
++      )
+       expect(observed).toEqual(["custom-provider.chat"])
++      expect(fetchSpy).toHaveBeenCalledTimes(1)
++      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
++      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
+     }),
+   )
+ 
+   it.effect("does not overwrite an SDK created by an earlier provider-specific plugin", () =>
+     Effect.gen(function* () {
+diff --git a/packages/core/test/plugin/provider-snowflake-cortex.test.ts b/packages/core/test/plugin/provider-snowflake-cortex.test.ts
+--- a/packages/core/test/plugin/provider-snowflake-cortex.test.ts
++++ b/packages/core/test/plugin/provider-snowflake-cortex.test.ts
+@@ -1,4 +1,5 @@
+ import { AISDK } from "@opencode-ai/core/aisdk"
+-import { describe, expect, it as bun_it } from "bun:test"
++import { describe, expect, it as bun_it, spyOn } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { Effect } from "effect"
+ import { ModelV2 } from "@opencode-ai/core/model"
+@@ -176,14 +177,23 @@ describe("cortexFetch", () => {
+   bun_it("rewrites max_tokens to max_completion_tokens", async () => {
+     const captured: RequestInit[] = []
+-    const upstream: FetchLike = async (_url, init) => {
++    const signal = new AbortController().signal
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_url, init) => {
+       captured.push(init ?? {})
+       return new Response("{}", { status: 200 })
+-    }
+-    await cortexFetch(upstream)("https://test", {
+-      method: "POST",
+-      body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1024 }),
++    })
++    try {
++      await cortexFetch()("http://127.0.0.1:9", {
++        method: "POST",
++        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1024 }),
++        signal,
++      })
++      expect(fetchSpy).toHaveBeenCalledTimes(1)
++      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
++      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
++      const body = JSON.parse(captured[0].body as string)
++      expect(body.max_completion_tokens).toBe(1024)
++      expect(body.max_tokens).toBeUndefined()
++    } finally {
++      fetchSpy.mockRestore()
++    }
+-    })
+-    const body = JSON.parse(captured[0].body as string)
+-    expect(body.max_completion_tokens).toBe(1024)
+-    expect(body.max_tokens).toBeUndefined()
+   })
+diff --git a/packages/opencode/test/provider/digitalocean.test.ts b/packages/opencode/test/provider/digitalocean.test.ts
+--- a/packages/opencode/test/provider/digitalocean.test.ts
++++ b/packages/opencode/test/provider/digitalocean.test.ts
+@@ -1,4 +1,5 @@
+-import { expect } from "bun:test"
++import { expect, spyOn } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Provider } from "../../src/provider/provider"
+ 
+@@ -11,12 +12,14 @@
+ const it = testEffect(LayerNode.compile(Provider.node))
+ 
+ const withEnv = <A, E, R>(values: Record<string, string>, effect: Effect.Effect<A, E, R>) =>
+   Effect.acquireUseRelease(
+     Effect.sync(() => {
+-      const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]] as const))
+-      Object.assign(process.env, values)
++      // 刷新会保存凭据，其他用例必须使用显式空认证，避免读取前一用例写入的文件。
++      const vars = { OPENCODE_AUTH_CONTENT: "{}", ...values }
++      const previous = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]] as const))
++      Object.assign(process.env, vars)
+       return previous
+     }),
+     () => effect,
+     (previous) =>
+       Effect.sync(() => {
+@@ -61,7 +64,7 @@ it.instance(
+ )
+ 
+ it.instance(
+-  "digitalocean provider.models surfaces cached routers from auth metadata",
++  "digitalocean provider.models refreshes stale routers through NetworkProxy",
+   () =>
+     withAuth(
+       {
+@@ -69,7 +72,7 @@ it.instance(
+           { name: "my-router", uuid: "11f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
+           { name: "other-router", uuid: "22f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
+         ]),
+-        routers_fetched_at: String(Date.now()),
++        routers_fetched_at: "0",
+         oauth_access: "doo_v1_test",
+         oauth_expires: String(Date.now() + 60 * 60 * 1000),
+       },
+@@ -76,10 +79,24 @@ it.instance(
+       Effect.gen(function* () {
++        const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(
++          Response.json({
++            model_routers: [
++              { name: "my-router", uuid: "11f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
++              { name: "other-router", uuid: "22f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
++            ],
++          }),
++        )
++        yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
+         const provider = yield* Provider.Service
+         const providers = yield* provider.list()
+         const models = providers[DIGITALOCEAN].models
+         expect(models["router:my-router"]).toBeDefined()
+         expect(models["router:my-router"].api.id).toBe("router:my-router")
+         expect(models["router:my-router"].api.url).toBe("https://inference.do-ai.run/v1")
+         expect(models["router:my-router"].api.npm).toBe("@ai-sdk/openai-compatible")
+         expect(models["router:other-router"]).toBeDefined()
++        expect(fetchSpy).toHaveBeenCalledTimes(1)
++        expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("plugin")
++        expect(fetchSpy.mock.calls[0]?.[0]).toBe("https://api.digitalocean.com/v2/gen-ai/models/routers")
++        expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer doo_v1_test")
++        expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
+       }),
+diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
+--- a/packages/opencode/test/provider/provider.test.ts
++++ b/packages/opencode/test/provider/provider.test.ts
+@@ -1,4 +1,5 @@
+-import { afterEach, expect, test } from "bun:test"
++import { afterEach, expect, spyOn, test } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { mkdir, unlink } from "fs/promises"
+ import path from "path"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -2196,3 +2197,48 @@ it.effect("opencode loader keeps paid models when auth exists", () =>
+     expect(keyedCount).toBeGreaterThan(0)
+   }).pipe(provideMultiInstance),
+ )
++
++it.instance(
++  "routes Snowflake PAT transformations through NetworkProxy",
++  () =>
++    Effect.gen(function* () {
++      const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () =>
++        new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
++          headers: { "content-type": "text/event-stream" },
++        }),
++      )
++      yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
++      const providers = yield* list
++      const provider = providers[ProviderV2.ID.make("snowflake-cortex")]
++      expect(typeof provider.options.fetch).toBe("function")
++      const signal = new AbortController().signal
++      const response = yield* Effect.promise<Response>(() =>
++        provider.options.fetch("http://127.0.0.1:9/v1/chat/completions", {
++          method: "POST",
++          headers: { authorization: "Bearer test-pat", "x-keep": "yes" },
++          body: JSON.stringify({ model: "test-model", max_tokens: 1024 }),
++          signal,
++        }),
++      )
++      expect(fetchSpy).toHaveBeenCalledTimes(1)
++      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
++      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
++      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer test-pat")
++      expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toEqual({
++        model: "test-model", max_completion_tokens: 1024,
++      })
++      expect(yield* Effect.promise(() => response.text())).toContain('"role":"assistant"')
++    }),
++  {
++    config: {
++      enabled_providers: ["snowflake-cortex"],
++      provider: {
++        "snowflake-cortex": {
++          npm: "@ai-sdk/openai-compatible",
++          models: { "test-model": { name: "Test" } },
++          options: { account: "test-account", token: "test-pat" },
++        },
++      },
++    },
++  },
++)
+diff --git a/packages/opencode/test/plugin/azure.test.ts b/packages/opencode/test/plugin/azure.test.ts
+--- a/packages/opencode/test/plugin/azure.test.ts
++++ b/packages/opencode/test/plugin/azure.test.ts
+@@ -1,4 +1,5 @@
+-import { afterEach, describe, expect, test } from "bun:test"
++import { afterEach, describe, expect, spyOn, test } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { chmod } from "node:fs/promises"
+ import path from "node:path"
+ import { pathToFileURL } from "node:url"
+@@ -160,10 +161,32 @@ describe("plugin.azure", () => {
+     process.env.PATH = cli.bin
+     delete process.env.AZURE_RESOURCE_NAME
+ 
+-    const hooks = await AzureAuthPlugin()
+-
+-    expect(await cli.calls()).toEqual([])
+-    expect(oauthMethod(hooks).prompts?.[0].type).toBe("text")
++    const runSpy = spyOn(Process, "run").mockResolvedValue({
++      code: 0,
++      stdout: Buffer.from(JSON.stringify({ accessToken: "test-token", expires_on: Math.floor(Date.now() / 1000) + 3600 })),
++      stderr: Buffer.alloc(0),
++    })
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response(null, { status: 200 }))
++    try {
++      const hooks = await AzureAuthPlugin()
++      expect(await cli.calls()).toEqual([])
++      expect(runSpy).not.toHaveBeenCalled()
++      expect(oauthMethod(hooks).prompts?.[0].type).toBe("text")
++      const signal = new AbortController().signal
++      await customFetch(await loader(hooks)(async () => oauth, provider))("http://127.0.0.1:9/openai/v1/responses", {
++        headers: { "api-key": OAUTH_DUMMY_KEY, "x-keep": "yes" },
++        signal,
++      })
++      expect(runSpy).toHaveBeenCalledTimes(1)
++      expect(fetchSpy).toHaveBeenCalledTimes(1)
++      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
++      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
++      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer test-token")
++      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("x-keep")).toBe("yes")
++    } finally {
++      fetchSpy.mockRestore()
++      runSpy.mockRestore()
++    }
+   })
+ 
+   test("keeps the existing API-key method and adds Entra ID", () => {
+diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
+--- a/packages/opencode/test/plugin/codex.test.ts
++++ b/packages/opencode/test/plugin/codex.test.ts
+@@ -1,5 +1,7 @@
+-import { describe, expect, test } from "bun:test"
++import { afterEach, describe, expect, spyOn, test, type Mock } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { createServer, type IncomingMessage } from "node:http"
+ import { type AddressInfo } from "node:net"
+ import { WebSocketServer } from "ws"
++import { OpenAIWebSocketPool } from "../../src/plugin/openai/ws-pool"
+ import {
+@@ -12,7 +14,14 @@ import {
+   type IdTokenClaims,
+ } from "../../src/plugin/openai/codex"
+ 
++let fetchSpy: Mock<typeof NetworkProxy.fetch> | undefined
++
++afterEach(() => {
++  fetchSpy?.mockRestore()
++  fetchSpy = undefined
++})
++
+ function createTestJwt(payload: object): string {
+   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
+   const body = Buffer.from(JSON.stringify(payload)).toString("base64url")
+   return `${header}.${body}.sig`
+@@ -216,8 +225,9 @@ describe("plugin.codex", () => {
+     await enabled.dispose?.()
+   })
+ 
+   test("sends token residency only to the ChatGPT Codex backend", async () => {
++    fetchSpy = spyOn(NetworkProxy, "fetch")
+     const requests: Array<{ path: string; residency: string | null }> = []
+     using server = Bun.serve({
+       port: 0,
+       fetch(request) {
+@@ -230,8 +240,9 @@ describe("plugin.codex", () => {
+     })
+     const hooks = await CodexAuthPlugin({} as never, {
+       codexApiEndpoint: new URL("/backend-api/codex/responses", server.url).toString(),
++      experimentalWebSockets: true,
+     })
+     const loaded = await hooks.auth!.loader!(
+       async () =>
+         ({
+           type: "oauth",
+@@ -244,13 +255,27 @@ describe("plugin.codex", () => {
+       {} as never,
+     )
+ 
+-    await loaded.fetch!("https://api.openai.com/v1/responses")
+-    await loaded.fetch!(new URL("/other", server.url))
+-
+-    expect(requests).toEqual([
+-      { path: "/backend-api/codex/responses", residency: "eu" },
+-      { path: "/other", residency: null },
+-    ])
++    try {
++      const signal = new AbortController().signal
++      await loaded.fetch!("https://api.openai.com/v1/responses", {
++        method: "POST",
++        headers: { [OpenAIWebSocketPool.TITLE_HEADER]: "true", "session-id": "session-1" },
++        body: JSON.stringify({ stream: true, input: "hi" }),
++        signal,
++      })
++      await loaded.fetch!(new URL("/other", server.url), { signal })
++
++      expect(fetchSpy).toHaveBeenCalledTimes(2)
++      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["provider", "provider"])
++      expect(fetchSpy.mock.calls.every(([, init]) => init?.signal === signal)).toBe(true)
++      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get(OpenAIWebSocketPool.TITLE_HEADER)).toBeNull()
++      expect(requests).toEqual([
++        { path: "/backend-api/codex/responses", residency: "eu" },
++        { path: "/other", residency: null },
++      ])
++    } finally {
++      await hooks.dispose?.()
++    }
+   })
+ 
+   test("sends token residency through the WebSocket transport", async () => {
+diff --git a/packages/opencode/test/plugin/modal-models.test.ts b/packages/opencode/test/plugin/modal-models.test.ts
+--- a/packages/opencode/test/plugin/modal-models.test.ts
++++ b/packages/opencode/test/plugin/modal-models.test.ts
+@@ -1,6 +1,7 @@
+-import { expect, test } from "bun:test"
++import { expect, spyOn, test } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import type { Model, Provider } from "@opencode-ai/sdk/v2"
+ import { ModalPlugin } from "@/plugin/modal/modal"
+ 
+ const BASE_MODEL_ID = "thinkingmachines/Inkling-NVFP4"
+ const RUNTIME_MODEL_ID = "workspace--inkling.us-west.modal.direct"
+@@ -122,13 +123,21 @@ test("discovers Modal workspace models", async () => {
+   const provider = makeProvider(`${server.url}v1`)
+ 
+   const plugin = await ModalPlugin()
+-  const models = await plugin.provider!.models!(provider, {
+-    auth: {
+-      type: "api",
+-      key: "test-token",
+-    },
+-  })
++  const fetchSpy = spyOn(NetworkProxy, "fetch")
++  const models = await (async () => {
++    try {
++      const result = await plugin.provider!.models!(provider, {
++        auth: { type: "api", key: "test-token" },
++      })
++      expect(fetchSpy).toHaveBeenCalledTimes(1)
++      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("plugin")
++      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
++      return result
++    } finally {
++      fetchSpy.mockRestore()
++    }
++  })()
+   const model = models[RUNTIME_MODEL_ID]
+ 
+   expect(requests).toEqual([
+     {
+diff --git a/packages/opencode/test/plugin/snowflake-cortex.test.ts b/packages/opencode/test/plugin/snowflake-cortex.test.ts
+--- a/packages/opencode/test/plugin/snowflake-cortex.test.ts
++++ b/packages/opencode/test/plugin/snowflake-cortex.test.ts
+@@ -1,6 +1,7 @@
+-import { describe, expect, test } from "bun:test"
++import { describe, expect, spyOn, test } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { OAUTH_DUMMY_KEY } from "../../src/auth"
+ import { oauthScope, SnowflakeCortexAuthPlugin } from "../../src/plugin/snowflake-cortex"
+ 
+ function makeInput() {
+   let auth: any = {
+@@ -57,12 +58,11 @@ describe("plugin.snowflake-cortex", () => {
+     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
+     expect(options.apiKey).toBe(OAUTH_DUMMY_KEY)
+ 
+-    const originalFetch = globalThis.fetch
+     const captured: Headers[] = []
+-    globalThis.fetch = (async (_request, init) => {
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_request, init) => {
+       captured.push(new Headers(init?.headers))
+       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+-    }) as typeof fetch
++    })
+ 
+     try {
+       await options.fetch("https://example.test/v1/chat", {
+@@ -69,8 +69,8 @@ describe("plugin.snowflake-cortex", () => {
+         headers: { Authorization: `Bearer ${OAUTH_DUMMY_KEY}`, "x-keep": "yes" },
+       })
+     } finally {
+-      globalThis.fetch = originalFetch
++      fetchSpy.mockRestore()
+     }
+ 
+     expect(captured).toHaveLength(1)
+     expect(captured[0].get("authorization")).toBe("Bearer access-live")
+@@ -83,9 +83,8 @@ describe("plugin.snowflake-cortex", () => {
+     let refreshCalls = 0
+     const apiAuthHeaders: string[] = []
+ 
+-    // Must mock fetch before calling loader because startup refresh triggers for expires: 0
+-    const originalFetch = globalThis.fetch
+-    globalThis.fetch = (async (request, init) => {
++    // loader 的预刷新也走统一入口，提前拦截以避免真实网络请求。
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (request, init) => {
+       const url =
+         typeof request === "string" ? request : request instanceof URL ? request.toString() : String(request.url)
+ 
+@@ -101,7 +100,7 @@ describe("plugin.snowflake-cortex", () => {
+ 
+       apiAuthHeaders.push(new Headers(init?.headers).get("authorization") || "")
+       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+-    }) as typeof fetch
++    })
+ 
+     try {
+       const hooks = await SnowflakeCortexAuthPlugin(input)
+@@ -122,8 +121,9 @@ describe("plugin.snowflake-cortex", () => {
+         options.fetch("https://example.test/v1/chat", { headers: {} }),
+       ])
++      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["plugin", "provider", "provider"])
+     } finally {
+-      globalThis.fetch = originalFetch
++      fetchSpy.mockRestore()
+     }
+ 
+     expect(refreshCalls).toBe(1)
+     expect(apiAuthHeaders).toEqual(["Bearer access-new", "Bearer access-new"])
+@@ -153,17 +153,18 @@ describe("plugin.snowflake-cortex", () => {
+ 
+     let apiCalls = 0
+     const seenAuth: string[] = []
+-    const originalFetch = globalThis.fetch
+-    globalThis.fetch = (async (request, init) => {
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (request, init) => {
+       const url =
+         typeof request === "string" ? request : request instanceof URL ? request.toString() : String(request.url)
+ 
+       if (url.includes("/oauth/token-request")) {
+         return Response.json({ access_token: "access-fresh", refresh_token: "refresh-fresh", expires_in: 3600 })
+       }
+ 
+       apiCalls += 1
+       seenAuth.push(new Headers(init?.headers).get("authorization") || "")
+       if (apiCalls === 1) return new Response("unauthorized", { status: 401 })
+-      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+-    }) as typeof fetch
++      return new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
++        status: 200, headers: { "content-type": "text/event-stream" },
++      })
++    })
+@@ -171,8 +172,17 @@ describe("plugin.snowflake-cortex", () => {
+     try {
+-      const response = await options.fetch("https://example.test/v1/chat", { headers: {} })
++      const signal = new AbortController().signal
++      const request = new Request("http://127.0.0.1:9/v1/chat", { headers: { "x-keep": "yes" } })
++      const response = await options.fetch(request, { signal })
+       expect(response.status).toBe(200)
++      expect(await response.text()).toContain('"role":"assistant"')
++      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["provider", "plugin", "provider"])
++      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
++      expect(fetchSpy.mock.calls[2]?.[1]?.signal).toBe(signal)
++      expect(fetchSpy.mock.calls[0]?.[0]).toBe(request)
++      expect(fetchSpy.mock.calls[2]?.[0]).toBe(request)
++      expect(new Headers(fetchSpy.mock.calls[2]?.[1]?.headers).get("x-keep")).toBe("yes")
+     } finally {
+-      globalThis.fetch = originalFetch
++      fetchSpy.mockRestore()
+     }
+ 
+     expect(apiCalls).toBe(2)
+@@ -192,11 +202,10 @@ describe("plugin.snowflake-cortex", () => {
+     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
+ 
+     let sentBody: string | undefined
+-    const originalFetch = globalThis.fetch
+-    globalThis.fetch = (async (request, init) => {
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_request, init) => {
+       sentBody = typeof init?.body === "string" ? init.body : undefined
+       return new Response("{}", { status: 200, headers: { "content-type": "application/json" } })
+-    }) as typeof fetch
++    })
+ 
+     try {
+       await options.fetch("https://example.test/v1/chat", {
+@@ -204,8 +213,8 @@ describe("plugin.snowflake-cortex", () => {
+         body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 4096, messages: [] }),
+       })
+     } finally {
+-      globalThis.fetch = originalFetch
++      fetchSpy.mockRestore()
+     }
+ 
+     expect(sentBody).toBeDefined()
+     const parsed = JSON.parse(sentBody!)
+@@ -219,13 +228,12 @@ describe("plugin.snowflake-cortex", () => {
+     const hooks = await SnowflakeCortexAuthPlugin(input)
+     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
+ 
+-    const originalFetch = globalThis.fetch
+-    globalThis.fetch = (async () => {
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () => {
+       return new Response(JSON.stringify({ message: "Conversation complete" }), {
+         status: 400,
+         headers: { "content-type": "application/json" },
+       })
+-    }) as unknown as typeof fetch
++    })
+ 
+     try {
+       const response = await options.fetch("https://example.test/v1/chat", {
+@@ -236,8 +244,8 @@ describe("plugin.snowflake-cortex", () => {
+       const body = await response.json()
+       expect(body.choices[0].finish_reason).toBe("stop")
+     } finally {
+-      globalThis.fetch = originalFetch
++      fetchSpy.mockRestore()
+     }
+   })
+ 
+   test("loader fixes empty role in SSE stream", async () => {
+@@ -245,9 +253,8 @@ describe("plugin.snowflake-cortex", () => {
+     const hooks = await SnowflakeCortexAuthPlugin(input)
+     const options = await hooks.auth!.loader!(getAuth as any, {} as any)
+ 
+-    const originalFetch = globalThis.fetch
+     const sseChunk = `data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n`
+-    globalThis.fetch = (async () => {
++    const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () => {
+       const stream = new ReadableStream({
+         start(ctrl) {
+           ctrl.enqueue(new TextEncoder().encode(sseChunk))
+@@ -258,8 +265,8 @@ describe("plugin.snowflake-cortex", () => {
+         status: 200,
+         headers: { "content-type": "text/event-stream" },
+       })
+-    }) as unknown as typeof fetch
++    })
+ 
+     try {
+       const response = await options.fetch("https://example.test/v1/chat", {
+         method: "POST",
+@@ -272,7 +279,7 @@ describe("plugin.snowflake-cortex", () => {
+       expect(text).not.toContain('"role":""')
+       expect(text).toContain('"role":"assistant"')
+     } finally {
+-      globalThis.fetch = originalFetch
++      fetchSpy.mockRestore()
+     }
+   })
+ })
+diff --git a/packages/opencode/test/plugin/xai.test.ts b/packages/opencode/test/plugin/xai.test.ts
+--- a/packages/opencode/test/plugin/xai.test.ts
++++ b/packages/opencode/test/plugin/xai.test.ts
+@@ -1,7 +1,16 @@
+-import { describe, expect, test } from "bun:test"
++import { afterEach, describe, expect, spyOn, test, type Mock } from "bun:test"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { accessTokenIsExpiring, pollDeviceCodeToken, requestDeviceCode, XaiAuthPlugin } from "../../src/plugin/xai"
+ import { OAUTH_DUMMY_KEY } from "../../src/auth"
+ 
++// 拦截统一入口，回环测试无需改动进程代理或全局 fetch。
++let fetchSpy: Mock<typeof NetworkProxy.fetch> | undefined
++
++afterEach(() => {
++  fetchSpy?.mockRestore()
++  fetchSpy = undefined
++})
++
+ function makeJwt(payload: object): string {
+   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url")
+   const body = Buffer.from(JSON.stringify(payload)).toString("base64url")
+@@ -179,7 +188,7 @@ describe("plugin.xai", () => {
+       expect(captured[0].get("x-extra")).toBe("yes")
+     })
+ 
+-    test("falls through to plain fetch when stored auth flips from oauth to api", async () => {
++    test("preserves API-key headers when stored auth flips from oauth to api", async () => {
+       const { input } = makeInput()
+       const captured: Headers[] = []
+       using server = makeServer((request) => {
+@@ -204,8 +213,9 @@ describe("plugin.xai", () => {
+       expect(captured[0].get("x-keep")).toBe("v")
+     })
+ 
+     test("deduplicates concurrent refreshes within a loader instance", async () => {
++      fetchSpy = spyOn(NetworkProxy, "fetch")
+       const { input, setCalls } = makeInput()
+       let tokenRequests = 0
+       const apiRequests: Headers[] = []
+       using server = makeServer(async (request, url) => {
+@@ -222,11 +232,18 @@ describe("plugin.xai", () => {
+         await XaiAuthPlugin(input, serverOptions(server))
+       ).auth!.loader!(async () => ({ type: "oauth" as const, access: "old", refresh: "rt-old", expires: 0 }), {} as any)
+ 
++      const signal = new AbortController().signal
+       await Promise.all([
+-        opts.fetch!(new URL("/chat/completions", server.url), { headers: {} }),
+-        opts.fetch!(new URL("/chat/completions", server.url), { headers: {} }),
++        opts.fetch!(new URL("/chat/completions", server.url), { headers: {}, signal }),
++        opts.fetch!(new URL("/chat/completions", server.url), { headers: {}, signal }),
+       ])
+ 
++      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["plugin", "provider", "provider"])
++      expect(fetchSpy.mock.calls.slice(1).every(([, init]) => init?.signal === signal)).toBe(true)
++      expect(fetchSpy.mock.calls.slice(1).map(([request]) => request.toString())).toEqual([
++        new URL("/chat/completions", server.url).toString(),
++        new URL("/chat/completions", server.url).toString(),
++      ])
+       expect(tokenRequests).toBe(1)
+       expect(apiRequests.map((headers) => headers.get("authorization"))).toEqual([
+         "Bearer new-access",
+@@ -373,8 +390,9 @@ describe("plugin.xai", () => {
+   })
+ 
+   describe("device code flow", () => {
+     test("authorize advertises verification URL + user code and returns success on callback", async () => {
++      fetchSpy = spyOn(NetworkProxy, "fetch")
+       using server = makeServer((_, url) => {
+         if (url.pathname === "/oauth2/device/code") {
+           return Response.json({
+             device_code: "DEVICE-1",
+@@ -400,8 +418,11 @@ describe("plugin.xai", () => {
+       expect(result.url).toBe("https://x.ai/device?user_code=ABCD-1234")
+       expect(result.instructions).toContain("https://x.ai/device")
+       expect(result.instructions).toContain("ABCD-1234")
+       expect(await (result as any).callback()).toMatchObject({ type: "success", refresh: "RT", access: "AT" })
++      expect(fetchSpy).toHaveBeenCalledTimes(2)
++      expect(fetchSpy.mock.calls.map(([, init]) => init?.purpose)).toEqual(["plugin", "plugin"])
++      expect(fetchSpy.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "POST"])
+     })
+ 
+     test("authorize falls back to verification_uri when verification_uri_complete is absent", async () => {
+       using server = makeServer((_, url) => {
 diff --git a/packages/opencode/test/plugin/github-copilot-models.test.ts b/packages/opencode/test/plugin/github-copilot-models.test.ts
 index e6d89fe01c..da82bf379e 100644
 --- a/packages/opencode/test/plugin/github-copilot-models.test.ts

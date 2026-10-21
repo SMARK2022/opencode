@@ -1,5 +1,11 @@
 # 0198 — feat(permission): add reviewer auto decision service
 
+## 2026-10-16 原生共享决策
+- 确定性 auto 路由、Assessment、提示模板和默认策略移到 Core，V1 路径只重导出。两种运行时共享原始 precheck/strict/失败降级规则与政策，不复制第二套规则。
+- 原生 reviewer 接入现有模型 resolver、只读 SessionStore 和单次结构化 LLM 调用；保留配置策略、超时、禁用及 fallback=user 语义，后续 199 在原 Permission owner 统一消费。
+- 验证：typecheck-0198-2026-10-16T11-32-01-045Z 累计198及30 workspace通过；auto.test.ts 与 reviewer-prompt.test.ts 共9项、23断言通过。原生主路径集成覆盖随199的真实Permission测试执行。
+- 196–200最终完整双审均PASS：正向`ses_ebb6460b3ffewKjl6eIK7awy97`，逆向`ses_ebb646065ffeI9AvcJokiZ6BF6`；采用`typecheck-0200-2026-10-16T12-02-45-359Z`终态，无未关闭B/G。默认Catalog模型选择与逐段截断提示差异按N保留。
+
 ## Source
 - SHA: 09fcecbcdcc7eb4d37ee39df54807e25ac78648f
 - Subject: feat(permission): add reviewer auto decision service

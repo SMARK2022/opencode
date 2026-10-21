@@ -688,6 +688,100 @@ index 0000000000000000000000000000000000000000..744f6cfb63aee91af9a39f9fa34f381c
 +
 +所有改动遵循 Effect-first 架构、[local-smark] 标记、向后兼容、手术刀式修改。
 
+diff --git a/packages/opencode/test/session/file-evidence.test.ts b/packages/opencode/test/session/file-evidence.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/session/file-evidence.test.ts
+@@ -0,0 +1,31 @@
++import { expect } from "bun:test"
++import { Effect } from "effect"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import type { SessionV1 } from "@opencode-ai/core/v1/session"
++import { CompactionFileEvidence } from "../../src/session/file-evidence"
++import { testEffect } from "../lib/effect"
++
++const it = testEffect(LayerNode.compile(FSUtil.node))
++
++it.live("preserves bounded search-only history and the compaction count", () =>
++  Effect.gen(function* () {
++    const fs = yield* FSUtil.Service
++    const parts = Array.from({ length: 12 }, (_, i) => ({
++      type: "tool", tool: "grep", state: { status: "completed", input: { pattern: `query${i}`, path: "src|lib" }, metadata: { totalMatches: i } },
++    }))
++    // 重复搜索应更新最近结果，不能占用第二个交接名额；没有 read 也必须产出交接。
++    parts.push({ type: "tool", tool: "grep", state: { status: "completed", input: { pattern: "query4", path: "src|lib" }, metadata: { totalMatches: 99 } } })
++    const messages = [{ info: { role: "assistant" }, parts }] as unknown as SessionV1.WithParts[]
++    const result = yield* CompactionFileEvidence.render(messages, fs, ".", 3)
++    expect(result).toContain("### Search History")
++    expect(result).not.toContain("### Inspected Files")
++    expect(result).toContain("| grep | query4 | src\\|lib | 99 |")
++    expect(result?.match(/\| grep \| query4 \|/g)).toHaveLength(1)
++    expect(result).not.toContain("| grep | query0 |")
++    expect(result).toContain("Omitted: 2 searches due to evidence budget.")
++    expect(result).toContain("This is compaction #3.")
++  }),
++)
++
++
+diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
+--- a/packages/opencode/test/tool/task.test.ts
++++ b/packages/opencode/test/tool/task.test.ts
+@@ -914,6 +914,9 @@
+   it.instance("rejects background execution when the experiment is disabled", () =>
+     Effect.gen(function* () {
+       const { chat, assistant } = yield* seed()
+       const tool = yield* TaskTool
+       const def = yield* tool.init()
++      // 检查实际默认模式广告，不能只依赖完整 Parameters 的 schema 快照。
++      expect(def.jsonSchema?.properties?.inspected_files).toMatchObject({ enum: ["none", "summary"] })
++      expect(def.jsonSchema?.properties?.background).toBeUndefined()
+ 
+diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
+--- a/packages/opencode/src/session/file-evidence.ts
++++ b/packages/opencode/src/session/file-evidence.ts
+@@ -22,4 +22,6 @@
+ export const render = Effect.fn("CompactionFileEvidence.render")(function* (
+   messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string,
++  compactionCount = 1,
+ ) {
+   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
++  const searches = new Map<string, { tool: string; pattern: string; path: string; matches: number }>()
+@@ -27,3 +29,15 @@
+     for (const part of message.parts) {
++      if (part.type === "tool" && part.state.status === "completed" && (part.tool === "grep" || part.tool === "glob")) {
++        const pattern = part.state.input.pattern
++        if (typeof pattern === "string" && pattern) {
++          const location = typeof part.state.input.path === "string" ? part.state.input.path : "."
++          const meta = part.state.metadata
++          const count = part.tool === "grep" ? meta.totalMatches ?? meta.matches : meta.total ?? meta.count
++          const key = JSON.stringify([part.tool, pattern, location])
++          // 同一搜索只保留最近结果，预算按去重后的真实时间顺序截取。
++          searches.delete(key)
++          searches.set(key, { tool: part.tool, pattern: pattern.slice(0, 60), path: location, matches: typeof count === "number" ? count : 0 })
++        }
++      }
+       if (part.type !== "tool" || part.tool !== "read" || part.state.status !== "completed") continue
+       const parsed = Schema.decodeUnknownOption(Receipt)(part.state.metadata.read)
+@@ -48,3 +62,3 @@
+-  if (files.size === 0) return undefined
++  if (files.size === 0 && searches.size === 0) return undefined
+   // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
+   const visible = [...files.values()].toReversed().slice(0, 20)
+@@ -73,8 +87,11 @@
+   return [
+-    "## Evidence Handoff", "", "### Inspected Files",
+-    "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows,
++    "## Evidence Handoff",
++    ...(rows.length ? ["", "### Inspected Files", "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows] : []),
+     ...(files.size > visible.length ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`] : []),
++    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern)} | ${cell(search.path)} | ${search.matches} |`)] : []),
++    ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
+     "", "### Lost Context Notice", "- Use current evidence before repeating reads or commands.",
+     "- Treat stale evidence as advisory only.",
++    `- This is compaction #${compactionCount}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
+   ].join("\n")
+ })
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
@@ -701,7 +795,7 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
 +const PRUNE_PROTECTED_TOOLS = ["skill", "read"]
  // #255：保留预算上下限翻倍——长会话尾部保留 4K-16K 令牌，降低频繁压缩对长任务的扰动
  const MIN_PRESERVE_RECENT_TOKENS = 4_000
-@@ -144,7 +146,11 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
+@@ -144,9 +146,13 @@ function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model
  // #256：memento 预算没有下限——与整轮尾部不同，它是 summary+tail 之上的增量，
  // 小窗口模型必须允许把它缩到 0，否则压缩重放后立刻再次溢出。
  function preserveRecentUserBudget(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
@@ -716,7 +810,11 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
    )
  }
  
-
+@@ -611,3 +617,3 @@
+       if (result === "continue" && !processor.message.error) {
+-        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree)
++        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1)
+         if (handoff) yield* session.updatePart({
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
@@ -853,55 +951,26 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
          const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
  
          while (true) {
-@@ -1724,12 +1729,11 @@ const layer = Layer.effect(
-             }).inputTokens
-             // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量
-             // #175：overflow 使用含 media 的 estimatedInput
--            if (
--              yield* compaction.isOverflow({
--                tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
--                model,
--              })
--            ) {
-+            const isOverflowing = yield* compaction.isOverflow({
-+              tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+              model,
-+            })
-+            if (isOverflowing) {
-               // #140：auto compact 使用 estimatedInput 窗口
-               // #242：auto compact 直接执行而非排队为历史任务，避免留下可重放的 compact 命令
-               const compacted = yield* compaction.run({
-@@ -1738,9 +1742,30 @@ const layer = Layer.effect(
-                 model: lastUser.model,
-                 auto: true,
-               })
-+              // [local-smark] compaction 后重置 nearOverflow 提示标志：
-+              // 下一轮 compaction 周期可以再次提示
-+              nearOverflowNotified = false
-               if (compacted === "stop") return "break" as const
-               return "continue" as const
-             }
-+            // [local-smark] 上下文接近溢出时的轻量提示：仅首次达到 80% usable 时注入一次。
-+            // 提示是 ephemeral 的（仅存在于 messages 数组，不持久化到 DB），
-+            // 不会泄漏给 compaction 模型。compaction 后标志重置，下一周期可再次提示。
-+            // 不限制工具使用、不退化回复质量；任务仍在进行时模型应忽略并按用户指令执行。
+@@ -1565,3 +1570,13 @@ const layer = Layer.effect(
+             const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
++            // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
 +            if (!nearOverflowNotified && !isLastStep) {
++              const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
++              const estimatedInput = prior?.role === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
 +              const usableTokens = usable({ cfg: yield* config.get(), model })
 +              if (usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)) {
-+                messages.push({
-+                  role: "user" as const,
-+                  // [local-smark] 提示重点：避免大量内容进入上下文（大文件读取、
-+                  // 宽范围 grep 等），而非缩短回复。不降低回复质量。
-+                  // 任务仍在进行时忽略此提示，按用户指令正常执行。
-+                  content:
-+                    "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.",
-+                })
++                modelMsgs.push({ role: "user", content: "Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions." })
 +                nearOverflowNotified = true
 +              }
 +            }
-             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
-             handle.message.tokens.input = estimatedInput
-             // #127：pending 快照落 assistant message（首 chunk/step-start 前即可读）
+             const result = yield* handle.process({
+               user: lastUser,
+@@ -1622,4 +1637,5 @@ const layer = Layer.effect(
+             if (result === "compact") {
++              nearOverflowNotified = false
+               // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
+               // 执行 compaction，不留可重放标记给下一轮 loop
+               const compacted = yield* compaction.run({
 
 diff --git a/packages/opencode/src/tool/glob.ts b/packages/opencode/src/tool/glob.ts
 --- a/packages/opencode/src/tool/glob.ts
@@ -988,7 +1057,7 @@ diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/t
 diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
 --- a/packages/opencode/src/tool/read-outline.ts
 +++ b/packages/opencode/src/tool/read-outline.ts
-@@ -301,3 +301,37 @@ stream.destroy()
+@@ -309,3 +309,38 @@ stream.destroy()
    // #142：返回大纲
  return { items, truncated }
  }
@@ -1005,6 +1074,7 @@ diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/
 +  offset: number,
 +  size: number,
 +  modifiedMs: number,
++  totalExact = true,
 +): Promise<Outline | undefined> {
 +  // [local-smark] 仅在 offset<=1 时使用缓存（readOutline 内部也仅在此条件生成 outline）。
 +  // offset>1 时不查缓存也不生成 outline，保持原有行为。
@@ -1017,7 +1087,7 @@ diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/
 +  if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {
 +    return cached.outline
 +  }
-+  const outline = await readOutline(filepath, total, offset)
++  const outline = await readOutline(filepath, total, offset, totalExact)
 +  // LRU 淘汰：超限时删最早插入的条目（Map 保持插入顺序）
 +  if (outlineCache.size >= OUTLINE_CACHE_LIMIT) {
 +    const firstKey = outlineCache.keys().next().value
@@ -1060,7 +1130,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
  
  // #142：区间元数据写入 metadata.read，供后续 stub 比对
  type ReadRangeMeta = {
-@@ -933,3 +938,44 @@ const stub = findReadStub(visibleReads, current)
+@@ -846,9 +851,52 @@ const stub = findReadStub(visibleReads, current)
          }
        }
  
@@ -1078,7 +1148,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +          const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
 +          const visibleEnd = overlapEnd
 +          const nextOffset = visibleEnd + 1
-+          const reachedEof = visibleEnd >= file.count
++          const reachedEof = file.totalExact && visibleEnd >= file.count
 +          const offsetExit = reachedEof
 +            ? "No unread lines remain (end of file reached); use grep to locate symbols."
 +            : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
@@ -1105,14 +1175,12 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +        }
 +      }
 +
-@@ -941,7 +987,9 @@ const stub = findReadStub(visibleReads, current)
- 
        // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
        // #142：异步 outline
--const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset))
+-const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset, file.totalExact))
 +// [local-smark] 使用 readOutlineCached 替代 readOutline，
 +// 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
-+const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs))
++const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact))
        // #142：部分重叠仍返回内容，但附 note
        // #142：overlap 判定
  const overlap = findOverlapNote(visibleReads, current)
@@ -1120,7 +1188,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -324,43 +324,54 @@ function preview(text: string) {
+@@ -292,42 +292,54 @@ function preview(text: string) {
  }
  
  function tail(text: string, maxLines: number, maxBytes: number) {
@@ -1145,7 +1213,6 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 -    return {
 -      text,
 -      cut: false,
--      // #293：未截断时没有隐藏区；诊断仍走完整 visible 输出
 -      hidden: "",
 -    }
 +    return { text, cut: false, hidden: "" }
@@ -1178,11 +1245,11 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
      bytes += size
    }
    const visible = out.join("\n")
--  // #293：tail 只展示末尾窗口；hidden 是同一个 source 中被窗口丢弃的前缀。
--  // 后续诊断只扫描这段文本，避免从全量输出再反推“是否已经可见”。
 -  return {
 -    text: visible,
 -    cut: true,
+-    // 隐藏诊断只扫描同一 source 被 tail 丢弃的前缀，避免重复可见错误。
+-    // 字符切片沿用最终窗口边界，保留超长行的隐藏部分。
 -    hidden: visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source,
 -  }
 +  // hidden 语义按方向区分：head 丢弃后缀，tail 丢弃前缀（与 #293 一致）
@@ -1193,16 +1260,11 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
  }
  
  const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
-@@ -1089,7 +1100,19 @@ export const ShellTool = Tool.define(
-       // #282：截断前先统计 normalize 后全文，notice 的 total 必须是完整输出量
-       const normalizedStats = outputStats(normalized)
-       // #293：诊断收集改为隐藏模式，tail 输入跟随压缩开关，被丢弃的前缀进入隐藏诊断
--      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
-+      // [local-smark] command-aware truncation direction：
-+      // 列表/树形命令（ls/find/tree/git status/git diff）用 head 保开头（文件列表在头部），
-+      // 日志/流式命令（typecheck/test/build）用 tail 保末尾（错误/结果在尾部）。
-+      // 内联环境变量剥离逻辑（与 compaction.ts stripLeadingEnvAssignments 同款），
-+      // 避免 FOO=bar git status 被误判为非列表命令。
+@@ -717,6 +728,14 @@ export const ShellTool = Tool.define(
+       // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
+       const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
+-      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
++      // 列表类命令保留开头，验证日志保留末尾；环境变量前缀不参与命令分类。
 +      let cmdForMatch = input.command.trim()
 +      while (true) {
 +        const m = cmdForMatch.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
@@ -1210,11 +1272,11 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +        cmdForMatch = cmdForMatch.slice(m[0].length).trimStart()
 +      }
 +      const useHead = /^(ls|dir|find|tree|git\s+(status|diff|log|ls-files))/.test(cmdForMatch.toLowerCase())
-+      const end = (useHead ? head : tail)(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
++      const end = (useHead ? head : tail)(compressed.text, limits.maxLines, limits.maxBytes)
        if (end.cut) {
          cut = true
-         // #293：被 tail 窗口丢弃的前缀进入隐藏诊断
-@@ -1106,13 +1129,30 @@ export const ShellTool = Tool.define(
+         hiddenDiag.push(end.hidden)
+@@ -732,3 +751,20 @@ export const ShellTool = Tool.define(
        const emptyOutput = end.text.length === 0
        let output = emptyOutput ? "(no output)" : end.text
  
@@ -1235,21 +1297,17 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +          "\n- The process is hung; check the command and environment."
 +      }
 +
-       if (cut && file) {
-         // #282：统一 output_truncated notice；shown 为 tail 预览的实际行字节量
-         output =
-           formatOutputTruncatedNotice({
-             source: "shell",
-             total: normalizedStats,
+@@ -740,5 +776,5 @@ export const ShellTool = Tool.define(
+             total: { bytes: total.bytes, lines: total.lines + Number(trailingLine) },
 -            shown: { direction: "tail", ...outputStats(output) },
 +            shown: { direction: useHead ? "head" : "tail", ...outputStats(output) },
              path: file,
            }) +
            "\n\n" +
-@@ -1145,6 +1185,20 @@ export const ShellTool = Tool.define(
+@@ -772,6 +808,20 @@ export const ShellTool = Tool.define(
+       if (meta.length > 0) {
+         output += "\n\n" + meta.join("\n")
        }
-       // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
-       const displayOutput = preview(display.value())
 +
 +      // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
 +      // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
@@ -1267,12 +1325,13 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
        return {
          title: input.command,
          metadata: {
-@@ -1163,6 +1217,8 @@ export const ShellTool = Tool.define(
-           durationMs: Date.now() - started,
-           diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
-           diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
+@@ -786,6 +836,8 @@ export const ShellTool = Tool.define(
+           // 错误频率与采样遗漏独立持久化，未观察的长行中段不能被计为无错误。
+           diagnosticErrorLikeLines: diagnostic.errorLikeLines,
+           diagnosticWarningLikeLines: diagnostic.warningLikeLines,
 +          // [local-smark] hasErrors flag 供 TUI 和后续逻辑判断验证是否失败
 +          hasErrors,
+           diagnosticDiscardedChars: diagnostic.discardedChars,
          },
          output,
        }
@@ -1324,10 +1383,8 @@ diff --git a/packages/opencode/src/tool/skill.ts b/packages/opencode/src/tool/sk
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -15,6 +15,54 @@ import { EffectBridge } from "@/effect/bridge"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- // #280：task_id 恢复需要 compact 后的完整子权限集合并回写 session
- import { Permission } from "@/permission"
+@@ -17,3 +17,51 @@ import { Permission } from "@/permission"
+ import { Database } from "@opencode-ai/core/database/database"
 +
 +// [local-smark] 从父 session 的 messages 提取已读文件列表，
 +// 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
@@ -1376,13 +1433,10 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 +  if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
 +  return lines.join("\n")
 +}
- import { Database } from "@opencode-ai/core/database/database"
  
  export interface TaskPromptOps {
-@@ -61,6 +109,13 @@ export const Parameters = Schema.Struct({
-     description:
-       "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
-   }),
+@@ -52,4 +100,11 @@ const BaseParameterFields = {
+   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
 +  // [local-smark] 控制是否传递父 session 的已读文件列表给子 agent。
 +  // 'summary': 传递文件路径+range 表格（新 subagent 默认）。
 +  // 'none': 不传递（resume 默认，子 session 已有自己的 read 历史）。
@@ -1390,9 +1444,9 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 +    description:
 +      "Controls whether to pass parent session's inspected file list to the subagent. 'none': no file list (default for resume). 'summary': compact file path + range table (default for new subagents).",
 +  }),
- })
+ }
  
- function renderOutput(input: {
+ const BaseParameters = Schema.Struct(BaseParameterFields)
 @@ -213,6 +268,16 @@ export const TaskTool = Tool.define(
  
        const runTask = Effect.fn("TaskTool.runTask")(function* () {

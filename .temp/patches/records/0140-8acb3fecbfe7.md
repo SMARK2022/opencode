@@ -1,5 +1,17 @@
 # Record 0140-8acb3fecbfe7
 
+## 2026-10-17 扩大回归修订
+- 395 终态的 processor-effect 回归发现：0072 为既有 overflow 用例加入800字符指令后，原20-token窗口必在0140新增的 prepared 预检中终止，因而从未调用 provider；旧断言却仍要求响应文本和确认用量。
+- 保留预检生产路径，将本用例窗口设为20000、provider确认输入设为30000，使准备估算可发送、真实用量随后超限；文本、step-finish、800字符归属、确认标记、密度和一次provider调用等断言全部保留，并同步确认账本的精确输入断言。
+- 修订进入0140而非后续补偿项；未修改0072的独立统计能力，也未修改0242的压缩实现。累计重建和回归结果待实跑补充。
+- 官方395从exact baseline重放395/395并通过30workspace类型检查（`typecheck-0395-2026-10-17T12-36-18-316Z.md`）；隔离执行processor-effect、llm-native、effect/runner三文件61 pass/0 fail/214断言，包含原overflow及0392消息边界回归。
+- 0136–0140完整五项新双审：升序`ses_eb60a72d1ffe5bUYFRMNLmxcpp`、降序`ses_eb60a7285ffeK7UEA0nJyf7hl9`均5/5 PASS，无确认B/G。0139局部Unix信号转发/断线文案差异及未跑专项记N；不据此宣称累计CI全绿或追加无关改动。
+
+## 2026-10-13 v1.18.32 适配
+- V1 请求体准备已迁入 Processor 的 onRequestPrepared，删除 prompt 对旧 lastFinished 的提前判断，在实际正文估算后接入现有 compact 返回路径；局部控制信号只终止本次未发送请求，不伪造 provider 错误或触发重试。
+- 比率仍按源要求限制为 3–4，复用已有 Token.estimateRequest 样本与字符统计，不新增正文拼装或第二 serializer。V2 的 compactIfNeeded 已判断当前已构建 request 而非旧助手 tokens，保留该路径。
+- 原“压缩后保留旧 tail 不应再次压缩”测试完整保留，等待累计与聚焦验证。
+
 ## Identity
 - Index: **140**
 - Current: `.temp/patches/current/0140-8acb3fecbfe7.patch`

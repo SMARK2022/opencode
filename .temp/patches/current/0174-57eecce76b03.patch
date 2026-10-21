@@ -18,14 +18,65 @@ new file mode 100644
 +  if (Math.abs(num) >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M"
 +  // #174：绝对值达 1e3 用 K 后缀
 +  if (Math.abs(num) >= 1_000) return (num / 1_000).toFixed(1) + "K"
-+  // #174：其余四舍五入为整数
-+  return Math.round(num).toString()
++  // #174：小额费用保留四位小数；去掉尾零，整数计数与紧凑量级格式保持不变。
++  return Number(num.toFixed(4)).toString()
 +}
+diff --git a/packages/opencode/test/cli/stats-money.test.ts b/packages/opencode/test/cli/stats-money.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/cli/stats-money.test.ts
+@@ -0,0 +1,46 @@
++import { expect, test } from "bun:test"
++import { renderCharts, renderCosts, renderModels, renderSessions, renderTokens } from "../../src/cli/cmd/stats-render"
++import type { StatsReport } from "../../src/cli/cmd/stats-data"
++import { formatNumber } from "../../src/cli/format"
++import { renderHeatmap, renderRoundedLineChart } from "../../src/cli/cmd/stats-charts"
++
++test("small costs survive total, model, daily and session rendering", () => {
++  // 最小报告只提供这些真实 renderer 消费的字段，金额断言不能仅验证 formatter 本身。
++  const tokens = { input: 80, output: 10, reasoning: 10, cache: { read: 0, write: 0 }, total: 100 }
++  const report = {
++    totalSessions: 1, days: 1, total: { cost: 0.25, tokens },
++    models: [{ id: "sample-model", label: "sample-model", cost: 0.25, tokens, assistantCalls: 2, requests: 1, sessions: 1 }],
++    providers: [{ id: "sample-provider", label: "sample-provider", cost: 0.25, tokens }],
++    modelSeries: [], providerSeries: [],
++    daily: [{ day: 0, label: "day", cost: 0.25, tokens }],
++    sessions: [{ id: "sample-session", title: "sample-session", cost: 0.25, tokens }],
++  } as unknown as StatsReport
++  const costs = renderCosts(report, { color: "never" })
++  expect(costs).toContain("cost=0.25")
++  expect(costs).toMatch(/sample-model[^\n]*0\.25/)
++  expect(costs).toMatch(/day[^\n]*0\.25/)
++  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[^\n]*cost=0\.25/)
++  expect(formatNumber(100)).toBe("100")
++  expect(formatNumber(1000)).toBe("1.0K")
++  expect(formatNumber(0.001)).toBe("0.001")
++  expect(costs).toContain("Provider cost waterfall")
++  expect(costs).toContain("Session cost distribution")
++  expect(renderModels(report)).toMatch(/calls=2 requests=1 sessions=1/)
++  expect(renderTokens(report)).toContain("input=80 output=20")
++  expect(renderCharts(report)).toContain("Model mix over time")
++  // 完整月份的两个端点都必须保留，不能只渲染最后十二日。
++  const points = Array.from({ length: 31 }, (_, index) => ({ day: new Date(2026, 0, index + 1).getTime(), dow: (new Date(2026, 0, index + 1).getDay() + 6) % 7, value: index, label: `01-${String(index + 1).padStart(2, "0")}` }))
++  expect(renderHeatmap({ points }).join("\n")).toContain("01-01 .. 01-31")
++})
++
++test("line charts retain every series and its identity", () => {
++  // 相异的值与名称保证预测上下界、多个工具都被消费，而非仅输出一条序列。
++  const text = renderRoundedLineChart({ series: [{ id: "lower", label: "lower-bound", points: [{ x: "day", y: 1 }] }, { id: "upper", label: "upper-bound", points: [{ x: "day", y: 9 }] }] }).join("\n")
++  expect(text).toContain("lower-bound")
++  expect(text).toContain("upper-bound")
++  expect(text).toMatch(/day[^\n]*9/)
++  // 宽度只约束显示，不能丢掉长区间的早期峰值或末端日期。
++  const full = renderRoundedLineChart({ width: 20, series: [{ id: "full", label: "Full", points: Array.from({ length: 75 }, (_, day) => ({ x: `day-${day}`, y: day === 0 ? 999 : 1 })) }] }).join("\n")
++  expect(full).toMatch(/day-0[^\n]*999/)
++  expect(full).toContain("day-74")
++})
 diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -0,0 +1,636 @@
+@@ -0,0 +1,650 @@
 +import { Effect } from "effect"
 +import { Session } from "@/session/session"
 +// #174：assistant 表优先费用
@@ -250,7 +301,7 @@ new file mode 100644
 +}
 +
 +// #174：addUsage 同步 cost 与次数
-+const addUsage = (target: UsageTotals, event: UsageEvent) => {
++const addUsage = (target: UsageTotals, event: UsageTotals | UsageEvent) => {
 +  addTokens(target.tokens, event.tokens)
 +  target.cost += event.cost
 +  target.requests += event.requests
@@ -503,23 +554,32 @@ new file mode 100644
 +      totalEvents.push(...requestEvents)
 +      breakdownEvents.push(...requestEvents)
 +    }
-+  } else {
-+    for (const message of visibleMessages) {
-+      if (message.info.role !== "assistant") continue
-+      const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
-+      const event = {
-+        time: message.info.time.created,
-+        sessionID: session.id,
-+        providerID: message.info.providerID,
-+        modelID: message.info.modelID,
-+        tokens,
-+        cost: message.info.cost ?? 0,
-+        requests: 0,
-+        assistantCalls: 1,
-+      }
-+      totalEvents.push(event)
-+      breakdownEvents.push(event)
++  }
++  // #174：助手 ID 去重后补历史消息，新请求账本不能遮蔽旧模型。
++  const tracked = new Set(assistantUsageRows.map((row) => row.assistant_message_id))
++  // #174：缺明细的已确认请求由汇总行计量；零用量 noReply 不覆盖历史消息。
++  const fallbackRequests = new Set(
++    requestUsageRows
++      .filter((row) => row.assistant_count > 0 || row.tokens_total > 0 || row.cost_micros > 0)
++      .map((row) => row.request_id),
++  )
++  assistantUsageRows.forEach((row) => fallbackRequests.delete(row.request_id))
++  for (const message of visibleMessages) {
++    if (message.info.role !== "assistant") continue
++    if (tracked.has(message.info.id) || fallbackRequests.has(message.info.parentID)) continue
++    const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
++    const event = {
++      time: message.info.time.created,
++      sessionID: session.id,
++      providerID: message.info.providerID,
++      modelID: message.info.modelID,
++      tokens,
++      cost: message.info.cost ?? 0,
++      requests: 0,
++      assistantCalls: 1,
 +    }
++    totalEvents.push(event)
++    breakdownEvents.push(event)
 +  }
 +
 +  const toolUsage: Record<string, number> = {}
@@ -599,10 +659,15 @@ new file mode 100644
 +    }
 +
 +    for (const event of aggregate.totalEvents) {
-+      addUsage(total, event)
 +      addUsage(sessionUsage, event)
 +      addUsage(getDaily(daily, event.time), event)
 +    }
++    // 未筛选日期时沿用持久 Session 全历史累计，部分 request 账本只负责明细与次数。
++    if (cutoff === 0) {
++      sessionUsage.tokens = normalizeTokens(aggregate.session.tokens ?? emptyTokens())
++      sessionUsage.cost = aggregate.session.cost ?? 0
++    }
++    addUsage(total, sessionUsage)
 +
 +    for (const event of aggregate.breakdownEvents) {
 +      addGroup(models, event.modelID, event.modelID, event)
@@ -666,7 +731,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/cli/cmd/stats-charts.ts
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,368 @@
 +
 +import { formatNumber } from "../format"
 +import type { DailyUsage, StatsReport, UsageGroup, TokenTotals } from "./stats-data"
@@ -753,7 +818,7 @@ new file mode 100644
 +// #174：input/output/cache 层与分列绑定
 +export const layersFromTokenParts = (): ChartLayer[] => [
 +  { id: "input", label: "Input", color: "cyan", value: (d) => d.tokens.input },
-+  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output },
++  { id: "output", label: "Output", color: "green", value: (d) => d.tokens.output + d.tokens.reasoning },
 +  { id: "cacheRead", label: "Cache Read", color: "blue", value: (d) => d.tokens.cache.read },
 +  { id: "cacheWrite", label: "Cache Write", color: "magenta", value: (d) => d.tokens.cache.write },
 +]
@@ -774,13 +839,17 @@ new file mode 100644
 +// #174：renderRoundedLineChart 服务时间线折线，不承担 heatmap 命令
 +export const renderRoundedLineChart = (input: { title?: string; series: ChartSeries[]; width?: number; height?: number }) => {
 +  const w = input.width ?? Math.min(60, statsContentWidth())
-+  const series = input.series[0]
-+  if (!series || series.points.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
-+  const m = maxY(series.points)
++  const series = input.series.filter((item) => item.points.length > 0)
++  if (series.length === 0) return [input.title || "line", "(empty)"].filter(Boolean) as string[]
++  const m = Math.max(...series.map((item) => maxY(item.points)))
 +  const lines = input.title ? [input.title] : []
-+  for (const p of series.points.slice(-w)) {
-+    const n = Math.round((p.y / m) * 20)
-+    lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
++  // 多序列共用刻度并保留身份，预测上下界和各工具趋势不能静默退成第一条。
++  for (const item of series) {
++    if (series.length > 1) lines.push(fitVisible(item.label || item.id, w))
++    for (const p of item.points) {
++      const n = Math.round((p.y / m) * 20)
++      lines.push(`${fitVisible(String(p.x), 8)} ${bar(n, 20, "•")}${n ? "" : "·"} ${formatNumber(p.y)}`)
++    }
 +  }
 +  return lines
 +}
@@ -789,9 +858,14 @@ new file mode 100644
 +// #174：堆叠按层输出分量，缺层不插值
 +export const renderStackedAreaChart = (input: { title?: string; daily: DailyUsage[]; layers: ChartLayer[]; width?: number }) => {
 +  const lines = input.title ? [input.title] : []
-+  for (const d of input.daily.slice(-30)) {
-+    const parts = input.layers.map((l) => `${l.label[0] || "?"}:${formatNumber(l.value(d))}`)
-+    lines.push(`${fitVisible(d.label, 8)} ${parts.join(" ")}`)
++  const width = Math.max(1, input.width ?? Math.min(40, statsContentWidth() - 12))
++  const max = Math.max(1, ...input.daily.map((day) => input.layers.reduce((sum, layer) => sum + layer.value(day), 0)))
++  // 同一时间轴和总量刻度呈现组成，图例保留每个分量的名字。
++  lines.push(input.layers.map((layer, index) => `${"█▓▒░"[index % 4]} ${layer.label}`).join("  "))
++  for (const d of input.daily) {
++    const stack = input.layers.map((layer, index) => bar(layer.value(d) / max * width, width, "█▓▒░"[index % 4])).join("")
++    const parts = input.layers.map((layer) => `${layer.label}:${formatNumber(layer.value(d))}`)
++    lines.push(`${fitVisible(d.label, 8)} ${stack} ${parts.join(" ")}`)
 +  }
 +  return lines.length ? lines : ["(empty stack)"]
 +}
@@ -809,24 +883,31 @@ new file mode 100644
 +  width?: number
 +  formatter?: (n: number) => string
 +}) => {
-+  // week x weekday density — NOT a line/timeline projection
 +  const lines = input.title ? [paint(input.title, "cyan", undefined, true)] : []
-+  const byKey = new Map(input.points.map((p) => [`${p.day}-${p.dow}`, p.value]))
-+  const vals = input.points.map((p) => p.value)
-+  const hi = Math.max(1, ...vals, 0)
-+  lines.push("    Mo Tu We Th Fr Sa Su")
-+  const days = [...new Set(input.points.map((p) => p.day))].sort((a, b) => a - b).slice(-12)
-+  for (const day of days) {
-+    let row = fitVisible(String(day).slice(-4), 4)
-+// #174：热力一周七列固定顺序
++  const points = input.points.toSorted((a, b) => a.day - b.day)
++  const hi = Math.max(1, ...points.map((point) => point.value))
++  const weeks = new Map<number, { label: string; values: Map<number, number> }>()
++  // 本地周一作为行键，保留完整请求区间；毫秒尾数不能作为可读日期。
++  for (const point of points) {
++    const monday = new Date(point.day)
++    monday.setDate(monday.getDate() - point.dow)
++    monday.setHours(0, 0, 0, 0)
++    const week = weeks.get(monday.getTime()) ?? { label: `${String(monday.getMonth() + 1).padStart(2, "0")}-${String(monday.getDate()).padStart(2, "0")}`, values: new Map<number, number>() }
++    week.values.set(point.dow, point.value)
++    weeks.set(monday.getTime(), week)
++  }
++  if (points.length) lines.push(`${points[0].label ?? ""} .. ${points.at(-1)?.label ?? ""}`)
++  lines.push("       Mo Tu We Th Fr Sa Su")
++  for (const week of weeks.values()) {
++    let row = week.label
 +    for (let dow = 0; dow < 7; dow++) {
-+      const v = byKey.get(`${day}-${dow}`) ?? 0
++      const v = week.values.get(dow) ?? 0
 +      const idx = Math.min(DENSITY.length - 1, Math.round((v / hi) * (DENSITY.length - 1)))
 +      row += `  ${DENSITY[idx]}`
 +    }
 +    lines.push(row)
 +  }
-+  if (days.length === 0) lines.push("(empty heatmap)")
++  if (points.length === 0) lines.push("(empty heatmap)")
 +  return lines
 +}
 +
@@ -1023,8 +1104,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,202 @@
 +
++import { renderCompositionDonut, renderPercentStack, renderStreamStackChart, renderWaterfall, renderHistogram } from "./stats-charts"
 +import type { StatsReport } from "./stats-data"
 +// #174：render 再导出 formatNumber 方便调用
 +import { formatNumber } from "../format"
@@ -1088,6 +1170,23 @@ new file mode 100644
 +  "-".repeat(Math.min(60, statsContentWidth())),
 +]
 +
++// 分组时间序列共用同一图元，保留各模型/供应商身份与完整趋势数据。
++const renderUsageSeries = (series: StatsReport["modelSeries"], options: StatsRenderOptions, title: string) =>
++  renderRoundedLineChart({
++    title,
++    series: limitRows(series, options.limit).map((item) => ({
++      id: item.id, label: item.label || item.id,
++      points: item.points.map((point) => ({ x: point.label, y: options.metric === "cost" ? point.cost : point.tokens.total })),
++    })),
++  })
++
++// 分组台账补足排名图省略的计量，模型、供应商和扩展维度复用同一口径。
++const renderGroupDetails = (groups: StatsReport["models"], options: StatsRenderOptions) =>
++  limitRows(options.sort === "cost" ? groups.toSorted((a, b) => b.cost - a.cost) : options.sort === "calls" ? groups.toSorted((a, b) => b.assistantCalls - a.assistantCalls) : groups, options.limit).flatMap((group) => [
++    `${group.label || group.id} cost=${formatNumber(group.cost)} tokens=${formatNumber(group.tokens.total)} calls=${group.assistantCalls} requests=${group.requests} sessions=${group.sessions} $/call=${formatNumber(group.assistantCalls ? group.cost / group.assistantCalls : 0)}`,
++    `  input=${formatNumber(group.tokens.input)} output=${formatNumber(group.tokens.output + group.tokens.reasoning)} cacheRead=${formatNumber(group.tokens.cache.read)} cacheWrite=${formatNumber(group.tokens.cache.write)}`,
++  ])
++
 +// #174：dashboard 固定模型榜后日线
 +// #174：dashboard 固定先模型榜后日线
 +export const renderDashboard = (report: StatsReport, options: StatsRenderOptions = {}) =>
@@ -1115,8 +1214,10 @@ new file mode 100644
 +  [
 +    ...header(report, "stats models"),
 +    ...renderRankBars({
-+      rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
++      rows: limitRows(options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models, options.limit).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
 +    }),
++    ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
++    ...renderGroupDetails(report.models, options),
 +  ].join("\n")
 +
 +// #174：providers 页数据源独立
@@ -1124,8 +1225,10 @@ new file mode 100644
 +  [
 +    ...header(report, "stats providers"),
 +    ...renderRankBars({
-+      rows: limitRows(report.providers, options.limit).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
++      rows: limitRows(options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers, options.limit).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
 +    }),
++    ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
++    ...renderGroupDetails(report.providers, options),
 +  ].join("\n")
 +
 +// #174：折线加堆叠非热力命令：只读报告生成终端行，不写库
@@ -1144,7 +1247,7 @@ new file mode 100644
 +  const sort = options.sort ?? "cost"
 +  const rows = [...report.sessions].sort((a, b) => {
 +    if (sort === "tokens") return b.tokens.total - a.tokens.total
-+    if (sort === "calls") return b.requests - a.requests
++    if (sort === "calls") return b.assistantCalls - a.assistantCalls
 +    if (sort === "updated") return b.updated - a.updated
 +    return b.cost - a.cost
 +  })
@@ -1160,6 +1263,10 @@ new file mode 100644
 +    ...header(report, "stats charts"),
 +    ...renderRankBars({ rows: limitRows(report.models, options.limit ?? 8).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
 +    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
++    ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
++    ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
++    ...renderStackedAreaChart({ title: "Token components", daily: report.daily, layers: layersFromTokenParts() }),
++    ...renderStreamStackChart({ title: "Model mix over time", daily: report.daily, layers: limitRows(report.modelSeries, options.limit).map((series) => ({ id: series.id, label: series.label || series.id, color: "cyan", value: (day) => { const point = series.points.find((point) => point.day === day.day); return options.metric === "cost" ? point?.cost ?? 0 : point?.tokens.total ?? 0 } })) }),
 +  ].join("\n")
 +
 +// #174：双热力加矩阵禁止 timeline 别名
@@ -1183,6 +1290,8 @@ new file mode 100644
 +    ...header(report, "stats costs"),
 +    ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.cost })) }),
 +    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => d.cost)] }),
++    ...renderWaterfall({ title: "Provider cost waterfall", steps: report.providers.map((provider) => ({ label: provider.label || provider.id, delta: provider.cost })) }),
++    ...renderHistogram({ title: "Session cost distribution", values: report.sessions.map((session) => session.cost) }),
 +  ].join("\n")
 +
 +// #174：tokens 页先打印 cache 分列
@@ -1190,8 +1299,11 @@ new file mode 100644
 +export const renderTokens = (report: StatsReport, options: StatsRenderOptions = {}) =>
 +  [
 +    ...header(report, "stats tokens"),
-+    `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
++    `input=${formatNumber(report.total.tokens.input)} output=${formatNumber(report.total.tokens.output + report.total.tokens.reasoning)} cacheRead=${formatNumber(report.total.tokens.cache.read)} cacheWrite=${formatNumber(report.total.tokens.cache.write)}`,
 +    ...renderRankBars({ rows: limitRows(report.models, options.limit).map((m) => ({ label: m.label || m.id, value: m.tokens.total })) }),
++    ...renderStackedAreaChart({ title: "Input / output / cache over time", daily: report.daily, layers: layersFromTokenParts() }),
++    ...renderPercentStack({ title: "Token share", columns: report.daily.map((day) => ({ label: day.label, parts: layersFromTokenParts().map((layer) => ({ label: layer.label, value: layer.value(day) })) })) }),
++    ...renderCompositionDonut({ title: "Top model token share", parts: limitRows(report.models, options.limit).map((model) => ({ label: model.label || model.id, value: model.tokens.total })) }),
 +  ].join("\n")
 +
 +export { formatNumber }
@@ -1769,7 +1881,7 @@ new file mode 100644
 diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/cmd/stats.ts
 --- a/packages/opencode/src/cli/cmd/stats.ts
 +++ b/packages/opencode/src/cli/cmd/stats.ts
-@@ -1,475 +1,453 @@
+@@ -1,393 +1,453 @@
 +import type { Argv } from "yargs"
  import { Effect } from "effect"
 +// #174：effectCmd 包装 handler 为 Effect
@@ -1778,8 +1890,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 -import { NotFoundError } from "@/storage/storage"
 -import { Database } from "@opencode-ai/core/database/database"
 -import { SessionTable } from "@opencode-ai/core/session/sql"
--import { RequestUsageTable, RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
--import { eq, sql } from "drizzle-orm"
+-import { RequestUsageAssistantTable } from "@opencode-ai/core/session/request-usage.sql"
+-import { eq } from "drizzle-orm"
 -import { Project } from "@/project/project"
 +// #174：InstanceRef 提供 currentProject
  import { InstanceRef } from "@/effect/instance-ref"
@@ -1820,10 +1932,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +  tools?: number
 +}
  
--// Per-model 用量统计结构
--// per-model 聚合结构：用于 stats 命令的模型级别用量统计
+-// 模型明细与 Session 总量用途不同，只在这里统计助手身份对应的模型分布。
+-// messages 是助手调用次数，多次相同助手修订已经在 ledger 层去重。
 -export type ModelUsageEntry = { messages: number; tokens: { input: number; output: number; cache: { read: number; write: number } }; cost: number }
--// 累加 per-model 用量到 Map：按 provider/model 聚合 token 和 cost
+-// 每次调用累加一个助手，不能把 SQL 的一条分组汇总当作一次模型调用。
 -function upsertModelUsage(acc: Record<string, ModelUsageEntry>, key: string, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number) {
 -  if (!acc[key]) acc[key] = { messages: 0, tokens: { input: 0, output: 0, cache: { read: 0, write: 0 } }, cost: 0 }
 -  acc[key].messages++; acc[key].tokens.input += input; acc[key].tokens.output += output; acc[key].tokens.cache.read += cacheRead; acc[key].tokens.cache.write += cacheWrite; acc[key].cost += cost; 
@@ -2094,47 +2206,6 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 -  let earliestTime = Date.now()
 -  let latestTime = 0
 -
--  // 从 request_usage 表加载精确用量数据
--  const { db } = yield* Database.Service
--  const sessionIds = filteredSessions.map((s) => s.id)
--  // per-session 聚合查询：包含 cost 和 per-category token 用量
--  const requestUsageRows = sessionIds.length > 0
--    ? yield* db.select({
--        sessionId: RequestUsageTable.session_id,
--        costMicros: sql<number>`sum(${RequestUsageTable.cost_micros})`,
--        tokensInput: sql<number>`sum(${RequestUsageTable.tokens_input})`,
--        tokensOutput: sql<number>`sum(${RequestUsageTable.tokens_output})`,
--        tokensReasoning: sql<number>`sum(${RequestUsageTable.tokens_reasoning})`,
--        tokensCacheRead: sql<number>`sum(${RequestUsageTable.tokens_cache_read})`,
--        tokensCacheWrite: sql<number>`sum(${RequestUsageTable.tokens_cache_write})`,
--      }).from(RequestUsageTable).where(sql`${RequestUsageTable.session_id} IN (${sql.raw(sessionIds.map(id => `'${id}'`).join(","))})`).groupBy(RequestUsageTable.session_id).all().pipe(Effect.orDie)
--    : []
--  // 助手用量明细：用于 per-model 聚合
--  const assistantUsageRows = sessionIds.length > 0
--    ? yield* db.select({
--        providerId: RequestUsageAssistantTable.provider_id,
--        modelId: RequestUsageAssistantTable.model_id,
--        inputTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_input})`,
--        outputTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_output})`,
--        reasoningTokens: sql<number>`sum(${RequestUsageAssistantTable.tokens_reasoning})`,
--        cacheRead: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_read})`,
--        cacheWrite: sql<number>`sum(${RequestUsageAssistantTable.tokens_cache_write})`,
--        costMicros: sql<number>`sum(${RequestUsageAssistantTable.cost_micros})`,
--      }).from(RequestUsageAssistantTable).where(sql`${RequestUsageAssistantTable.session_id} IN (${sql.raw(sessionIds.map(id => `'${id}'`).join(","))})`).groupBy(RequestUsageAssistantTable.provider_id, RequestUsageAssistantTable.model_id).all().pipe(Effect.orDie)
--    : []
--  // per-model 用量 Map：优先使用 request_usage 数据
--  const modelUsageMap: Record<string, ModelUsageEntry> = {}
--  if (assistantUsageRows.length > 0) {
--    for (const row of assistantUsageRows) {
--      upsertModelUsage(modelUsageMap, `${row.providerId}/${row.modelId}`, row.inputTokens, row.outputTokens + row.reasoningTokens, row.cacheRead, row.cacheWrite, row.costMicros / 1_000_000)
--    }
--  }
--  // per-session 用量映射：从 request_usage 表获取更精确的 cost 和 per-category tokens
--  const sessionUsageMap = new Map<string, { cost: number; tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } } }>(requestUsageRows.map(r => [r.sessionId, {
--    cost: r.costMicros / 1_000_000,
--    tokens: { input: r.tokensInput ?? 0, output: r.tokensOutput ?? 0, reasoning: r.tokensReasoning ?? 0, cache: { read: r.tokensCacheRead ?? 0, write: r.tokensCacheWrite ?? 0 } },
--  }]))
--
 -  const sessionTotalTokens: number[] = []
 -
 -  const results = yield* Effect.forEach(
@@ -2145,66 +2216,27 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 -          .messages({ sessionID: session.id })
 -          .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
 -
--        // 按会话加载 request_usage 数据：精确的 cost 和 per-category tokens
--        const sessionRequestUsageRows = yield* db.select().from(RequestUsageTable)
--          .where(eq(RequestUsageTable.session_id, session.id)).all().pipe(Effect.orDie)
+-        // 会话累计已覆盖 V1/V2 全历史，部分请求账本不能替换它。
+-        const sessionCost = session.cost ?? 0
+-        const sessionTokens = session.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+-        const db = (yield* Database.Service).db
 -        const sessionAssistantUsageRows = yield* db.select().from(RequestUsageAssistantTable)
 -          .where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
--
--        let sessionCost = 0
--        let sessionTokens = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 -        let sessionToolUsage: Record<string, number> = {}
--        // per-model 用量：有 DB 数据时从 request_usage_assistant 加载
+-        // 新旧助手在同一个模型结果中合并，不新增第二套会话总额算法。
 -        const sessionModelUsage: Record<string, ModelUsageEntry> = {}
 -
--        // DB 路径 vs 遗留路径：有 request_usage 数据时用精确 DB 聚合，否则回退到 message metadata
--        if (sessionRequestUsageRows.length > 0) {
--          // 有 DB 追踪数据：从 request_usage 获取精确 cost/tokens
--          for (const row of sessionRequestUsageRows) {
--            sessionCost += row.cost_micros / MICROS
--            sessionTokens.input += row.tokens_input
--            sessionTokens.output += row.tokens_output
--            sessionTokens.reasoning += row.tokens_reasoning
--            sessionTokens.cache.read += row.tokens_cache_read
--            sessionTokens.cache.write += row.tokens_cache_write
--          }
--          // per-model 从 assistant 表聚合
--          for (const row of sessionAssistantUsageRows) {
--            upsertModelUsage(
--              sessionModelUsage,
--              `${row.provider_id}/${row.model_id}`,
--              row.tokens_input,
--              // output 包含 reasoning tokens：与 stats 显示和遗留路径一致
--              row.tokens_output + row.tokens_reasoning,
--              row.tokens_cache_read,
--              row.tokens_cache_write,
--              row.cost_micros / MICROS,
--            )
--          }
--        } else {
--          // 遗留会话：从 message metadata 推导
--          for (const message of messages) {
--            if (message.info.role !== "assistant") continue
--            sessionCost += message.info.cost || 0
+-        // 模型明细按助手 ID 去重，旧消息只补尚未被账本覆盖的记录。
+-        const tracked = new Set(sessionAssistantUsageRows.map(row => row.assistant_message_id))
+-        for (const row of sessionAssistantUsageRows)
+-          upsertModelUsage(sessionModelUsage, `${row.provider_id}/${row.model_id}`, row.tokens_input,
+-            row.tokens_output + row.tokens_reasoning, row.tokens_cache_read, row.tokens_cache_write, row.cost_micros / MICROS)
+-        for (const message of messages) {
+-          if (message.info.role === "assistant" && !tracked.has(message.info.id)) {
 -            const t = message.info.tokens
--            if (t) {
--              sessionTokens.input += t.input || 0
--              sessionTokens.output += t.output || 0
--              sessionTokens.reasoning += t.reasoning || 0
--              sessionTokens.cache.read += t.cache?.read || 0
--              sessionTokens.cache.write += t.cache?.write || 0
--              upsertModelUsage(
--                sessionModelUsage,
--                `${message.info.providerID}/${message.info.modelID}`,
--                t.input || 0,
--                (t.output || 0) + (t.reasoning || 0),
--                t.cache?.read || 0,
--                t.cache?.write || 0,
--                message.info.cost || 0,
--              )
--            }
+-            upsertModelUsage(sessionModelUsage, `${message.info.providerID}/${message.info.modelID}`,
+-              t.input, t.output + t.reasoning, t.cache.read, t.cache.write, message.info.cost)
 -          }
--        }
 +export const StatsModelsCommand = effectCmd({
 +  command: "models",
 +  aliases: ["model"],
@@ -2215,8 +2247,6 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +  }),
 +})
  
--        // 工具用量始终从 message parts 获取
--        for (const message of messages) {
 -          for (const part of message.parts) {
 -            if (part.type === "tool" && part.tool) {
 -              sessionToolUsage[part.tool] = (sessionToolUsage[part.tool] || 0) + 1
@@ -2678,5 +2708,5 @@ diff --git a/packages/opencode/src/cli/cmd/session.ts b/packages/opencode/src/cl
 -import { formatNumber } from "./stats"
 +import { formatNumber } from "../format"
  
- // 微美分到美元的转换常量
+ // CLI 复用 source 的微美元存储单位，不能按微美分换算而放大费用。
  const MICROS = 1_000_000

@@ -1176,9 +1176,10 @@ diff --git a/packages/opencode/src/cli/cmd/daemon.ts b/packages/opencode/src/cli
 index ce459e4b4..b6e50b126 100644
 --- a/packages/opencode/src/cli/cmd/daemon.ts
 +++ b/packages/opencode/src/cli/cmd/daemon.ts
-@@ -80,81 +80,102 @@ const DaemonStopCommand = cmd({
+@@ -80,86 +80,111 @@ const DaemonStopCommand = cmd({
    command: "stop",
    describe: "stop the shared opencode daemon",
+   builder: (yargs) => withNetworkOptions(yargs),
    async handler() {
 -    await stopDaemon()
 +    // #535：typed result 由命令层统一渲染；错误以 throw 传播由 catch 统一转 stderr+exitCode
@@ -1195,18 +1196,26 @@ index ce459e4b4..b6e50b126 100644
  })
  
 -async function stopDaemon() {
--  const lock = await ServerLock.read()
 +// #535：stopDaemon 导出为 db 维护域的唯一安全停机 owner：expected 绑定 prompt 时用户看到的 PID/token，
 +// maintenanceIdle 请求 conditional shutdown，progress 承接人类进度；typed result 让调用方获得 offline 授权。
-+export async function stopDaemon(input: { expected?: ServerLockInfo; maintenanceIdle?: boolean; progress?: (message: string) => void } = {}) {
++export async function stopDaemon(input: { expected?: ServerLock.ServerLock; maintenanceIdle?: boolean; progress?: (message: string) => void } = {}) {
+   // 与发现共用DB/channel定位；网络参数不另建同库owner，也无需启动runtime读取配置。
+   const lockPath = ServerLock.placement()
+   // CLI 没有经过发现入口；私有 token 请求仍须绕过父进程继承的代理。
+   const noProxy = NetworkProxy.noProxyString(
+     [process.env.NO_PROXY, process.env.no_proxy].flatMap((value) => (value ?? "").split(",").map((s) => s.trim()).filter(Boolean)),
+   )
+   process.env.NO_PROXY = noProxy
+   process.env.no_proxy = noProxy
+-  const lock = await ServerLock.read(lockPath)
 +  // #535：expected 来自用户看到的 prompt；首次 control request 前就必须校验，不能只保护超时后的 force 阶段。
-+  const observed = await ServerLock.read()
++  const observed = await ServerLock.read(lockPath)
 +  if (input.expected && observed && !sameOwner(observed, input.expected)) {
 +    throw new Error(`Refused to stop opencode daemon pid=${input.expected.pid}: daemon owner changed.`)
 +  }
 +  // #535：expected 将用户看到的 PID/token 绑定到首次 shutdown；无新 owner 时旧进程自然退出可视为已停止。
 +  if (input.expected && !observed) {
-+    if (!ServerLock.alive(input.expected.pid)) return finishStop(input.expected, false)
++    if (!ServerLock.alive(input.expected.pid)) return finishStop(input.expected, false, lockPath)
 +    throw new Error(`Refused to stop opencode daemon pid=${input.expected.pid}: daemon lock disappeared.`)
 +  }
 +  const lock = input.expected ?? observed
@@ -1222,8 +1231,8 @@ index ce459e4b4..b6e50b126 100644
    if (!ServerLock.alive(lock.pid)) {
 -    // #259：pid 已不存在时只清理同 token lock——这样不会误删刚重启 daemon 写入的新 lock
 +    // #259：pid 已不存在时只清理同 token lock；这样不会误删刚重启 daemon 写入的新 lock。
-+    if (input.expected) return finishStop(lock, false)
-     await ServerLock.clearIfOwner(lock.token)
++    if (input.expected) return finishStop(lock, false, lockPath)
+     await ServerLock.clearIfOwner(lock.token, lockPath)
 -    UI.println("Removed stale opencode daemon lock.")
 -    return
 +    return { type: "stale" as const }
@@ -1241,13 +1250,11 @@ index ce459e4b4..b6e50b126 100644
 +    throw new Error(`opencode daemon pid=${lock.pid} does not support safe stop; restart the TUI or wait for idle shutdown.`)
    }
  
--  // #523：先走 graceful；只有在同 owner 复核通过后才考虑 force 分支
 -  const requestError = await requestStop(lock, controlPort)
 +  // #523：先走 graceful；只有在同 owner 复核通过后才考虑 force 分支。
 +  // #535：maintenance-idle 的 409 是业务拒绝，不得降级成普通 shutdown 或 process.kill。
 +  const requestError = await requestStop(lock, controlPort, input.maintenanceIdle === true)
    if (requestError) {
--    // #523：控制面不可达时不能升级 force——无法证明目标仍是请求时的 owner
 -    UI.error(`Failed to request opencode daemon shutdown pid=${lock.pid}: ${requestError}`)
 -    process.exitCode = 1
 -    return
@@ -1260,16 +1267,16 @@ index ce459e4b4..b6e50b126 100644
  
    if (await waitForStop(lock)) {
 -    // #259：只在停止成功后清锁，且仍走同 token 校验——进程若已换代则保留新 owner 的锁
--    await ServerLock.clearIfOwner(lock.token)
+-    await ServerLock.clearIfOwner(lock.token, lockPath)
 -    UI.println("Stopped opencode daemon.")
 -    return
 +    // #259：只在停止成功后清锁（finishStop 内），且仍走同 token 校验——进程若已换代则保留新 owner 的锁。
-+    return finishStop(lock, false)
++    return finishStop(lock, false, lockPath)
    }
  
--  // #523：graceful 超时后必须重读 lock 再确认 owner；期间换代的新 daemon 不能被旧 stop 误杀
+-  // placement 与首次请求一致；等待期间换代的 owner 不能被旧 stop 误杀。
 +  // #523：graceful 超时后必须重读 lock 再确认 owner；期间换代的新 daemon 不能被旧 stop 误杀。
-   const current = await ServerLock.read()
+   const current = await ServerLock.read(lockPath)
    if (!sameOwner(current, lock)) {
 -    UI.error(`Refused to force-stop opencode daemon pid=${lock.pid}: daemon owner changed.`)
 -    process.exitCode = 1
@@ -1277,39 +1284,37 @@ index ce459e4b4..b6e50b126 100644
 +    throw new Error(`Refused to force-stop opencode daemon pid=${lock.pid}: daemon owner changed.`)
    }
    if (!ServerLock.alive(lock.pid)) {
--    // #523：等待窗口内 owner 自然退出——仍走同 token 清锁，避免误删换代后的新锁
--    await ServerLock.clearIfOwner(lock.token)
+-    await ServerLock.clearIfOwner(lock.token, lockPath)
 -    UI.println("Stopped opencode daemon.")
 -    return
 +    // #523：等待窗口内 owner 自然退出——仍走同 token 清锁，避免误删换代后的新锁。
-+    return finishStop(lock, false)
++    return finishStop(lock, false, lockPath)
    }
  
 +  input.progress?.(`Graceful stop timed out; force-stopping opencode daemon pid=${current.pid}...`)
    const forceError = await forceStop(lock)
    if (forceError) {
--    // #523：SIGKILL 后仍存活属异常态；锁保留给下次 stop 或 stale 清理，不在此处盲删
 -    UI.error(`Failed to force-stop opencode daemon pid=${lock.pid}: ${forceError}`)
 -    process.exitCode = 1
 -    return
 +    // #523：SIGKILL 后仍存活属异常态；锁保留给下次 stop 或 stale 清理，不在此处盲删。
 +    throw new Error(`Failed to force-stop opencode daemon pid=${lock.pid}: ${forceError}`)
    }
-+  return finishStop(lock, true)
++  return finishStop(lock, true, lockPath)
 +}
 +
 +// #535：所有成功 stop 都在这里完成最后一次 owner 校验，调用方拿到 stopped 时才真正获得 offline handoff。
-+async function finishStop(lock: ServerLockInfo, forced: boolean) {
++async function finishStop(lock: ServerLock.ServerLock, forced: boolean, lockPath: string) {
 +  // PID 退出到 offline 授权之间再次读取 lock；replacement 出现时 token-safe clear 不足以证明数据库无人持有。
-+  const replacement = await ServerLock.read()
++  const replacement = await ServerLock.read(lockPath)
 +  if (replacement && !sameOwner(replacement, lock)) throw new Error(`Refused offline handoff: daemon owner changed.`)
-   await ServerLock.clearIfOwner(lock.token)
+   await ServerLock.clearIfOwner(lock.token, lockPath)
 -  UI.println("Force-stopped opencode daemon.")
 +  return { type: "stopped" as const, forced }
  }
  
--async function requestStop(lock: ServerLockInfo, controlPort: number) {
-+async function requestStop(lock: ServerLockInfo, controlPort: number, maintenanceIdle: boolean) {
+-async function requestStop(lock: ServerLock.ServerLock, controlPort: number) {
++async function requestStop(lock: ServerLock.ServerLock, controlPort: number, maintenanceIdle: boolean) {
    try {
 -    const response = await fetch(`http://127.0.0.1:${controlPort}${ServerLock.CONTROL_SHUTDOWN_PATH}`, {
 +    // #535：maintenance-idle query 请求 conditional shutdown——active/pending 维护时 daemon 返回 409。
@@ -1319,14 +1324,10 @@ index ce459e4b4..b6e50b126 100644
        method: "POST",
        // #259：control token 复用 lock token——端口证明"本机私有控制面"，token 证明"当前 lock owner"
        headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token },
-@@ -180,14 +201,16 @@ async function waitForStop(lock: ServerLockInfo, timeoutMs = STOP_TIMEOUT_MS) {
-   return false
- }
- 
--function sameOwner(current: ServerLockInfo | undefined, expected: ServerLockInfo) {
-+function sameOwner(current: ServerLockInfo | undefined, expected: ServerLockInfo): current is ServerLockInfo {
-   // #523：pid+token+controlPort 三重一致才认定同一 owner；任一变化都意味着锁已被接管
-   // controlPort 参与比较是因为同 pid 复用端口时锁内容可能被新实例改写
+@@ -188,9 +213,11 @@
+-function sameOwner(current: ServerLock.ServerLock | undefined, expected: ServerLock.ServerLock) {
++function sameOwner(current: ServerLock.ServerLock | undefined, expected: ServerLock.ServerLock): current is ServerLock.ServerLock {
+   // PID、token 和私有端口三者均来自重新读取的 owner，不能凭旧 PID 授权强停。
 +  // #535：dbPath 参与 identity，防止共享 lock 位置异常时把另一数据库的 daemon 当成原 owner。
    return (
      current !== undefined &&
@@ -1363,7 +1364,17 @@ index fc0fdf7e7..a4954ca6e 100644
  
  
  class MaintenanceUnavailableError extends Error {}
-@@ -83,10 +90,279 @@ async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init
+@@ -53,6 +60,7 @@ async function liveDaemon() {
+-  const lock = await ServerLock.read()
++  const lockPath = ServerLock.placement()
++  const lock = await ServerLock.read(lockPath)
+   if (!lock) return
+   if (path.resolve(lock.dbPath) !== path.resolve(Database.path())) return
+   if (!ServerLock.alive(lock.pid)) {
+-    await ServerLock.clearIfOwner(lock.token)
++    await ServerLock.clearIfOwner(lock.token, lockPath)
+     return
+@@ -83,6 +91,275 @@ async function daemonRequest(lock: ServerLock.ServerLock, pathname: string, init
  }
  
  function printMaintenance(value: unknown) {
@@ -1373,7 +1384,6 @@ index fc0fdf7e7..a4954ca6e 100644
 +  UI.println(JSON.stringify(value, null, 2))
  }
  
--async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.PreparedMaintenance) {
 +// #535：mode 在任何 prompt/ANSI 前一次决定，避免同一命令中途从 machine 输出切换成人类输出。
 +function interactive(json: boolean) {
 +  // 人类输出同时要求可见终端和可读输入；重定向/脚本不得进入 ANSI 或 prompt 分支。
@@ -1564,7 +1574,7 @@ index fc0fdf7e7..a4954ca6e 100644
 +// #535：与 TUI reconnect 共用选主锁；从 expected-owner stop 到 offline 序列结束都禁止 replacement daemon 发布。
 +function daemonElection() {
 +  // 75s 超时覆盖最长 offline 压缩序列的启动等待；5s stale 阈值与 TUI reconnect 的接管判定一致。
-+  return Flock.acquire("opencode.server", { dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
++  return Flock.acquire(`opencode.server:${ServerLock.placement()}`, { dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
 +}
 +
 +// #535：online polling 只接受同一 taskID 的 durable terminal；failed/interrupted 不能进入 vacuum。
@@ -1624,7 +1634,7 @@ index fc0fdf7e7..a4954ca6e 100644
 +}
 +
 +// #535：standalone 可保留 daemon 域；combined 路径显式传 null，确保停机后只走 offline lease。
-+async function runVacuum(db: ColdStorage.TxOrDb, pageSize: number, human: boolean, lock: ServerLock.ServerLock | null = null) {
++async function runVacuum(db: Database.Interface, pageSize: number, human: boolean, lock: ServerLock.ServerLock | null = null) {
 +  const started = performance.now()
 +  if (human) UI.println(`${UI.Style.TEXT_HIGHLIGHT}●${UI.Style.TEXT_NORMAL} Reclaiming SQLite pages...`)
 +  // 内层固定 machine：vacuum 结果只由外层渲染一次，避免 JSON 与人类行交错。
@@ -1641,12 +1651,11 @@ index fc0fdf7e7..a4954ca6e 100644
 +  return result
 +}
 +
-+async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.PreparedMaintenance, onTask?: (task: ColdStorage.MaintenanceTask) => void) {
-   if (prepared.type === "immediate") {
-     if (prepared.request.operation !== "vacuum") return ColdStorage.maintain(db, prepared)
-     const existing = await ServerLock.findNonterminalMaintenanceTask()
-@@ -110,7 +386,11 @@ async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.Prepared
-     return await ColdStorage.maintain(db, prepared, {
+@@ -94,1 +371,1 @@
+-async function runOffline(db: Database.Interface, prepared: ColdStorage.PreparedMaintenance) {
++async function runOffline(db: Database.Interface, prepared: ColdStorage.PreparedMaintenance, onTask?: (task: ColdStorage.MaintenanceTask) => void) {
+@@ -115,7 +392,11 @@ async function runOffline(db: Database.Interface, prepared: ColdStorage.Prepared
+     return await maintain(db, prepared, {
        task: prepared.task,
        lease,
 -      checkpoint: (task) => ServerLock.writeMaintenanceTask(task),
@@ -1658,15 +1667,15 @@ index fc0fdf7e7..a4954ca6e 100644
      })
    } finally {
      await lease.release()
-@@ -120,19 +400,150 @@ async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.Prepared
+@@ -125,19 +406,150 @@ async function runOffline(db: Database.Interface, prepared: ColdStorage.Prepared
  // 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
  // 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
  // #524：status 的 deadline 豁免只在 CLI 侧；task 类 control 仍走 2s acknowledgement 合同。
--async function executeMaintenance(db: ColdStorage.TxOrDb, request: ColdStorage.MaintenanceRequest) {
+-async function executeMaintenance(db: Database.Interface, request: ColdStorage.MaintenanceRequest) {
 -  const lock = await liveDaemon()
 +// #535：options 只承载展示与已选执行域，不允许 control 失败后重新选择 offline writer。
 +async function executeMaintenance(
-+  db: ColdStorage.TxOrDb,
++  db: Database.Interface,
 +  request: ColdStorage.MaintenanceRequest,
 +  options: {
 +    human?: boolean
@@ -1752,7 +1761,7 @@ index fc0fdf7e7..a4954ca6e 100644
 +// #535：sequence owner 只编排两个现有 operation，任何非 completed compression 都在 vacuum 前失败。
 +// flags 由同一个 CLI request 传入，避免 machine/human 分支各自解释 --yes 的含义。
 +async function executeCompression(
-+  db: ColdStorage.TxOrDb,
++  db: Database.Interface,
 +  input: { request: Extract<ColdStorage.MaintenanceRequest, { operation: "compress" }> } &
 +    Record<"human" | "vacuum" | "yes", boolean>,
 +) {
@@ -1776,7 +1785,7 @@ index fc0fdf7e7..a4954ca6e 100644
 +    // 显式 machine 组合只打印一个最终 JSON；两个既有 operation 仍各自拥有数据库语义。
 +    const compressed = await executeMaintenance(db, input.request, { output: false, lock: null })
 +    const task = taskResult(compressed.result)
-+    const report = ColdStorage.status(db)
++    const report = await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 +    const vacuum = await runVacuum(db, report.pageSize, false)
 +    printMaintenance({ type: "compress-vacuum", compress: task, vacuum })
      return
@@ -1796,7 +1805,7 @@ index fc0fdf7e7..a4954ca6e 100644
 +      UI.println("  Stop the daemon and run: opencode db vacuum --yes")
 +      return
 +    }
-+    const report = ColdStorage.status(db)
++    const report = await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 +    const reusable = report.freelistPages * report.pageSize
 +    // completed task 只证明 logical compression；只有非零 freelist 才值得向用户请求物理回收授权。
 +    if (reusable === 0) return
@@ -1876,7 +1885,7 @@ index fc0fdf7e7..a4954ca6e 100644
        }
        if (lock) {
          // #524：status 没有持久 task 结果可轮询，必须在同一 control 请求中等到完整 StatusReport。
-         // 豁免 deadline 只此一处；新增 immediate 操作必须先证明有 task 结果可轮询才能复用 false。
+         // 只有本报告调用显式传 false；task 状态查询和其他操作仍沿原 acknowledgement 合同。
 -        printMaintenance(
 -          await daemonRequest(
 -            lock,
@@ -1902,8 +1911,8 @@ index fc0fdf7e7..a4954ca6e 100644
 +        else printMaintenance(result)
          return
        }
--      printMaintenance(ColdStorage.status(db))
-+      const report = ColdStorage.status(db)
+-      printMaintenance(await Effect.runPromise(Database.withSync(db, ColdStorage.status)))
++      const report = await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 +      if (interactive(args.json)) renderStatus(report)
 +      else printMaintenance(report)
      })
@@ -1932,7 +1941,7 @@ index fc0fdf7e7..a4954ca6e 100644
 +      // pageSize 必须来自执行前的同一数据库；执行后再读会把 vacuum 后的 page_count 当基准。
 +      const report = lock
 +        ? parseStatus(await daemonRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operation: "status" }) }, false))
-+        : ColdStorage.status(db)
++        : await Effect.runPromise(Database.withSync(db, ColdStorage.status))
 +      // standalone vacuum 复用当前所选执行域；仅 human renderer 改变，daemon/storage ownership 不迁移。
 +      await runVacuum(db, report.pageSize, true, lock ?? null)
      })
@@ -2006,56 +2015,36 @@ index fb3585265..10f24174d 100644
            .catch((error) => {
              const mapped = maintenanceError(error)
              return Response.json({ error: mapped.message }, { status: mapped.status })
-@@ -462,11 +495,27 @@ if (isDaemon) {
-       }
-       if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
-         return new Response("not found", { status: 404 })
--      // #259：setTimeout 避免在 fetch handler 内直接关闭——让响应先返回
--      setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
-+      // #535：DB preflight 没有中断其他维护的授权；显式 daemon stop 不带该 query，仍走原有 abort 合同。
-+      if (
-+        url.searchParams.get("maintenance-idle") === "1" &&
-+        (maintenanceTransitionPending > 0 || activeMaintenance !== undefined)
-+      ) {
-+        return Response.json({ error: "database maintenance is active" }, { status: 409 })
-+      }
-+      // #259：setTimeout 避免在 fetch handler 内直接关闭——让响应先返回。
-+      // #535：conditional 通过后同步发布 shutdownInProgress，响应返回前到达的 start/resume 也必须被拒绝。
-+      if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(DisposedReason.DaemonStop)
-+      else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
-       return Response.json({ ok: true })
-     },
-   })
-+  // #535：interrupted recovery 必须在 lock 对外可见前登记 activeMaintenance，消除“发现 daemon 但恢复尚未表示”的窗口。
-+  // 损坏 record 或 lease failure 必须阻止 daemon 发布，不能被日志降级成“已证明 idle”。
-+  // recovery 依赖全局 node memoMap 连接（#493）：先完成 Database init，再登记恢复。
-+  await AppRuntime.runPromise(Database.Service)
-+  maintenanceRecoveryPromise = recoverInterruptedMaintenance()
-+  // 这里只等待 recovery 完成“无需恢复或已发布 active”判定，不等待后台 maintenance 跑到 terminal。
-+  await maintenanceRecoveryPromise
-   lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
-   // #259：lock 写入延后到 controlPort 已知——锁文件与控制面端口原子地对外可见
-   log.info("daemon lock written", {
-@@ -616,17 +665,13 @@ if (isDaemon) {
-     armIdleTimer()
-   })
- 
--  // #493：startup 前 await maintenance recovery——activeMaintenance 登记后 idle 判定从第一刻生效。
--  // #493：maintenance recovery 先于任何 instance 加载运行——经全局 node memoMap 打开本进程
-+  // #493：startup 前 await maintenance database init——经全局 node memoMap 打开本进程
-   // 唯一的原生连接（OPENCODE_DB 即 lock.dbPath），使 Database.client() 从启动起可用；
-   // 后续 instance runtime 复用同一 memoMap 连接，不产生第二个数据源。
-+  // #535：recovery 本体已前置到 controlServer 之后、ServerLock.write 之前；此处只保留数据库初始化。
-   await AppRuntime.runPromise(Database.Service).catch((error) => {
-     log.error("maintenance database init failed", { error: String(error) })
-   })
--  maintenanceRecoveryPromise = recoverInterruptedMaintenance().catch((error) => {
--    log.error("maintenance recovery failed", { error: String(error) })
--  })
--  await maintenanceRecoveryPromise
-   // #235：启动即注册两段保护——startup idle 与 launcher watcher 并行
-   maybeScheduleStartupIdleShutdown()
-   startLauncherWatcher()
+@@ -540,5 +571,13 @@ if (isDaemon) {
+         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+           return new Response("not found", { status: 404 })
+-        // 先返回停止响应，再进入既有关闭闭包，避免在 handler 内中断响应。
+-        setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
++        // DB preflight没有中断其他维护的授权；普通stop保留既有abort与退出责任。
++        if (
++          url.searchParams.get("maintenance-idle") === "1" &&
++          (maintenanceTransitionPending > 0 || activeMaintenance !== undefined)
++        ) {
++          return Response.json({ error: "database maintenance is active" }, { status: 409 })
++        }
++        // conditional通过后立即进入同一闭包置位shutdownInProgress，不能暴露接收新维护的窗口。
++        if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(0, DisposedReason.DaemonStop)
++        else setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
+         return Response.json({ ok: true })
+@@ -547,9 +586,8 @@ if (isDaemon) {
+     // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
++    // recovery先于owner发布；失败交给既有启动清理，不把未知恢复状态当成idle。
++    await AppRuntime.runPromise(Database.Service)
++    maintenanceRecoveryPromise = recoverInterruptedMaintenance()
++    await maintenanceRecoveryPromise
+     lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
+     log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
+     // 锁发布后才启用启动期保护，首个订阅到达后转由运行期空闲路径负责。
+-    // 先恢复持久任务并登记 activeMaintenance，再让既有 idle/launcher 判定观察它。
+-    maintenanceRecoveryPromise = recoverInterruptedMaintenance().catch((error) => {
+-      log.error("maintenance recovery failed", { error: String(error) })
+-    })
+-    await maintenanceRecoveryPromise
 
 diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
 new file mode 100644
@@ -2248,7 +2237,7 @@ index 0000000000000000000000000000000000000000..11111111111111111111111111111111
 +    }
 +    const contender = (async () => {
 +      // contender 只拿同 key 选主锁；30s 等待窗口内任何提前成功都是发布边界波漏。
-+      await using _ = await Flock.acquire("opencode.server", { dir: electionDir, timeoutMs: 30_000 })
++      await using _ = await Flock.acquire(`opencode.server:${path.join(tmp.path, "tui-server.json")}`, { dir: electionDir, timeoutMs: 30_000 })
 +      return "acquired" as const
 +    })()
 +    const exited = waitForExit(cli.proc, cli.exited)
@@ -2316,7 +2305,7 @@ index fa25bc63b..35a903a63 100644
 @@ -24,6 +24,10 @@ import { discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
  // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
  import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
- import * as Win32Module from "@opencode-ai/tui/terminal-win32"
+ import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
 +// #535：交互 DB 命令走真实 PTY；control 断言用同 token 的公开 endpoint。
 +import stripAnsi from "strip-ansi"
 +import { spawn as spawnPty } from "@lydell/node-pty"
@@ -2324,13 +2313,11 @@ index fa25bc63b..35a903a63 100644
  
  const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
  
-@@ -84,6 +88,24 @@ function authHeaders(env: Record<string, string>) {
-   }
- }
+@@ -79,4 +83,22 @@
  
 +// #535：POST body 与 token 在同一个 request envelope 中，测试不会绕过 daemon control 的鉴权边界。
 +function controlRequest(
-+  lock: ServerLockModule.ServerLock,
++  lock: ServerLock.ServerLock,
 +  pathname: string,
 +  method: "GET" | "POST" = "GET",
 +  body?: unknown,
@@ -2339,7 +2326,7 @@ index fa25bc63b..35a903a63 100644
 +  return fetch(`http://127.0.0.1:${lock.controlPort}${pathname}`, {
 +    method,
 +    headers: {
-+      [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token,
++      [ServerLock.CONTROL_TOKEN_HEADER]: lock.token,
 +      ...(body === undefined ? {} : { "content-type": "application/json" }),
 +    },
 +    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -2348,11 +2335,8 @@ index fa25bc63b..35a903a63 100644
 +
  async function runDaemonStop(lockPath: string, env: Record<string, string> = {}) {
    await prepareCliData(lockPath)
-   // #259：预置 CLI 数据目录避免迁移阻塞
-@@ -99,6 +121,52 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
-   return { exitCode, stderr }
- }
- 
+   // 用 argv 数组保留路径和密码中的空格，并从真实入口验证命令注册。
+@@ -93,3 +115,49 @@
 +// #535：PTY 驱动真实 db 命令——prompt 应答、owner replacement hook 和 terminal 观察都在同一进程 seam。
 +async function runInteractiveDb(
 +  lockPath: string,
@@ -2411,15 +2395,6 @@ index fa25bc63b..35a903a63 100644
    // #532：独立 lock/XDG/DB 保证该查询不可能观察或停止开发者真实 daemon。
    // running=false 是公开 expected literal，测试不读取 private lock parser 返回类型。
    // lock 仍不存在证明 status 没有把 read 操作偷偷升级为 ensure。
-@@ -1155,6 +1225,8 @@ describe("daemon lifecycle", () => {
-         await proc.exited.catch(() => undefined)
-       }
-     },
-+    // #535：interrupted recovery 已前置于 lock 发布，daemon 冷启动包含数据库初始化；5s 默认时限不再覆盖最坏冷启动。
-+    30_000,
-   )
- 
-   // #173：短 idle 超时 + SSE 断开后守护进程应退出并清锁
 @@ -1539,6 +1611,168 @@ test(
  
  
@@ -2449,9 +2424,9 @@ index fa25bc63b..35a903a63 100644
 +          // N 之后不能再出现 reclaim 文案；首次拒绝已耗尽本命令的全部停机授权。
 +          expect(result.output).not.toContain("Reclaim")
 +          // 同一 PID 存活证明 CLI 没有先停 daemon 再偷偷转向 offline writer。
-+          expect(ServerLockModule.alive(proc.pid)).toBe(true)
++          expect(ServerLock.alive(proc.pid)).toBe(true)
 +        } finally {
-+          if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++          if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +          await proc.exited.catch(() => undefined)
 +        }
 +      }
@@ -2470,7 +2445,7 @@ index fa25bc63b..35a903a63 100644
 +          ["compress", "--older-than", "0ms", "--batch-size", "1"],
 +          "y",
 +          async () => {
-+            const db = new SQLite(yesDaemon.lock.dbPath)
++            const db = new Database(yesDaemon.lock.dbPath)
 +            db.exec("PRAGMA foreign_keys = OFF")
 +            const insert = db.prepare(
 +              `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, 'msg_election', 'ses_election', 1, 1, ?)`,
@@ -2485,7 +2460,7 @@ index fa25bc63b..35a903a63 100644
 +            db.close()
 +            // contender 与旧 daemon 退出绑定：停机完成即开始争锁，成功时序揭示 release 位置。
 +            contender = yesDaemon.proc.exited.then(async () => {
-+              await using _ = await Flock.acquire("opencode.server", {
++              await using _ = await Flock.acquire(`opencode.server:${yesLockPath}`, {
 +                dir: path.join(yesTmp.path, "state", "opencode", "locks"),
 +                timeoutMs: 30_000,
 +              })
@@ -2506,9 +2481,9 @@ index fa25bc63b..35a903a63 100644
 +        await contender
 +        expect(acquired).toBe(true)
 +        // Y 路径的旧 daemon 必须遇出：offline handoff 的前提是唯一 writer。
-+        expect(ServerLockModule.alive(yesDaemon.proc.pid)).toBe(false)
++        expect(ServerLock.alive(yesDaemon.proc.pid)).toBe(false)
 +      } finally {
-+        if (ServerLockModule.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
++        if (ServerLock.alive(yesDaemon.proc.pid)) yesDaemon.proc.kill("SIGTERM")
 +        await yesDaemon.proc.exited.catch(() => undefined)
 +      }
 +      // replacement 场景独立启动 control server，任何 prompt 后请求都会改变公开错误并使测试失败。
@@ -2535,10 +2510,10 @@ index fa25bc63b..35a903a63 100644
 +        expect(result.exitCode).not.toBe(0)
 +        expect(result.output).toContain("owner changed")
 +        // 原 daemon 不受影响：拒绝路径不能附带停机或锁清理副作用。
-+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
++        expect(ServerLock.alive(proc.pid)).toBe(true)
 +      } finally {
 +        replacementControl.stop(true)
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -2556,37 +2531,37 @@ index fa25bc63b..35a903a63 100644
 +      try {
 +        if (!lock.controlPort) throw new Error("missing control port")
 +        // 先用公开 status 请求完成数据库初始化，后续插入的行才能进入真实 eligibility 扫描。
-+        const initialized = await controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
++        const initialized = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
 +        expect(initialized.status).toBe(200)
-+        const db = new SQLite(lock.dbPath)
++        const db = new Database(lock.dbPath)
 +        db.exec("PRAGMA foreign_keys = OFF")
 +        // 500 行 batchSize 1 的任务足够长：409 请求落在任务 still running 的窗口内。
 +        db.exec(`WITH RECURSIVE rows(index_value) AS (SELECT 0 UNION ALL SELECT index_value + 1 FROM rows WHERE index_value < 499) INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) SELECT 'prt_gate_' || index_value, 'msg_gate', 'ses_gate', 1, 1, '{"type":"reasoning","text":"x"}' FROM rows`)
 +        db.close()
 +        // 202 证明 worker 已接受真实 task；后续 409 不能由测试伪造的内存 flag 提供。
-+        const start = await controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
++        const start = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
 +        expect(start.status).toBe(202)
 +        // 只有公开 202 之后发出的 conditional request 才能证明 gate 覆盖已接受任务，而非预请求占位。
 +        // query mode 的授权只属于 DB preflight；它不能继承显式 daemon stop 的“中断后关闭”语义。
-+        const conditional = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
++        const conditional = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
 +        expect(conditional.status).toBe(409)
 +        // 409 是业务拒绝：daemon 必须继续存活，不得把 busy 错误升级成进程退出。
-+        expect(ServerLockModule.alive(proc.pid)).toBe(true)
++        expect(ServerLock.alive(proc.pid)).toBe(true)
 +        // 不带 query 的公开 stop 仍须成功，防止 DB preflight 收紧既有用户控制面。
 +        const stopped = await runDaemonStop(lockPath)
 +        expect(stopped.exitCode, stopped.stderr).toBe(0)
 +        // 普通 stop 文案保持 #259 契约；maintenance-idle 不得改写共享 endpoint 的默认语义。
 +        expect(stopped.stderr).toContain("Stopped opencode daemon.")
-+        expect(ServerLockModule.alive(proc.pid)).toBe(false)
++        expect(ServerLock.alive(proc.pid)).toBe(false)
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
 +    DAEMON_START_TIMEOUT_MS + DAEMON_STOP_TIMEOUT_MS,
 +  )
 +
-   // #524：status 是唯一无 task 轮询的 immediate 操作；真实 CLI 必须等到完整 StatusReport。
+   // status 报告没有可轮询 task，真实 CLI 必须等到同一请求的完整结果。
    test(
      "db status waits for the daemon's complete report beyond the control acknowledgement deadline",
 @@ -1572,6 +1806,8 @@ test(
@@ -2609,7 +2584,7 @@ index fa25bc63b..35a903a63 100644
 @@ -1634,26 +1869,157 @@ test(
          updatedAt: Date.now(),
        }
-       await ServerLockModule.writeMaintenanceTask(task)
+       await ServerLock.writeMaintenanceTask(task)
 -      const { proc } = await spawnDaemon(lockPath, {
 -        OPENCODE_DAEMON_STARTUP_IDLE_TIMEOUT_MS: "250",
 -        OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "5000",
@@ -2688,7 +2663,7 @@ index fa25bc63b..35a903a63 100644
 -        const deadline = Date.now() + 10_000
 -        let recovered: MaintenanceTask | undefined
 -        while (Date.now() < deadline) {
--          recovered = await ServerLockModule.readMaintenanceTask(task.taskID, dbPath)
+-          recovered = await ServerLock.readMaintenanceTask(task.taskID, dbPath)
 -          if (recovered?.status === "completed" || recovered?.status === "failed") break
 -          await Bun.sleep(50)
 +        expect(await readUntil(reader, "rename-blocked-1")).toContain("rename-blocked-1")
@@ -2698,7 +2673,7 @@ index fa25bc63b..35a903a63 100644
 +        await proc.stdin.write("continue\n")
 +        expect(await readUntil(reader, "lease-release-blocked")).toContain("lease-release-blocked")
 +        // lock 只在 recovery 已取得 lease 并登记 activeMaintenance 后才允许对外发布。
-+        let lock: ServerLockModule.ServerLock | undefined
++        let lock: ServerLock.ServerLock | undefined
 +        const lockDeadline = Date.now() + DAEMON_START_TIMEOUT_MS
 +        while (!lock && Date.now() < lockDeadline) {
 +          lock = await Bun.file(lockPath).json().catch(() => undefined)
@@ -2707,26 +2682,26 @@ index fa25bc63b..35a903a63 100644
 +        if (!lock?.controlPort) throw new Error("recovered daemon did not publish its control lock")
 +        // token 来自 recovery 完成注册后发布的真实 daemon lock，后续请求都验证同一 owner。
 +        let settled = false
-+        const terminal = controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${task.taskID}`)
++        const terminal = controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${task.taskID}`)
 +          .then(async (response) => ({ status: response.status, body: await response.json() }))
 +        void terminal.then(() => (settled = true))
 +        await Bun.sleep(100)
 +        // 固定等待只观察 marker 已建立的 pending 状态，不用于猜测 worker 是否进入该状态。
 +        expect(settled).toBe(false)
 +        // lease cleanup 被 marker 挡住时，其他 control 请求仍可响应，证明不是整个 server 被阻塞。
-+        const statusReport = await controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
++        const statusReport = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "status" })
 +        expect(statusReport.status).toBe(200)
 +        // terminal-but-active 窗口内 conditional shutdown 必须拒绝；lease release 尚未完成。
-+        const busy = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
++        const busy = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
 +        expect(busy.status).toBe(409)
 +        // 释放 lease 后 terminal 与 conditional shutdown 才能依次成功，禁止 CLI retry workaround。
 +        await proc.stdin.write("release\n")
 +        expect(await terminal).toMatchObject({ status: 200, body: { status: "completed" } })
-+        const conditional = () => controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
++        const conditional = () => controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
 +        const waitIdle = async (taskID: string) => {
 +          const deadline = Date.now() + 10_000
 +          while (Date.now() < deadline) {
-+            const response = await controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
++            const response = await controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
 +            const body = (await response.json()) as { status?: string }
 +            if (response.ok && ["completed", "failed", "interrupted"].includes(body.status ?? "")) {
 +              return
@@ -2740,7 +2715,7 @@ index fa25bc63b..35a903a63 100644
 +        // start gate 使用独立 stale lease marker，不能借 recovery 已登记的 active promise 获得假阳性。
 +        // start 在 stale-lease rename await 中尚未发布 active；pending gate 必须独立返回 busy。
 +        await staleLease("dbm_start_gate")
-+        const starting = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
++        const starting = controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
 +        // rename-blocked-2 证明 start 已进入 lease 等待；此后的 409 来自 pending 计数而非 active。
 +        expect(await readUntil(reader, "rename-blocked-2")).toContain("rename-blocked-2")
 +        expect((await conditional()).status).toBe(409)
@@ -2753,9 +2728,9 @@ index fa25bc63b..35a903a63 100644
 +        // resume gate 重新写 interrupted record，验证另一 producer 也在首个 await 前发布 pending。
 +        // resume 经过独立 reconcile/lease producer；它不能只依赖 start 路径偶然设置的 active 状态。
 +        const resumeTask = { ...task, taskID: "dbm_resume_gate", status: "interrupted" as const, updatedAt: Date.now() }
-+        await ServerLockModule.writeMaintenanceTask(resumeTask)
++        await ServerLock.writeMaintenanceTask(resumeTask)
 +        await staleLease(resumeTask.taskID)
-+        const resuming = controlRequest(lock, ServerLockModule.CONTROL_MAINTENANCE_RESUME_PATH, "POST", { taskID: resumeTask.taskID })
++        const resuming = controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_RESUME_PATH, "POST", { taskID: resumeTask.taskID })
 +        // rename-blocked-3 锁定 resume 也在 lease await 阶段；409 覆盖它的过渡期。
 +        expect(await readUntil(reader, "rename-blocked-3")).toContain("rename-blocked-3")
 +        expect((await conditional()).status).toBe(409)
@@ -2763,13 +2738,13 @@ index fa25bc63b..35a903a63 100644
 +        expect(resumeResponse.status).toBe(202)
 +        await waitIdle(((await resumeResponse.json()) as { taskID: string }).taskID)
 +        // 两个过渡期都 terminal 后才允许 conditional stop，证明 pending 与 active 没有残留计数。
-+        const stopped = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
++        const stopped = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
 +        expect(stopped.status).toBe(200)
 +        // conditional 200 后 daemon 必须真实退出；否则门控只是返回值而不是生命周期语义。
 +        expect(await Promise.race([proc.exited, Bun.sleep(10_000).then(() => "timeout")])).not.toBe("timeout")
        } finally {
 +        reader.releaseLock()
-         if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
+         if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
          await proc.exited.catch(() => undefined)
        }
      },

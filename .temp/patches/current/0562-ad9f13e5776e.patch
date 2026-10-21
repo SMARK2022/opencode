@@ -10,15 +10,74 @@ Content-Transfer-Encoding: 8bit
 
 
 
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -315,2 +315,4 @@
+             "x-session-affinity": session.id,
++            // 代理按连字符头识别OpenAI会话；header保留完整身份，不复用缩短的正文缓存键。
++            ...(model.provider === "openai" ? { "session-id": session.id } : {}),
+             "X-Session-Id": session.id,
+
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -80,1 +80,3 @@
+           model: selected.model, system: PermissionReviewerPrompt.buildSystemPrompt(tenant),
++          // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
++          ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -3446,2 +3446,5 @@
+       yield* setup
++      // 正文键保持64字符，而代理header必须区分两个完整的真实Session ID。
++      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
++      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
+       const longSessionID = SessionV2.ID.make(`ses_${"a".repeat(64)}`)
+@@ -3470,1 +3473,3 @@
+       expect(keys[0]).not.toBe(keys[1])
++      expect(requests.map(request => request.http?.headers?.["session-id"])).toEqual([longSessionID, otherLongSessionID])
++      expect(requests.every(request => request.http?.headers?.session_id === undefined)).toBe(true)
+
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -62,1 +62,1 @@
+-  return Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route }))
++  return Effect.succeed(Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: OpenAIChat.route }))
+@@ -411,1 +411,2 @@
+     expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
++    expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
+@@ -432,1 +433,6 @@
+     expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
++    // 保留原override验证，再经真实reviewer入口确认OpenAI代理头；fake client不发网络请求。
++    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer" }) })
++    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/openai"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
++    expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
++    expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
+
+diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
+--- a/packages/opencode/test/plugin/codex.test.ts
++++ b/packages/opencode/test/plugin/codex.test.ts
+@@ -67,1 +67,7 @@
+     expect(output.headers["User-Agent"]).toBe(CODEX_USER_AGENT)
++    // header命名与非OpenAI早退均由真实hook产生，不以手写运输头自证。
++    expect(output.headers["session-id"]).toBe("session-id")
++    expect(output.headers.session_id).toBeUndefined()
++    const other = { headers: {} as Record<string, string> }
++    await hooks["chat.headers"]!({ sessionID: "other-session", model: { providerID: "anthropic" } } as never, other)
++    expect(other.headers).toEqual({})
+
 diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
 --- a/packages/opencode/src/plugin/openai/codex.ts
 +++ b/packages/opencode/src/plugin/openai/codex.ts
-@@ -581,6 +581,8 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
+@@ -581,6 +581,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
        if (input.model.providerID !== "openai") return
        // #169：openai oauth 会话对外伪装 Codex TUI，保留 tip session-id / title 头
        Object.assign(output.headers, CODEX_HEADERS)
-+      // #562：session-id 必须用连字符键——ws 池与 Codex 兼容代理只认该形态维持缓存亲和
-+      // （源补丁的下划线→连字符修正已由上游 #29471 吸收，此处固化亲和合同不可回退）。
++      // 兼容代理识别连字符session-id；保留完整Session身份，不能替换为缩短的正文缓存键。
        output.headers["session-id"] = input.sessionID
        // Temporary fetch-layer hack: title generation currently shares the conversation
        // session ID, so the OpenAI plugin marks it for HTTP fallback until transport

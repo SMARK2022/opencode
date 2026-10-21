@@ -19,8 +19,8 @@ activeSessionID，useEvent 经 useRoute 读取活动会话；与 #164/#165 globa
 #499 lsp.updated 特判合并为单 admission owner）。H4/H5 测试随 owner 迁 tui 包并按目标
 事件 schema（envelope directory/project + payload.properties）重建。H3 project.ts 与 H6
 project.test 裁记：目标 v1.18.32 的 ProjectV2（remote??previous??root + commit 写回 +
-migrateProjectId 事务迁移）是互斥设计——用户可见后果链（列表丢会话/空屏）已由迁移机制
-消除，INV-01/05 的 copied-cache 严格性为上游显式选择不采纳（plan 第 5 节亦排除该分支）；
+migrateProjectId 事务迁移）是互斥设计，保留其remote身份、缓存连续性与既有worktree。
+INV-01/05 的 copied-cache 严格性在目标未实现；同ID不会触发迁移，不声称后果已全消除；
 --path-format=absolute 子修复已由 core git.ts resolvePath 等价覆盖。H7 落目标既有
 session-list.test（Project.ID 形态）。
 
@@ -1399,37 +1399,27 @@ diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.
  
    function subscribe(handler: (event: Event, metadata: EventMetadata) => void) {
      return sdk.event.on("event", (event) => {
-@@ -69,6 +81,14 @@ export function useEvent() {
- 
-       // #164/#165：单次投递前做 project/global 作用域判定
-       const currentProject = project.project()
-+      // #570：活动会话与事件 sessionID 同时非空才构成跨 Project 投递资格。
+@@ -65,6 +77,13 @@ export function useEvent() {
+       // 重连通知始终投递，其余事件只在一次主分发前检查项目归属。
+       // LSP 通知只触发当前 route 重拉；跨项目投递不携带可直接渲染的状态。
 +      const activeSessionID = route.data.type === "session" ? route.data.sessionID : undefined
++      // 每次投递读取route与顶层Session ID，不缓存订阅时身份或猜测第二身份源。
 +      const eventSessionID = "sessionID" in event.payload.properties
 +        ? typeof event.payload.properties.sessionID === "string"
 +          ? event.payload.properties.sessionID
 +          : undefined
 +        : undefined
-+      // #570：sessionID 只接受 string 形态——非 string 的同名属性不构成投递资格。
-       // #499：lsp.updated 只表示"当前 route 需要重拉"，不携带可渲染状态；跨 Project
-       // 放行后仍由 SyncProvider 按 active Session 请求和过滤，不能在这里丢失通知。
-       if (event.payload.type === "lsp.updated") {
-@@ -77,8 +97,9 @@ export function useEvent() {
-       }
-       if (
-         !shouldDeliverScopedEvent(
--          { directory: event.directory, project: (event as { project?: string }).project },
-+          { directory: event.directory, project: (event as { project?: string }).project, sessionID: eventSessionID },
-           currentProject,
-+          activeSessionID,
-         )
-       ) {
-         return
+       if (event.payload.type !== "server.connected" && event.payload.type !== "lsp.updated" && !shouldDeliverScopedEvent(
+-        { directory: event.directory, project: (event as { project?: string }).project },
+-        project.project(),
++        { directory: event.directory, project: (event as { project?: string }).project, sessionID: eventSessionID },
++        project.project(), activeSessionID,
+       )) return
 
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
-@@ -513,6 +513,37 @@ describe("tui sync", () => {
+@@ -513,6 +513,49 @@ describe("tui sync", () => {
        app.renderer.destroy()
      }
    })
@@ -1439,7 +1429,7 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 +  test("delivers cross-project session events into the active session projection", async () => {
 +    await using tmp = await tmpdir()
 +    await Bun.write(`${tmp.path}/kv.json`, "{}")
-+    const { app, emit, sync } = await mount(
++    const { app, emit, sync, route } = await mount(
 +      () => undefined,
 +      tmp.path,
 +      { type: "session", sessionID: "ses_1" },
@@ -1460,6 +1450,18 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 +        payload: { id: "evt_cross_part", type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: 1 } },
 +      })
 +      await wait(() => sync.data.part[part.messageID]?.[0]?.id === part.id)
++      expect(sync.data.message.ses_1?.[0]).toMatchObject(info)
++      expect(sync.data.part[part.messageID]?.[0]).toMatchObject(part)
++      // route切换必须重新判定Session资格，不能把初始会话缓存进订阅。
++      route.navigate({ type: "session", sessionID: "ses_other" })
++      const other = { ...info, id: "msg_other", sessionID: "ses_other" }
++      emit({ directory, project: foreignProject, payload: { id: "evt_cross_other", type: "message.updated", properties: { sessionID: other.sessionID, info: other } } })
++      await wait(() => sync.data.message.ses_other?.[0]?.id === other.id)
++      const rejected = { ...info, id: "msg_rejected", sessionID: "ses_rejected" }
++      emit({ directory, project: foreignProject, payload: { id: "evt_cross_rejected", type: "message.updated", properties: { sessionID: rejected.sessionID, info: rejected } } })
++      emit(branchEvent("route-switch-processed"))
++      await wait(() => sync.data.vcs?.branch === "route-switch-processed")
++      expect(sync.data.message.ses_rejected).toBeUndefined()
 +    } finally {
 +      app.renderer.destroy()
 +    }
@@ -1520,14 +1522,12 @@ diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cl
        </SDKProvider>
      </TestTuiContexts>
    ))
-@@ -149,4 +153,33 @@ describe("useEvent", () => {
+@@ -149,4 +153,32 @@ describe("useEvent", () => {
        app.renderer.destroy()
      }
    })
 +
-+  // #570：活动 Session 跨 Project 投递：session.status 只带必需 sessionID（刻意不用
-+  // info.id 第二身份源），daemon owner 是 proj_other 时仍须送达；不带 sessionID 的
-+  // 跨 Project 事件继续被拒——隔离对照只改 daemon owner，不改 Session owner。
++  // 活动Session资格只取顶层sessionID；无Session及另一Session仍保持Project隔离。
 +  test("delivers events for the active Session across Projects", async () => {
 +    const { app, emit, seen } = await mount({ type: "session", sessionID: "ses_1" })
 +
@@ -1537,13 +1537,14 @@ diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cl
 +          {
 +            id: "evt_status_cross",
 +            type: "session.status",
-+            properties: { sessionID: "ses_1" },
-+          } as unknown as Event,
++            properties: { sessionID: "ses_1", status: { type: "idle" } },
++          },
 +          { directory: "/tmp/other", project: "proj_other" },
 +        ),
 +      )
 +
 +      await wait(() => seen.length === 1)
++      emit(event({ id: "evt_other_session", type: "session.status", properties: { sessionID: "ses_other", status: { type: "idle" } } }, { directory: "/tmp/other", project: "proj_other" }))
 +
 +      // 无 sessionID 的跨 Project 事件仍被 admission 拒绝（seen 不再增长）。
 +      emit(event(vcs("foreign"), { directory: "/tmp/other", project: "proj_other" }))
@@ -1554,6 +1555,47 @@ diff --git a/packages/tui/test/cli/tui/use-event.test.tsx b/packages/tui/test/cl
 +    }
 +  })
  })
+
+diff --git a/packages/tui/test/cli/tui/data.test.tsx b/packages/tui/test/cli/tui/data.test.tsx
+--- a/packages/tui/test/cli/tui/data.test.tsx
++++ b/packages/tui/test/cli/tui/data.test.tsx
+@@ -9,1 +9,2 @@
+ import { DataProvider, useData } from "../../../src/context/data"
++import { RouteProvider, type Route } from "../../../src/context/route"
+@@ -13,1 +14,1 @@
+-function InitializedDataProvider(props: ParentProps) {
++function InitializedDataProvider(props: ParentProps<{ initialRoute?: Route }>) {
+@@ -21,2 +22,3 @@
+   // 在真实 provider 外等待初始化，不放宽 shouldDeliverScopedEvent 的隔离条件。
+-  return <Show when={ready()}><DataProvider>{props.children}</DataProvider></Show>
++  // 与生产App顺序一致，Route在Data外层；测试不依赖可选context或生产fallback。
++  return <RouteProvider initialRoute={props.initialRoute}><Show when={ready()}><DataProvider>{props.children}</DataProvider></Show></RouteProvider>
+@@ -41,2 +43,2 @@
+-function emitEvent(events: ReturnType<typeof createEventSource>, payload: Event) {
+-  events.emit(global(payload))
++function emitEvent(events: ReturnType<typeof createEventSource>, payload: Event, project = "proj_test") {
++  events.emit({ ...global(payload), project })
+@@ -470,7 +472,7 @@
+     <TestTuiContexts>
+       <SDKProvider url="http://test" directory={directory} testTransport={{ events: events.source, fetch: calls.fetch }}>
+         <ProjectProvider>
+-          <InitializedDataProvider>
++          <InitializedDataProvider initialRoute={{ type: "session", sessionID: "session-1" }}>
+             <Probe />
+           </InitializedDataProvider>
+         </ProjectProvider>
+@@ -483,10 +485,10 @@
+     emitEvent(events, {
+       id: "evt_context_1",
+       type: "session.next.context.updated",
+       properties: {
+         sessionID: "session-1",
+         messageID: "msg_context_1",
+         timestamp: 1,
+         text: "Updated context",
+       },
+-    })
++    }, "proj_session_owner")
 
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
 --- a/packages/opencode/test/server/session-list.test.ts

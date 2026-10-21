@@ -298,6 +298,7 @@ index a8e5aa4b5..ebbc2631a 100644
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
 @@ -7,13 +7,19 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
  import { Locale } from "../../util/locale"
+ import { getContextLimit } from "../../util/token-estimate"
  import { tokenAccounting } from "../../util/token-accounting"
  // #122：subagent footer 共用 accounting
 -import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
@@ -306,7 +307,6 @@ index a8e5aa4b5..ebbc2631a 100644
 +import { useDialog } from "../../ui/dialog"
 +import { DialogAlert } from "../../ui/dialog-alert"
 +import { formatDuration } from "../../util/format"
- import { activeTurnPair } from "../../util/session-pending"
  import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
  
  export function SubagentFooter() {
@@ -317,9 +317,10 @@ index a8e5aa4b5..ebbc2631a 100644
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
    const session = createMemo(() => sync.session.get(route.sessionID))
  
-@@ -37,6 +43,14 @@ export function SubagentFooter() {
+@@ -37,7 +43,15 @@ export function SubagentFooter() {
  
    // 获取会话状态，用于判断是否正在运行
+   // 子代理有独立 sessionID，必须读取其自身状态而非父请求的运行状态。
    const status = createMemo(() => sync.data.session_status?.[route.sessionID])
 +  // #550：仅认当前 child 的 retry 态——禁止回读 parent 的 status 造成跨会话串味。
 +  const retry = createMemo(() => {
@@ -366,15 +367,18 @@ index a8e5aa4b5..ebbc2631a 100644
 @@ -114,18 +152,33 @@ export function SubagentFooter() {
          backgroundColor={theme.backgroundPanel}
        >
-         <box flexDirection="row" justifyContent="space-between" gap={1}>
+-        <box flexDirection="row" justifyContent="space-between" gap={1}>
++        <box flexDirection="row" justifyContent="space-between" gap={1} minWidth={0} overflow="hidden">
 -          <box flexDirection="row" gap={1}>
-+          <box flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-             <text fg={theme.text}>
++          <box flexDirection="row" gap={1} minWidth={0} flexGrow={1} flexShrink={1} overflow="hidden">
+-            <text fg={theme.text}>
++            <text fg={theme.text} flexShrink={0}>
                <b>{subagentInfo().label}</b>
              </text>
 +            {/* 计数标签不参与收缩——它是身份信息而非诊断数据。 */}
              <Show when={subagentInfo().total > 0}>
-               <text style={{ fg: theme.textMuted }}>
+-              <text style={{ fg: theme.textMuted }}>
++              <text style={{ fg: theme.textMuted }} flexShrink={0}>
                  ({subagentInfo().index} of {subagentInfo().total})
                </text>
              </Show>
@@ -396,8 +400,8 @@ index a8e5aa4b5..ebbc2631a 100644
                {(item) => (
 -                <text fg={theme.textMuted} wrapMode="none">
 +                <text fg={theme.textMuted} wrapMode="none" flexShrink={1} minWidth={0} truncate>
-                   {/* #506：箭头空格与主面板 compact 同构；只显示当前 step，不再追加 request 累计括号。
-                       ↑↓ 之间用空格内聚（不用 ·）——与主面板 live flow 及 formatUsageStats 的 flow.join(" ") 一致。 */}
+                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
+                   {/* 两方向用空格内聚并保留独立脉冲；context/cost 仍以中点分组。 */}
                    <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
 @@ -136,7 +189,8 @@ export function SubagentFooter() {
                )}
@@ -414,8 +418,8 @@ diff --git a/packages/tui/test/routes/session/subagent-footer-flow.test.ts b/pac
 index 520cf6c62..77b70452a 100644
 --- a/packages/tui/test/routes/session/subagent-footer-flow.test.ts
 +++ b/packages/tui/test/routes/session/subagent-footer-flow.test.ts
-@@ -24,3 +24,37 @@ describe("SubagentFooter usage flow template", () => {
-     expect(source).toContain("{item().context ? ` · ${item().context}` : \"\"}")
+@@ -25,3 +25,37 @@ describe("SubagentFooter usage flow template", () => {
+     expect(source).not.toContain("item().totalOutput")
    })
  })
 +
@@ -451,4 +455,135 @@ index 520cf6c62..77b70452a 100644
 +    // createRefreshClock 以 retry 态门控——非 retry 不持 interval（组件首个计时器）。
 +    expect(source).toContain("createRefreshClock(() => !!retry())")
 +  })
++})
+
+diff --git a/packages/tui/test/routes/session/subagent-footer-retry.test.tsx b/packages/tui/test/routes/session/subagent-footer-retry.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/routes/session/subagent-footer-retry.test.tsx
+@@ -0,0 +1,125 @@
++/** @jsxImportSource @opentui/solid */
++import { expect, test } from "bun:test"
++import { engine } from "@opentui/core"
++import { testRender, useRenderer } from "@opentui/solid"
++import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
++import { onCleanup } from "solid-js"
++import { tmpdir } from "../../fixture/fixture"
++import { TestTuiContexts } from "../../fixture/tui-environment"
++import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
++import { createEventSource, createFetch, directory, json, wait } from "../../cli/cmd/tui/sync-fixture"
++import { ArgsProvider } from "../../../src/context/args"
++import { ExitProvider } from "../../../src/context/exit"
++import { KVProvider } from "../../../src/context/kv"
++import { PermissionProvider } from "../../../src/context/permission"
++import { ProjectProvider } from "../../../src/context/project"
++import { RouteProvider } from "../../../src/context/route"
++import { SDKProvider } from "../../../src/context/sdk"
++import { SyncProvider, useSync } from "../../../src/context/sync"
++import { ThemeProvider } from "../../../src/context/theme"
++import { TuiConfigProvider } from "../../../src/config"
++import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
++import { DialogProvider } from "../../../src/ui/dialog"
++import { ToastProvider } from "../../../src/ui/toast"
++import { SubagentFooter } from "../../../src/routes/session/subagent-footer"
++
++test("child footer consumes retry events and opens original error details", async () => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  const childID = "ses_footer_retry_child"
++  const parentID = "ses_footer_retry_parent"
++  const events = createEventSource()
++  const child = {
++    id: childID, parentID, projectID: "proj_test", directory,
++    slug: "footer-retry", version: "1", title: "retry child (@permission-reviewer subagent)",
++    time: { created: 1, updated: 1 },
++  }
++  // 沿真实SDK传输提供子会话身份，绝不直接修改Sync store来伪造可见状态。
++  const calls = createFetch((url) => {
++    if (url.pathname === "/session") return json([child])
++    if (url.pathname === `/session/${childID}`) return json(child)
++  }, events)
++  let sync!: ReturnType<typeof useSync>
++  function Probe() {
++    sync = useSync()
++    return <SubagentFooter />
++  }
++  function Harness() {
++    const renderer = useRenderer()
++    const config = createTuiResolvedConfig()
++    const keymap = createDefaultOpenTuiKeymap(renderer)
++    onCleanup(registerOpencodeKeymap(keymap, renderer, config))
++    // 只挂footer所需上下文；不导入App、Prompt或任何daemon/worker入口。
++    return (
++      <TestTuiContexts paths={{ state: tmp.path }}>
++        <OpencodeKeymapProvider keymap={keymap}>
++          <ArgsProvider><ExitProvider exit={() => {}}><KVProvider><ToastProvider>
++            <RouteProvider initialRoute={{ type: "session", sessionID: childID }}>
++              <TuiConfigProvider config={config}>
++                <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
++                  <PermissionProvider><ProjectProvider><SyncProvider><ThemeProvider mode="dark">
++                    <DialogProvider><Probe /></DialogProvider>
++                  </ThemeProvider></SyncProvider></ProjectProvider></PermissionProvider>
++                </SDKProvider>
++              </TuiConfigProvider>
++            </RouteProvider>
++          </ToastProvider></KVProvider></ExitProvider></ArgsProvider>
++        </OpencodeKeymapProvider>
++      </TestTuiContexts>
++    )
++  }
++  const app = await testRender(Harness, { width: 140, height: 16, footerHeight: 0, useThread: false })
++  async function frame() {
++    // Yoga与usage节流分别在渲染帧和时钟推进；等待实际帧而非只检查JSX源码。
++    await Bun.sleep(60)
++    for (let index = 0; index < 5; index++) await app.renderOnce()
++    return app.captureCharFrame().split("\n")
++  }
++  function retry(id: string, message: string) {
++    events.emit({ directory, project: "proj_test", payload: {
++      id: `evt-${id}`, type: "session.status",
++      properties: { sessionID: id, status: { type: "retry", attempt: 3, next: Date.now() + 9000, message } },
++    } })
++  }
++  try {
++    await wait(() => !!sync && sync.status === "complete")
++    expect((await frame()).some((line) => line.includes("(details)"))).toBe(false)
++    // 父会话重试不能污染当前child，permission-reviewer仍走同一个footer owner。
++    retry(parentID, "Parent-only error")
++    await wait(() => sync.data.session_status[parentID]?.type === "retry")
++    expect((await frame()).join("\n")).not.toContain("Parent-only error")
++    const original = "Short error\nline two"
++    retry(childID, original)
++    await wait(() => sync.data.session_status[childID]?.type === "retry")
++    const rows = await frame()
++    const footer = rows.find((line) => line.includes("(details)")) ?? ""
++    expect(footer).toContain("Permission-Reviewer")
++    expect(footer).toContain("Short error line two (details)")
++    expect(footer).toMatch(/retry(?: in .+)? · #3/)
++    expect(footer).toContain("Parent")
++    expect(footer).toContain("Next")
++    // 正在重试但尚无助手时仍有零值usage，诊断必须排在它前面。
++    expect(footer.search(/[↑↓]/)).toBeGreaterThan(footer.indexOf("Short error"))
++    const spans = app.captureSpans().lines.flatMap((line) => line.spans)
++    const errorSpan = spans.find((span) => span.text.includes("Short error"))
++    const detailsSpan = spans.find((span) => span.text.includes("(details)"))
++    expect(errorSpan).toBeDefined()
++    expect(detailsSpan).toBeDefined()
++    expect(detailsSpan?.fg.toInts()).toEqual(errorSpan?.fg.toInts())
++    const y = rows.findIndex((line) => line.includes("(details)"))
++    const x = rows[y].indexOf("(details)") + 4
++    // 坐标来自真实字符帧，经鼠标命中测试进入DialogAlert，不直接调用handler。
++    app.renderer.clearSelection()
++    await app.mockMouse.moveTo(x, y)
++    await app.renderOnce()
++    await app.mockMouse.click(x, y)
++    const details = (await frame()).join("\n")
++    expect(details).toContain("Retry Error")
++    expect(details).toContain("Short error")
++    expect(details).toContain("line two")
++  } finally {
++    // 同步销毁真实组件owner，停止retry clock并退订SDK事件，再分离headless engine。
++    events.dispose()
++    try { app.renderer.destroy() } finally { engine.detach() }
++  }
 +})

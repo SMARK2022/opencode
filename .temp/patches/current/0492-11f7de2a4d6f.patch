@@ -1,4 +1,4 @@
-From 11f7de2a4d6f1a2b3c4d5e6f7a8b9c0d1e2f3a4b Mon Sep 17 00:00:00 2001
+From 11f7de2a4d6f13bf673389fb56130314e72e6b1f Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Wed, 15 Jul 2026 16:38:00 +0800
 Subject: [PATCH] fix(provider): 修复 OpenAI-compatible 空助手消息与 OpenAI reasoning 重放错误
@@ -6,9 +6,9 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-适配：核心过滤语义原样落地；两处目标契约适配——① mistral 族模型豁免 space-prepend
-（本地 tool-call ID 归一化契约锁定 content 精确形态，测试实证豁免必要性）；
-② preserve 断言改为 encryptedContent（目标 pipeline 末端剥 itemId 为既有更强契约）。
+适配：完整保留 openai-compatible 占位文本与目标 Mistral ID 归一化，不按模型名称豁免协议修复；
+保留目标 store!=true 的 itemId 剥离，以 encryptedContent 及 ID 缺失断言 stateless 重放。
+Native Responses 复用已有分组/加密重放实现，不机械复制 V1 过滤器。
 diff --git a/docs/plans/provider-empty-assistant-reasoning-replay-fix.md b/docs/plans/provider-empty-assistant-reasoning-replay-fix.md
 new file mode 100644
 --- /dev/null
@@ -392,13 +392,12 @@ new file mode 100644
 diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
 --- a/packages/opencode/src/provider/transform.ts
 +++ b/packages/opencode/src/provider/transform.ts
-@@ -221,6 +221,70 @@ function normalizeMessages(
+@@ -221,6 +221,59 @@ function normalizeMessages(
        .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
    }
  
-+  // #492：OpenAI-compatible 代理（Moonshot/Kimi/GLM 等）对 assistant 消息的空 content 返回 400。
-+  // AI SDK 将仅含 tool-call 的 assistant 序列化为 content: ""，需要过滤空 text parts
-+  // 并为 tool-call-only 消息补充非空 text part 以满足协议要求。
++  // OpenAI-compatible 代理可能拒绝空 content；先去掉空 text，再为 tool-call-only 保留非空 wire 内容。
++  // 约束来自实际 SDK 协议，不按模型名称豁免；后续 Mistral ID 映射仍独立保留。
 +  if (model.api.npm === "@ai-sdk/openai-compatible") {
 +    msgs = msgs
 +      .map((msg) => {
@@ -416,29 +415,19 @@ diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src
 +        return { ...msg, content: filtered }
 +      })
 +      .filter((msg): msg is ModelMessage => msg !== undefined && msg.content !== "")
-+    // #492 适配：mistral 族模型带本地 tool-call ID 归一化契约（测试锁定 content 精确形态），
-+    // space-prepend 只服务 Moonshot/Kimi 类代理，对 mistral 族豁免。
-+    const modelID = model.api.id.toLowerCase()
-+    const isMistralFamily =
-+      model.providerID === "mistral" ||
-+      ["mistral", "devstral", "codestral", "pixtral", "mixtral"].some((family) => modelID.includes(family))
-+    if (!isMistralFamily) {
-+      // 仅有 tool-call 无非空 text 的 assistant 会被 AI SDK 序列化为 content: ""，
-+      // OpenAI-compatible API 拒绝空 content；补充空格 text part 使 wire content 非空。
-+      msgs = msgs.map((msg) => {
-+        if (msg.role !== "assistant" || typeof msg.content === "string" || !Array.isArray(msg.content)) return msg
-+        const hasText = msg.content.some((part) => part.type === "text" && part.text !== "")
-+        const hasToolCall = msg.content.some((part) => part.type === "tool-call")
-+        if (hasText || !hasToolCall) return msg
-+        return { ...msg, content: [{ type: "text" as const, text: " " }, ...msg.content] }
-+      })
-+    }
++    // 仅有 tool-call 的 assistant 会被 SDK 序列化为空字符串，单个空格避免代理拒绝合法工具调用。
++    // 已有非空文本保持原值，包括有意义的空白，不改 tool-call 或 tool-result 的身份。
++    msgs = msgs.map((msg) => {
++      if (msg.role !== "assistant" || typeof msg.content === "string" || !Array.isArray(msg.content)) return msg
++      const hasText = msg.content.some((part) => part.type === "text" && part.text !== "")
++      const hasToolCall = msg.content.some((part) => part.type === "tool-call")
++      if (hasText || !hasToolCall) return msg
++      return { ...msg, content: [{ type: "text" as const, text: " " }, ...msg.content] }
++    })
 +  }
 +
-+  // #492：OpenAI Responses API 在 store≠true（stateless）模式下不持久化 reasoning，
-+  // 无法通过 itemId 服务端查找。AI SDK 为含 itemId 的 reasoning 创建带 id 的 item，
-+  // provider.ts 剥离 id 后，无 encrypted_content 的 reasoning 变为既无 id 又无加密内容的无效 item，
-+  // API 返回 "reasoning part rs_...:0 not found"。在消息构建层过滤这些不完整的 reasoning parts。
++  // Stateless reasoning 不能凭服务端 itemId 查找；末端剥 ID 后，只能用完整 encrypted_content 重放。
++  // 在消息构建处丢弃中断留下的不完整 part，不改持久原件或后续已有的 ID 剥离。
 +  if (model.api.npm === "@ai-sdk/openai" && _options.store !== true) {
 +    msgs = msgs
 +      .map((msg) => {
@@ -467,6 +456,14 @@ diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src
 diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/opencode/test/provider/transform.test.ts
 --- a/packages/opencode/test/provider/transform.test.ts
 +++ b/packages/opencode/test/provider/transform.test.ts
+@@ -2187,6 +2187,6 @@
+       )
+ 
+       expect(result).toMatchObject([
+-        { role: "assistant", content: [{ type: "tool-call", toolCallId: "toolu01CB" }] },
++        { role: "assistant", content: [{ type: "text", text: " " }, { type: "tool-call", toolCallId: "toolu01CB" }] },
+         { role: "tool", content: [{ type: "tool-result", toolCallId: "toolu01CB" }] },
+       ])
 @@ -2252,6 +2252,10 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
  
      expect(result).toHaveLength(1)
@@ -478,7 +475,7 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
        {
          type: "tool-call",
          toolCallId: "test",
-@@ -2890,6 +2894,202 @@ describe("ProviderTransform.message - anthropic empty content filtering", () =>
+@@ -2890,6 +2894,210 @@ describe("ProviderTransform.message - anthropic empty content filtering", () =>
    })
  })
  
@@ -561,7 +558,7 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
 +
 +    test("filters entire message when only empty text", () => {
 +    // 全空 assistant 无信息量：删除整条消息比保留空 content 触发 400 更符合协议。
-+      const msgs = [{ role: "assistant", content: [{ type: "text", text: "" }] }] as any[]
++      const msgs = [{ role: "assistant", content: "" }, { role: "assistant", content: [] }, { role: "assistant", content: [{ type: "text", text: "" }] }] as any[]
 +
 +      const result = ProviderTransform.message(msgs, kimiModel, {}) as any[]
 +
@@ -612,6 +609,11 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
 +              text: "orphaned thinking...",
 +              providerOptions: { openai: { itemId: "rs_broken" } },
 +            },
++            {
++              type: "reasoning",
++              text: "complete reasoning",
++              providerOptions: { openai: { itemId: "rs_ok", reasoningEncryptedContent: "encrypted" } },
++            },
 +            { type: "text", text: "Answer" },
 +          ],
 +        },
@@ -620,8 +622,11 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
 +      const result = ProviderTransform.message(msgs, openaiReasoningModel, { store: false }) as any[]
 +
 +      const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
-+      // 过滤后没有 reasoning 残留：token 统计与 provider 重放都不应看到它。
-+      expect(reasoningParts).toHaveLength(0)
++      // 同一消息中只移除坏 part，完整加密 reasoning 和普通 answer 必须一起保留。
++      expect(reasoningParts).toHaveLength(1)
++      expect(reasoningParts[0].providerOptions.openai).toEqual({ reasoningEncryptedContent: "encrypted" })
++      expect(result[0].content.at(-1)).toMatchObject({ type: "text", text: "Answer" })
++      expect(ProviderTransform.message([{ role: "assistant", content: [msgs[0].content[0]] }], openaiReasoningModel, {})).toEqual([])
 +    })
 +
 +    test("preserves reasoning with encryptedContent when store=false", () => {
@@ -647,9 +652,9 @@ diff --git a/packages/opencode/test/provider/transform.test.ts b/packages/openco
 +      const reasoningParts = result[0].content.filter((p: any) => p.type === "reasoning")
 +      // 结果里 itemId 已被 pipeline 末端剥除，但加密内容必须完整到达 provider。
 +      expect(reasoningParts).toHaveLength(1)
-+      // #492 适配：目标谱系在 pipeline 末端剥除 itemId（store=false 下的既有契约），
-+      // 重放依赖 encryptedContent 而非 itemId——断言钉住加密内容被保留。
++      // 重放凭 encryptedContent，不能把 source 的旧 ID 断言覆盖到目标 stateless 剥离之后。
 +      expect(reasoningParts[0].providerOptions.openai.reasoningEncryptedContent).toBe("encrypted")
++      expect(reasoningParts[0].providerOptions.openai.itemId).toBeUndefined()
 +    })
 +
 +    test("preserves reasoning without encryptedContent when store=true", () => {

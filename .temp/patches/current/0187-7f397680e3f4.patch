@@ -396,7 +396,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    failure?: string
    spinner?: boolean
    separate?: boolean
-@@ -2234,13 +2302,20 @@ export function InlineToolRow(props: {
+@@ -2234,13 +2302,14 @@ export function InlineToolRow(props: {
          <Match when={true}>
            <Show
              fallback={
@@ -407,20 +407,14 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 -              >
 -                ~ {props.pending}
 -              </text>
-+              // #187：pending 可能是带颜色的 +/- 片段，不能塞进单一 text 节点
-+              <box flexDirection="row" paddingLeft={3}>
-+                <text fg={props.color} attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}>
-+                  ~{" "}
-+                </text>
-+                <Show
-+                  when={typeof props.pending === "string"}
-+                  fallback={props.pending}
-+                >
-+                  <text fg={props.color} attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}>
-+                    {props.pending as string}
-+                  </text>
-+                </Show>
-+              </box>
++              // #187：真实 pending 包含裸文本与有色 span，必须由 text 父节点承载。
++              <text
++                paddingLeft={3}
++                fg={props.color}
++                attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}
++              >
++                ~ {props.pending}
++              </text>
              }
              when={props.complete || props.failed}
            >
@@ -443,7 +437,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +      </>
 +    )
 +  })
-   // 文件内容展开/收缩：超过 10 行时默认收缩，点击展开
+   // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
    const [expanded, setExpanded] = createSignal(false)
    const code = createMemo(() => {
 @@ -2620,3 +2728,3 @@ function Write(props: ToolProps) {
@@ -651,10 +645,10 @@ diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/pack
 +  })
 +
 +  test("pending fallback renders JSX stats fragment directly", async () => {
-+    // #187：JSX pending（PendingStats 形态）走 fallback 直渲染分支，不进 text 包裹（B-01 修复）
++    // #187：使用生产工具的裸文本/span 形态，不能让测试自带 text 父节点掩盖容器错误。
 +    const frame = await renderFrame(
 +      () => (
-+        <InlineToolRow icon="←" complete={false} pending={<text>-2 +1</text>}>
++        <InlineToolRow icon="←" complete={false} pending={<>Edit src/b.ts<span> -2</span><span> +1</span></>}>
 +          Edit src/b.ts
 +        </InlineToolRow>
 +      ),

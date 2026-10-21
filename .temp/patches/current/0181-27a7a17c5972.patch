@@ -44,8 +44,20 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
  } from "./stats-charts"
  
  // #174：ColorMode 仅 auto/always/never
-@@ -138,23 +128,107 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+@@ -152,35 +142,121 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
        )
+     }
+   }
+   if (by !== "tool") {
+     // 数据层的各维度序列与输入组件必须有实际输出入口，不能只保留在报告对象中。
+     const series = { model: report.modelSeries, provider: report.providerSeries, agent: report.agentSeries, source: report.sourceSeries, project: report.projectSeries, status: report.statusSeries }[by]
+     lines.push("", ...renderUsageSeries(series, options, `${by} usage over time`))
+     lines.push(...renderGroupDetails(groups, options))
+     if (by === "source") {
+       lines.push("Input components by source")
+       for (const group of limitRows(groups, options.limit)) {
+         lines.push(`  ${group.label || group.id} ${Object.entries(group.components).map(([key, value]) => `${key}=${formatNumber(value)}`).join(" ")}`)
+       }
      }
    }
 +    // #181：只返回本表行，由 dashboard 负责段间距
@@ -125,7 +137,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +        // #181：标签按显示列截断，保留 CJK 语义
 +    const label = truncateVisible(row.label, labelWidth)
 +        // #181：行体固定指标槽位，便于扫读对齐
-+    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(String(row.tokens), 8)} ${fitVisible(String(row.calls), 5)} ${fitVisible(share, 5)}`
++    const base = `  ${fitVisible(label, labelWidth)} ${fitVisible(money(row.cost), 8)} ${fitVisible(formatNumber(row.tokens), 8)} ${fitVisible(formatNumber(row.calls), 5)} ${fitVisible(share, 5)}`
 +        // #181：trend 用 │ 与 share 分隔
 +    lines.push(trendWidth > 0 ? `${base} │ ${trend}` : base)
 +  }
@@ -154,6 +166,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    "",
 +        // #181：providers 表绑定 providerSeries 趋势
 +    ...dashboardTopTable("Top providers", report.providers, report.providerSeries, options, "provider", report.total.tokens.total),
++    ...renderCallout("daily", "recent"),
++    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
 +  ]
 +    // #181：整页一次 join，保持段间空行
 +  return body.join("\n")

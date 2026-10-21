@@ -6,6 +6,11 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=B7=A5=E5=85=B7=E5=86=99=E5=85=A5?=
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
+@@ -12,3 +12,3 @@
+ import type { CommandContext } from "@opentui/keymap"
+-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
++import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match, untrack } from "solid-js"
+ import { registerOpencodeSpinner } from "../register-spinner"
 @@ -176,7 +176,10 @@ export function Prompt(props: PromptProps) {
    const exit = useExit()
    const dimensions = useTerminalDimensions()

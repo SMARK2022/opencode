@@ -116,7 +116,7 @@ index 344cfe600..a4a0e52d9 100644
 -<!-- 「1. Type Check」：.vscodeignore 排除 test/fixtures -->
 -
 -```powershell
--<!-- powershell：仅 Windows 主机 -->
+-# powershell：仅 Windows 主机
 +Run all commands from `sdks/vscode`.
 +
 +```bash

@@ -1,38 +1,59 @@
 
-diff --git a/packages/tui/test/routes/session/session-layout.test.ts b/packages/tui/test/routes/session/session-layout.test.ts
---- a/packages/tui/test/routes/session/session-layout.test.ts
-+++ b/packages/tui/test/routes/session/session-layout.test.ts
-@@ -148,3 +148,33 @@ async function renderTextareaFrame(opts: { width: number; height: number; conten
-     setup.renderer.destroy()
-   }
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -1,6 +1,7 @@
+ /** @jsxImportSource @opentui/solid */
+ // #209：auto-review 渲染逻辑单元测试
+ import { describe, expect, test } from "bun:test"
+ import { autoReviewLabel, autoReviewMetadata, toolDisplay } from "../../../src/routes/session"
++import { sessionMessageContentWidth } from "../../../src/routes/session/layout"
+ import { testRender, useRenderer } from "@opentui/solid"
+ import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+@@ -674,4 +675,46 @@
+ function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void }) {
+   props.observe(useRoute())
+   return <Session />
  }
 +
-+
-+// [local-smark] reasoning 布局回归：目标 TUI 中 text 与 reasoning 预览共用
-+// 同一条 messageContentWidth 管线（session/index.tsx 单一 memo），不存在两套
-+// 宽度公式。锁定该管线与 ReasoningPart 同模块定义，防止日后拆分出独立
-+// reasoning 宽度公式导致两套布局漂移
-+describe("reasoning layout shares message width pipeline (#0414)", () => {
-+  test("session index routes content width through a single messageContentWidth memo", async () => {
-+    const { readFileSync } = await import("fs")
-+    const path = await import("path")
-+    const sessionSource = readFileSync(
-+      path.resolve(import.meta.dir, "../../../src/routes/session/index.tsx"),
-+      "utf-8",
-+    )
-+    // 单一宽度 memo：所有 part（text/reasoning/tool）共用同一可读宽计算
-+    expect(sessionSource).toContain("const messageContentWidth = createMemo(() =>")
-+    expect(sessionSource).toContain("sessionMessageContentWidth({")
-+    // reasoning 渲染与宽度消费在同一模块，未引入独立 reasoning 宽度公式
-+    expect(sessionSource).toContain("function ReasoningPart(")
-+    expect(sessionSource).not.toMatch(/reasoning[A-Za-z]*Width\s*=/)
-+    // [local-smark] 数据流闭环：ReasoningPart 必须经 ctx.width 消费共享 memo，
-+    // 而 context 的 width getter 必须来自 messageContentWidth——内联独立公式
-+    //（如 width: msgWidth - 1）或 chrome 偏移漂移会被以下两条捕获
-+    const reasoningBody = sessionSource.slice(sessionSource.indexOf("function ReasoningPart("))
-+    expect(reasoningBody.slice(0, reasoningBody.indexOf("\n}"))).toContain("ctx.width")
-+    const providerAt = sessionSource.indexOf("get width()")
-+    expect(providerAt).toBeGreaterThan(-1)
-+    expect(sessionSource.slice(providerAt, providerAt + 120)).toContain("messageContentWidth()")
-+  })
++// 在真实Session树测量两个正文renderable，不用私有组件名字或手工复制chrome替代布局。
++test.each([
++  { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: false },
++  { terminalWidth: 80, sidebarVisible: false, scrollbarEnabled: true },
++  { terminalWidth: 160, sidebarVisible: false, scrollbarEnabled: true },
++  { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: true },
++  { terminalWidth: 160, sidebarVisible: true, scrollbarEnabled: false },
++].flatMap((input) => (["hide", "show"] as const).map((thinkingMode) => ({ ...input, thinkingMode }))))("measures actual reasoning and text width: %j", async (input) => {
++  const messageID = "msg_layout"
++  const info: AssistantMessage = {
++    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
++    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const parts: Part[] = [
++    { id: "part_a_text", sessionID, messageID, type: "text", text: "reference width" },
++    { id: "part_b_reasoning", sessionID, messageID, type: "reasoning", text: "推理宽度".repeat(200), time: { start: 1, end: 2 } },
++  ]
++  await withRenderedReview([{ info, parts }], async (app) => {
++    const id = input.thinkingMode === "hide" ? "reasoning-preview-part_b_reasoning" : "text-part_b_reasoning"
++    await waitForReviewFrame(app, async () => {
++      const code = app.renderer.root.findDescendantById(id)
++      const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
++      if (code && text && code.width > 0 && text.width > 0 && (code.parent?.height ?? 0) > 0) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 400 })
++    // 异步highlight和预布局都落定后再读几何，不以刚挂载时的零尺寸通过。
++    await app.renderOnce()
++    await app.renderOnce()
++    const code = app.renderer.root.findDescendantById(id)
++    const text = app.renderer.root.findDescendantById(messageID)?.getChildren()[0]?.getChildren()[0]
++    if (!code || !text) throw new Error("expected measured message bodies")
++    const expected = sessionMessageContentWidth({ terminalWidth: input.terminalWidth, sidebarInLayout: input.sidebarVisible && input.terminalWidth > 120, scrollbarEnabled: input.scrollbarEnabled })
++    expect({ text: text.width, reasoning: code.width }).toEqual({ text: expected, reasoning: expected })
++    expect(code.parent?.height).toBeGreaterThan(0)
++    // CJK单行会真实软换行；折叠容器仍受共享五行预算约束。
++    if (input.thinkingMode === "hide") expect(code.parent?.height).toBeLessThanOrEqual(5)
++  }, { width: input.terminalWidth, height: 48 }, {}, { sidebar: input.sidebarVisible ? "auto" : "hide", scrollbar_enabled: input.scrollbarEnabled, thinking_mode: input.thinkingMode })
 +})

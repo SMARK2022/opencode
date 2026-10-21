@@ -11,9 +11,9 @@ index f05b1970d3..1464dadbc7 100644
 +++ b/packages/tui/src/util/context-usage.ts
 @@ -592,12 +592,14 @@ async function findUpAll(filename: string, start: string, stop?: string) {
  
- // 递归扫描技能文件：收集目录树中所有 SKILL.md 的绝对路径
+ // 技能目录缺失是可选配置，不生成空技能；递归只收集普通文件 SKILL.md，目录名不能充当技能。
  async function scanSkillFiles(root: string, result: Set<string>) {
--  // 使用 .catch 避免 let 类型标注导致的 Dirent 重载歧义
+-  // 一处不可访问目录只终止该分支，其余项目/home/config 来源仍可进入去重集合。
 -  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null)
 +  // #117：显式 DirentLike，避免 readdir 重载把 entries 推成 string[]
 +  type DirentLike = { name: string | Buffer; isDirectory(): boolean; isFile(): boolean }
@@ -21,7 +21,7 @@ index f05b1970d3..1464dadbc7 100644
 +  const entries = (await fs.readdir(root, { withFileTypes: true }).catch(() => null)) as DirentLike[] | null
    if (!entries) return
    for (const entry of entries) {
--    // entry.name 在某些类型版本下为 Buffer，强制转为 string
+-    // readdir 默认 utf8 返回字符串；目录路径必须保持平台编码，不能按字节拆成多个技能路径。
 -    const name = entry.name as string
 +    // #117：name 在部分类型版本为 Buffer
 +    const name = String(entry.name)
