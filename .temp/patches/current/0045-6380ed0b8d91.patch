@@ -1,187 +1,124 @@
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -61,15 +61,14 @@
-   default: 0.25,
- }
- 
--// 文件去重缓存 - per-session
-+// 文件去重缓存 - per-session，key = filepath::offset::limit 避免跨范围碰撞
- type ReadCacheEntry = {
-   content: string
-   timestamp: number
--  offset: number
--  limit: number | undefined
--  isPartialView: boolean
- }
- const readFileState = new Map<string, ReadCacheEntry>()
-+// 缓存预热标志：首次读取时从会话历史加载已有结果
-+let cacheSeeded = false
- 
- // Stub 文案 - 当文件未修改且上下文中已有未压缩的读取结果时返回此文案
- export const FILE_UNCHANGED_STUB =
-@@ -101,11 +100,13 @@
-   return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
- }
- 
--// 检查当前上下文中是否有该文件的未被压缩的读取结果
--// 遍历 assistant 消息的 tool parts，查找同路径且未 compacted 的 read 结果
-+// 检查当前上下文中是否有该文件的未被压缩的读取结果（同范围）
-+// 遍历 assistant 消息的 tool parts，查找同路径、同范围且未 compacted 的 read 结果
- function findUnexpandedFileInContext(
-   messages: SessionV1.WithParts[],
-   filepath: string,
-+  offset: number,
-+  limit: number | undefined,
- ): boolean {
-   for (let i = messages.length - 1; i >= 0; i--) {
-     const msg = messages[i]
-@@ -114,14 +115,24 @@
-       if (part.type !== "tool") continue
-       if (part.tool !== "read") continue
-       if (part.state.status !== "completed") continue
--      const input = part.state.input as { filePath?: string }
-+      const input = part.state.input as { filePath?: string; offset?: number; limit?: number }
-       if (input.filePath !== filepath) continue
-+      // 范围必须完全匹配，不同 offset/limit 视为不同读取
-+      if ((input.offset ?? 1) !== offset) continue
-+      if ((input.limit ?? DEFAULT_READ_LIMIT) !== (limit ?? DEFAULT_READ_LIMIT)) continue
-       // 检查是否被压缩（compacted）
-       if (part.state.time.compacted) continue
-+      // 跳过 stub 结果 — stub 不携带实际内容，不能作为去重依据
-+      if (part.state.output === FILE_UNCHANGED_STUB) continue
-       return true
-     }
-   }
-   return false
-+}
-+
-+// 复合缓存键：filepath + offset + limit，避免不同读取范围互相碰撞
-+function cacheKey(filepath: string, offset: number, limit: number | undefined) {
-+  return `${filepath}::${offset}::${limit ?? DEFAULT_READ_LIMIT}`
- }
- 
- class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
-@@ -377,26 +388,63 @@
- 
-       if (!stat) return yield* miss(filepath)
- 
--      // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
--      const existingState = readFileState.get(filepath)
--      if (existingState && !existingState.isPartialView) {
--        if (existingState.offset === (params.offset ?? 1) && existingState.limit === params.limit) {
--          // stat.mtime 在目标中是 Option<Date>，需要 unwrap 后取毫秒时间戳
--          const mtimeMs = Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
--          if (mtimeMs === existingState.timestamp) {
--            // 额外检查：当前上下文中是否有该文件的未被压缩的读取结果
--            const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath)
--            if (hasUnexpandedContent) {
--              return {
--                title,
--                output: FILE_UNCHANGED_STUB,
--                metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
--              }
-+      // 首次读取时从会话历史预热缓存 — 扫描已有的非 stub、未压缩的读取记录
-+      if (!cacheSeeded) {
-+        for (let i = ctx.messages.length - 1; i >= 0; i--) {
-+          const msg = ctx.messages[i]
-+          if (msg.info.role !== "assistant") continue
-+          for (const part of msg.parts) {
-+            if (part.type !== "tool") continue
-+            if (part.tool !== "read") continue
-+            if (part.state.status !== "completed") continue
-+            if (part.state.time.compacted) continue
-+            if (part.state.output === FILE_UNCHANGED_STUB) continue
-+
-+            const seedInput = part.state.input as { filePath?: string; offset?: number; limit?: number }
-+            if (!seedInput.filePath) continue
-+
-+            const seedKey = cacheKey(seedInput.filePath, seedInput.offset ?? 1, seedInput.limit)
-+            if (readFileState.has(seedKey)) continue
-+
-+            const seedStat = yield* fs.stat(seedInput.filePath).pipe(
-+              Effect.catch(() => Effect.succeed(undefined)),
-+            )
-+            if (!seedStat || seedStat.type !== "File") continue
-+
-+            // V2 stat.mtime 是 Option<Date>，用 getOrElse 取毫秒时间戳
-+            const seedMtime = Math.floor(Option.getOrElse(seedStat.mtime, () => new Date(0)).getTime())
-+            // 仅当文件在读取后未被修改时才加入缓存（mtime ≤ 读取时间表示无后续修改）
-+            if (seedMtime <= part.state.time.end) {
-+              readFileState.set(seedKey, {
-+                content: part.state.output,
-+                timestamp: seedMtime,
-+              })
-             }
-           }
-         }
-+        cacheSeeded = true
-       }
- 
-+      // 文件去重检查 - 使用复合键查找同范围的缓存
-+      const requestOffset = params.offset ?? 1
-+      const requestLimit = params.limit
-+      const existingState = readFileState.get(cacheKey(filepath, requestOffset, requestLimit))
-+      if (existingState) {
-+        // stat.mtime 在目标中是 Option<Date>，需要 unwrap 后取毫秒时间戳
-+        const mtimeMs = Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
-+        if (mtimeMs === existingState.timestamp) {
-+          // 额外检查：当前上下文中是否有该文件同范围的未压缩读取结果
-+          const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath, requestOffset, requestLimit)
-+          if (hasUnexpandedContent) {
-+            return {
-+              title,
-+              output: FILE_UNCHANGED_STUB,
-+              metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
-+            }
-+          }
-+        }
-+      }
-+
-       if (stat.type === "Directory") {
-         const items = yield* list(filepath)
-         const limit = params.limit ?? DEFAULT_READ_LIMIT
-@@ -512,15 +560,11 @@
-         )
-       }
- 
--      // 写入去重缓存
--      readFileState.set(filepath, {
-+      // 写入去重缓存 — 使用复合键，不同范围分别缓存
-+      readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
-         content,
-         timestamp: Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime()),
--        offset: params.offset ?? 1,
--        limit: params.limit,
--        isPartialView: file.more || file.cut,
-       })
--      // isPartialView 标记本次读取是否为部分视图（截断或还有更多行），部分视图不参与去重
- 
-       let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
-       output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
+@@ -496,9 +496,10 @@
+-      // 权限与本次有界读取均已完成；只省模型上下文，不让缓存替代内容版本证明。
+-      // 行内截断同样丢失正文，不能把两个不同文件的相同截断前缀当作完整文件。
+       if (
+-        !truncated &&
++        // 当前页读取与权限检查已完成；未截掉页内正文时分页仍可去重。
++        !file.cut &&
++        // 行内截断丢失完整内容，相同前缀不能证明文件版本一致。
+         file.raw.every((line) => !line.endsWith(MAX_LINE_SUFFIX)) &&
++        // 每次用本会话可见历史证明范围与版本，恢复会话无需预热或借用外会话缓存。
+         findUnexpandedFileInContext(ctx, params, output)
+       ) {
+         return {
+           title,
 
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -192,10 +192,8 @@
- 
+@@ -195,10 +195,8 @@
          const { items, next } = asks()
          const target = path.join(dir, "test.txt")
+-        // 保留 fixture 盘符；根相对路径归当前进程盘，跨盘临时目录不能假定同盘。
 -        const alt = target
--          .replace(/^[A-Za-z]:/, "")
 -          .replaceAll("\\", "/")
 -          .toLowerCase()
-+        // Windows 驱动器路径转换：C:\foo → /c/foo（Git Bash 风格）
++        // 驱动器别名交给实际路径规范化；保留其余路径大小写，不能改写文件身份。
 +        const alt = target.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`).replaceAll("\\", "/")
  
          yield* exec(dir, { filePath: alt }, next)
          const read = items.find((item) => item.permission === "read")
-@@ -508,7 +506,8 @@
+         expect(read).toBeDefined()
+@@ -330,6 +328,8 @@
+       const history = (result: Tool.ExecuteResult, sessionID = ctx.sessionID): Tool.Context["messages"] => {
+         // 使用真实持久化 Schema 构造历史，不以 any 伪造工具结果的身份字段。
++        // 分页历史保存真实请求范围，不用测试侧缓存或比较算法伪造命中。
++        const input = { filePath: target, offset: 1, limit: 1 }
+         const decoded = Schema.decodeUnknownSync(SessionV1.WithParts)({
+           info: {
+             id: "msg_prior", sessionID, role: "assistant", parentID: "msg_parent",
+             time: { created: 1 }, modelID: "test", providerID: "test", mode: "build", agent: "build",
+@@ -341,7 +341,9 @@
+-            state: { status: "completed", input: { filePath: target }, ...result, time: { start: 1, end: 2 } },
++            state: { status: "completed", input, ...result, time: { start: 1, end: 2 } },
+           }],
+         })
+         return [decoded as SessionV1.WithParts]
+       }
+-      yield* put(target, "v1")
+-      const first = yield* exec(dir, { filePath: target })
++      // 多行文件强制形成分页视图，覆盖取消部分视图排除的原始意图。
++      yield* put(target, "v1\ntail")
++      const request = { filePath: target, offset: 1, limit: 1 }
++      const first = yield* exec(dir, request)
+@@ -349,12 +351,22 @@
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
++      // 同会话已有完整页面可预热命中，第一次历史调用也无需进程级初始化。
++      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
+       // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
+-      yield* put(target, "v2")
+-      const second = yield* exec(dir, { filePath: target }, { ...ctx, sessionID: SessionID.make("ses_b") })
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toContain("v2")
++      yield* put(target, "v2\ntail")
++      const b = { ...ctx, sessionID: SessionID.make("ses_b") }
++      const second = yield* exec(dir, request, b)
++      // 独立预期来自实际写入文字，不只比较两次可能同时错误的返回值。
++      expect(second.output).toContain("1: v2")
++      expect(second.output).not.toContain("1: v1")
++      expect(second.metadata.truncated).toBe(true)
++      const reread = yield* exec(dir, request, { ...ctx, messages: visible })
++      expect(reread.output).toContain("1: v2")
++      expect(reread.output).not.toContain("1: v1")
++      // B 的本会话可见页面证明当前版本；A 的旧页面不能借用这个证明。
++      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toBe(FILE_UNCHANGED_STUB)
+       // 外会话即使包含当前版本，也不构成本会话的可见证明。
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(second, SessionID.make("ses_b")) })).output).toContain("v2")
++      expect((yield* exec(dir, request, { ...ctx, messages: history(second, b.sessionID) })).output).toContain("v2")
+       const current = history(second)
+       const part = current[0].parts[0]
+       if (part.type !== "tool" || part.state.status !== "completed") throw new Error("invalid fixture")
+       // 压缩时间为零仍是压缩；stub 不能作为新的正文证明。
+       part.state.time.compacted = 0
+@@ -361,20 +373,22 @@
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
++      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
+       delete part.state.time.compacted
+       part.state.output = FILE_UNCHANGED_STUB
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
++      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
+       part.state.output = second.output
+       // 范围变化必须返回正文；权限也必须先于成功的 stub 判定执行。
+-      part.state.input.limit = 1
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
+-      delete part.state.input.limit
+-      const denied = yield* fail(dir, { filePath: target }, {
++      part.state.input.limit = 2
++      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
++      part.state.input.limit = 1
++      // 恢复范围确实命中，避免拒绝断言仅因测试历史失配而偶然成立。
++      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toBe(FILE_UNCHANGED_STUB)
++      const denied = yield* fail(dir, request, {
+         ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
+       })
+       expect(denied.message).toBe("read denied")
+       // 相同截断前缀不是完整版本证明，长行必须继续返回实际可见内容。
+       yield* put(target, "x".repeat(3000))
+-      const partial = yield* exec(dir, { filePath: target })
+-      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(partial) })).output)
++      const partial = yield* exec(dir, request)
++      expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
+         .not.toBe(FILE_UNCHANGED_STUB)
+     }),
+   )
+@@ -574,7 +588,8 @@
        yield* put(path.join(dir, "image.bin"), jpeg)
  
        const result = yield* exec(dir, { filePath: path.join(dir, "image.bin") })
 -      expect(result.output).toBe("Image read successfully")
-+      // 图片读取输出可能包含附加信息，使用 toStartWith 避免严格匹配
++      // 图片文案允许附加说明；原生附件 MIME 与 data URL 断言继续保留。
 +      expect(result.output).toStartWith("Image read successfully")
        expect(result.attachments?.[0].mime).toBe("image/jpeg")
        expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)

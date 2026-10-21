@@ -9,79 +9,60 @@ diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-prox
 index 309989b091..0ca0eff2bc 100644
 --- a/packages/core/src/network-proxy.ts
 +++ b/packages/core/src/network-proxy.ts
-@@ -5,11 +5,13 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
+@@ -5,12 +5,17 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
  
  export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
  
 -const TTL = 120_000
--// #71：本地地址强制直连，避免环回走代理
-+// #73：系统代理缓存 15s，平衡探测开销与变更响应
-+const TTL = 15_000 // #73：缩短系统代理缓存，更快响应代理变更
- const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
++// 系统代理缓存缩至十五秒，代理应用重启后不长期沿用失效端口。
++const TTL = 15_000
+ // URL 会将 mapped IPv4 规范为十六进制 IPv6，两种表示都必须保持回环直连。
+ const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1"])
  
+ // 共享探测 Promise 防止并发请求各自拉起 reg/scutil 子进程。
  let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
-+// #73：全局 fetch 包装是否已安装，避免重复包装递归
-+let globalFetchInstalled = false
++// 记录本模块包装函数的身份，后来替换的全局自定义 fetch 不能被误解包。
++let globalFetchInstalled: FetchFn | undefined
++// 显式路由复用安装前的运输函数，不能再次进入全局代理包装。
++let savedOriginal: FetchFn | undefined
  
  type SystemProxy = {
    http?: string
-@@ -26,17 +28,14 @@ export function noProxyString(extra: string[] = []) {
-   return Array.from(new Set([...LOCAL, ...extra])).join(",")
- }
- 
--// #71：主机名小写归一
- function normalizeHost(hostname: string) {
-   return hostname.replace(/^\[|\]$/g, "").toLowerCase()
- }
- 
--// #71：判定 localhost/127.0.0.1/::1
- function isLocal(url: URL) {
-   return LOCAL.has(normalizeHost(url.hostname))
- }
- 
--// #71：补全协议并把 localhost 归一到 127.0.0.1
- function normalizeProxy(value: string | undefined) {
-   if (!value) return
-   const next = value.trim()
-@@ -69,8 +68,7 @@ function envProxy(url: URL): SystemProxy | undefined {
-   const all = process.env.ALL_PROXY || process.env.all_proxy
-   const picked = normalizeProxy(proxy || all)
-   if (!picked) return
--  return { http: picked, https: picked, bypass: (// #71：Bun 缓存代理 env：NO_PROXY=* 迫使无 proxy 参数直连
--process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
-+  return { http: picked, https: picked, bypass: (process.env.NO_PROXY || process.env.no_proxy || "").split(",") }
- }
- 
- async function execText(command: string, args: string[], timeout = 1500) {
-@@ -128,8 +126,10 @@ async function macProxy(): Promise<SystemProxy | undefined> {
+@@ -143,10 +148,12 @@ async function macProxy(): Promise<SystemProxy | undefined> {
    return { http, https, socks, bypass: [] }
  }
  
 -async function currentSystemProxy() {
-+// #73：支持 force refresh 绕过 TTL
++// 失败后的刷新必须绕过缓存，否则会再次选择同一失效代理。
 +async function currentSystemProxy(refresh = false) {
+   // Linux 的代理来源是 env，不能为它执行 Windows/macOS 系统探测。
    if (process.platform !== "win32" && process.platform !== "darwin") return undefined
 +  if (refresh) cache = undefined
    if (!cache || cache.expires < Date.now()) {
+     // 探测失败也缓存本轮结果，避免短时系统错误让每个请求重复 spawn。
      cache = {
        expires: Date.now() + TTL,
-@@ -139,9 +139,9 @@ async function currentSystemProxy() {
+@@ -156,11 +163,11 @@ async function currentSystemProxy() {
    return cache.value
  }
  
 -async function configuredProxy(url: URL) {
 +async function configuredProxy(url: URL, refresh = false) {
+   // 桌面平台以系统设置为准，shell 的旧代理不应覆盖代理工具当前的开关。
    if (process.platform === "win32" || process.platform === "darwin") {
 -    const sys = await currentSystemProxy()
 +    const sys = await currentSystemProxy(refresh)
-     if (!sys || bypass(url, sys.bypass)) return
+-    // 系统 bypass 与代理必须来自同一次快照，防止混用切换前后的规则。
+-    if (!sys || bypass(url, sys.bypass)) return
++    // 系统代理与其 bypass 保持同一快照，叠加用户 NO_PROXY 以对齐实际运输。
++    if (!sys || bypass(url, [...sys.bypass, ...(process.env.NO_PROXY || process.env.no_proxy || "").split(",")])) return
      return url.protocol === "https:" ? sys.https || sys.http || sys.socks : sys.http || sys.https || sys.socks
    }
-@@ -150,38 +150,62 @@ async function configuredProxy(url: URL) {
+@@ -169,41 +176,84 @@ async function configuredProxy(url: URL) {
    return url.protocol === "https:" ? env.https || env.http || env.socks : env.http || env.https || env.socks
  }
  
--// #71：解析直连/代理路由，支持 force 刷新缓存
+ // 回环在系统探测之前直连，健康检查不承担探测耗时或受外部 bypass 配置影响。
 -export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown"): Promise<Route> {
 +export async function resolveProxyRoute(input: string | URL, purpose: Purpose = "unknown", refresh = false): Promise<Route> {
    const url = input instanceof URL ? input : new URL(input)
@@ -94,30 +75,40 @@ index 309989b091..0ca0eff2bc 100644
 +  return { type: "direct", reason: refresh ? "refresh-no-proxy" : "no-proxy" }
  }
  
--// #71：主入口：按 purpose 解析代理后用原生 fetch 发出
+ // 明确 routed 入口可用于 CLI/测试，不能要求调用方先安装全局 fetch 才能应用代理。
  export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
    return fetchWithRoute(fetch, input, init)
  }
  
--export // #71：适配器透传，禁止二次注入代理
--async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
-+export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+ // provider 的自定义 fetch 可能负责鉴权，必须在原 transport 上加路由而非换成裸 fetch。
+ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
    const url = new URL(input instanceof Request ? input.url : input.toString())
 -  const { purpose = "unknown", ...rest } = (init ?? {}) as RoutedInit
 -  const route = await resolveProxyRoute(url, purpose)
--  // #71：直连路径：失败不重试代理
--if (route.type === "direct") return fetchFn(input, rest)
-+  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
+-  // 无代理时保持一次原请求，不为普通直连失败引入第二次 provider 调用。
+-  if (route.type === "direct") return fetchFn(input, rest)
++  // 只解开本模块安装的全局入口；调用方传入的自定义 fetch 保持原运输职责。
++  const original = savedOriginal && fetchFn === globalFetchInstalled ? savedOriginal : fetchFn
++  // Request 自带取消信号也须参与失败判断，显式 init.signal 仍优先。
++  const { purpose = "unknown", signal = input instanceof Request ? input.signal : undefined, ...rest } = (init ?? {}) as RoutedInit
++  // 提供者与安装请求首次刷新，避免仍在 TTL 内的旧代理拖延交互。
 +  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
-+  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
-+  const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
++  // 路由探测期间也可能取消；开始网络运输前须结算同一个信号。
++  signal?.throwIfAborted()
++  // 恢复运输仍沿原取消信号，不能通过改写用户代理环境制造直连。
++  const direct = () => original(input, { ...rest, signal })
++  const proxy = (value: string) => original(input, { ...rest, signal, proxy: value })
 +
++  // 无代理失败只允许重新发现新代理，不能再次发送相同直连请求。
 +  if (route.type === "direct") {
 +    try {
 +      return await direct()
 +    } catch (error) {
++      // 取消是请求终点，保留首次错误对象，不能转成代理重发。
 +      if (signal?.aborted) throw error
 +      const refreshed = await resolveProxyRoute(url, purpose, true)
++      // 刷新等待期间的取消同样禁止第二次运输。
++      if (signal?.aborted) throw error
 +      if (refreshed.type === "proxy") return proxy(refreshed.proxy).catch(() => { throw error })
 +      throw error
 +    }
@@ -127,35 +118,43 @@ index 309989b091..0ca0eff2bc 100644
 -    return await fetchFn(input, { ...rest, proxy: route.proxy })
 +    return await proxy(route.proxy)
    } catch (error) {
+     // 代理不可用可尝试原直连，但两路都失败时保留最初代理错误以便诊断。
 -    return fetchFn(input, rest).catch(() => {
 -      throw error
 -    })
-+    const refreshed = signal?.aborted ? undefined : await resolveProxyRoute(url, purpose, true)
-+    if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
++    // provider 的组合信号包含调用方取消与超时，不能去掉信号或换一个窗口。
++    if (signal?.aborted) throw error
++    const refreshed = await resolveProxyRoute(url, purpose, true)
++    // 取消可能发生在系统代理探测中，继续回退前须再次检查。
++    if (signal?.aborted) throw error
++    if (refreshed.type === "proxy" && refreshed.proxy !== route.proxy) {
 +      return proxy(refreshed.proxy).catch(() => { throw error })
 +    }
-+    // When the proxy attempt consumed the abort signal, retry direct without it
-+    // so the fallback has a chance to succeed.
-+    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
++    // 环境代理仍未变化时，裸 fetch 会重进同一代理；终止恢复并保留首次错误。
++    if (process.platform !== "win32" && process.platform !== "darwin" && refreshed.type === "proxy") throw error
 +    return direct().catch(() => { throw error })
    }
  }
  
-+// #73：包装 globalThis.fetch，使未改调用方也走代理
++// 插件直接使用全局 fetch 时也共享路由；显式用途不得被默认用途覆盖。
 +export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
-+  // #73：幂等安装，禁止重复包裹
-+if (globalFetchInstalled) return
++  if (globalFetchInstalled) return
 +  const original = globalThis.fetch.bind(globalThis) as FetchFn
-+  globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
-+    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
-+  globalFetchInstalled = true
++  savedOriginal = original
++  globalFetchInstalled = (input: FetchInput, init?: RoutedInit) =>
++    fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })
++  // 局部 Fetch 适配复用 Bun 的 preconnect，安装全局包装不能丢掉这个运输成员。
++  globalThis.fetch = Object.assign(globalFetchInstalled, { preconnect: globalThis.fetch.preconnect })
 +}
 +
  export async function npmProxyOptions(registry: string) {
+   // registry 与安装请求共用用途，避免 ping 走代理而 Arborist 下载仍走旧 shell 路径。
 -  const route = await resolveProxyRoute(registry, "npm")
++  // npm 子进程不共享 fetch 包装，每次安装前须读取当前代理设置。
 +  const route = await resolveProxyRoute(registry, "npm", true)
    if (route.type === "direct") return {}
    return {
+     // npm config 的扁平与连字符字段都需运输，不能只给原生 fetch 的 proxy 键。
      proxy: route.proxy,
 diff --git a/packages/core/src/npm-config.ts b/packages/core/src/npm-config.ts
 index 04536982c2..884deb8381 100644
@@ -166,16 +165,16 @@ index 04536982c2..884deb8381 100644
        purpose: "npm",
        method: "GET",
 -      signal: AbortSignal.timeout(1500),
-+      // ping 超时 3 秒：兼容高延迟网络环境
-+    signal: AbortSignal.timeout(3000),
++      // 三秒覆盖整个路由请求，代理失败不能另开超时窗口拖延安装。
++      signal: AbortSignal.timeout(3000),
      })
      return response.ok
    } catch {
-@@ -41,11 +42,11 @@ async function pingRegistry(registry: string) {
+@@ -41,11 +42,10 @@ async function pingRegistry(registry: string) {
  
- // 按顺序检测候选 registry，返回第一个可用的
+-// 先验证官方源再尝试镜像，两者都不可用时仍交给 npm 的正常错误路径报告失败。
++// 并行只缩短等待，仍按候选顺序选择，避免镜像抢先返回改变默认优先级。
  async function selectRegistry() {
-+  // 并行 ping 所有候选 registry，返回第一个可用的
    const candidates = [defaultRegistry, mirrorRegistry]
 -  for (const candidate of candidates) {
 -    if (await pingRegistry(candidate)) return candidate
@@ -186,28 +185,28 @@ index 04536982c2..884deb8381 100644
 +  return first?.registry ?? defaultRegistry
  }
  
- // 带缓存的默认 registry 选择：60 秒内复用上次结果
+ // 共享选源 Promise 可合并并发安装的探测，而过期后必须允许网络切换重新选择。
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 index 0c4b6f8aed..ab8046ebcc 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -2,6 +2,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
- import { Global } from "@opencode-ai/core/global"
- import path from "path"
+@@ -1,6 +1,7 @@
  import { Server } from "@/server/server"
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
  import { InstanceRuntime } from "@/project/instance-runtime"
  import { Rpc } from "@/util/rpc"
  import { upgrade } from "@/cli/upgrade"
-@@ -130,6 +131,8 @@ Rpc.listen(rpc)
- // 仅在守护进程模式下运行：启动内部回环 HTTP 服务器、写入锁文件、注册信号
- // 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
+ import { Config } from "@/config/config"
+ import { GlobalBus } from "@/bus/global"
+@@ -102,6 +103,8 @@ if (!isDaemon) Rpc.listen(rpc)
+ 
+ // 线程入口不创建第二个 HTTP listener，也不安装 daemon 的 idle 退出回调。
  if (isDaemon) {
-+  // 安装全局 fetch 代理路由，使 daemon 内未显式 routedFetch 的请求也走系统代理
++  // daemon 插件可能直接调用 fetch，入口安装一次使其共享实时代理策略。
 +  NetworkProxy.installGlobalFetch()
-   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
-   // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
-   const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
+   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
+   let internalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
+ 
 diff --git a/packages/opencode/src/config/config.ts b/packages/opencode/src/config/config.ts
 index 86238f1a84..84a8df123a 100644
 --- a/packages/opencode/src/config/config.ts
@@ -217,47 +216,35 @@ index 86238f1a84..84a8df123a 100644
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
  import { serviceUse } from "@opencode-ai/core/effect/service-use"
-@@ -190,18 +191,32 @@ const layer = Layer.effect(
+@@ -204,18 +205,30 @@ const layer = Layer.effect(
        schema: S,
        loginOrigin: string,
      ) {
--      const response = yield* HttpClient.filterStatusOk(withTransientReadRetry(http))
--        .execute(
--          HttpClientRequest.get(url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers ?? {})),
--        )
--        .pipe(
--          Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
--        )
--      const body = yield* response.text.pipe(
--        Effect.catch((error) => Effect.die(new Error(`failed to read remote config from ${url}: ${String(error)}`))),
-+      // NetworkProxy 系统代理 + 手动 transient 重试（对齐 withTransientReadRetry 2 次退避）
-+      const fetched = yield* Effect.promise(async () => {
-+        let last: unknown
-+        for (let attempt = 0; attempt < 3; attempt++) {
-+          try {
-+            // #73：well-known/remote config 走系统代理路由，避免 HttpClient mock 漏拦
-+            // #73：well-known/remote 配置走系统代理路由
-+            const res = await NetworkProxy.routedFetch(url, {
-+              purpose: "infrastructure",
-+              headers: { Accept: "application/json", ...(headers ?? {}) },
-+            })
-+            if (!res.ok) throw new Error(`failed to fetch remote config from ${url}: ${res.status}`)
-+            const body = await res.text()
-+            return { body, contentType: (res.headers.get("content-type") ?? "").toLowerCase() }
-+          } catch (error) {
-+            last = error
-+            if (attempt < 2) await new Promise((r) => setTimeout(r, 200 * 2 ** attempt))
-+          }
-+        }
-+        throw last
-+      }).pipe(
-+        Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
++      // 状态与瞬态重试留给 HttpClient；代理只换本次运输，认证拒绝不能被手写重试。
+       const response = yield* HttpClient.filterStatusOk(withTransientReadRetry(http))
+         .execute(
+           HttpClientRequest.get(url).pipe(HttpClientRequest.acceptJson, HttpClientRequest.setHeaders(headers ?? {})),
+         )
+         .pipe(
++          // 只覆盖远程配置这次运输，复用原 HttpClient 的请求头、重试与取消 signal。
++          Effect.provideService(
++            FetchHttpClient.Fetch,
++            Object.assign(
++              (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
++                NetworkProxy.routedFetch(input, { ...init, purpose: "infrastructure" }),
++              // 沿 ModelsDev 的局部接缝保留 Bun preconnect，避免用类型断言伪造 fetch 接口。
++              { preconnect: fetch.preconnect },
++            ),
++          ),
+           Effect.catch((error) => Effect.die(new Error(`failed to fetch remote config from ${url}: ${String(error)}`))),
+         )
++      // 响应正文保留 Effect 读取错误与作用域取消，不能改成脱离请求作用域的 Promise。
+       const body = yield* response.text.pipe(
+         Effect.catch((error) => Effect.die(new Error(`failed to read remote config from ${url}: ${String(error)}`))),
        )
 -      // An auth proxy can answer with an HTML login page at HTTP 200 (passes filterStatusOk); treat it as a re-auth error, not a decode failure.
--      const contentType = (response.headers["content-type"] ?? "").toLowerCase()
-+      const body = fetched.body
-+      // An auth proxy can answer with an HTML login page at HTTP 200; treat it as a re-auth error, not a decode failure.
-+      const contentType = fetched.contentType
++      // 认证代理可能以 HTTP 200 返回 HTML 登录页；沿原契约报重新认证，不能误归为 JSON 解码失败。
+       const contentType = (response.headers["content-type"] ?? "").toLowerCase()
        if (contentType.includes("html") || /^\s*<!doctype|^\s*<html/i.test(body)) {
          return yield* Effect.die(new RemoteAuthError({ url: loginOrigin, remote: url }))
        }
@@ -269,131 +256,213 @@ index 5faaa18dc7..a5eda68d76 100644
  import { ProviderError } from "./error"
  
  const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
-+// 请求默认超时 5 分钟：覆盖无显式 timeout 的 provider 请求
++// 总超时约束握手后的整个请求，不能靠连续首包或分块活动无限续期。
 +const DEFAULT_TIMEOUT_MS = 300_000
  
  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
    if (typeof ms !== "number" || ms <= 0) return res
-@@ -1780,8 +1782,8 @@ const layer = Layer.effect(
+@@ -1851,8 +1853,9 @@ const layer = Layer.effect(
            if (opts.signal) signals.push(opts.signal)
            if (chunkAbortCtl) signals.push(chunkAbortCtl.signal)
            if (headerTimeoutCtl) signals.push(headerTimeoutCtl.signal)
 -          if (options["timeout"] !== undefined && options["timeout"] !== null && options["timeout"] !== false)
 -            signals.push(AbortSignal.timeout(options["timeout"]))
++          // 总期限加入既有取消链，显式 false 仍关闭此期限；路由恢复必须保留同一组合信号。
 +          if (options["timeout"] !== false)
 +            signals.push(AbortSignal.timeout(typeof options["timeout"] === "number" ? options["timeout"] : DEFAULT_TIMEOUT_MS))
  
            const combined = signals.length === 0 ? null : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
            if (combined) opts.signal = combined
-diff --git a/packages/opencode/test/config/config.test.ts b/packages/opencode/test/config/config.test.ts
-index e281831ddf..489f366219 100644
---- a/packages/opencode/test/config/config.test.ts
-+++ b/packages/opencode/test/config/config.test.ts
-@@ -9,8 +9,9 @@ import { Config } from "@/config/config"
- import { ConfigManaged } from "@/config/managed"
- import { ConfigParse } from "../../src/config/parse"
- import { ConfigV2Compat } from "../../src/config/v2-compat"
- import { snapshot } from "./snapshot"
- import { Npm } from "@opencode-ai/core/npm"
-+import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -10,9 +10,11 @@
+ import {
++  LLMError,
+   LLMRequest,
+   Tool as NativeTool,
+   ToolFailure,
+   ToolRuntime,
++  TransportReason,
+   toDefinitions,
+   type JsonSchema,
+   type LLMEvent,
+ } from "@opencode-ai/llm"
+@@ -75,7 +77,9 @@
+ export function stream(input: StreamInput): StreamResult {
+   const fetch = providerFetch(input)
+   const current = statusWithFetch(input, fetch)
+   if (current.type === "unsupported") return current
++  // native 沿 V1 SDK 工厂的 provider.options 期限，不把协议正文选项误当运输配置。
++  const timeout = input.provider.options.timeout
  
- import { InstanceRef } from "../../src/effect/instance-ref"
- import type { InstanceContext } from "../../src/project/instance-context"
-@@ -209,6 +210,54 @@ const withConfigTree = <A, E, R>(
-     return yield* withGlobalConfigDir(global, withInstanceDir(directory, effect))
-   })
- 
-+// #73：单一 routedFetch spy + 当前 active payload，避免多次 spyOn/afterEach restore 互相踩踏
-+type WellKnownRoutedPayload = {
-+  seen: { wellKnown?: string; remote?: string; authorization?: string }
-+  wellKnown: unknown
-+  remote?: unknown
-+  remoteHtml?: string
-+}
-+let activeWellKnownRouted: WellKnownRoutedPayload | undefined
-+let wellKnownRoutedFetchInstalled = false
-+afterEach(() => {
-+  // #73：用例结束后清空 active payload，避免污染真实网络用例
-+  activeWellKnownRouted = undefined
-+})
-+// #73：只安装一次 spy，避免 last-spy 被 restore 后漏拦
-+function ensureWellKnownRoutedFetchSpy() {
-+  if (wellKnownRoutedFetchInstalled) return
-+  wellKnownRoutedFetchInstalled = true
-+  // #73：保留原 routedFetch，无 active fixture 时透传给真实/FetchHttpClient 用例
-+  const original = NetworkProxy.routedFetch.bind(NetworkProxy)
-+  // #73：拦截 well-known/remote_config 的 routedFetch，避免真实访问 example.com
-+  spyOn(NetworkProxy, "routedFetch").mockImplementation(async (inputUrl, init) => {
-+    const payload = activeWellKnownRouted
-+    const url = typeof inputUrl === "string" ? inputUrl : inputUrl instanceof URL ? inputUrl.toString() : inputUrl.url
-+    if (!payload) {
-+      return original(inputUrl as any, init as any)
-+    }
-+    if (url.includes(".well-known/opencode")) {
-+      payload.seen.wellKnown = url
-+      return new Response(JSON.stringify(payload.wellKnown), {
-+        status: 200,
-+        headers: { "content-type": "application/json" },
-+      })
-+    }
-+    if (url.includes("config.example.com") && (payload.remote !== undefined || payload.remoteHtml !== undefined)) {
-+      payload.seen.remote = url
-+      payload.seen.authorization = new Headers(init?.headers).get("authorization") ?? undefined
-+      if (payload.remoteHtml !== undefined) {
-+        return new Response(payload.remoteHtml, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
-+      }
-+      return new Response(JSON.stringify(payload.remote), {
-+        status: 200,
-+        headers: { "content-type": "application/json" },
-+      })
-+    }
-+    return new Response(JSON.stringify({}), { status: 404, headers: { "content-type": "application/json" } })
-+  })
-+}
-+
- const wellKnown = (input: {
-   authUrl?: string
-   config?: unknown
-@@ -218,7 +267,7 @@ const wellKnown = (input: {
-   wellKnown?: unknown
- }) => {
-   const seen: { wellKnown?: string; remote?: string; authorization?: string } = {}
--  const client = remoteConfigClient({
-+  const payload: WellKnownRoutedPayload = {
-     seen,
-     wellKnown: input.wellKnown ?? {
-       ...(input.config !== undefined ? { config: input.config } : {}),
-@@ -226,10 +275,31 @@ const wellKnown = (input: {
-     },
-     remote: input.remote,
-     remoteHtml: input.remoteHtml,
--  })
-+  }
-+  const client = remoteConfigClient(payload)
-+  // #73：与 HttpClient mock 并存，覆盖生产主路径 NetworkProxy.routedFetch
-+  ensureWellKnownRoutedFetchSpy()
-+  const base = configIt({ auth: wellKnownAuth(input.authUrl ?? "https://example.com"), client })
-+  // #73：每个用例开始时激活本 fixture 的 payload，杜绝模块加载顺序导致的 last-spy 覆盖
-+  const activate = <A, E, R>(fn: () => Effect.Effect<A, E, R>) => {
-+    return () => {
-+      // #73：用例期间绑定 fixture，结束后清空以免劫持真实 FetchHttpClient 用例
-+      // #73：绑定本 fixture 的 seen/响应体
-+      activeWellKnownRouted = payload
-+      return fn().pipe(
-+        Effect.ensuring(
-+          Effect.sync(() => {
-+            if (activeWellKnownRouted === payload) activeWellKnownRouted = undefined
-+          }),
-+        ),
-+      )
-+    }
-+  }
-+  const instance = ((name: string, fn: any, opts?: any) => base.instance(name, activate(fn), opts)) as typeof base.instance
-+  instance.skip = ((name: string, fn: any, opts?: any) => base.instance.skip(name, activate(fn), opts)) as typeof base.instance.skip
-   return {
-     seen,
--    it: configIt({ auth: wellKnownAuth(input.authUrl ?? "https://example.com"), client }),
-+    it: { instance },
-   }
+   // Integration point with @opencode-ai/llm: native-request lowers session data
+   // into an LLMRequest, then LLMClient handles route selection and transport.
+@@ -111,7 +115,15 @@
+         const provider = input.llmClient
+           // native 与 V2 使用同一 compile 回调，模型默认 system 不得在提前估算时漏掉。
+           .stream(advertised, input.onRequestPrepared)
+           .pipe(
++            // 固定总期限只包 provider 流，活跃 chunks 不续期，结束后的本地工具等待仍归 settlement。
++            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 300_000).pipe(
++              Effect.andThen(Effect.fail(new LLMError({
++                module: "LLMNativeRuntime",
++                method: "stream",
++                reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
++              }))),
++            )),
+             Stream.flatMap((event) =>
+               event.type !== "tool-call" || event.providerExecuted
+                 ? Stream.make(event)
+diff --git a/packages/core/src/aisdk.ts b/packages/core/src/aisdk.ts
+--- a/packages/core/src/aisdk.ts
++++ b/packages/core/src/aisdk.ts
+@@ -87,7 +87,8 @@
+     const signals = [
+       opts.signal,
+       typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined,
+-      options.timeout !== undefined && options.timeout !== null && options.timeout !== false
+-        ? AbortSignal.timeout(options.timeout)
++      // 沿 SDK 原 options 合并顺序补总期限，false 不添信号，连续 SSE 活动不能延长请求。
++      options.timeout !== false
++        ? AbortSignal.timeout(typeof options.timeout === "number" ? options.timeout : 300_000)
+         : undefined,
+     ].filter((item): item is AbortSignal | AbortController => Boolean(item))
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -74,6 +74,7 @@
+ export interface Interface {
+-  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
++  // 期限仅在 Core resolver/runner 间携带，不进入公开 Model Schema 或 provider JSON。
++  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model & { readonly timeout?: number | false }, Error>
  }
  
+ export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionRunnerModel") {}
+ 
+@@ -213,6 +214,14 @@
+ export const resolve = (session: SessionSchema.Info, model: ModelV2.Info, credential?: Credential.Value) =>
+-  withVariant(model, session.model?.variant).pipe(Effect.flatMap((model) => fromCatalogModel(model, credential)))
++  withVariant(model, session.model?.variant).pipe(
++    Effect.flatMap((model) => fromCatalogModel(model, credential).pipe(
++      Effect.map((resolved) => {
++        // V1 lowerer 已把运输 timeout 放入 api.settings；request.body 保持独立协议语义。
++        const timeout = model.api.settings?.timeout
++        return Object.assign(resolved, { timeout: timeout === false || typeof timeout === "number" ? timeout : undefined } as const)
++      }),
++    )),
++  )
+ 
+ export const supported = (model: ModelV2.Info) =>
+   model.api.type === "aisdk" &&
+   (model.api.package === "@ai-sdk/openai" ||
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -5,6 +5,7 @@
+   LLMEvent,
+   Message,
+   SystemPart,
++  TransportReason,
+   isContextOverflowFailure,
+   type ProviderErrorEvent,
+ } from "@opencode-ai/llm"
+@@ -373,7 +374,17 @@
+           }),
+         ),
++        // 对整个消费 Effect 计一次总期限，不能用会被 chunks 重置的 Stream.timeout。
++        (effect) => model.timeout === false ? effect : Effect.timeoutOrElse(effect, {
++          duration: model.timeout ?? 300_000,
++          // 只创建本次到期的运输错误；原 provider cause 与既有 flush/助手/用量结算保持。
++          orElse: () => Effect.fail(new LLMError({
++            module: "SessionRunner",
++            method: "stream",
++            reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
++          })),
++        }),
+         // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
+         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
+       )
+ 
+       return yield* Effect.uninterruptibleMask((restore) =>
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -66,3 +66,4 @@
+-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
++import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
++import { TestClock } from "effect/testing"
+ import { asc, eq } from "drizzle-orm"
+ import { testEffect } from "./lib/effect"
+@@ -648,3 +649,71 @@
+ describe("SessionRunnerLLM", () => {
++  it.effect("bounds active provider streams by total timeout and respects explicit timeout or false", () =>
++    Effect.gen(function* () {
++      // 后续原用例读取 requests[0]；本用例的模块级捕获须随现有测试 scope 清空。
++      yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
++      const session = yield* SessionV2.Service
++      const runner = yield* SessionRunner.Service
++      for (const timeout of [undefined, 120_000, false] as const) {
++        yield* setup
++        // 使用真实 resolver 的既有 settings 边界，正文同名字段不能变成运输期限。
++        currentModel = yield* SessionRunnerModel.resolve(yield* session.get(sessionID), ModelV2.Info.make({
++          id: ModelV2.ID.make("timed-model"),
++          providerID: ProviderV2.ID.make("fake"),
++          name: "Timed model",
++          api: { type: "aisdk", package: "@ai-sdk/openai", id: ModelV2.ID.make("timed-model"), settings: { timeout } },
++          capabilities: { tools: true, input: ["text"], output: ["text"] },
++          request: { headers: {}, body: { timeout: 1 } },
++          variants: [],
++          time: { released: 0 },
++          cost: [],
++          status: "active",
++          enabled: true,
++          limit: { context: 128_000, output: 32_000 },
++        }))
++        expect(currentModel.route.defaults.http?.body).toHaveProperty("timeout", 1)
++        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep streaming" }), resume: false })
++        requests.length = 0
++        const waiting = yield* Queue.unbounded<void>()
++        let chunks = 0
++        let stopped = false
++        responseStream = Stream.concat(
++          Stream.fromIterable([LLMEvent.stepStart({ index: 0 }), LLMEvent.textStart({ id: "timed-text" })]),
++          Stream.unfold(0, (index) => Effect.gen(function* () {
++            // 每次推进前等真实 pull 注册，避免虚拟时间越过尚未启动的生产者。
++            yield* Queue.offer(waiting, undefined)
++            yield* Effect.sleep("1 minute")
++            chunks++
++            return [LLMEvent.textDelta({ id: "timed-text", text: "." }), index + 1] as const
++          })),
++        ).pipe(Stream.ensuring(Effect.sync(() => { stopped = true })))
++        const fiber = yield* runner.run({ sessionID, force: true }).pipe(Effect.forkChild)
++        const minutes = timeout === false ? 7 : (timeout ?? 300_000) / 60_000
++        for (let minute = 0; minute < minutes; minute++) {
++          yield* Queue.take(waiting)
++          yield* TestClock.adjust("1 minute")
++        }
++        expect(chunks).toBeGreaterThanOrEqual(minutes - 1)
++        expect(requests).toHaveLength(1)
++        if (timeout === false) {
++          expect(stopped).toBe(false)
++          yield* Fiber.interrupt(fiber)
++          expect(stopped).toBe(true)
++          continue
++        }
++        const exit = yield* Fiber.await(fiber)
++        expect(Exit.isFailure(exit)).toBe(true)
++        if (Exit.isSuccess(exit)) throw new Error("Provider deadline unexpectedly succeeded")
++        expect(Cause.squash(exit.cause)).toMatchObject({ _tag: "LLM.Error", reason: { kind: "timeout" } })
++        expect(stopped).toBe(true)
++        // 到期仍经原 owner 结算失败和已收到的文本，不把 partial 数据当成功 EOF。
++        expect((yield* session.context(sessionID)).findLast((message) => message.type === "assistant")).toMatchObject({
++          finish: "error",
++          error: { message: "Provider request timed out" },
++          content: [expect.objectContaining({ type: "text", text: expect.stringContaining(".") })],
++        })
++      }
++    }),
++  )
++
+   it.effect("advertises and executes a globally attached application tool", () =>
+     Effect.gen(function* () {

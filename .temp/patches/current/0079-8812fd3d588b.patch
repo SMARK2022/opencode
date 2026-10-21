@@ -4,102 +4,71 @@ Date: Tue, 5 May 2026 05:56:32 +0800
 Subject: [PATCH] feat(notebook): 优化编辑操作文档，增强字符串匹配逻辑及上下文构建
 
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
-index d22bada0b1..ebd06ea3e8 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -1,26 +1,15 @@
+@@ -1,23 +1,24 @@
  /**
-- * `vscode_notebook_edit` — insert, edit, or delete notebook cells
-- * via the `vscode.WorkspaceEdit` + `vscode.NotebookEdit` API.
-+ * Notebook cell edit via WorkspaceEdit + NotebookEdit.
-  *
-- * Three operations via `editType`:
-- *   insert – new cell after cellId ("TOP"|"BOTTOM" for edges; default "TOP" if empty)
-- *   edit   – TextEdit when language unchanged; full cell replacement when language changes
-- *   delete – remove a cell
-- *
-- * Required: filePath, editType, cellId.
-- * newCode required for insert and for edit (unless pure type-change).
-- * language determines cell kind: "markdown" → Markup; anything else → Code.
-- *
-- * Edit summary conventions:
-- *   Anchor  – target cell; type-change shows old→new; delete shows ~~strikethrough~~
-- *   Affected – insert: NEW->cN; delete: c(old)→c(new) shifted cell
-- *   Context  – only with range edits, showing surrounding lines
-+ * editType: insert | edit | delete. Required: filePath, editType, cellId.
-+ * String match (like opencode edit tool): oldCode -> newCode with
-+ * exact -> line-trimmed -> border-trimmed. No line numbers — immune to index shift.
-+ * Multi-match errors only on exact. Context uses virtual global ranges.
-+ * newCode-only full-cell replace remains; type-change may match oldCode.
+  * vscode_notebook_edit 经 WorkspaceEdit/NotebookEdit 插入、修改或删除格。
+  * filePath、editType、cellId 必填；editType 为 insert | edit | delete。
+  * insert 在 cellId 后插入，TOP/BOTTOM 指定文档边缘；newCode 必填。
+  * edit 在语言不变时使用 TextEdit；改变语言时替换整个 NotebookCellData。
+  * 仅修改语言可省略 newCode；显式空字符串仍表示清空源码。
+  * language=markdown 对应 Markup，其余语言对应 Code。
+- * range 使用虚拟源码的一基闭区间，返回邻接行 Context；整格编辑不返回 Context。
++ * oldCode/newCode 在目标格内匹配替换，不使用会随并行编辑漂移的行号。
++ * 匹配顺序为 exact、line-trimmed、border-trimmed；仅精确匹配拒绝多处命中。
++ * newCode 单独提供时替换整格；类型变更也可先匹配 oldCode。
++ * Context 标注策略及编辑前的虚拟全局邻接行，Preview 展示替换片段。
+  * Anchor 报告所选格，类型变更显示旧到新，删除显示删除线。
+  * Affected 报告新插入格或移位格，cN 为一基显示编号。
+  * save=true 仍是显式保存请求，dirty 文档保存失败沿原错误边界传播。
+  * 返回 applyEdit 状态与差分，不隐式保存或回传完整笔记本。
   */
- import * as vscode from "vscode"
+ import vscode from "vscode"
  import {
 -  isRecord,
    stringProp,
 -  numberProp,
    sourceProp,
-   // TextEdit 覆盖整文档范围，避免半截替换留下脏文本
    fullDocumentRange,
-@@ -162,37 +151,46 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
- // Edit
- // ---------------------------------------------------------------------------
- 
--// 编辑 cell：根据是否改变语言选择整行替换或 TextEdit 范围编辑
- // edit 可整 cell 替换或进入字符串/类型变更路径
- // 语言不变走 TextEdit；语言变化走整 cell 替换，两路径不互相 fallback
+   documentEol,
+   previewText,
+ } from "../util"
+@@ -142,24 +143,26 @@
  async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
    const targetCell = resolveNotebookCell(notebook, undefined, cellId)
    const language = stringProp(input, "language")
+-  // range 与 source/summary 使用同一个虚拟全局坐标，不能解释为选中格的局部行号。
 -  const range = readLineRange(input)
-+    const oldCodeRaw = sourceProp(input, "oldCode")
++  // oldCode 从格内文本定位，不接受仍可能随编辑漂移的 range 坐标。
++  const oldCodeRaw = sourceProp(input, "oldCode")
+   // python 到 javascript 也需要结构替换，即使二者的 NotebookCellKind 都是 Code。
    const typeChange = language !== undefined && language !== targetCell.document.languageId
  
    if (typeChange) {
      const newKind = kindFromLang(language!)
+     // 旧语言和类型在替换前捕获，不能从新格反推转换箭头的左侧。
      const oldKind = cellTypeLabel(targetCell.kind)
      const oldLang = targetCell.document.languageId
 -    return await handleTypeChange(notebook, targetCell, input, range, newKind, language!, oldKind, oldLang, beforeCount)
-+    // Anchor 依赖 oldKind 字段而非把箭头塞进 kind 字符串
 +    return await handleTypeChange(notebook, targetCell, input, newKind, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
    }
  
--  // language unchanged → TextEdit only
+-  // 不改语言的范围更新保持现有格身份，不能为了改源码重建 NotebookCellData。
 -  if (range) {
 -    return await handleTextEditSource(notebook, targetCell, input, range, beforeCount)
-+  // 有 oldCode 时禁止 silent full-replace，强制 newCode 配对
 +  if (oldCodeRaw) {
 +    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
++    // 提供非空 oldCode 就必须配对 newCode，不能退回整格覆盖。
 +    if (sourceRaw === undefined) throw new Error("newCode is required with oldCode")
-+    return await handleStringEdit(notebook, targetCell, oldCodeRaw, sourceRaw, beforeCount)
++    return await handleStringEdit(notebook, targetCell, oldCodeRaw, sourceRaw, beforeCount, input)
    }
  
--  const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
-+    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+   // 未请求类型变更时缺少 newCode 是错误，不能将它解释为保留原文的成功编辑。
    if (sourceRaw === undefined) throw new Error("newCode is required for edit")
-   const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
--
-   const edit = new vscode.WorkspaceEdit()
--  // 替换 cell 内容：使用 WorkspaceEdit 的 replace 操作
--edit.replace(targetCell.document.uri, // 获取文档完整范围：用于全量替换 cell 源码
--fullDocumentRange(targetCell.document), source)
-+  edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
-   const applied = await vscode.workspace.applyEdit(edit)
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
-+  return compactEditResult(notebook, {
-+    applied,
-+    editType: "edit",
-+    opIndex: String(c1(targetCell)),
-+    beforeCount,
-+    afterCount: notebook.cellCount,
-+    anchorCell: targetCell,
-+    kind: cellTypeLabel(targetCell.kind),
-+    language: targetCell.document.languageId,
-+    sourcePreview: source,
-+  })
- }
- 
- // ---------------------------------------------------------------------------
-@@ -205,118 +203,217 @@ async function handleTypeChange(
+@@ -176,34 +179,33 @@
+ async function handleTypeChange(
    notebook: vscode.NotebookDocument,
    targetCell: vscode.NotebookCell,
    input: Record<string, unknown>,
@@ -115,107 +84,63 @@ index d22bada0b1..ebd06ea3e8 100644
    let contextSummary: string | undefined
  
 -  if (range) {
--    // 应用范围编辑：在指定行范围内替换内容，失败时返回 undefined
--const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
--    // 范围编辑失败抛出错误：确保调用方知道编辑未完成
--if (!result) throw new Error("newCode is required for edit with range")
+-    // 先计算完整新源码再构造结构编辑，不能先换语言而在范围计算失败后留下半次修改。
+-    const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
+-    if (!result) throw new Error("newCode is required for edit with range")
 +  const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
 +
 +  if (oldCode) {
-+    // 类型变更路径：oldCode 可选匹配，再以新 kind 重建 cell
++    // 先在旧源码完成匹配再更换语言，匹配失败不能留下半次类型修改。
 +    if (sourceRaw === undefined) throw new Error("newCode is required with oldCode")
 +    const result = matchAndReplace(targetCell, oldCode, sourceRaw)
      newSource = result.source
 -    contextSummary = result.context
 +    contextSummary = buildContext(notebook, targetCell, result, sourceRaw)
 +  } else if (sourceRaw !== undefined) {
++    // 只在整格 newCode 分支剥离围栏，片段替换须保留正文中的反引号。
 +    newSource = newKind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
    } else {
 -    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+-    // 显式空文本仍覆盖正文；只有省略 newCode 才是纯语言变更。
 -    if (sourceRaw !== undefined) {
 -      newSource = newKind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
 -    } else {
+-      // 类型修改保留打开文档的真实源码，不读取可能过时的 saved metadata。
 -      newSource = targetCell.document.getText()
 -    }
++    // 类型修改保留打开文档的真实源码，不读取可能过时的 saved metadata。
 +    newSource = targetCell.document.getText()
    }
  
+   // NotebookCellData 的结构替换会产生新 URI 身份，不能继续返回旧格 ID 作为编辑后目标。
    const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
-   const edit = new vscode.WorkspaceEdit()
-   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(targetCell.index, targetCell.index + 1), [newCell])])
-   const applied = await vscode.workspace.applyEdit(edit)
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
-+  const afterCell = notebook.cellAt(targetCell.index)
-+  // Anchor 用 oldKind/oldLang 分支显示转换；kind/language 只承载新标签
-+  return compactEditResult(notebook, {
-+    applied,
-+    editType: "edit",
-+    opIndex: String(c1(afterCell)),
-+    beforeCount,
-+    afterCount: notebook.cellCount,
-+    anchorCell: afterCell,
-+    kind: cellTypeLabel(newKind),
-+    language: newLang,
-+    // compactEditResult 约定：oldKind/oldLang 存在才打印转换箭头
-+    oldKind,
-+    oldLang,
-+    sourcePreview: newSource,
-+    contextSummary,
-+  })
- }
- 
-+
-+
-+// ---------------------------------------------------------------------------
-+// Helpers
-+// ---------------------------------------------------------------------------
-+
-+// 仅 markdown→Markup，其余一律 Code，防止 languageId 泄漏进 kind
- // ---------------------------------------------------------------------------
--// TextEdit — line range (no type change)
-+// String-match edit（oldCode → newCode）
- // ---------------------------------------------------------------------------
- 
+   const anchorCellIndex = targetCell.index
+@@ -219,61 +221,143 @@
 -async function handleTextEditSource(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, input: Record<string, unknown>, range: { start: number; end: number }, beforeCount: number) {
 -  const result = applyRangeEdit(notebook, targetCell, range, sourceProp(input, "newCode", documentEol(targetCell.document)))
+-  // 范围路径必须真的提交源码，未提供正文不能伪报该范围已被修改。
 -  if (!result) throw new Error("newCode is required for edit with range")
-+// string oldCode/newCode 主路径：替代 #78 的 range 编辑
-+// applyEdit 失败时 applied=false 仍返回 compact，禁止吞掉失败状态
-+async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number) {
++async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number, input: Record<string, unknown>) {
 +  const result = matchAndReplace(targetCell, oldCode, newCode)
++  // Context 在 applyEdit 前捕获，不能从修改后的文档反推旧邻接行。
 +  const contextSummary = buildContext(notebook, targetCell, result, newCode)
  
    const edit = new vscode.WorkspaceEdit()
+   // result.source 已保留范围外的前后缀，整文档替换不会误丢邻接代码。
    edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
    const applied = await vscode.workspace.applyEdit(edit)
--  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: result.source, contextSummary: result.context })
-+  // 预览用 newCode：突出替换内容而非整 cell 源码
-+  return compactEditResult(notebook, {
-+    applied,
-+    editType: "edit",
-+    opIndex: String(c1(targetCell)),
-+    beforeCount,
-+    afterCount: notebook.cellCount,
-+    anchorCell: targetCell,
-+    kind: cellTypeLabel(targetCell.kind),
-+    language: targetCell.document.languageId,
-+    sourcePreview: newCode,
-+    contextSummary,
-+  })
+   if (input.save === true) await saveNotebook(notebook)
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: result.source, contextSummary: result.context })
++  // Preview 只展示替换片段，完整合成源码由 TextEdit 写入而不塞进差分摘要。
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
  }
  
- // ---------------------------------------------------------------------------
--// Shared: apply a line range to a cell's source + capture context
-+// 字符串匹配：exact → line-trimmed → border-trimmed
- // ---------------------------------------------------------------------------
- 
--// 范围编辑：在 cell 源码的指定行范围内替换内容，用于精确编辑
 -function applyRangeEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, range: { start: number; end: number }, newCode: string | undefined) {
 -  if (newCode === undefined) return undefined
-+// 三阶匹配：exact → line-trimmed → border-trimmed；仅 exact 多命中报错
-+// 匹配索引基于归一化文本，替换写回原始 content 切片，保持 EOL 原样
 +function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCode: string) {
 +  const content = targetCell.document.getText()
++  const eol = documentEol(targetCell.document)
++  // 三种策略统一在 LF 坐标中匹配，不能把 CRLF 的额外字节计入索引。
 +  const normalize = (s: string) => s.replace(/\r\n/g, "\n")
 +  const src = normalize(content)
 +  const old = normalize(oldCode)
@@ -225,7 +150,6 @@ index d22bada0b1..ebd06ea3e8 100644
 +  let matchLen = 0
 +  let strategy = ""
 +
-+  // exact 策略标签供 context 与多命中门禁共用
 +  matchIdx = src.indexOf(old)
 +  if (matchIdx !== -1) {
 +    matchLen = old.length
@@ -235,7 +159,7 @@ index d22bada0b1..ebd06ea3e8 100644
 -  const vr = computeVirtualRanges(notebook)
 -  const cellRange = vr.get(targetCell.index)
 -  if (!cellRange) throw new Error(`Cell c${c1(targetCell)} has no virtual range`)
-+  // 第二阶：行级 trim，不改 exact 唯一性规则
++  // 逐行策略要求整行对齐，不把包含相同词语的局部片段当作命中。
 +  if (matchIdx === -1) {
 +    const result = lineTrimmedMatch(src, old)
 +    if (result) {
@@ -245,57 +169,63 @@ index d22bada0b1..ebd06ea3e8 100644
 +    }
 +  }
 +
-+  // 第三阶：块首尾 trim，最后才放宽
++  // 只有前两阶均未命中才裁块边界，避免宽松规则掩盖精确匹配。
 +  if (matchIdx === -1) {
 +    const trimmedOld = old.trim()
 +    matchIdx = src.indexOf(trimmedOld)
 +    if (matchIdx !== -1) {
++      // 替换跨度取裁剪后的实际长度，保留命中片段外的原始空白。
 +      matchLen = trimmedOld.length
-+      // border 阶放在最后：避免过早 trim 掩盖 exact 多命中风险
 +      strategy = "border-trimmed"
 +    }
 +  }
  
++  // 空白降级只可替换真实片段，零长命中会把未匹配请求误当成插入。
++  if (matchIdx !== -1 && matchLen === 0 && strategy !== "exact") {
++    throw new Error(`oldCode has no non-empty match after whitespace trimming in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`)
++  }
 -  const globalStart = Math.max(cellRange.start, range.start)
 -  const globalEnd = Math.min(cellRange.end, range.end)
+-  // 两个闭区间没有交集时拒绝修改，不把越界请求转为首行插入。
 -  if (globalStart > globalEnd) {
 -    throw new Error(`Global range [${range.start},${range.end}] out of bounds for cell c${c1(targetCell)}`)
-+  // 找不到 oldCode 必须失败，禁止空操作成功
++  // 未命中在创建 WorkspaceEdit 前失败，不能静默转成整格替换。
 +  if (matchIdx === -1) {
 +    throw new Error(`oldCode not found in cell c${c1(targetCell)}. Try re-reading the source with vscode_notebook_source.`)
    }
  
+-  // 先转换为格内一基闭区间，slice 再用 start-1 和排他终点保留范围外文本。
 -  const localStart = globalStart - cellRange.start + 1
 -  const localEnd = globalEnd - cellRange.start + 1
 -  const cellLines = targetCell.document.getText().split(/\r?\n/)
-+  // 仅 exact 多命中失败，避免 trimmed 过度严格
-+  // 二次 indexOf 仅服务 exact 唯一性门禁
++  // 精确命中重复时直接报错，不能改走宽松策略选择任意位置。
 +  const secondIdx = src.indexOf(old, matchIdx + 1)
 +  if (secondIdx !== -1 && strategy === "exact") {
 +    throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
 +  }
  
--  const aboveIdx = localStart - 2
--  const belowIdx = localEnd
--  const aboveLine = aboveIdx >= 0 ? cellLines[aboveIdx] : undefined
--  const belowLine = belowIdx < cellLines.length ? cellLines[belowIdx] : undefined
-+  const source = content.substring(0, matchIdx) + rep + content.substring(matchIdx + matchLen)
-+  const preMatch = content.substring(0, matchIdx)
-+  const preLines = preMatch.split(/\r?\n/)
++  // 拼接也使用 LF 索引，再恢复目标 EOL，避免在 CRLF 原文中切错前后缀。
++  const source = (src.substring(0, matchIdx) + rep + src.substring(matchIdx + matchLen)).replace(/\n/g, eol)
++
++  const preMatch = src.substring(0, matchIdx)
++  const preLines = preMatch.split("\n")
 +  const matchStartLine = preLines.length
-+  const matchLines = oldCode.split(/\r?\n/)
++  // 行跨度取实际命中源码；边界裁剪后的空行不能仍计入 oldCode 的旧长度。
++  const matchLines = src.substring(matchIdx, matchIdx + matchLen).split("\n")
 +  const matchEndLine = matchStartLine + matchLines.length - 1
++
 +  return { source, matchStartLine, matchEndLine, strategy }
 +}
 +
-+// 逐行 trim 后对齐：容忍缩进差异但保持行结构
-+// 行级 trim 只用于定位，写回长度取自源切片而非 trim 后长度
 +function lineTrimmedMatch(src: string, old: string) {
++  // 尾部换行仍是匹配结构的一部分，不能为了放宽定位删掉最后的空行。
 +  const oldLines = old.split("\n")
 +  const srcLines = src.split("\n")
 +  if (oldLines.length > srcLines.length) return undefined
++
 +  for (let i = 0; i <= srcLines.length - oldLines.length; i++) {
 +    let matches = true
++    // trim 只参与比较，不能将实际写回的源码也去掉缩进。
 +    for (let j = 0; j < oldLines.length; j++) {
 +      if (srcLines[i + j].trim() !== oldLines[j].trim()) {
 +        matches = false
@@ -303,47 +233,55 @@ index d22bada0b1..ebd06ea3e8 100644
 +      }
 +    }
 +    if (matches) {
++      // 起点包含命中首行的完整缩进，不能按 trim 后长度回推源偏移。
 +      let start = 0
++      // 输入已归一为 LF，每条前置行只累计一个换行字符。
 +      for (let k = 0; k < i; k++) start += srcLines[k].length + 1
 +      let end = start
++      // 只覆盖行间换行，最后一行之后的换行属于保留的后缀。
 +      for (let k = 0; k < oldLines.length; k++) {
 +        end += srcLines[i + k].length
 +        if (k < oldLines.length - 1) end += 1
 +      }
++      // 保留原算法的首个宽松命中；多命中拒绝仅属于 exact 策略。
 +      return { index: start, length: end - start }
 +    }
 +  }
 +  return undefined
 +}
- 
-+// 用虚拟全局行号拼 above/match/below，供 compactEditResult 摘要
-+// strategy 标签写入摘要，agent 可区分 exact/trimmed 命中来源
-+function buildContext(
-+  notebook: vscode.NotebookDocument,
-+  targetCell: vscode.NotebookCell,
-+  result: { matchStartLine: number; matchEndLine: number; strategy: string },
-+  newCode: string,
-+) {
++
++function buildContext(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, result: { matchStartLine: number; matchEndLine: number; strategy: string }, newCode: string) {
 +  const cellLines = targetCell.document.getText().split(/\r?\n/)
 +  const vr = computeVirtualRanges(notebook)
++  // 共享虚拟起点包含前格正文和空分隔行，不能仅累计其它格的正文行数。
 +  const globalOffset = (vr.get(targetCell.index)?.start ?? 1) - 1
-+  // 本地行号 + 虚拟起点 = 全局坐标，供 agent 对照 source 视图
 +  const gStart = result.matchStartLine + globalOffset
 +  const gEnd = result.matchEndLine + globalOffset
++
+-  // 上邻接行是 start 的前一行；索引负数表示格顶而非借用上一格的源码。
+-  const aboveIdx = localStart - 2
+-  const belowIdx = localEnd
+-  const aboveLine = aboveIdx >= 0 ? cellLines[aboveIdx] : undefined
+-  const belowLine = belowIdx < cellLines.length ? cellLines[belowIdx] : undefined
+-
    const ctxLines: string[] = []
 -  if (aboveLine !== undefined) {
 -    ctxLines.push(`${globalStart - 1}: ${aboveLine}`)
 +  if (result.matchStartLine > 1) {
 +    ctxLines.push(`${gStart - 1}: ${cellLines[result.matchStartLine - 2]}`)
    } else {
+     // 格边界没有正文行号，Context 的标记不能伪装成可编辑的源码行。
      ctxLines.push(`--: <cell_top> --- c${c1(targetCell)} ${cellTypeLabel(targetCell.kind)}/${targetCell.document.languageId}`)
    }
+-  // 标签描述被替换的旧跨度；newCode 可含多行，不能按其长度重写旧范围证据。
 -  const modifiedLabel = globalStart === globalEnd ? `${globalStart}` : `${globalStart}~${globalEnd}`
 -  ctxLines.push(`${modifiedLabel}: ${previewText(newCode, 50)}`)
 -  if (belowLine !== undefined) {
+-    // 下邻接行仍引用编辑前的全局 end+1，不能把新正文的末行冒充邻接上下文。
 -    ctxLines.push(`${globalEnd + 1}: ${belowLine}`)
++
 +  const label = gStart === gEnd ? `${gStart}` : `${gStart}~${gEnd}`
-+  // 摘要标注匹配策略，便于确认走了哪一阶
++  // 策略标签说明定位方式，不把宽松匹配伪装成 exact 或执行成功证据。
 +  ctxLines.push(`${label} (${result.strategy}): ${previewText(newCode, 50)}`)
 +  if (result.matchEndLine < cellLines.length) {
 +    ctxLines.push(`${gEnd + 1}: ${cellLines[result.matchEndLine]}`)
@@ -352,22 +290,20 @@ index d22bada0b1..ebd06ea3e8 100644
    }
 -
 -  const eol = documentEol(targetCell.document)
+-  // 数组拼接保留目标文档 EOL，返回的 Context 则独立用 LF 作为展示分隔。
 -  const source = [...cellLines.slice(0, localStart - 1), newCode, ...cellLines.slice(localEnd)].join(eol)
 -  return { source, context: ctxLines.join("\n") }
++
 +  return ctxLines.join("\n")
  }
  
--// ---------------------------------------------------------------------------
--// Helpers
--// ---------------------------------------------------------------------------
--
--// 仅 markdown→Markup，其余一律 Code，防止 languageId 泄漏进 kind
- function kindFromLang(language?: string) {
+@@ -282,16 +366,6 @@
    return language === "markdown" ? vscode.NotebookCellKind.Markup : vscode.NotebookCellKind.Code
  }
  
 -function readLineRange(input: Record<string, unknown>) {
 -  const range = input.range
+-  // 只解释原 range.start/end 对象，不把 source 的 offset/limit 猜成编辑范围。
 -  if (!isRecord(range)) return undefined
 -  const start = numberProp(range, "start")
 -  const end = numberProp(range, "end")
@@ -375,22 +311,28 @@ index d22bada0b1..ebd06ea3e8 100644
 -  return { start, end }
 -}
 -
--// 去除代码围栏：移除 ``` 标记，用于提取纯代码内容
+ // 仅剥离完整包围正文的围栏，源码中间的反引号或未闭合围栏不能被宽松搜索截掉。
  function stripCodeFence(source: string) {
    const match = source.match(/^```[\w-]*\r?\n([\s\S]*?)\r?\n```$/)
-   return match ? match[1] : source
-@@ -374,11 +471,9 @@ function compactEditResult(
+@@ -360,18 +434,14 @@
+   if (info.editType === "insert" && target) {
+     lines.push(`Affected: NEW->c${c1(target)} id=${copilotLikeCellId(target)} ${cellTypeLabel(target.kind)}/${target.document.languageId}.`)
    }
- 
-   // --- Affected ---
 -  if (info.editType === "delete" && info.shiftedCell) {
 -    const oldIdx = (info.shiftedOldIdx ?? 0) + 1
 -    const newIdx = c1(info.shiftedCell)
 -    lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
 -  } else if (info.editType === "insert" && info.shiftedCell) {
+-    // 插入将旧编号推后一格；这个邻居的 ID 不因显示编号变化而重新生成。
++  // 移位邻居统一报告；insert 的新格仍由上方独立的 NEW 条目展示。
 +  if ((info.editType === "delete" || info.editType === "insert") && info.shiftedCell) {
-+    // delete/insert 共用 Affected 移位摘要，减少重复分支
-+
      const oldIdx = (info.shiftedOldIdx ?? 0) + 1
      const newIdx = c1(info.shiftedCell)
      lines.push(`Affected: c${oldIdx}->c${newIdx} id=${copilotLikeCellId(info.shiftedCell)} ${cellTypeLabel(info.shiftedCell.kind)}/${info.shiftedCell.document.languageId} lines=${info.shiftedCell.document.lineCount} first=${JSON.stringify(previewText((info.shiftedCell.document.getText().split("\n")[0] ?? "").trim(), 50))}`)
+   }
+ 
+   if (info.contextSummary) {
+-    // 范围上下文与 Preview 分开，消费者不能把紧凑源码预览解释成实际替换范围。
++    // 匹配上下文与 Preview 分开，消费者不能把紧凑源码预览解释成实际替换范围。
+     lines.push(`Context:\n${info.contextSummary}`)
+   }

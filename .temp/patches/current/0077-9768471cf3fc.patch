@@ -7,20 +7,12 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 index 82ceadb99c..4397fbee8b 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -181,15 +181,35 @@ function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: string) {
+@@ -174,15 +174,27 @@ function selectBedrockMantleLanguageModel(sdk: BundledSDK, modelID: string) {
    return sdk.responses?.(modelID) ?? sdk.languageModel(modelID)
  }
  
-+// 检测 Anthropic extended-thinking 模型（3.7 / Claude 4 系列）
-+// Claude 3.7 / 4 系列具备 extended thinking，用于默认 reasoning
-+function isAnthropicThinkingModel(modelID: string) {
-+  const id = modelID.toLowerCase()
-+  return id.includes("claude-3-7") || id.includes("claude-3.7") || /claude-(haiku|sonnet|opus)-4/.test(id)
-+}
-+
-+// claudecode 及 extends 默认走 Anthropic SDK，而非 openai-compatible
-+// claudecode（含 baseType）默认 anthropic SDK，其余 openai-compatible
 +function defaultConfigProviderNpm(providerID: string, baseType?: string) {
++  // 直接继承的类型决定缺省 SDK，显式 npm 与目录 SDK 仍由调用方先取。
 +  if ((baseType ?? providerID) === "claudecode") return "@ai-sdk/anthropic"
 +  return "@ai-sdk/openai-compatible"
 +}
@@ -34,10 +26,10 @@ index 82ceadb99c..4397fbee8b 100644
 -      // 优先使用 ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL，兼容 CLAUDECODE_* 环境变量
 -      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || provider.options?.apiKey || env["CLAUDECODE_API_KEY"] || (auth?.type === "api" ? auth.key : undefined)
 -      const baseURL = env["ANTHROPIC_BASE_URL"] || provider.options?.baseURL || env["CLAUDECODE_BASE_URL"] || "https://api.cubence.com"
-+      // apiKey：env 与 auth 优先于 config options，避免本地 options 覆盖 token
-+      // env/auth 优先于 options.apiKey，防止本地配置盖掉真实 token
-+const authKey = auth?.type === "api" ? auth.key : undefined
++      const authKey = auth?.type === "api" ? auth.key : undefined
++      // 环境与该派生身份的已保存密钥先于配置，不能借用父提供者的账号。
 +      const apiKey = env["ANTHROPIC_AUTH_TOKEN"] || env["CLAUDECODE_API_KEY"] || authKey || provider.options?.apiKey
++      // 地址仍按源的独立优先级选择，不能随密钥顺序把配置端点移到环境之后。
 +      const baseURL =
 +        env["ANTHROPIC_BASE_URL"] ||
 +        provider.options?.baseURL ||
@@ -46,7 +38,7 @@ index 82ceadb99c..4397fbee8b 100644
  
        const autoload = Boolean(apiKey)
        if (!autoload) return { autoload: false }
-@@ -1533,11 +1553,11 @@ const layer = Layer.effect(
+@@ -1543,11 +1555,11 @@ const layer = Layer.effect(
                existingModel?.api.npm ??
                // Config-defined gateway models bypass fromModelsDevModel, so resolve the
                // native passthrough npm here before falling back to the catalog default.
@@ -59,32 +51,29 @@ index 82ceadb99c..4397fbee8b 100644
                if (model.name) return model.name
                if (model.id && model.id !== modelID) return modelID
                return existingModel?.name ?? modelID
-@@ -1503,7 +1523,12 @@ const layer = Layer.effect(
+@@ -1565,7 +1577,11 @@ const layer = Layer.effect(
                providerID: ProviderV2.ID.make(providerID),
                capabilities: {
                  temperature: model.temperature ?? existingModel?.capabilities.temperature ?? false,
 -                reasoning: model.reasoning ?? existingModel?.capabilities.reasoning ?? false,
-+                // 未显式配置时：Anthropic thinking 模型默认开启 reasoning 能力
++                // 显式 false 与目录能力先于推断，只有实际 Anthropic API ID 才补缺省能力。
 +                reasoning:
 +                  model.reasoning ??
 +                  existingModel?.capabilities.reasoning ??
-+                  // 无显式 reasoning 时按模型 ID 推断 thinking 能力
-+(apiNpm === "@ai-sdk/anthropic" && isAnthropicThinkingModel(apiID)),
++                  (apiNpm === "@ai-sdk/anthropic" && ProviderV2.isAnthropicThinkingModel(apiID)),
                  attachment: model.attachment ?? existingModel?.capabilities.attachment ?? false,
                  toolcall: model.tool_call ?? existingModel?.capabilities.toolcall ?? true,
                  input: {
-@@ -1610,12 +1635,16 @@ const layer = Layer.effect(
+@@ -1672,16 +1688,19 @@ const layer = Layer.effect(
            mergeProvider(providerID, patch)
          }
  
 -        for (const [id, fn] of Object.entries(custom(dep))) {
-+        // 封装 custom loader 为 Effect.fn，支持 configProviders.extends 复用同一 loader
-+        // 先物化 loader 表，供内置与 extends 两次复用
-+const customLoaders = custom(dep)
-+        // Effect.fn 命名 loadCustom：便于追踪 extends 二次加载
-+const loadCustom = Effect.fn("Provider.loadCustom")(function* (id: string, fn: CustomLoader) {
++        const customLoaders = custom(dep)
++        const loadCustom = Effect.fn("Provider.loadCustom")(function* (id: string, fn: CustomLoader) {
            const providerID = ProviderV2.ID.make(id)
 -          if (disabled.has(providerID)) continue
++          // 禁用检查针对派生 ID，父类型被禁用不能误删它的独立配置。
 +          if (disabled.has(providerID)) return
            const data = database[providerID]
            if (!data) {
@@ -93,7 +82,12 @@ index 82ceadb99c..4397fbee8b 100644
            }
            const result = yield* fn(data)
            if (result && (result.autoload || providers[providerID])) {
-@@ -1626,6 +1655,19 @@ const layer = Layer.effect(
++            // 各 ID 独立登记模型、变量与发现入口，派生加载不能覆盖父提供者的槽位。
+             if (result.getModel) modelLoaders[providerID] = result.getModel
+             if (result.vars) varsLoaders[providerID] = result.vars
+             if (result.discoverModels) discoveryLoaders[providerID] = result.discoverModels
+             const opts = result.options ?? {}
+@@ -1688,6 +1707,18 @@ const layer = Layer.effect(
              const patch: Partial<Info> = providers[providerID] ? { options: opts } : { source: "custom", options: opts }
              mergeProvider(providerID, patch)
            }
@@ -103,9 +97,8 @@ index 82ceadb99c..4397fbee8b 100644
 +          yield* loadCustom(id, fn)
 +        }
 +
-+        // extends：用父 custom loader 加载 config 中的派生 provider（如 Cubence extends claudecode）
-+        // config.extends：派生 provider 复用父 custom loader（如 Cubence→claudecode）
-+for (const [id, provider] of configProviders) {
++        // 只沿显式 extends 复用父 loader，传入的仍是派生身份与派生配置。
++        for (const [id, provider] of configProviders) {
 +          if (!provider.extends) continue
 +          const fn = customLoaders[provider.extends]
 +          if (!fn) continue
@@ -113,23 +106,30 @@ index 82ceadb99c..4397fbee8b 100644
          }
  
          // load config - re-apply with updated data
+@@ -1698,7 +1729,7 @@ const layer = Layer.effect(
+           if (provider.name) partial.name = provider.name
+           // loader 已读取配置并选择凭据/地址；重合并不能把环境优先级或规范后的 URL 覆盖回去。
+-          if (provider.options) partial.options = id === "claudecode"
++          if (provider.options) partial.options = id === "claudecode" || provider.extends === "claudecode"
+             ? Object.fromEntries(Object.entries(provider.options).filter(([key]) => !["apiKey", "baseURL"].includes(key)))
+             : provider.options
+           mergeProvider(providerID, partial)
+         }
 diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
 index e656890b01..2c139cc635 100644
 --- a/packages/opencode/test/provider/provider.test.ts
 +++ b/packages/opencode/test/provider/provider.test.ts
-@@ -406,6 +406,69 @@ it.instance(
+@@ -410,6 +410,69 @@ it.instance(
    },
  )
  
 +it.instance(
-+  // 回归：config 模型应推断 reasoning 与 thinking variants
-+"claudecode config models infer Anthropic thinking variants",
++  "claudecode config models infer Anthropic thinking variants",
 +  Effect.gen(function* () {
 +    const providers = yield* list
 +    const model = providers[ProviderV2.ID.make("claudecode")].models["claude-opus-4-6"]
-+    // reasoning 应由 thinking-model 推断为 true，并带上 adaptive/max variants
-+    // opus-4 命中 isAnthropicThinkingModel
-+expect(model.capabilities.reasoning).toBe(true)
++    // 不填 reasoning:true 才能锁定缺省推断，避免 fixture 绕过本次新增的生产分支。
++    expect(model.capabilities.reasoning).toBe(true)
 +    expect(model.variants?.low?.thinking?.type).toBe("adaptive")
 +    expect(model.variants?.max?.effort).toBe("max")
 +  }),
@@ -152,17 +152,19 @@ index e656890b01..2c139cc635 100644
 +)
 +
 +it.instance(
-+  // 回归：extends claudecode 应继承 anthropic npm 与 loader fetch
-+"provider extending claudecode uses Anthropic SDK and ClaudeCode loader",
++  "provider extending claudecode uses Anthropic SDK and ClaudeCode loader",
 +  Effect.gen(function* () {
++    // 环境值刻意不同于 options.apiKey，才能捕获后续重合并把 loader 选择覆盖回去。
++    yield* set("ANTHROPIC_AUTH_TOKEN", "env-test-key")
++    yield* remove("ANTHROPIC_BASE_URL")
 +    const providers = yield* list
 +    const provider = providers[ProviderV2.ID.make("Cubence")]
 +    const model = provider.models["claude-opus-4-6"]
-+    // extends claudecode：npm 走 anthropic，并继承 loader 注入的 fetch
 +    expect(model.api.npm).toBe("@ai-sdk/anthropic")
 +    expect(provider.options.baseURL).toBe("https://api-dmit.cubence.com/v1")
-+    // loader 注入的 fetch 证明走了 claudecode custom 路径
-+expect(typeof provider.options.fetch).toBe("function")
++    expect(provider.options.apiKey).toBe("env-test-key")
++    // SDK 包正确仍不足以证明专用包装生效，fetch 断言锁定真实 ClaudeCode loader。
++    expect(typeof provider.options.fetch).toBe("function")
 +  }),
 +  {
 +    config: {
@@ -191,7 +193,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index af87480770..b1025b4f5c 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -47,6 +47,7 @@ import type {
+@@ -46,6 +46,7 @@ import type {
  } from "@opencode-ai/sdk/v2"
  import { useLocal } from "../../context/local"
  import { Locale } from "../../util/locale"
@@ -199,33 +201,33 @@ index af87480770..b1025b4f5c 100644
  import { webSearchProviderLabel } from "../../util/tool-display"
  import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
  import { useSDK } from "../../context/sdk"
-@@ -1518,6 +1519,25 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+@@ -1529,6 +1530,25 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
    const final = createMemo(() => {
      return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
    })
-+  // 有真实可见 part 才露 footer，避免空助手气泡先闪元信息
-+  // 仅 text/reasoning/tool 视为“有内容”，空助手消息不露 footer
-+const visibleParts = createMemo(() => {
++  // 只计实际正文、推理和工具，避免空助手消息先闪出模式与模型行。
++  const visibleParts = createMemo(() => {
 +    return props.parts.some((part) => {
 +      if (part.type === "text") return part.text.trim().length > 0
 +      if (part.type === "reasoning") {
-+        // 关闭 thinking 时不把 reasoning 算作可见内容
-+if (!ctx.showThinking()) return false
++        if (!ctx.showThinking()) return false
++        // 加密占位不算可见正文，否则空完成消息仍会露出 footer。
 +        return part.text.replace("[REDACTED]", "").trim().length > 0
 +      }
 +      if (part.type === "tool") return true
 +      return false
 +    })
 +  })
-+  // final 或 abort 且有可见内容时才显示模式/模型行
-+const footerVisible = createMemo(() => {
++  const footerVisible = createMemo(() => {
++    // 中断可能发生在首个正文之前，错误身份不能因消息为空而被这道可见性门槛吞掉。
 +    if (!visibleParts() && !props.message.error) return false
++    // 最后一条仍在流式生成不等于完成，不能恢复原 props.last 触发的过早元信息。
 +    return final() || props.message.error?.name === "MessageAbortedError"
 +  })
  
    const duration = createMemo(() => {
      if (!final()) return 0
-@@ -1587,7 +1607,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
+@@ -1600,7 +1620,7 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
          </box>
        </Show>
        <Switch>
@@ -234,21 +236,20 @@ index af87480770..b1025b4f5c 100644
            <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
              <text marginTop={1}>
                <span
-@@ -1648,7 +1668,13 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+@@ -1649,7 +1669,12 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
      // OpenRouter encrypts some reasoning blocks; drop the placeholder.
      return props.part.text.replace("[REDACTED]", "").trim()
    })
    const opaque = createMemo(() => !content() && Boolean(props.part.metadata))
-+  // 50ms 节流：推理流式刷新过密时降低 markdown 重排开销
-+  // 50ms 节流推理流，降低 markdown 重排频率
-+const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
++  // 全文共用既有 50ms 首尾值窗口，预览与展开正文不另设刷新计时器。
++  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
 +  createEffect(() => setDisplayContent(content()))
-+  // 首帧无节流值时回退 content，避免空白一帧
-+const renderedContent = createMemo(() => displayContent() || content())
++  // 首次 effect 尚未发布时沿源回退正文，已有节流值后不再逐字重排 markdown。
++  const renderedContent = createMemo(() => displayContent() || content())
    // Reasoning is finalized when the server sets `time.end` (see processor.ts).
    // Flips independently of the parent message completing.
    const isDone = createMemo(() => props.part.time.end !== undefined)
-@@ -1643,7 +1669,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+@@ -1658,8 +1683,8 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
      const end = props.part.time.end
      return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
    })
@@ -256,8 +257,22 @@ index af87480770..b1025b4f5c 100644
 +  const summary = createMemo(() => reasoningSummary(renderedContent()))
    const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
  
+   // 选区只拦截鼠标入口；共享 toggle 保留模式与加密判断，键盘切换思考模式不应受残留选区影响。
    const toggle = () => {
-@@ -1678,12 +1704,12 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+@@ -1684,10 +1709,11 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
+         <box>
++          {/* 字数与正文使用同一节流快照，避免标题逐字刷新绕过 markdown 的 50ms 窗口。 */}
+           <ReasoningHeader
+             toggleable={inMinimal() && !opaque()}
+             open={!inMinimal() || expanded()}
+             done={isDone()}
+             title={summary().title}
+-            characters={opaque() ? undefined : content().length}
++            characters={opaque() ? undefined : renderedContent().length}
+             duration={isDone() ? Locale.duration(duration()) : undefined}
+             encrypted={opaque()}
+           />
+@@ -1701,12 +1727,13 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
                drawUnstyledText={false}
                streaming={true}
                syntaxStyle={syntax()}
@@ -266,9 +281,678 @@ index af87480770..b1025b4f5c 100644
                conceal={ctx.conceal()}
                fg={theme.textMuted}
              />
-             {/* 超出预览行时提示可展开；展开仍走 header toggle */}
+             {/* 超出预览行时提示可展开；点击由外层推理区统一处理 */}
 -            <Show when={content().split(String.fromCharCode(10)).length > 5}>
++            {/* 溢出提示也按同一快照判定，正文尾值发布前不能提前改变折叠布局。 */}
 +            <Show when={renderedContent().split(String.fromCharCode(10)).length > 5}>
                <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
              </Show>
            </box>
+diff --git a/packages/core/src/provider.ts b/packages/core/src/provider.ts
+--- a/packages/core/src/provider.ts
++++ b/packages/core/src/provider.ts
+@@ -35,6 +35,61 @@
+ ])
+ 
+ export function apiUrl(input: { npm?: string; api?: string }) {
+   // 未知 SDK 保持地址未解析，避免借用另一协议的主机误导显示与探测。
+   return input.api ?? (input.npm ? SDK_DEFAULT_API_URL.get(input.npm) : undefined) ?? ""
+ }
++
++export function isAnthropicThinkingModel(modelID: string) {
++  const id = modelID.toLowerCase()
++  // 两个配置 owner 都检查实际 API ID，显示名或 Catalog 别名不授予模型能力。
++  return id.includes("claude-3-7") || id.includes("claude-3.7") || /claude-(haiku|sonnet|opus)-4/.test(id)
++}
++
++export function anthropicThinkingEfforts(apiId: string): string[] | null {
++  // 复用原 transform 的完整型号表，日期后缀不能被当作次版本号。
++  const version = /claude-(?:[a-z]+-)?(\d+)(?:[.-](\d{1,2}))?(?:[.@-]|$)/i.exec(apiId)
++  // 无法解析版本的 Claude 部署沿上游自适应策略，不能把有效部署名降成旧预算模式。
++  if (apiId.toLowerCase().includes("claude-") && (!version || Number(version[1]) > 4 ||
++    (Number(version[1]) === 4 && Number(version[2] ?? 0) >= 7)))
++    return ["low", "medium", "high", "xhigh", "max"]
++  if (
++    ["opus-4-6", "opus-4.6", "4-6-opus", "4.6-opus", "sonnet-4-6", "sonnet-4.6", "4-6-sonnet", "4.6-sonnet"].some((v) =>
++      apiId.includes(v),
++    )
++  ) {
++    // 4.6 的四档不含 xhigh，复用型号表不能给旧部署添加服务端不接受的一档。
++    return ["low", "medium", "high", "max"]
++  }
++  return null
++}
++
++export function anthropicThinkingVariants(model: { apiID: string; providerID: string; output: number }) {
++  const efforts = anthropicThinkingEfforts(model.apiID)
++  if (efforts) {
++    // Copilot 的同名 Anthropic 部署有独立 effort 限额，不能直接暴露云端全档位。
++    const supported = model.providerID === "github-copilot"
++      ? model.apiID.includes("opus-4.7") ? ["medium"] : efforts.filter((id) => id !== "max" && id !== "xhigh")
++      : efforts
++    return Object.fromEntries(supported.map((effort) => [effort, {
++      // 新自适应型号默认隐藏思考正文，保留 summarized 才能让既有 TUI 收到摘要。
++      thinking: { type: "adaptive", ...(efforts.includes("xhigh") ? { display: "summarized" } : {}) },
++      effort,
++    }]))
++  }
++  // enabled thinking 必须低于输出上限，两档沿上游算法，不能借 64 的 contextLimit 计算。
++  // Anthropic 的 enabled 预算至少 1024；未声明或不足以容纳它的输出窗口不制造缺省变体。
++  if (model.output <= 1024) return {}
++  const budgetTokens = Math.min(16_000, Math.max(1024, Math.floor(model.output / 2 - 1)))
++  if (["opus-4-5", "opus-4.5"].some((id) => model.apiID.includes(id)))
++    return Object.fromEntries(["low", "medium", "high"].map((effort) => [effort, { thinking: { type: "enabled", budgetTokens }, effort }]))
++  return {
++    high: { thinking: { type: "enabled", budgetTokens } },
++    max: { thinking: { type: "enabled", budgetTokens: Math.min(31_999, model.output - 1) } },
++  }
++}
++
++export function isClaudeCode(model: { providerID: string; api: Api }) {
++  // 派生标记只由配置 owner 沿真实继承关系产生，仍须同时命中实际 Anthropic 协议。
++  return model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic" &&
++    (model.providerID === "claudecode" || model.api.settings?.claudeCode === true)
++}
+diff --git a/packages/core/src/catalog.ts b/packages/core/src/catalog.ts
+--- a/packages/core/src/catalog.ts
++++ b/packages/core/src/catalog.ts
+@@ -91,7 +91,8 @@
++      // 专用缺省只补合并后仍缺失的地址，显式 URL/settings 继续领取 75 的优先级。
+       const api = inherited.type === "aisdk" && inherited.url === undefined &&
+         (inherited.settings?.baseURL === undefined || typeof inherited.settings?.baseURL === "string")
+-        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : undefined }) || undefined }
++        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : ProviderV2.isClaudeCode({ providerID: model.providerID, api: inherited }) ? process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com" : undefined }) || undefined }
+         : inherited
+       const request = {
+         headers: { ...provider.request.headers, ...model.request.headers },
+         body: { ...provider.request.body, ...model.request.body },
+diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
+--- a/packages/opencode/src/provider/transform.ts
++++ b/packages/opencode/src/provider/transform.ts
+@@ -4,6 +4,7 @@
+ import type * as Provider from "./provider"
+ import type * as ModelsDev from "@opencode-ai/core/models-dev"
+ import { iife } from "@/util/iife"
++import { ProviderV2 } from "@opencode-ai/core/provider"
+ 
+ type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
+ 
+@@ -669,15 +670,5 @@
+ function anthropicAdaptiveEfforts(apiId: string): string[] | null {
+-  if (anthropicUsesModernAdaptiveThinking(apiId)) {
+-    return ["low", "medium", "high", "xhigh", "max"]
+-  }
+-  if (
+-    ["opus-4-6", "opus-4.6", "4-6-opus", "4.6-opus", "sonnet-4-6", "sonnet-4.6", "4-6-sonnet", "4.6-sonnet"].some((v) =>
+-      apiId.includes(v),
+-    )
+-  ) {
+-    return ["low", "medium", "high", "max"]
+-  }
+-  return null
++  return ProviderV2.anthropicThinkingEfforts(apiId)
+ }
+ 
+ function anthropicOmitsThinking(apiId: string) {
+@@ -1032,49 +1023,7 @@
+     case "@ai-sdk/anthropic":
+     // https://v5.ai-sdk.dev/providers/ai-sdk-providers/anthropic
+     case "@ai-sdk/google-vertex/anthropic":
+       // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-vertex#anthropic-provider
+-      if (adaptiveEfforts) {
+-        let efforts = [...adaptiveEfforts]
+-        if (model.providerID === "github-copilot") {
+-          if (model.api.id.includes("opus-4.7")) {
+-            efforts = ["medium"]
+-          }
+-          // Efforts currently supported are: low, medium, high
+-          efforts = efforts.filter((v) => v !== "max" && v !== "xhigh")
+-        }
+-        return Object.fromEntries(
+-          efforts.map((effort) => [
+-            effort,
+-            {
+-              thinking: {
+-                type: "adaptive",
+-                ...(adaptiveThinkingOmitted ? { display: "summarized" } : {}),
+-              },
+-              effort,
+-            },
+-          ]),
+-        )
+-      }
+-
+-      if (anthropicOpus45(model.api.id)) {
+-        return Object.fromEntries(
+-          WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, anthropicOpus45Effort(model, effort)]),
+-        )
+-      }
+-
+-      return {
+-        high: {
+-          thinking: {
+-            type: "enabled",
+-            budgetTokens: Math.min(16_000, Math.floor(model.limit.output / 2 - 1)),
+-          },
+-        },
+-        max: {
+-          thinking: {
+-            type: "enabled",
+-            budgetTokens: Math.min(31_999, model.limit.output - 1),
+-          },
+-        },
+-      }
++      return ProviderV2.anthropicThinkingVariants({ apiID: model.api.id, providerID: model.providerID, output: model.limit.output })
+ 
+     case "@ai-sdk/amazon-bedrock":
+diff --git a/packages/core/src/config/provider.ts b/packages/core/src/config/provider.ts
+--- a/packages/core/src/config/provider.ts
++++ b/packages/core/src/config/provider.ts
+@@ -57,5 +57,7 @@
+   v1: Schema.Struct({
+     options: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+     // variant 同模型等待实际基础 SDK，不能在 npm 缺省时提前按 raw 转换。
+     variants: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)).pipe(Schema.optional),
++    // 显式 false 只抑制缺省变体推断，不把能力元数据改写成请求的 disabled thinking。
++    reasoning: Schema.Boolean.pipe(Schema.optional),
+   }).pipe(Schema.optional),
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -228,4 +228,6 @@
+-    // 迁移标记只包含尚未 lowering 的输入，显式 npm 的原路径保持不变。
+-    v1: deferred ? { options: info.options, variants: info.variants } : undefined,
++    // 能力开关随未决输入到配置 owner；显式 npm 的 options/variants 仍沿原路径转换。
++    v1: deferred || info.reasoning !== undefined
++      ? { options: deferred ? info.options : undefined, variants: deferred ? info.variants : undefined, reasoning: info.reasoning }
++      : undefined,
+     family: info.family,
+     name: info.name,
+diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/config/plugin/provider.ts
+--- a/packages/core/src/config/plugin/provider.ts
++++ b/packages/core/src/config/plugin/provider.ts
+@@ -104,6 +104,6 @@
+-                // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
+-                if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
+-                  provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
++                // 未指定协议的直接继承领取父类型的 SDK，部分 URL/settings 不能阻断缺省协议。
++                if ((baseType ?? providerID) === "claudecode" && item.api?.type === undefined && provider.api.type === "native")
++                  provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url, settings: provider.api.settings }
+                 // 继承与部分 API 覆盖保留基础 settings；完整非继承配置仍保持上游替换语义。
+                 if (item.api !== undefined) {
+                   const api = item.api.type === undefined ? provider.api : item.api
+@@ -150,6 +150,14 @@
+               })
+             }
++            const claudeCode = providerID === "claudecode" || baseType === "claudecode" ||
++              (copy?.provider.api.type === "aisdk" && copy.provider.api.package === "@ai-sdk/anthropic" && copy.provider.api.settings?.claudeCode === true)
++            catalog.provider.update(providerID, (provider) => {
++              if (provider.api.type !== "aisdk" || provider.api.package !== "@ai-sdk/anthropic") return
++              // 继承证明由此 owner 拥有，普通配置不能靠同名 settings 冒充 ClaudeCode。
++              const settings = Object.fromEntries(Object.entries(provider.api.settings ?? {}).filter(([key]) => key !== "claudeCode"))
++              provider.api.settings = claudeCode ? { ...settings, claudeCode: true } : settings
++            })
+             // 模型层保留原顺序；未决转换读取最后显式 model API，否则使用已经定型的默认 API。
+             const models = layers.flatMap((layer) => Object.entries(layer.models ?? {}))
+             for (const [id, config] of models) {
+               // 新别名从指定 api.id 的基础模型接纳默认值，再执行上游逐字段覆盖。
+@@ -173,7 +181,10 @@
+                 // 仅有模型 ID/URL 的配置仍需继承 ClaudeCode 默认协议；显式 type/package 完整保留。
+-                if (providerID === "claudecode" && item.api === undefined &&
++                if ((baseType ?? providerID) === "claudecode" && item.api?.type === undefined &&
+                   (config.api === undefined || config.api.type === undefined) && model.api.type === "native")
+                   model.api = { type: "aisdk", package: "@ai-sdk/anthropic", id: model.api.id, url: model.api.url, settings: model.api.settings }
++                // 模型专用设置也不能伪造继承证明，投影随后合并提供者的已验证标记。
++                if (model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic")
++                  model.api.settings = Object.fromEntries(Object.entries(model.api.settings ?? {}).filter(([key]) => key !== "claudeCode"))
+                 if (config.capabilities !== undefined) {
+                   model.capabilities = {
+                     tools: config.capabilities.tools,
+@@ -233,9 +244,38 @@
++                // 显式能力跟随原模型层覆盖并参与继承，后层 false 不再等默认表生成后才补记。
++                if (v1?.reasoning !== undefined) model.request.body.__opencodeReasoning = v1.reasoning
+                 if (config.disabled !== undefined) model.enabled = !config.disabled
+                 if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
+               })
+             }
+           }
+         }
++        // 全部文档和继承结算后只推断一次，此时 variants 只含真实显式配置，旧默认预算不能伪装成用户覆盖。
++        for (const [providerID] of configured) {
++          const record = catalog.provider.get(providerID)
++          for (const model of record?.models.values() ?? []) {
++            const id = model.id
++            const providerApi = record?.provider.api
++            const api = model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 && providerApi ? providerApi : model.api
++            const reasoning = model.request.body.__opencodeReasoning
++            if (reasoning === false || api.type !== "aisdk" || api.package !== "@ai-sdk/anthropic" || !ProviderV2.isAnthropicThinkingModel(model.api.id)) continue
++            const lowerer = ConfigProviderOptionsV1.get(api.package)
++            const generated = Object.entries(ProviderV2.anthropicThinkingVariants({ apiID: model.api.id, providerID, output: model.limit.output }))
++              .map(([id, options]) => ({ id: ModelV2.VariantID.make(id), headers: {}, body: lowerer.request(options) }))
++            catalog.model.update(providerID, id, (draft) => {
++              const explicit = new Map(draft.variants.map((variant) => [variant.id, variant]))
++              draft.variants = [
++                ...generated.map((variant) => ({
++                  // 默认 body 推断不能丢弃显式变体的请求头，认证与路由覆盖仍由该变体拥有。
++                  ...variant, headers: { ...variant.headers, ...explicit.get(variant.id)?.headers },
++                  // 同一 SDK 的原生 lowerer 和既有深合并同时保留用户覆盖，不另建配置解析器。
++                  body: mergeJsonRecords(variant.body, explicit.get(variant.id)?.body) ?? {},
++                })),
++                // 没有默认同名项的用户变体仍属于完整配置集合，不能被推断表替换掉。
++                ...draft.variants.filter((variant) => !generated.some((item) => item.id === variant.id)),
++              ]
++            })
++          }
++        }
+       }),
+     )
+   }),
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -83,14 +83,15 @@
+ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
+-  // ClaudeCode 的配置、环境、已保存 API key 顺序来自源 loader，不能继承通用 credential-first。
+-  if (model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic") {
+-    const configured = model.request.body.apiKey ?? model.api.settings?.apiKey
+-    // ANTHROPIC_AUTH_TOKEN 必须在模型覆盖和保存凭据之前，不能只在 Catalog 启动时投影一次。
+-    const value = process.env.ANTHROPIC_AUTH_TOKEN || (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
+-      (credential?.type === "key" ? credential.key : undefined)
++  if (ProviderV2.isClaudeCode(model)) {
++    // V1 lowerer 把 apiKey 放进 x-api-key，只查 body/settings 会漏掉这份配置凭据。
++    const configured = model.request.body.apiKey ?? model.api.settings?.apiKey ??
++      Object.entries(model.request.headers).find(([key]) => key.toLowerCase() === "x-api-key")?.[1]
++    // 已验证的派生身份沿源读取两类环境密钥、自己的保存凭据，最后才用配置 lowerer 的密钥。
++    const value = process.env.ANTHROPIC_AUTH_TOKEN || process.env.CLAUDECODE_API_KEY ||
++      (credential?.type === "key" ? credential.key : undefined) || (typeof configured === "string" && configured)
+     // OAuth access 不是源补丁支持的 API key，不在这里偷偷增加另一种认证来源。
+     return value ? Auth.value(value) : undefined
+   }
+   if (credential?.type === "key") return Auth.value(credential.key)
+   if (credential?.type === "oauth") return Auth.value(credential.access)
+   const value = model.request.body.apiKey ?? model.api.settings?.apiKey
+   if (typeof value === "string") return Auth.value(value)
+@@ -99,7 +100,9 @@
+ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
+   const body = model.request.body
+   // 只有专用 Anthropic 路由消费这些字段；其他协议的 body 投影不扩大本补丁范围。
+-  const claudecode = model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic"
++  const claudecode = ProviderV2.isClaudeCode(model)
++  const anthropic = model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic" &&
++    (claudecode || ProviderV2.isAnthropicThinkingModel(model.api.id))
+   // 源补丁按 provider ID 或 SDK package 识别 OpenAI 系列，不扩大普通兼容服务默认值。
+   const parallel = model.providerID === "openai" || (model.api.type === "aisdk" &&
+     ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/github-copilot"].includes(model.api.package))
+@@ -106,6 +109,8 @@
+   // model/variant 的并行参数进入 typed provider options，禁止 HTTP 后置 overlay 抢占协议字段。
+-  const httpBody = Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey" &&
++  // 能力标志只服务配置继承，不能混入 72 观察的 prepared JSON 或实际提供者请求。
++  // 推断的 thinking/effort 同样交给唯一 typed lowering，不能由 HTTP 后置覆盖协议字段。
++  const httpBody = Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey" && key !== "__opencodeReasoning" &&
+-    (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key))))
++    (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key)) && (!anthropic || !["thinking", "output_config"].includes(key)) && (!claudecode || !["system", "metadata"].includes(key))))
+   return route.with({
+     provider: model.providerID,
+     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
+@@ -115,20 +120,23 @@
+-    http: { body: claudecode ? Object.fromEntries(Object.entries(httpBody).filter(([key]) =>
+-      !["system", "thinking", "metadata", "output_config"].includes(key))) : httpBody },
+-    // metadata 不再出现在后置 overlay，保证最终 user_id 由专用 adapter 决定。
+-    ...(claudecode ? { providerOptions: { anthropic: {
+-      // 配置 beta 转入既有协议选项，HTTP 后置 overlay 不再覆盖专用 beta 或身份头。
+-      betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
+-      thinking: body.thinking,
+-      // 原始 system 转交 typed 协议校验与合并，不能从 HTTP overlay 覆盖自有计费首块。
+-      system: body.system,
+-      metadata: body.metadata,
+-      output_config: body.output_config,
+-    } } } : {}),
+-    // 空值采用源默认 true；显式 false 与已合并的 variant 配置完整保留。
+-    ...(parallel ? { providerOptions: { openai: {
+-      parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
+-    } } } : {}),
++    http: { body: httpBody },
++    ...(anthropic || parallel ? { providerOptions: {
++      ...(anthropic ? { anthropic: {
++        thinking: body.thinking,
++        output_config: body.output_config,
++        ...(claudecode ? {
++          // 标记来自已验证的 Catalog 继承；保持真实 provider ID，校准与历史匹配不能改成父 ID。
++          claudeCode: true,
++          betas: Object.entries(model.request.headers).flatMap(([key, value]) => key.toLowerCase() === "anthropic-beta" ? value.split(",") : []),
++          system: body.system,
++          metadata: body.metadata,
++        } : {}),
++      } } : {}),
++      // 两个命名空间独立合并，不能为 ClaudeCode 或 Anthropic 丢弃其他提供者的并行参数。
++      ...(parallel ? { openai: {
++        parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
++      } } : {}),
++    } } : {}),
+     // Catalog 的输入边界随同一解析 Model 交给压缩 owner，不放入 provider 请求正文。
+-    limits: { context: model.limit.context, input: model.limit.input, output: model.limit.output },
++    // 零是 Catalog 的未声明值，eligible Anthropic 应由实际协议决定 max_tokens，不能把它发成零限额。
++    limits: { context: model.limit.context, input: model.limit.input, output: anthropic && model.limit.output === 0 ? undefined : model.limit.output },
+   })
+ }
+@@ -173,7 +181,7 @@
+   // credential metadata 可补充请求参数，但不能反过来抢占 ClaudeCode 的显式配置密钥。
+-  const key = apiKey(model.providerID === "claudecode" ? model : resolved, credential)
++  const key = apiKey(ProviderV2.isClaudeCode(model) ? model : resolved, credential)
+   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/openai") {
+     return Effect.succeed(
+       withDefaults(resolved, OpenAIResponses.route)
+         .with({ auth: key === undefined ? Auth.none : Auth.bearer(key) })
+         .model({ id: resolved.api.id }),
+@@ -182,7 +190,7 @@
+   if (resolved.api.type === "aisdk" && resolved.api.package === "@ai-sdk/anthropic") {
+     // 仅在已经确认的 Anthropic API 分支配置 ClaudeCode，不按名称强改其他显式协议。
+-    const claudecode = resolved.providerID === "claudecode"
++    const claudecode = ProviderV2.isClaudeCode(resolved)
+     return Effect.succeed(
+       withDefaults(resolved, AnthropicMessages.route)
+         .with({
+           // 源服务使用 Bearer；清除另一个认证头避免同一请求携带两份凭据。
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -509,9 +509,10 @@
+ const anthropicOptions = (request: LLMRequest) => request.providerOptions?.anthropic
++const isClaudeCode = (request: LLMRequest) => request.model.provider === "claudecode" || anthropicOptions(request)?.claudeCode === true
+ 
+ const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
+   const thinking = anthropicOptions(request)?.thinking
+   // 专用策略由 provider 身份限定，普通 Anthropic 的预算验证仍沿用上游。
+-  if (request.model.provider === "claudecode") {
++  if (isClaudeCode(request)) {
+     if (thinking !== undefined && thinking !== null && !ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
+     // disabled 优先于模型默认，不能把用户关闭思考的选择改成 adaptive。
+     if (ProviderShared.isRecord(thinking) && thinking.type === "disabled") return { type: "disabled" as const }
+@@ -534,7 +535,13 @@
+     // 非 nullish 的无效配置必须走 typed 错误，不能被 fromRequest 的缺省 enabled 掩盖。
+     if (ProviderShared.isRecord(thinking) && thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
+   }
++  // 普通 Anthropic 推断的变体也由同一 Schema 编码，不能为了专用策略把 adaptive 静默丢弃。
++  if (ProviderShared.isRecord(thinking) && thinking.type === "adaptive")
++    return { ...thinking, type: "adaptive" as const }
++  // disabled 不携带 budget/display，不能把旧 enabled 参数残留进这一有效关闭分支。
++  if (ProviderShared.isRecord(thinking) && thinking.type === "disabled")
++    return { type: "disabled" as const }
+   if (!ProviderShared.isRecord(thinking) || thinking.type !== "enabled") return undefined
+   const budget =
+     typeof thinking.budgetTokens === "number"
+       ? thinking.budgetTokens
+@@ -572,7 +579,7 @@
+           text: part.text,
+           cache_control: cacheControl(breakpoints, part.cache),
+         }))
+-  const rawSystem = request.model.provider === "claudecode" ? anthropicOptions(request)?.system : undefined
++  const rawSystem = isClaudeCode(request) ? anthropicOptions(request)?.system : undefined
+   const originalSystem = rawSystem === undefined ? undefined : yield* decodeSystem(rawSystem)
+   // 全部 system 必须先于 history 领取同一预算，原始块不能绕过四断点上限。
+   const retainedSystem = originalSystem === undefined ? [] : typeof originalSystem === "string"
+@@ -590,7 +597,7 @@
+     )
+   }
+   // 原生 lowering 保持媒体、工具和 chronological system update 的上游处理，不经过 V1 fetch。
+-  const claudecode = request.model.provider === "claudecode"
++  const claudecode = isClaudeCode(request)
+   const metadata = anthropicOptions(request)?.metadata
+   // 先保留已有 metadata，再替换 adapter 拥有的 user_id；不覆盖其他字段。
+   const claudeCodeMetadata = {
+@@ -612,7 +619,8 @@
+     system: claudecode ? [...billing, ...(system ?? []), ...retainedSystem] : system,
+     model: request.model.id,
+     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
+     // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
+-    ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
++    // effort 已由同一 lowerer 转入 output_config，普通 Anthropic 也必须保留合法协议选项。
++    ...(ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
+     messages,
+     // ClaudeCode 的同一 wire 占位也适用于 native lowering；普通 Anthropic 与 none 保持上游语义。
+@@ -935,7 +943,7 @@
+     const betas = anthropicOptions(request)?.betas
+     return {
+       "anthropic-version": "2023-06-01",
+-      ...(request.model.provider === "claudecode" ? {
++      ...(isClaudeCode(request) ? {
+         "anthropic-beta": [...new Set([
+           // 23 原生恢复 redact；1M 仍只随 15 的三个型号添加，不改变 disabled/adaptive。
+           "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27,redact-thinking-2026-02-12" +
+diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/config/provider.test.ts
+--- a/packages/core/test/config/provider.test.ts
++++ b/packages/core/test/config/provider.test.ts
+@@ -4,12 +4,13 @@
+ import { Config } from "@opencode-ai/core/config"
+ import { ConfigProviderPlugin } from "@opencode-ai/core/config/plugin/provider"
+ import { Integration } from "@opencode-ai/core/integration"
++import { Credential } from "@opencode-ai/core/credential"
+ import { ModelV2 } from "@opencode-ai/core/model"
+ import { PluginV2 } from "@opencode-ai/core/plugin"
+ import { PluginHost } from "@opencode-ai/core/plugin/host"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+-import { LLM, LLMClient, ModelID } from "@opencode-ai/llm"
++import { LLM, LLMClient, ModelID, ProviderID, type Model } from "@opencode-ai/llm"
+ import { RequestExecutor } from "@opencode-ai/llm/route"
+ import { AnthropicMessages } from "@opencode-ai/llm/protocols/anthropic-messages"
+ import { HttpClientRequest } from "effect/unstable/http"
+ import { ProjectV2 } from "@opencode-ai/core/project"
+@@ -412,7 +413,8 @@
+         const anthropic = required(yield* catalog.model.get(ProviderV2.ID.make("anthropic-copy"), ModelV2.ID.make("claude")))
+         // 同一个已有 SDK lowerer 应同时转换模型与变体；中间配置和实际 wire 都无 camel userId。
+         expect(anthropic.request.body).toEqual({ extension: { base: "keep", child: "add", shared: "high" }, items: ["high"], metadata: { base: "keep", user_id: "later-model-user" } })
++        // 未声明输出窗口时不推断 enabled 预算，用户显式 high 变体的完整 metadata 继续保留。
+         expect(anthropic.variants[0]?.body).toEqual({ metadata: { user_id: "later-variant-user" } })
+         // authToken 不能困在 settings/body；基础不变，高层 URL/settings/headers 均独立覆盖。
+         expect(anthropic.api).toMatchObject({ type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic-high.test/v1", settings: { region: "high" } })
+         expect(anthropic.api.settings).not.toHaveProperty("authToken")
+@@ -427,9 +429,14 @@
+           // preview body 不携带 endpoint，typed transport 必须接续 resolver 已选定的 endpoint/auth。
+           const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
+           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+           const text = yield* Effect.promise(() => web.text())
++          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(text)
++          // 检查最终字节而非仅 Catalog 元数据，缺省上限必须来自协议且不能再携带负思考预算。
++          expect(body.max_tokens).toBe(4096)
++          expect(body).not.toHaveProperty("thinking")
++          expect(body.metadata).toEqual(variant === undefined ? { base: "keep", user_id: "later-model-user" } : { user_id: "later-variant-user" })
+           expect(web.headers.get("authorization")).toBe("Bearer new-token")
+           expect(web.url).toBe("https://anthropic-high.test/v1/messages")
+           expect(text).toContain(variant === undefined ? '"user_id":"later-model-user"' : '"user_id":"later-variant-user"')
+           expect(text).not.toContain('"userId"')
+           expect(text).not.toContain('"authToken"')
+@@ -438,4 +445,157 @@
+       }),
+     ),
+   )
++
++  it.effect("compiles claudecode thinking variants through the inherited Location model resolver", () =>
++    withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, CLAUDECODE_API_KEY: undefined, ANTHROPIC_BASE_URL: undefined, CLAUDECODE_BASE_URL: undefined }, () =>
++      Effect.gen(function* () {
++        const catalog = yield* Catalog.Service
++        const config = Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document",
++          info: decode(ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++            claudecode: { options: { apiKey: "configured-key" }, models: {
++              "claude-opus-4-6": { name: "Claude Opus 4.6", limit: { context: 64000, output: 32000 } },
++              "claude-3-7-sonnet-20250219": { reasoning: false, limit: { context: 64000, output: 32000 } },
++              "budget-base": { id: "claude-3-7-sonnet", reasoning: true, limit: { context: 64000, output: 32000 }, variants: { high: { custom_extension: { source: "base" } } } },
++            } },
++            Cubence: { extends: "claudecode", options: { apiKey: "derived-key", baseURL: "https://api-dmit.cubence.com/v1" }, models: {
++              "opus-alias": { id: "claude-opus-4-6", variants: { low: { metadata: { userId: "explicit-variant" } } } },
++              "disabled-alias": { id: "claude-3-7-sonnet-20250219" },
++            } },
++            // 无 extends 的普通提供者刻意带同名设置，锁定专用身份必须来自真实继承证明。
++            ordinary: { npm: "@ai-sdk/anthropic", options: { apiKey: "ordinary-key", claudeCode: true }, models: {
++              "claude-opus-4-6": { limit: { context: 64000, output: 32000 } },
++              "claude-sonnet-4-5": { limit: { context: 64000, output: 1024 } },
++              "claude-3-7-sonnet": { limit: { context: 64000, output: 1025 }, variants: { high: { metadata: { userId: "small-window" } } } },
++              lowered: { id: "claude-3-7-sonnet", reasoning: true, limit: { context: 64000, output: 32000 } },
++              off: { id: "claude-3-7-sonnet", reasoning: true, limit: { context: 64000, output: 32000 }, variants: { manual: { custom_extension: { source: "first" } } } },
++            } },
++            "sdk-switch": { extends: "claudecode" },
++          } }))),
++        }), new Config.Document({ type: "document",
++          // 后层不重述基础配置，预算、能力和协议必须共同按最终状态推断，不能消费上一层的默认表。
++          info: decode(ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++            ordinary: { models: {
++              lowered: { limit: { context: 64000, output: 2048 } },
++              off: { reasoning: false, variants: { manual: { custom_extension: { source: "later" } } } },
++            } },
++            "sdk-switch": { npm: "@ai-sdk/openai", options: { apiKey: "sdk-key", baseURL: "https://openai.test/v1" }, models: { "budget-base": { id: "gpt-4.1" } } },
++          } }))),
++        })]) })
++        yield* addPlugin(config)
++        const compile = <Body = AnthropicMessages.AnthropicMessagesBody>(model: Model) => Effect.gen(function* () {
++          const requests: HttpClientRequest.HttpClientRequest[] = []
++          const route = model.route.with({ transport: { ...model.route.transport,
++            prepare: (input) => model.route.transport.prepare(input).pipe(Effect.tap((prepared) => Effect.sync(() => requests.push(prepared.request)))),
++          } })
++          const prepared = yield* LLMClient.prepare<Body>(LLM.request({ model: route.model({ id: model.id }), prompt: "hello", cache: "none" }))
++          // 截获同一次 compile 的真实请求，计数拦住重复 prepare，fixture 永不进入发送或 frames。
++          expect(requests).toHaveLength(1)
++          return { body: prepared.body, web: yield* HttpClientRequest.toWeb(required(requests[0])).pipe(Effect.orDie) }
++        })
++        const providerID = ProviderV2.ID.make("Cubence")
++        const alias = required(yield* catalog.model.get(providerID, ModelV2.ID.make("opus-alias")))
++        expect(alias.providerID).toBe(providerID)
++        expect(alias.id).toBe(ModelV2.ID.make("opus-alias"))
++        expect(alias.api).toMatchObject({ id: "claude-opus-4-6", type: "aisdk", package: "@ai-sdk/anthropic", url: "https://api-dmit.cubence.com/v1" })
++        expect(alias.variants.map((variant) => variant.id)).toEqual(["low", "medium", "high", "max"].map((id) => ModelV2.VariantID.make(id)))
++        // 完整低档 body 同时锁定默认 effort 与用户 metadata，部分匹配会漏掉合并丢项。
++        expect(alias.variants.find((variant) => variant.id === "low")?.body).toEqual({ thinking: { type: "adaptive" }, output_config: { effort: "low" }, metadata: { user_id: "explicit-variant" } })
++        expect((yield* catalog.model.get(ProviderV2.ID.make("claudecode"), ModelV2.ID.make("claude-3-7-sonnet-20250219")))?.variants).toEqual([])
++        const disabled = required(yield* catalog.model.get(providerID, ModelV2.ID.make("disabled-alias")))
++        expect(disabled.variants).toEqual([])
++        const disabledModel = yield* SessionRunnerModel.fromCatalogModel(disabled)
++        expect((yield* compile(disabledModel)).body).not.toHaveProperty("__opencodeReasoning")
++        expect((yield* catalog.model.get(ProviderV2.ID.make("claudecode"), ModelV2.ID.make("claude-opus-4-6")))?.api.url).toBe("https://api.cubence.com")
++        const session = SessionSchema.Info.make({ id: SessionSchema.ID.make("ses_claudecode_inference"), projectID: ProjectV2.ID.global, title: "test", cost: 0,
++          model: { providerID, id: alias.id, variant: ModelV2.VariantID.make("max") },
++          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
++        })
++        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
++        const selected = yield* resolver.resolve(session)
++        // 真实 Location resolver 保留派生 provider 与 wire ID，冻结预算不随 Catalog 别名重写。
++        expect(selected.provider).toBe(ProviderID.make(providerID))
++        expect(selected.id).toBe(ModelID.make("claude-opus-4-6"))
++        expect(selected.route.defaults.limits).toEqual({ context: 64000, input: undefined, output: 32000 })
++        const prepared = yield* compile(selected)
++        expect(prepared.body.thinking).toEqual({ type: "adaptive" })
++        expect(prepared.body.output_config).toEqual({ effort: "max" })
++        expect(prepared.body.system?.[0]?.text).toStartWith("x-anthropic-billing-header:")
++        expect(prepared.web.url).toBe("https://api-dmit.cubence.com/v1/messages")
++        expect(prepared.web.headers.get("authorization")).toBe("Bearer derived-key")
++        expect(prepared.web.headers.has("x-api-key")).toBe(false)
++        expect(prepared.web.headers.get("x-app")).toBe("cli")
++        // 只准备请求而不发送，四种来源验证源优先级，保存凭据属于当前派生身份。
++        for (const sample of [
++          { token: "env-token", cc: "cc-token", saved: "saved-key", expected: "env-token" },
++          { token: undefined, cc: "cc-token", saved: "saved-key", expected: "cc-token" },
++          { token: undefined, cc: undefined, saved: "saved-key", expected: "saved-key" },
++          { token: undefined, cc: undefined, saved: undefined, expected: "derived-key" },
++        ]) yield* withEnv({ ANTHROPIC_AUTH_TOKEN: sample.token, CLAUDECODE_API_KEY: sample.cc }, () => Effect.gen(function* () {
++          const resolved = yield* SessionRunnerModel.fromCatalogModel(alias, sample.saved === undefined ? undefined : Credential.Key.make({ type: "key", key: sample.saved }))
++          const prepared = yield* compile(resolved)
++          expect(prepared.web.headers.get("authorization")).toBe(`Bearer ${sample.expected}`)
++          expect(prepared.web.headers.has("x-api-key")).toBe(false)
++        }))
++        const ordinary = required(yield* catalog.model.get(ProviderV2.ID.make("ordinary"), ModelV2.ID.make("claude-opus-4-6")))
++        expect(ordinary.api.url).toBe("https://api.anthropic.com/v1")
++        const normal = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: ordinary.providerID, id: ordinary.id, variant: ModelV2.VariantID.make("low") } }), ordinary)
++        const normalBody = yield* compile(normal)
++        // 普通 Anthropic 仍有推断变体，绝不因为专用能力混入 ClaudeCode 的计费、占位工具或身份头。
++        expect(normalBody.body.thinking).toEqual({ type: "adaptive" })
++        expect(normalBody.body.output_config).toEqual({ effort: "low" })
++        expect(normalBody.body.system).toBeUndefined()
++        expect(normalBody.body.tools).toBeUndefined()
++        expect(normalBody.web.headers.get("x-api-key")).toBe("ordinary-key")
++        expect(normalBody.web.headers.has("x-app")).toBe(false)
++        // 两个相邻窗口分别验证不能容纳思考与恰能容纳最低预算，显式变体 metadata 不能被默认表丢掉。
++        for (const sample of [{ id: "claude-sonnet-4-5", output: 1024 }, { id: "claude-3-7-sonnet", output: 1025 }]) {
++          const edge = required(yield* catalog.model.get(ordinary.providerID, ModelV2.ID.make(sample.id)))
++          expect(edge.variants).toEqual(sample.output === 1024 ? [] : [
++            { id: ModelV2.VariantID.make("high"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 1024 }, metadata: { user_id: "small-window" } } },
++            { id: ModelV2.VariantID.make("max"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 1024 } } },
++          ])
++          const resolved = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: edge.providerID, id: edge.id, variant: sample.output === 1024 ? undefined : ModelV2.VariantID.make("high") } }), edge)
++          const prepared = yield* compile(resolved)
++          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => prepared.web.text()))
++          // wire 的 max_tokens 必须等于所选小窗口，1024 的思考预算只能出现在更大的 1025 窗口。
++          expect(body.max_tokens).toBe(sample.output)
++          expect(body.thinking).toEqual(sample.output === 1024 ? undefined : { type: "enabled", budget_tokens: 1024 })
++          expect(body.metadata).toEqual(sample.output === 1024 ? undefined : { user_id: "small-window" })
++          expect(prepared.web.headers.has("x-app")).toBe(false)
++        }
++        const lowered = required(yield* catalog.model.get(ordinary.providerID, ModelV2.ID.make("lowered")))
++        // 两档精确预算锁定第二层 2048 上限，不能只测变体名字而漏掉首层 32000 的残留。
++        expect(lowered.variants).toEqual([
++          { id: ModelV2.VariantID.make("high"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 1024 } } },
++          { id: ModelV2.VariantID.make("max"), headers: {}, body: { thinking: { type: "enabled", budget_tokens: 2047 } } },
++        ])
++        for (const variant of lowered.variants) {
++          const resolved = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: lowered.providerID, id: lowered.id, variant: variant.id } }), lowered)
++          const prepared = yield* compile(resolved)
++          const body = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => prepared.web.text()))
++          expect(body.max_tokens).toBe(2048)
++          expect(body.thinking).toEqual(variant.body.thinking)
++        }
++        const off = required(yield* catalog.model.get(ordinary.providerID, ModelV2.ID.make("off")))
++        // false 只撤销自动推断，显式变体仍沿原分层流程接纳后层正文并继续可执行。
++        expect(off.variants).toEqual([{ id: ModelV2.VariantID.make("manual"), headers: {}, body: { custom_extension: { source: "later" } } }])
++        const offModel = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: off.providerID, id: off.id, variant: ModelV2.VariantID.make("manual") } }), off)
++        const offPrepared = yield* compile(offModel)
++        const offBody = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => offPrepared.web.text()))
++        expect(offBody).not.toHaveProperty("thinking")
++        expect(offBody.custom_extension).toEqual({ source: "later" })
++        const switched = required(yield* catalog.model.get(ProviderV2.ID.make("sdk-switch"), ModelV2.ID.make("budget-base")))
++        // SDK 切换后仍继承真实用户变体，首次推断的 Anthropic thinking 不得混进 Responses 的 HTTP overlay。
++        expect(switched.variants).toEqual([{ id: ModelV2.VariantID.make("high"), headers: {}, body: { custom_extension: { source: "base" } } }])
++        const switchedModel = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: switched.providerID, id: switched.id, variant: ModelV2.VariantID.make("high") } }), switched)
++        const switchedPrepared = yield* compile<Record<string, unknown>>(switchedModel)
++        expect(switchedModel.route.id).toBe("openai-responses")
++        const switchedBody = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)))(yield* Effect.promise(() => switchedPrepared.web.text()))
++        expect(switchedBody.model).toBe("gpt-4.1")
++        expect(switchedBody).not.toHaveProperty("thinking")
++        expect(switchedBody.custom_extension).toEqual({ source: "base" })
++      }),
++    ),
++  )
+ })
+diff --git a/packages/core/src/aisdk.ts b/packages/core/src/aisdk.ts
+--- a/packages/core/src/aisdk.ts
++++ b/packages/core/src/aisdk.ts
+@@ -80,6 +80,9 @@
+   if (model.api.type === "aisdk" && model.api.url) options.baseURL = model.api.url
++  // 能力与继承标志属于配置 owner，不是 SDK 工厂选项，更不能由 SDK 带上 wire。
++  delete options.__opencodeReasoning
++  delete options.claudeCode
+ 
+   const customFetch = options.fetch
+   const chunkTimeout = options.chunkTimeout
+   delete options.chunkTimeout
+   options.fetch = async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+diff --git a/packages/core/src/plugin/models-dev.ts b/packages/core/src/plugin/models-dev.ts
+--- a/packages/core/src/plugin/models-dev.ts
++++ b/packages/core/src/plugin/models-dev.ts
+@@ -115,5 +115,7 @@
+   Object.assign(draft.request.headers, input.request?.headers ?? {})
+   Object.assign(draft.request.body, input.request?.body ?? {})
++  // 目录能力随模型副本继承，显式 false 不能在新别名上被型号推断重新开启。
++  draft.request.body.__opencodeReasoning = model.reasoning ?? false
+ }
+ 
+ export const ModelsDevPlugin = define({
+diff --git a/packages/core/test/plugin/models-dev.test.ts b/packages/core/test/plugin/models-dev.test.ts
+--- a/packages/core/test/plugin/models-dev.test.ts
++++ b/packages/core/test/plugin/models-dev.test.ts
+@@ -94,7 +94,8 @@
+       const fast = yield* catalog.model.get(providerID, ModelV2.ID.make("gpt-5.4-fast"))
+ 
+       expect(base?.variants).toEqual([])
+-      expect(base?.request.body).toEqual({})
++      expect(base?.request.body).toEqual({ __opencodeReasoning: true })
++      expect(fast?.request.body).toEqual({ service_tier: "priority", __opencodeReasoning: true })
+       expect(fast).toMatchObject({
+         id: "gpt-5.4-fast",
+         providerID: "acme",

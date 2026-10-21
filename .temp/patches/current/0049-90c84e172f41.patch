@@ -1,17 +1,17 @@
 diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/src/cli/tui/server-lock.ts
 --- a/packages/opencode/src/cli/tui/server-lock.ts
 +++ b/packages/opencode/src/cli/tui/server-lock.ts
-@@ -87,7 +87,9 @@
- export async function ping(port: number) {
-   try {
+@@ -125,8 +125,8 @@
      const resp = await fetch(`http://127.0.0.1:${port}/global/health`, {
+       // 保留受保护的健康路由，401 不能被当作陈旧 owner 并覆盖锁。
+       headers: headers(credentials),
+-      // deadline 覆盖响应与 JSON body 读取，卡住的 body 不能永久占用选举租约。
 -      signal: AbortSignal.timeout(2000),
-+      signal: // 健康 ping 超时收紧到 500ms
-+      // #49 将健康探测超时从 2s 收紧为 500ms
-+      AbortSignal.timeout(500),
++      // 500ms deadline 覆盖响应与 body；超时或 401 均不授权清理存活 owner。
++      signal: AbortSignal.timeout(500),
      })
-     return resp.ok
-   } catch {
+     // 健康 JSON 与当前版本均匹配才可复用，不能接受任意监听者的 200。
+     if (!resp.ok) return false
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
@@ -27,21 +27,41 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
  
  process.on("unhandledRejection", onUnhandledRejection)
  process.on("uncaughtException", onUncaughtException)
-@@ -138,6 +138,16 @@
-   // SIGTERM 触发优雅关闭
+@@ -124,6 +124,9 @@
+   async function gracefulShutdown(exitCode = 0) {
+     if (shutdownInProgress) return
+     shutdownInProgress = true
++    // 致命关闭也有上限；只退出当前 daemon，不向其他 owner 发终止信号。
++    const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
++    shutdownTimer.unref?.()
+     if (idleTimer) clearTimeout(idleTimer)
+     if (upgradeTimer) clearTimeout(upgradeTimer)
+     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
+@@ -134,6 +137,7 @@
+     const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
+     const runtime = await Promise.allSettled([AppRuntime.dispose()])
+     // Database Layer 的 finalizer 在 native close 前 checkpoint，监听 scope 与 runtime 均照常释放。
++    clearTimeout(shutdownTimer)
+     process.exit(exitCode || ([...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
+   }
+ 
+@@ -140,6 +144,18 @@
+   // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
    process.on("SIGTERM", () => void gracefulShutdown())
  
-+  // daemon 致命路径：覆盖空实现并 prepend，确保清锁
++  // daemon 致命路径替换线程空监听，启动与空闲阶段共享同一资源清理闭包。
++  process.off("unhandledRejection", onUnhandledRejection)
++  process.off("uncaughtException", onUncaughtException)
 +  onUnhandledRejection = (_error: unknown) => {
-+    void gracefulShutdown()
++    void gracefulShutdown(1)
 +  }
 +  onUncaughtException = (_error: Error) => {
-+    void gracefulShutdown()
++    void gracefulShutdown(1)
 +  }
 +  process.prependListener("unhandledRejection", onUnhandledRejection)
 +  process.prependListener("uncaughtException", onUncaughtException)
 +
-   // SIGUSR2 触发配置重载（仅 Unix；Windows 不支持此信号）
+   // reload 失效配置和实例而不是停止共享 HTTP listener，其他窗口的订阅必须保持。
    if (process.platform !== "win32") {
      process.on("SIGUSR2", () => {
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
@@ -50,139 +70,140 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 @@ -50,6 +50,7 @@
  }
  
- // 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
-+// #49 收紧选举/陈旧/轮询默认值（10s/5s/200ms）
+ // 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
++// 只缩短 contender 等待和探测频率，完整启动 deadline 仍由独立 waitMs 约束。
  const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
    read: ServerLock.read,
    alive: ServerLock.alive,
-@@ -60,11 +61,17 @@
-   sleep: (ms) => Bun.sleep(ms),
-   resolveDaemonFile: target,
-   // 选举租约 30s：与 SMARK 原值一致（#49 再收紧）
+@@ -69,10 +70,16 @@
+   },
+   // 选举等待只限制 contender，不缩短成功持锁者启动健康服务的完整预算。
 -  electionTimeoutMs: 30_000,
-+  // 选举超时收紧到 10s
++  // acquire 超时必须显式失败，不能在未获得租约时私自拉起另一个同身份服务。
 +
 +  electionTimeoutMs: 10_000,
-   // 陈旧租约 10s（#49 再收紧到 5s）
+   // staleMs 交给已有 Flock heartbeat 维护，不能凭 HTTP 超时自行打破活租约。
 -  electionStaleMs: 10_000,
-+  // 陈旧租约收紧到 5s
++  // Flock 持有期间仍按 staleMs 更新 heartbeat，长启动不等于 lease 已失效。
 +
 +  electionStaleMs: 5_000,
-   // 轮询间隔 100ms（#49 再收紧到 200ms）
+   // 启动轮询等待 owner 写锁，不能把尚未发布端口的进程当作可复用服务。
 -  pollMs: 100,
-+  // 轮询间隔 200ms
++  // 增大间隔减少未发布 owner 的无效读取；就绪验证仍检查同一子 PID 和受保护 health。
 +
 +  pollMs: 200,
    waitMs: 30_000,
  })
  
-@@ -139,6 +146,9 @@
-       fwdPid = proc.pid
+@@ -152,6 +159,9 @@
+           fwdPid = proc.pid
  
-       const deadline = Date.now() + deps.waitMs
-+      // 启动后等待 1s 再轮询，避免过早健康检查失败
-+      // #49 启动后先 sleep 1s 再进入健康轮询
-+      await deps.sleep(1000)
-       // 轮询锁文件直到 pid 匹配且健康检查通过
-       while (Date.now() < deadline) {
-         const daemonLock = await deps.read()
++          // 等待放在 proc 与 lease 的 finally 内，sleep 拒绝也不能泄漏选举所有权。
++          // 完整启动预算从 sleep 后开始，不能用避让早期探测的延迟吃掉健康等待时间。
++          await deps.sleep(1000)
+           const deadline = Date.now() + deps.waitMs
+           // 端口即使被其他健康服务占用，也不能替代本次子进程 PID 的发现锁。
+           while (Date.now() < deadline) {
+             const daemonLock = await deps.read(lockPath)
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -684,29 +684,152 @@
+@@ -5,11 +5,13 @@
+-import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
++import type { Agent, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { estimate } from "@opencode-ai/core/util/token"
+ import { ConfigProvider, Effect } from "effect"
+ import { boolean, withDefault } from "effect/Config"
++// 过滤共享 Schema 的纯权限语法，避免新增 TUI 到 Core 的运行时入口。
++import { Wildcard } from "@opencode-ai/schema/wildcard"
+ import { estimateDataUrlInputTokens } from "./token-estimate"
+ import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
+ import GIT_SAFETY from "../../../core/src/git-safety.txt"
+ import SHELL_DESCRIPTION from "../../../opencode/src/tool/shell/shell.txt"
+ // 提示词文本资产由 Bun 内嵌，估算无需加载服务或依赖打包后的源码目录。
+ import PROMPT_META from "../../../opencode/src/session/prompt/meta.txt"
+@@ -35,7 +37,7 @@
+ // RuntimeFlags 从环境 ConfigProvider 取值，不读取 SDK config.experimental；专用 false 覆盖实验伞。
+-function enabledByExperimental(key: string) {
++function enabledByExperimental(key: string, inheritExperimental = true) {
+   const provider = ConfigProvider.fromEnv()
+   // withDefault 只处理缺失值；实际 Config.boolean 保留 yes/on/1 等编码及非法值失败，不自行复制真值表。
+-  const experimental = Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
++  const experimental = inheritExperimental && Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
+   return Effect.runSync(boolean(key).pipe(withDefault(experimental)).parse(provider))
+ }
+@@ -316,6 +318,8 @@
+   config?: Config
+   agents?: Agent[]
++  // 会话权限由 prompt 持久化；下一条用户消息省略 tools 时仍决定工具广告。
++  session?: Session
+   lastUserModel?: { providerID: string; modelID: string }
+   vcs?: VcsInfo
+   paths: ContextUsagePaths
+   columns?: number
+@@ -774,26 +778,119 @@
  }
  
- 
--// 收集活跃工具名：从最后一条用户消息的 tools 映射和历史工具调用部件中提取
+-// 用户 tools 映射与历史调用是两个既有输入来源，缺省映射不能被解释成已明确禁用所有工具。
 -function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
 -  const names = new Set<string>()
 +
-+// 动态工具文本：task 工具输出可用子代理列表，skill 工具输出技能列表
 +
-+// 与 runtime-flags 一致：专属 key 未设置时回落 OPENCODE_EXPERIMENTAL 伞
-+function enabledByExperimental(key: string) {
-+  return process.env[key] === undefined ? truthy("OPENCODE_EXPERIMENTAL") : truthy(key)
-+}
-+// EXA 启停与 core 一致：伞/ENABLE/legacy 任一为真即启用
-+function enableExa() {
-+  return truthy("OPENCODE_EXPERIMENTAL") || truthy("OPENCODE_ENABLE_EXA") || truthy("OPENCODE_EXPERIMENTAL_EXA")
-+}
-+type PermissionRuleLike = { permission: string; pattern: string; action: string }
++type PermissionRuleLike = Agent["permission"][number]
 +const EDIT_TOOL_NAMES = new Set(["edit", "write", "apply_patch"])
-+// 简单通配：仅支持 * 为任意子串
-+function matchWild(value: string, pattern: string) {
-+  if (pattern === "*") return true
-+  if (!pattern.includes("*")) return value === pattern
-+  const chunks = pattern.split("*")
-+  let idx = 0
-+  for (let i = 0; i < chunks.length; i++) {
-+    const chunk = chunks[i]
-+    if (chunk.length === 0) continue
-+    const found = value.indexOf(chunk, idx)
-+    if (found < 0) return false
-+    if (i === 0 && found !== 0) return false
-+    idx = found + chunk.length
-+  }
-+  if (!pattern.endsWith("*") && idx !== value.length) return false
-+  return true
-+}
-+// 自后向前匹配权限规则，后写覆盖先写
++// 后写规则覆盖早期默认规则，复用 core 的 ? 与 Windows 路径归一语义。
 +function evaluateRule(permission: string, pattern: string, ruleset: readonly PermissionRuleLike[] = []) {
 +  for (let i = ruleset.length - 1; i >= 0; i--) {
 +    const rule = ruleset[i]
-+    if (matchWild(permission, rule.permission) && matchWild(pattern, rule.pattern)) return rule
++    if (Wildcard.match(permission, rule.permission, process.platform === "win32") && Wildcard.match(pattern, rule.pattern, process.platform === "win32")) return rule
 +  }
 +  return undefined
 +}
-+// 仅 pattern=* 且 action=deny 计入 disabled 集合
++// disabled 与 runtime 一样先取最后匹配 permission 的规则，再判断是否全资源 deny。
 +function disabledTools(names: string[], ruleset: readonly PermissionRuleLike[] = []) {
 +  return new Set(
 +    names.filter((name) => {
-+      const permission = EDIT_TOOL_NAMES.has(name) ? "edit" : name
-+      const rule = evaluateRule(permission, "*", ruleset)
++      const permission = EDIT_TOOL_NAMES.has(name) ? "edit" : ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"].includes(name) ? "read" : name
++      const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission, process.platform === "win32"))
 +      return rule?.pattern === "*" && rule.action === "deny"
 +    }),
 +  )
 +}
-+// #49 在嵌入 catalog 上叠加 flag/model/permission 过滤
++// catalog 提供序列化定义，当前模型、开关及权限过滤决定集合，历史调用不覆写这些输入。
 +function baseToolDefinitions(
 +  input: ComputeContextDataInput,
-+  modelInfo: { modelID: string; providerID: string },
-+  lastUser: Message | undefined,
++  modelInfo: ReturnType<typeof currentModel>,
 +) {
-+  // 测试可注入 toolDefinitions，跳过 flag 过滤以稳定断言
++  // 注入 definitions 是完整测试覆盖，包括空数组；不能再合并真实 catalog 扩大这个集合。
 +  if (input.toolDefinitions) return input.toolDefinitions
-+  // gpt 非 oss/非 gpt-4 走 apply_patch，隐藏 edit/write
-+  const usePatch =
-+    modelInfo.modelID.includes("gpt-") && !modelInfo.modelID.includes("oss") && !modelInfo.modelID.includes("gpt-4")
-+  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
-+  const rules = (agent?.permission ?? []) as PermissionRuleLike[]
++  // registry 收到解析后的 API ID；显示别名保留给面板，缺失模型不能猜测它的后端身份。
++  const apiID = modelInfo.model?.api.id
++  const usePatch = apiID !== undefined && apiID.includes("gpt-") && !apiID.includes("oss") && !apiID.includes("gpt-4")
 +  const resolved = resolveToolDescriptions(input.paths)
-+  const disabled = agent ? disabledTools(resolved.map((i) => i.name), rules) : new Set<string>()
++  // EXA 合并实验伞，Parallel/question 缺省 false；先解析全部键，不能用 provider/client 旁路掩盖非法值。
++  const flags = {
++    exa: ["OPENCODE_EXPERIMENTAL", "OPENCODE_ENABLE_EXA", "OPENCODE_EXPERIMENTAL_EXA"].map((key) => enabledByExperimental(key, false)).some(Boolean),
++    parallel: ["OPENCODE_ENABLE_PARALLEL", "OPENCODE_EXPERIMENTAL_PARALLEL"].map((key) => enabledByExperimental(key, false)).some(Boolean),
++    question: enabledByExperimental("OPENCODE_ENABLE_QUESTION_TOOL", false),
++  }
 +  return resolved
 +    .filter((item) => {
 +      if (item.name === "question") {
 +        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
-+        return ["app", "cli", "desktop"].includes(client) || truthy("OPENCODE_ENABLE_QUESTION_TOOL")
++        return ["app", "cli", "desktop"].includes(client) || flags.question
 +      }
-+      // LSP 工具：OPENCODE_EXPERIMENTAL 伞或专用 LSP_TOOL 开关
++      // 专用关闭值优先于实验伞；只有后端会提供 LSP 时才估算其定义 token。
 +      if (item.name === "lsp") return enabledByExperimental("OPENCODE_EXPERIMENTAL_LSP_TOOL")
-+      // plan_exit：实验 plan 模式且仅 cli 客户端
++      // plan_exit 还受 client=cli 限制，桌面客户端即使启用实验 plan 也不能看到不可执行工具。
 +      if (item.name === "plan_exit") {
 +        const client = process.env["OPENCODE_CLIENT"] ?? "cli"
 +        return enabledByExperimental("OPENCODE_EXPERIMENTAL_PLAN_MODE") && client === "cli"
 +      }
-+      // websearch 与 core enableExa 对齐；目标无 codesearch owner 不占位
-+      if (item.name === "websearch") return modelInfo.providerID === "opencode" || enableExa()
++      // 与实际 registry 对齐：Go provider 与 Parallel 开关同样广告 websearch。
++      if (item.name === "websearch") return ["opencode", "opencode-go"].includes(modelInfo.providerID) || flags.exa || flags.parallel
 +      if (usePatch) return item.name !== "edit" && item.name !== "write"
 +      return item.name !== "apply_patch"
-+    })
-+    .filter((item) => !disabled.has(item.name))
-+    .filter((item) => {
-+      // task 工具：agent 规则 deny 时从定义列表移除
-+      if (item.name !== "task" || !agent) return true
-+      const rule = evaluateRule("task", "*", rules)
-+      return !(rule?.pattern === "*" && rule.action === "deny")
 +    })
 +}
 +
@@ -194,7 +215,7 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 -      if (enabled) names.add(name)
 +      if (enabled === false) {
 +        names.delete(name)
-+        // edit:false 时同步禁用 write/apply_patch
++        // 旧消息的 edit:false 是编辑能力禁令，模型切到 apply_patch 也不能绕过这份显式禁用。
 +        if (name === "edit") {
 +          names.delete("write")
 +          names.delete("apply_patch")
@@ -208,25 +229,26 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
    return names
  }
  
--// 动态工具文本：task 工具输出可用子代理列表，skill 工具输出技能列表
+-// primary agent 不作为 task 子代理广告；task/skill 追加的是动态能力文本，不是再次执行工具。
 -function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>) {
-+// 工具定义 token：#48 catalog + #49 过滤，modelInfo 来自 currentModel
-+async function toolDefinitionTokens(
++// 定义文本由 catalog 序列化，调用参数已归消息分类，不再加入工具定义样本。
++function toolDefinitionTokens(
 +  input: ComputeContextDataInput,
-+  messages: WithParts[],
 +  skills: Array<{ name: string; description: string; path: string }>,
 +  lastUser: Message | undefined,
-+  modelInfo: { modelID: string; providerID: string },
++  modelInfo: ReturnType<typeof currentModel>,
 +) {
-+  // 与 computeContextData/currentModel 同一模型真相源
-+  const scanned = baseToolDefinitions(input, modelInfo, lastUser)
-+  const active = activeToolNames(scanned, lastUser)
++  // catalog 渲染模板，动态描述保留原始文本并使用同一请求模型身份。
++  const scanned = baseToolDefinitions(input, modelInfo)
++  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
++  // Session 规则排在 agent 后；同一过滤也作用于完整注入定义，不能绕过持久 deny。
++  const disabled = disabledTools(scanned.map((item) => item.name), [...(agent?.permission ?? []), ...(input.session?.permission ?? [])])
++  // 可用定义先过滤权限与用户禁用项，历史调用不能重新广告已禁用工具。
++  const active = activeToolNames(scanned.filter((item) => !disabled.has(item.name)), lastUser)
 +  const byName = new Map(scanned.map((item) => [item.name, item.text]))
-+  const details = [] as Array<{ name: string; tokens: number }>
++  const details: Array<{ name: string; tokens: number }> = []
 +  for (const name of active) {
-+    const parts = [byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean)
-+    const joined = parts.join(String.fromCharCode(10))
-+    const text = resolveTemplateVars(joined, input.paths)
++    const text = [byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean).join("\n")
 +    details.push({ name, tokens: estimate(text || name) })
 +  }
 +  return details.toSorted((a, b) => a.name.localeCompare(b.name))
@@ -234,9 +256,9 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 +
 +function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>, lastUser?: Message) {
    if (name === "task") {
-+    // 仅列出当前 agent 权限未 deny 的子代理
++    // task 子代理名称按同一 Wildcard 规则过滤；revie? deny 必须影响动态描述而不仅是工具集合。
 +    const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
-+    const rules = (agent?.permission ?? []) as PermissionRuleLike[]
++    const rules = agent?.permission ?? []
      const description = (input.agents ?? [])
 -      .filter((agent) => agent.mode !== "primary")
 +      .filter((item) => item.mode !== "primary")
@@ -253,23 +275,21 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 +      .join(String.fromCharCode(10))
 +    return ["Available agent types and the tools they have access to:", description].join(String.fromCharCode(10))
    }
+@@ -800,30 +897,7 @@
    if (name === "skill") return skillFmt(skillInfo(skills), { verbose: false })
    return ""
-@@ -843,30 +966,6 @@
-     .replaceAll("${compressionGuidance}", "")
  }
  
+-// 定义只计算 catalog 与动态描述；调用输入已经归类为消息，不能再次计入定义。
 -function toolDefinitionTokens(
 -  input: ComputeContextDataInput,
 -  messages: WithParts[],
 -  skills: Array<{ name: string; description: string; path: string }>,
 -  lastUser: Message | undefined,
 -) {
--  // 无测试注入时走 catalog 解析，禁止扫 monorepo tool 目录
--  
 -  const scanned = input.toolDefinitions ?? resolveToolDescriptions(input.paths)
 -  const active = activeToolNames(messages, lastUser)
--  // 用户未显式禁用工具且无活跃工具时，默认全部内置工具活跃
+-  // 只在 tools 缺省时补全集，显式空映射没有可用能力，不能因 active 为空再次恢复所有定义。
 -  if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
 -    for (const item of scanned) active.add(item.name)
 -  }
@@ -284,50 +304,101 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 -  return details.toSorted((a, b) => a.name.localeCompare(b.name))
 -}
  
- // 基础系统提示词：优先用 agent 自定义 prompt，无 agent prompt 时回退到模型默认提示
+ // agent 自定义 prompt 完整替换模型模板，不能同时拼入两份族模板把系统开销翻倍。
  function baseSystemPrompt(
-@@ -1032,12 +1131,13 @@
-   const provider = input.providers.find((item) => item.id === selected?.providerID)
-   const model = selected?.modelID ? provider?.models[selected.modelID] : undefined
-   return {
--    providerID: selected?.providerID ?? provider?.id ?? "",
--    modelID: selected?.modelID ?? "",
-     model,
-+    modelID: selected?.modelID ?? "",
-+    providerID: selected?.providerID ?? provider?.id ?? "",
-   }
- }
- 
-+
- export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
-   // 消息按时间倒序过滤压缩历史，再反转回正序
-   const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
-@@ -1068,7 +1168,7 @@
+@@ -1027,7 +1101,7 @@
      path: skill.path,
      tokens: estimate(skillsSection(skillInfo([skill]))),
    }))
 -  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser)
-+  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser, { modelID: modelInfo.modelID, providerID: modelInfo.providerID })
-   // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
++  const toolDefs = toolDefinitionTokens(input, skills, lastUser, modelInfo)
+   // 用户 system 是同一请求的附加系统载荷；存在自定义 agent prompt 也不能省略该字段。
    const systemText = [
      baseSystemPrompt(input, lastUser, modelInfo.model),
+@@ -1055,7 +1129,8 @@
+     { name: "System prompt", tokens: envTokens, color: "primary" },
+     { name: "Instructions", tokens: instructionTokens + loadedInstructionTokens, color: "info" },
+     { name: "Skills", tokens: skillTokens, color: "success" },
+-    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
++    // 工具定义与输入消息分别用 secondary/warning，保留两种分类的视觉辨识。
++    { name: "Tool definitions", tokens: toolDefTokens, color: "secondary" },
+     { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
+     { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
+     // free 非零也不能进入 used；isDeferred 只影响网格可见性门槛，不改变百分比分子。
+diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/src/routes/session/context-usage.tsx
+--- a/packages/tui/src/routes/session/context-usage.tsx
++++ b/packages/tui/src/routes/session/context-usage.tsx
+@@ -286,6 +286,8 @@
+       providers: [...sync.data.provider],
+       config: sync.data.config,
+       agents: [...sync.data.agent],
++      // 保留 store proxy 到现有 tracked 序列化边界，嵌套 permission 更新也能刷新同一 resource。
++      session: sync.session.get(props.sessionID),
+       lastUserModel: local.model.current(),
+       vcs: sync.data.vcs,
+       paths: { cwd: paths.directory, worktree: paths.worktree, shell: sync.data.config.shell },
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -151,7 +151,8 @@
-     // 指令文件 8 字符 → 2 token
+@@ -10,8 +10,8 @@
+-import type { Agent, Message, Part, Provider, TextPart } from "@opencode-ai/sdk/v2"
+-import { computeContextData, filterCompactedMessages, resolveToolDescriptions } from "../src/util/context-usage"
++import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
++import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
+ import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
+ import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
+ 
+ // 窗口/输入/输出故意不相等，才能让测试区分模型预留与压缩缓冲而非只验证零差额。
+ const provider: Provider = {
+   id: "test",
+@@ -95,6 +95,10 @@
+   test("subscribes to in-place text, pending input, and confirmed token changes", async () => {
++    const session: Session = {
++      id: "ses_context", slug: "context", projectID: "p", directory: ".", title: "Session", version: "1",
++      time: { created: 0, updated: 0 }, permission: [],
++    }
+     const mounted = createRoot((dispose) => {
+       const [store, setStore] = createStore({
+-        messages: [user("1"), assistant("2", "1"), assistant("3", "1")],
++        messages: [user("1"), assistant("2", "1"), assistant("3", "1")].map((message) => ({ ...message, sessionID: session.id })),
+         parts: {
+           "1": [text("1", "abcd")],
+@@ -105,7 +109,8 @@
+         },
+-        providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
++        session,
++        providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [{ name: "read", text: "read" }],
+       })
+       // 挂载生产 helper 的唯一 resource，不能在测试中复制 JSON 快照或计算公式。
+       const [data] = contextUsageResource(() => store)
+       let notify: ((value: NonNullable<ReturnType<typeof data>>) => void) | undefined
+       createComputed(() => {
+@@ -120,6 +125,11 @@
+     try {
+       const initial = await mounted.next()
++      expect(initial.details.toolDefs.map((item) => item.name)).toEqual(["read"])
++      // 原位持久权限更新保持 Session/消息身份不变，必须由现有 tracked snapshot 捕获。
++      const permissionChanged = mounted.next()
++      mounted.setStore("session", "permission", [{ permission: "read", pattern: "*", action: "deny" }])
++      expect((await permissionChanged).details.toolDefs).toEqual([])
+       // 数组身份与长度不变，只替换 text 字段，必须被 tracked 快照捕获。
+       const textChanged = mounted.next()
+       mounted.setStore("parts", "1", 0, "text", "abcdefghijkl")
+       expect((await textChanged).details.messages.userText).toBe(3)
+@@ -332,7 +342,7 @@
+     // instructionFiles 是完整覆盖，真实 AGENTS.md 不应偷偷叠加进注入的 2 token。
      expect(data.details.instructions[0]?.tokens).toBe(2)
-     // 工具定义包含 schema + 观察到的输入，token > 4
--    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBeGreaterThan(4)
-+    // 注入 16 字符 bash 定义固定为 4 token；保持 SMARK 精确锁
+-    // 注入定义恰为 16 字符；历史调用输入不能放大这 4 个定义 token。
+-    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
++    // 固定 16 字符定义只计 4 token，权限过滤和历史调用不能扩大注入定义的载荷。
 +    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBe(4)
-     // 系统提示词含环境信息 + 静态段落，token > 100
+     // 自定义 schema 不关闭环境/系统载荷，不能通过减少分类项让整体占用看似更低。
      expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
-     // 输入消息 = 用户文本 2 + 工具结果 4 = 6
-@@ -250,6 +251,76 @@
+     // 输入分类包含 synthetic 正文和工具结果，两者来自不同角色，不应按 message.role 粗分。
+@@ -462,6 +472,165 @@
    })
  
-   // 验证明细行按终端宽度截断，不溢出到网格区域
+-  // 超长 Windows 路径保留文件尾部，验证中间截断而非简单 slice 掩盖真正的文件身份。
 +
 +  test("does not collapse tool definitions to historical tool calls", async () => {
 +    const messages = [user("1"), assistant("2", "1")]
@@ -349,7 +420,7 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 +            metadata: {},
 +            time: { start: 1, end: 2 },
 +          },
-+        } as Part,
++        },
 +      ],
 +    }
 +
@@ -365,14 +436,14 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 +      skills: [],
 +    })
 +
-+    // non-collapse：历史仅调用 task 时仍应列出完整内置工具定义
++    // 历史只有 task 仍应广告全部可用定义；只从已调用工具反推集合会低估后续请求的 prompt。
 +    expect(data.details.toolDefs.length).toBeGreaterThan(10)
 +    expect(data.details.toolDefs.find((item) => item.name === "task")?.tokens).toBeGreaterThan(20)
 +    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(1000)
 +  })
 +
 +  test("explicit false tools disable definitions without turning true tools into a subset", async () => {
-+    const data = await computeContextData({
++    const input: ComputeContextDataInput = {
 +      messages: [user("1", { read: true, bash: false }), assistant("2", "1")],
 +      parts: {
 +        "1": [text("1", "hello")],
@@ -380,7 +451,7 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 +      },
 +      providers: [provider],
 +      config: {},
-+      agents: [],
++      agents: [{ name: "general", mode: "primary", options: {}, permission: [{ permission: "bash", pattern: "*", action: "allow" }] }],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
 +      instructionFiles: [],
@@ -390,14 +461,178 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 +        { name: "grep", text: "grep description" },
 +        { name: "read", text: "read description" },
 +      ],
-+    })
++    }
++    const data = await computeContextData(input)
 +
-+    // bash:false 移除 bash；read:true 不把集合收成仅 true 子集
-+    // 注入 toolDefinitions 时仍应尊重 tools 映射中的 false
++    // false 是撤销广告，true 不是 allow-list；未提及的 grep 必须继续留在定义集合。
++    // 注入 fixture 也经过消息级禁用过滤，避免测试 seam 绕过真实 false-tools 语义。
 +    expect(data.details.toolDefs.map((item) => item.name)).toEqual(["grep", "read"])
++    const session: Session = { id: "ses_context", slug: "context", projectID: "p", directory: ".", title: "Session", version: "1",
++      time: { created: 0, updated: 0 }, permission: [{ permission: "bash", pattern: "*", action: "deny" }] }
++    const messages = [user("1", { read: true, bash: false }), assistant("2", "1"), user("3"), assistant("4", "3")].map((message) => ({ ...message, sessionID: session.id }))
++    // 第二条 prompt 没有 tools；runtime 持久化的 deny 仍必须撤销 bash 广告。
++    expect((await computeContextData({ ...input, messages, session })).details.toolDefs.map((item) => item.name)).toEqual(["grep", "read"])
++    input.agents = [{ name: "general", mode: "primary", options: {}, permission: [{ permission: "bash", pattern: "*", action: "deny" }] }]
++    session.permission = [{ permission: "bash", pattern: "*", action: "allow" }]
++    expect((await computeContextData({ ...input, messages, session })).details.toolDefs.map((item) => item.name)).toEqual(["bash", "grep", "read"])
++    // 最后匹配 permission 的定向规则保留工具；不能跳过它回看更早的全资源 deny。
++    session.permission = [{ permission: "bash", pattern: "*", action: "deny" }, { permission: "bash", pattern: "private/*", action: "allow" }]
++    expect((await computeContextData({ ...input, messages, session })).details.toolDefs.map((item) => item.name)).toEqual(["bash", "grep", "read"])
++  })
++
++  test("selects editing tools by resolved API ID in both alias directions", async () => {
++    for (const [modelID, apiID, patch] of [["coding", "gpt-5-codex", true], ["gpt-5-codex", "claude-sonnet", false]] as const) {
++      const message = user("1")
++      if (message.role === "user") message.model = { providerID: "test", modelID }
++      const aliased: Provider = { ...provider, models: { [modelID]: { ...provider.models.model,
++        id: modelID, api: { ...provider.models.model.api, id: apiID } } } }
++      const data = await computeContextData({ messages: [message], parts: {}, providers: [aliased],
++        paths: { cwd: process.cwd() }, instructionFiles: [], skills: [] })
++      // 显示键不变；真正发送给 registry 的 API ID 决定 patch/edit/write 分支。
++      expect(data.model).toBe(`test/${modelID}`)
++      expect(data.details.toolDefs.some((item) => item.name === "apply_patch")).toBe(patch)
++      expect(data.details.toolDefs.some((item) => item.name === "edit")).toBe(!patch)
++      expect(data.details.toolDefs.some((item) => item.name === "write")).toBe(!patch)
++    }
++  })
++
++  test("matches task wildcard permissions and websearch provider flags", async () => {
++    const keys = ["OPENCODE_EXPERIMENTAL", "OPENCODE_ENABLE_EXA", "OPENCODE_EXPERIMENTAL_EXA",
++      "OPENCODE_ENABLE_PARALLEL", "OPENCODE_EXPERIMENTAL_PARALLEL", "OPENCODE_ENABLE_QUESTION_TOOL", "OPENCODE_CLIENT"]
++    const previous = keys.map((key) => process.env[key])
++    try {
++      // 使用真实 catalog 而非注入定义，覆盖 provider 与两种 Parallel 开关。
++      for (const key of keys) process.env[key] = "false"
++      process.env.OPENCODE_CLIENT = "api"
++      const primary: Agent = { name: "general", mode: "primary", options: {}, permission: [
++        { permission: process.platform === "win32" ? "TaSk" : "task", pattern: "revie?", action: "deny" },
++        { permission: "task", pattern: "team\\revie?", action: "deny" },
++      ] }
++      async function compute(providerID: string, agents: Agent[]) {
++        const message = user("1")
++        if (message.role === "user") message.model = { providerID, modelID: "model" }
++        return computeContextData({ messages: [message], parts: {}, providers: [provider], config: {},
++          agents, paths: { cwd: process.cwd() }, columns: 100, instructionFiles: [], skills: [] })
++      }
++      const base = await compute("test", [primary])
++      const denied = await compute("test", [primary,
++        { name: "review", mode: "subagent", options: {}, permission: [], description: "secret ".repeat(100) },
++        { name: "team/review", mode: "subagent", options: {}, permission: [], description: "hidden ".repeat(100) }])
++      // ? 与反斜杠规则必须移除动态子代理文本，不能只过滤整个 task 定义。
++      expect(denied.details.toolDefs.find((item) => item.name === "task")?.tokens)
++        .toBe(base.details.toolDefs.find((item) => item.name === "task")?.tokens)
++      expect(base.details.toolDefs.some((item) => item.name === "websearch")).toBe(false)
++      for (const providerID of ["opencode", "opencode-go"])
++        expect((await compute(providerID, [primary])).details.toolDefs.some((item) => item.name === "websearch")).toBe(true)
++      // 原始字符串交给真实 Config codec；大小写或非法值不能静默变成 false。
++      for (const [key, tool] of [["OPENCODE_EXPERIMENTAL", "websearch"], ["OPENCODE_ENABLE_EXA", "websearch"],
++        ["OPENCODE_EXPERIMENTAL_EXA", "websearch"], ["OPENCODE_ENABLE_PARALLEL", "websearch"],
++        ["OPENCODE_EXPERIMENTAL_PARALLEL", "websearch"], ["OPENCODE_ENABLE_QUESTION_TOOL", "question"]]) {
++        for (const [value, enabled] of [["true", true], ["yes", true], ["on", true], ["y", true], ["1", true],
++          ["false", false], ["no", false], ["off", false], ["n", false], ["0", false], [undefined, false]] as const) {
++          if (value === undefined) delete process.env[key]
++          else process.env[key] = value
++          expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === tool)).toBe(enabled)
++        }
++        for (const value of ["TRUE", "Yes", "ON", "Y", "False", "invalid", ""]) {
++          process.env[key] = value
++          for (const providerID of ["test", "opencode"])
++            await expect(compute(providerID, [primary])).rejects.toThrow()
++        }
++        process.env[key] = "false"
++      }
++      // CLI/app/desktop 广告 question 不依赖专用开关；缺省 client 仍是 cli，实验伞不授权其他客户端。
++      delete process.env.OPENCODE_CLIENT
++      expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === "question")).toBe(true)
++      for (const client of ["app", "cli", "desktop"]) {
++        process.env.OPENCODE_CLIENT = client
++        expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === "question")).toBe(true)
++      }
++      process.env.OPENCODE_CLIENT = "api"
++      process.env.OPENCODE_EXPERIMENTAL = "yes"
++      expect((await compute("test", [primary])).details.toolDefs.some((item) => item.name === "question")).toBe(false)
++      expect(base.categories.find((item) => item.name === "Tool definitions")?.color).toBe("secondary")
++    } finally {
++      // 环境开关恢复原始缺省状态，避免影响非折叠与 false-tools 的既有用例。
++      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
++    }
 +  })
 +
 +
    test("context usage detail lines are bounded so they do not push into the grid", async () => {
      const data = await computeContextData({
        messages: [user("1", { bash: true }), assistant("2", "1")],
+@@ -477,4 +646,5 @@
+       // 宿主可以是 Unix，保存的 Windows 路径仍应按两种分隔符保留 AGENTS.md 的文件尾部。
++      // 超长 Windows 路径保留文件尾部，验证中间截断而非简单 slice 掩盖真正的文件身份。
+       instructionFiles: [{ path: "F:\\very\\long\\nested\\workspace\\path\\that\\should\\not\\overflow\\AGENTS.md", content: "body" }],
+       skills: [],
+       toolDefinitions: [{ name: "bash", text: "bash description" }],
+diff --git a/packages/schema/src/wildcard.ts b/packages/schema/src/wildcard.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/schema/src/wildcard.ts
+@@ -0,0 +1,17 @@
++export * as Wildcard from "./wildcard"
++
++// 权限 pattern 的共享纯语法；大小写策略由调用方传入，不读取宿主或安装状态。
++export function match(input: string, pattern: string, ignoreCase = false) {
++  // 路径分隔符先归一，* 与 ? 分别沿用任意子串和单字符的原始语义。
++  const normalized = input.replaceAll("\\", "/")
++  let escaped = pattern
++    .replaceAll("\\", "/")
++    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
++    .replace(/\*/g, ".*")
++    .replace(/\?/g, ".")
++
++  // 命令前缀的空格加 * 同时匹配无参数形式，保留 Core 已有权限边界。
++  if (escaped.endsWith(" .*")) escaped = escaped.slice(0, -3) + "( .*)?"
++
++  return new RegExp("^" + escaped + "$", ignoreCase ? "si" : "s").test(normalized)
++}
+diff --git a/packages/core/src/util/wildcard.ts b/packages/core/src/util/wildcard.ts
+--- a/packages/core/src/util/wildcard.ts
++++ b/packages/core/src/util/wildcard.ts
+@@ -1,14 +1,8 @@
+ export * as Wildcard from "./wildcard"
+ 
++import { Wildcard } from "@opencode-ai/schema/wildcard"
++
++// 原 Core 入口保留 Windows 策略；匹配算法只由 Schema 的同一实现承载。
+ export function match(input: string, pattern: string) {
+-  const normalized = input.replaceAll("\\", "/")
+-  let escaped = pattern
+-    .replaceAll("\\", "/")
+-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+-    .replace(/\*/g, ".*")
+-    .replace(/\?/g, ".")
+-
+-  if (escaped.endsWith(" .*")) escaped = escaped.slice(0, -3) + "( .*)?"
+-
+-  return new RegExp("^" + escaped + "$", process.platform === "win32" ? "si" : "s").test(normalized)
++  return Wildcard.match(input, pattern, process.platform === "win32")
+ }
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -50,6 +50,7 @@
+   "dependencies": {
+     "@opencode-ai/core": "workspace:*",
+     "@opencode-ai/plugin": "workspace:*",
++    "@opencode-ai/schema": "workspace:*",
+     "@opencode-ai/sdk": "workspace:*",
+     "@opencode-ai/ui": "workspace:*",
+     "@opentui/core": "catalog:",
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -943,8 +943,9 @@
+     "packages/tui": {
+       "name": "@opencode-ai/tui",
+       "version": "1.18.32",
+       "dependencies": {
+         "@opencode-ai/core": "workspace:*",
+         "@opencode-ai/plugin": "workspace:*",
++        "@opencode-ai/schema": "workspace:*",
+         "@opencode-ai/sdk": "workspace:*",
+         "@opencode-ai/ui": "workspace:*",

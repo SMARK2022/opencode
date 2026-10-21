@@ -1,26 +1,22 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2467,24 +2467,31 @@
+@@ -2470,21 +2470,31 @@
    const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
  
    const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
 -  const diffLines = createMemo(() => diffContent().split("\n"))
 -  const diffOverflow = createMemo(() => diffLines().length > 20)
--  const limitedDiff = createMemo(() => {
--    if (expanded() || !diffOverflow()) return diffContent()
--    return [...diffLines().slice(0, 10), "…"].join("\n")
-+  // diff 行统计 memo：计算新增/删除/总计行数，用于标题和展开判断
++  // 复用已有 parsePatch 路径，仅统计 hunk 内容；+++ 与 --- 开头的代码不是文件头。
 +  const stats = createMemo(() => {
-+    const lines = diffContent().split("\n")
-+    let added = 0, removed = 0
-+    for (const line of lines) {
-+      if (line.startsWith("+") && !line.startsWith("+++")) added++
-+      if (line.startsWith("-") && !line.startsWith("---")) removed++
-+    }
-+    return { added, removed, total: lines.length }
-   })
-+  // 超过 20 行时启用展开/收缩，避免长 diff 占用过多屏幕
++    const changes = getRevertDiffFiles(diffContent()).reduce(
++      (sum, file) => ({ added: sum.added + file.additions, removed: sum.removed + file.deletions }),
++      { added: 0, removed: 0 },
++    )
++    // 收缩阈值仍按完整展示行数判断，不能用变更行数忽略上下文和文件头。
++    return { ...changes, total: diffContent().split("\n").length }
++  })
++  // 20 行是展开阈值，15 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
 +  const overflow = createMemo(() => stats().total > 20)
  
    return (
@@ -28,21 +24,21 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
        <Match when={stringValue(props.metadata.diff) !== undefined}>
          <BlockTool
 -          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))}
++          // 保留路径格式化与 unknown 解码，只给真实变更附加统计后缀。
 +          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
            part={props.part}
--          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
-+          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
+-          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
++          onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
          >
--          <box paddingLeft={1}>
-+          {/* 使用 maxHeight 限制初始显示高度，展开时移除限制 */}
-+          <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+           {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
+-          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 15 : undefined}>
++          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
              <diff
--              diff={limitedDiff()}
-+              diff={diffContent()}
+               diff={diffContent()}
                view={view()}
                filetype={ft()}
                syntaxStyle={syntax()}
-@@ -2503,7 +2510,7 @@
+@@ -2502,7 +2512,7 @@
                removedLineNumberBg={theme.diffRemovedLineNumberBg}
              />
            </box>
@@ -51,7 +47,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
            </Show>
            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
-@@ -2531,37 +2538,28 @@
+@@ -2531,37 +2541,27 @@
      return ctx.width > 120 ? "split" : "unified"
    })
  
@@ -80,7 +76,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 -      </box>
 -    )
 -  }
-+  // diff 文件标题：包含文件类型图标和行统计信息
++  // 文件动作标题保留上游 add/delete/move 语义，行统计不能覆盖路径或动作。
 +  function title(file: { type: string; relativePath: string; filePath: string; deletions: number; patch?: string }) {
 +    const baseTitle = (() => {
 +      if (file.type === "delete") return "# Deleted " + file.relativePath
@@ -94,68 +90,108 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 -    if (file.type === "add") return "# Created " + file.relativePath
 -    if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
 -    return "← Patched " + file.relativePath
++    // 删除计数仍由 delete 分支展示，不重复从空 patch 推导统计。
 +    if (file.type === "delete" || !file.patch) return baseTitle
 +
-+    // 统计 patch 行数：+ 开头为新增，- 开头为删除
-+    const lines = file.patch.split("\n")
-+    let added = 0, removed = 0
-+    for (const line of lines) {
-+      if (line.startsWith("+") && !line.startsWith("+++")) added++
-+      if (line.startsWith("-") && !line.startsWith("---")) removed++
-+    }
++    // 与 Edit 共享按 hunk 解析的统计，包含多文件与 ++counter/--counter 内容。
++    const stats = getRevertDiffFiles(file.patch).reduce(
++      (sum, item) => ({ added: sum.added + item.additions, removed: sum.removed + item.deletions }),
++      { added: 0, removed: 0 },
++    )
 +
-+    // 无变更行时不显示统计，有变更时附加 +added -removed 后缀
-+    if (added === 0 && removed === 0) return baseTitle
-+    return `${baseTitle} +${added} -${removed}`
++    // 仅重命名或模式变更不显示 +0 -0，保持原动作标题可读。
++    if (stats.added === 0 && stats.removed === 0) return baseTitle
++    return `${baseTitle} +${stats.added} -${stats.removed}`
    }
  
    return (
-@@ -2573,11 +2571,6 @@
-             const [patchExpanded, setPatchExpanded] = createSignal(false)
-             const patchLines = createMemo(() => (file.patch || "").split("\n"))
-             const patchOverflow = createMemo(() => patchLines().length > 20)
--            const limitedPatch = createMemo(() => {
--              if (patchExpanded() || !patchOverflow()) return file.patch
--              return [...patchLines().slice(0, 10), "…"].join("\n")
--            })
--
-             return (
-             <BlockTool
-               title={title(file)}
-@@ -2587,12 +2580,33 @@
+@@ -2583,15 +2583,34 @@
                <Show
                  when={file.type !== "delete"}
                  fallback={
 -                  <text fg={theme.diffRemoved}>
++                  // 删除文件仍显示权威 deletions，缩进与普通 diff 的内容列一致。
 +                  <text fg={theme.diffRemoved} paddingLeft={1}>
                      -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
                    </text>
                  }
                >
--                <Diff diff={limitedPatch()} filePath={file.filePath} />
-+                {/* 内联 diff 组件：移除独立 Diff 函数，直接使用 maxHeight 控制折叠 */}
-+                    <box paddingLeft={1} maxHeight={patchExpanded() ? undefined : 15}>
-+                      <diff
-+                        diff={file.patch || ""}
-+                        view={view()}
-+                        filetype={filetype(file.filePath)}
-+                        syntaxStyle={syntax()}
-+                        showLineNumbers={true}
-+                        width="100%"
-+                        wrapMode={ctx.diffWrapMode()}
-+                        fg={theme.text}
-+                        addedBg={theme.diffAddedBg}
-+                        removedBg={theme.diffRemovedBg}
-+                        contextBg={theme.diffContextBg}
-+                        addedSignColor={theme.diffHighlightAdded}
-+                        removedSignColor={theme.diffHighlightRemoved}
-+                        lineNumberFg={theme.diffLineNumber}
-+                        lineNumberBg={theme.diffContextBg}
-+                        addedLineNumberBg={theme.diffAddedLineNumberBg}
-+                        removedLineNumberBg={theme.diffRemovedLineNumberBg}
-+                      />
-+                    </box>
+                 {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
+-                <box maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
+-                  <Diff diff={file.patch} filePath={file.filePath} />
++                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
++                  <diff
++                    diff={file.patch || ""}
++                    view={view()}
++                    filetype={filetype(file.filePath)}
++                    syntaxStyle={syntax()}
++                    showLineNumbers={true}
++                    width="100%"
++                    wrapMode={ctx.diffWrapMode()}
++                    fg={theme.text}
++                    addedBg={theme.diffAddedBg}
++                    removedBg={theme.diffRemovedBg}
++                    contextBg={theme.diffContextBg}
++                    addedSignColor={theme.diffHighlightAdded}
++                    removedSignColor={theme.diffHighlightRemoved}
++                    lineNumberFg={theme.diffLineNumber}
++                    lineNumberBg={theme.diffContextBg}
++                    addedLineNumberBg={theme.diffAddedLineNumberBg}
++                    removedLineNumberBg={theme.diffRemovedLineNumberBg}
++                  />
+                 </box>
                  <Show when={patchOverflow()}>
                    <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
                  </Show>
+
+diff --git a/packages/tui/test/util/revert-diff.test.ts b/packages/tui/test/util/revert-diff.test.ts
+--- a/packages/tui/test/util/revert-diff.test.ts
++++ b/packages/tui/test/util/revert-diff.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, test } from "bun:test"
++import { createTwoFilesPatch } from "diff"
+ import { getRevertDiffFiles } from "../../src/util/revert-diff"
+ 
+ describe("revert diff", () => {
+   test("prefers the actual file path over /dev/null for added and deleted files", () => {
+@@ -9,11 +10,13 @@
+ --- /dev/null
+ +++ b/new.txt
+-@@ -0,0 +1 @@
++@@ -0,0 +1,2 @@
+ +new content
+++++counter
+ diff --git a/old.txt b/old.txt
+ deleted file mode 100644
+ index 3b18e51..0000000
+ --- a/old.txt
+ +++ /dev/null
+-@@ -1 +0,0 @@
++@@ -1,2 +0,0 @@
+ -old content
++---counter
+@@ -23,13 +26,21 @@
+       {
+         filename: "new.txt",
+-        additions: 1,
++        additions: 2,
+         deletions: 0,
+       },
+       {
+         filename: "old.txt",
+         additions: 0,
+-        deletions: 1,
++        deletions: 2,
+       },
+     ])
+   })
++
++  test("counts header-like content in producer-generated diffs", () => {
++    // 使用工具相同的 producer，验证文件头之外的三符号前缀仍是内容。
++    const files = getRevertDiffFiles(
++      createTwoFilesPatch("counter.ts", "counter.ts", "--counter\n--- heading\nold\n", "++counter\n+++ heading\nnew\n"),
++    )
++    expect(files).toEqual([{ filename: "counter.ts", additions: 3, deletions: 3 }])
++  })
+ })
 

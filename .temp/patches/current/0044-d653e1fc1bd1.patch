@@ -2,71 +2,75 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -0,0 +1,1028 @@
-+// 上下文使用量估算工具：为 TUI 上下文使用面板提供 token 分类、网格可视化与窗口详情。
-+// V2 将 TUI 拆分为独立包，无法依赖 @opencode-ai/opencode；
-+// 原 @/session/system、@/session/overflow、@/skill 的逻辑已内联至本文件。
+@@ -0,0 +1,1030 @@
 +import fs from "fs/promises"
-+import { existsSync, readFileSync } from "node:fs"
 +import os from "os"
 +import path from "path"
-+import { fileURLToPath } from "url"
 +import matter from "gray-matter"
 +import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
 +import { Flag } from "@opencode-ai/core/flag/flag"
-+import { estimate as estimateTokens } from "@opencode-ai/core/util/token"
++import { estimate } from "@opencode-ai/core/util/token"
++import { ConfigProvider, Effect } from "effect"
++import { boolean, withDefault } from "effect/Config"
 +import { estimateDataUrlInputTokens } from "./token-estimate"
++import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
++// 提示词文本资产由 Bun 内嵌，估算无需加载服务或依赖打包后的源码目录。
++import PROMPT_META from "../../../opencode/src/session/prompt/meta.txt"
++import PROMPT_BEAST from "../../../opencode/src/session/prompt/beast.txt"
++import PROMPT_ASTRA from "../../../opencode/src/session/prompt/gpt-astra.txt"
++import PROMPT_CODEX from "../../../opencode/src/session/prompt/codex.txt"
++import PROMPT_GPT from "../../../opencode/src/session/prompt/gpt.txt"
++import PROMPT_GEMINI from "../../../opencode/src/session/prompt/gemini.txt"
++import PROMPT_ANTHROPIC from "../../../opencode/src/session/prompt/anthropic.txt"
++import PROMPT_TRINITY from "../../../opencode/src/session/prompt/trinity.txt"
++import PROMPT_MINIMAX from "../../../opencode/src/session/prompt/minimax.txt"
++import PROMPT_DEEPSEEK from "../../../opencode/src/session/prompt/deepseek.txt"
++import PROMPT_KIMI from "../../../opencode/src/session/prompt/kimi.txt"
++import PROMPT_DEFAULT from "../../../opencode/src/session/prompt/default.txt"
 +
-+// 内联 truthy：检查环境变量是否为 truthy 值（"true" 或 "1"）
-+// V2 Flag 模块未导出 truthy，此处内联以避免跨包导出解析问题
 +function truthy(key: string) {
++  // 技能扫描只观察环境快照，不引入 Config/Flag 服务或另一份目录来源。
 +  const value = process.env[key]?.toLowerCase()
++  // 历史技能开关只接受 true/1；Task 广告使用 Config.boolean，两个编码口径各自保留。
 +  return value === "true" || value === "1"
 +}
 +
-+// ── 内联：原 @/session/system 的工具使用指引与静态段落 ───────────────────
-+
-+// 与 runtime system.ts provider() 同源：从 monorepo opencode prompt 文本按模型路由加载
-+// V2 包边界禁止 import @opencode-ai/opencode，故直接读 packages/opencode/src/session/prompt/*.txt
-+const SESSION_PROMPT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../opencode/src/session/prompt")
-+const sessionPromptCache = new Map<string, string>()
-+
-+function loadSessionPrompt(filename: string) {
-+  const hit = sessionPromptCache.get(filename)
-+  if (hit !== undefined) return hit
-+  // 缺失时返回空串：估算降级但不抛错（发布包旁路可能无 monorepo 布局）
-+  const full = path.join(SESSION_PROMPT_DIR, filename)
-+  const text = existsSync(full) ? readFileSync(full, "utf8") : ""
-+  sessionPromptCache.set(filename, text)
-+  return text
++// RuntimeFlags 从环境 ConfigProvider 取值，不读取 SDK config.experimental；专用 false 覆盖实验伞。
++function enabledByExperimental(key: string) {
++  const provider = ConfigProvider.fromEnv()
++  // withDefault 只处理缺失值；实际 Config.boolean 保留 yes/on/1 等编码及非法值失败，不自行复制真值表。
++  const experimental = Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
++  return Effect.runSync(boolean(key).pipe(withDefault(experimental)).parse(provider))
 +}
 +
 +function systemProviderPrompt(model: Provider["models"][string]): string[] {
-+  // 模型 id 优先 api.id，与 runtime Provider.Model.api.id 选择语义一致
-+  const id = (model.api?.id ?? model.id).toLowerCase()
-+  if (id.includes("muse-spark")) return [loadSessionPrompt("meta.txt")]
-+  if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return [loadSessionPrompt("beast.txt")]
++  // 模板路由使用 API ID；网关展示名变化不能改选模型族提示词。
++  const id = model.api?.id ?? model.id
++  if (id.includes("muse")) return [PROMPT_META.replaceAll("{{MODEL_NAME}}", id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark")]
++  if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return [PROMPT_BEAST]
 +  if (id.includes("gpt")) {
-+    if (id.includes("codex")) return [loadSessionPrompt("codex.txt")]
-+    return [loadSessionPrompt("gpt.txt")]
++    // GPT-6 先于 Codex 匹配，保留 provider 的大小写与分支优先级。
++    if (id.includes("gpt-6")) return [PROMPT_ASTRA]
++    if (id.includes("codex")) return [PROMPT_CODEX]
++    return [PROMPT_GPT]
 +  }
-+  if (id.includes("gemini-")) return [loadSessionPrompt("gemini.txt")]
-+  if (id.includes("claude")) return [loadSessionPrompt("anthropic.txt")]
-+  if (id.includes("trinity")) return [loadSessionPrompt("trinity.txt")]
-+  if (id.includes("minimax") || id.includes("mini-max")) return [loadSessionPrompt("minimax.txt")]
-+  if (id.includes("deepseek")) return [loadSessionPrompt("deepseek.txt")]
-+  if (id.includes("kimi")) return [loadSessionPrompt("kimi.txt")]
-+  return [loadSessionPrompt("default.txt")]
++  if (id.includes("gemini-")) return [PROMPT_GEMINI]
++  if (id.includes("claude")) return [PROMPT_ANTHROPIC]
++  if (id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
++  if (id.toLowerCase().includes("minimax") || id.toLowerCase().includes("mini-max")) return [PROMPT_MINIMAX]
++  if (id.toLowerCase().includes("deepseek")) return [PROMPT_DEEPSEEK]
++  if (id.toLowerCase().includes("kimi") || ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)) return [PROMPT_KIMI]
++  return [PROMPT_DEFAULT]
 +}
 +
-+// 工具使用指引：按已注册工具生成 per-tool 专用替代指引，并强调批量并行与安全写入
++// 指引跟随本次定义集合；模型/权限过滤后的 patch-only 请求不能宣称拥有 edit/write。
 +function toolUsageSection(registeredTools: string[]) {
 +  const has = (name: string) => registeredTools.includes(name)
 +  const items: string[] = [
 +    `Do NOT use the bash tool when a dedicated tool is available.`,
 +    `Using dedicated tools lets the user review and track your work:`,
 +  ]
-+  // 按已注册工具生成专用替代指引
++  // 每条文件操作替代项独立检查广告能力，不能从一次历史调用推导全部工具可用。
 +  if (has("read")) items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
 +  if (has("edit")) items.push(` - To edit files use the edit tool instead of sed or awk`)
 +  if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
@@ -78,7 +82,7 @@ new file mode 100644
 +      ` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`,
 +    )
 +  }
-+  // 批量并行调用指引：先规划完整批次，再一次性发出
++  // 批次说明属于实际系统载荷，未执行任何工具的首轮同样产生这份开销。
 +  items.push(
 +    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
 +    ``,
@@ -91,9 +95,9 @@ new file mode 100644
 +    `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
 +    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
 +    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
-+    // 并行写入安全：仅限非冲突文件
++    // 并发读写是否冲突由目标范围决定，不能因工具名不同就假定它们可并行。
 +    `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
-+    // 单文件多处修改优先用一次编辑
++    // 同一读取版本的多个替换合并提交，避免后一次编辑把前一次更新当作旧上下文覆盖。
 +    `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
 +  )
 +  if (has("todo")) {
@@ -107,7 +111,7 @@ new file mode 100644
 +  return ["# Using your tools", ...items].join("\n")
 +}
 +
-+// 静态指引段：动作谨慎、共享工作树、验证、上下文连续性、输出效率
++// 这些稳定段落计入估算一次；不要把 tool result 内引用的同名章节再次当作系统指令。
 +const actionCareSection = `# Executing actions with care
 +Carefully consider the reversibility and blast radius of actions before proceeding:
 +- Local, reversible actions (editing files, running tests, reading code): proceed freely.
@@ -155,10 +159,8 @@ new file mode 100644
 +  return [actionCareSection, sharedWorktreeSection, verificationSection, contextContinuitySection, outputEfficiencySection]
 +}
 +
-+// ── 内联：原 @/skill 的 Skill.fmt 与 escapeHtml ───────────────────────────
-+
-+// 转义 XML 特殊字符：技能 location 含用户可控路径，嵌入 XML 前必须转义以防注入破坏 prompt 结构
 +function escapeHtml(value: string) {
++  // 用户可控技能路径先转义 XML 特殊字符，防止路径内容破坏公告结构。
 +  return value
 +    .replaceAll("&", "&amp;")
 +    .replaceAll("<", "&lt;")
@@ -167,7 +169,7 @@ new file mode 100644
 +    .replaceAll("'", "&#39;")
 +}
 +
-+// 技能列表格式化：verbose 模式输出 XML 标签结构，非 verbose 输出 Markdown 列表
++// 技能公告与 skill 工具描述使用不同格式，token 估算必须计入实际 XML 标签而非只加名称。
 +function skillFmt(
 +  list: Array<{ name: string; description?: string; location: string }>,
 +  opts: { verbose: boolean },
@@ -183,6 +185,7 @@ new file mode 100644
 +          "  <skill>",
 +          `    <name>${skill.name}</name>`,
 +          `    <description>${skill.description}</description>`,
++          // 公告载荷使用转义后的路径，实体增加的字符同样参与 token 估算。
 +          `    <location>${escapeHtml(skill.location)}</location>`,
 +          "  </skill>",
 +        ]),
@@ -201,25 +204,24 @@ new file mode 100644
 +  return [
 +    "Skills provide specialized instructions and workflows for specific tasks.",
 +    "Use the skill tool to load a skill when a task matches its description.",
-+    // agents 对技能信息的吸收在 verbose 模式下更好，因此此处用 verbose
++    // 系统公告使用 verbose；工具动态描述仍用非 verbose，不能把两份不同载荷混成同一估算。
 +    skillFmt(list, { verbose: true }),
 +  ].join("\n")
 +}
 +
-+// ── 内联：原 @/session/overflow 的 usable ─────────────────────────────────
-+
-+// 压缩缓冲区上界：从输入限制中预留此值以保证自动压缩触发前有余量
++// 输入缓冲的 20k 上界与输出限额分开；小输出模型不应仍扣掉完整 20k 输入。
 +const COMPACTION_BUFFER = 20_000
 +
-+// 全局输出 token 上限：与模型自身限制取较小值，退化时回退到此全局上限
++// 模型输出上限为 0 时沿 runtime 的全局上限；不能把 0 当作没有输出预留。
 +const OUTPUT_TOKEN_MAX = 32_000
 +
 +function maxOutputTokens(model: Provider["models"][string], outputTokenMax = OUTPUT_TOKEN_MAX): number {
 +  return Math.min(model.limit.output, outputTokenMax) || outputTokenMax
 +}
 +
-+// 可用输入 token：从输入限制中扣除压缩缓冲区（或模型最大输出 token 的较小值）
++// 显式 input.limit 使用输入缓冲；只有没有输入上限时才从 context 扣输出预留。
 +function overflowUsable(input: { cfg: Config; model: Provider["models"][string]; outputTokenMax?: number }): number {
++  // 限额来自模型输入契约，面板字符估算的 used 不参与压缩阈值计算。
 +  const context = input.model.limit.context
 +  if (context === 0) return 0
 +  const reserved =
@@ -230,9 +232,8 @@ new file mode 100644
 +    : Math.max(0, context - maxOutputTokens(input.model, input.outputTokenMax))
 +}
 +
-+// ── 上下文使用数据模型 ───────────────────────────────────────────────────
-+
 +type WithParts = {
++  // compaction 依赖用户父 ID 与助手 finish 的关联，不能只传可见助手列表就裁掉请求边界。
 +  info: Message
 +  parts: Part[]
 +}
@@ -241,12 +242,15 @@ new file mode 100644
 +
 +export interface ContextCategory {
 +  name: string
++  // 分类是当前窗口文本估算，不能替代 provider 已确认的计费字段。
 +  tokens: number
 +  color: ContextCategoryColor
++  // reserve/free/buffer 延迟分类只占网格空间，不再次增加已用 token。
 +  isDeferred?: boolean
 +}
 +
 +export interface GridSquare {
++  // 格子保存计算结果而非 store 引用，resize 的渲染过程不能再次读取正在流式变化的消息。
 +  symbol: string
 +  categoryName: string
 +  color: ContextCategoryColor
@@ -255,6 +259,7 @@ new file mode 100644
 +
 +export interface ContextUsageData {
 +  model: string
++  // 已用量只覆盖当前模型窗口，整场会话消费保存在 details.usage。
 +  totalTokens: number
 +  maxTokens: number
 +  percentage: number
@@ -266,6 +271,7 @@ new file mode 100644
 +    skills: Array<{ name: string; tokens: number; path: string }>
 +    toolDefs: Array<{ name: string; tokens: number }>
 +    messages: {
++      // 文本分类与 provider 用量分开保存，流式尚未确认时仍能展示窗口。
 +      userText: number
 +      assistantText: number
 +      reasoning: number
@@ -275,6 +281,7 @@ new file mode 100644
 +      compactionSummary: number
 +    }
 +    usage: {
++      // input 是非缓存输入；缓存读写分别保留，合计时不会与 input 重复。
 +      input: number
 +      output: number
 +      reasoning: number
@@ -284,6 +291,7 @@ new file mode 100644
 +      cost: number
 +    }
 +    window: {
++      // contextLimit 与 inputLimit 不同，差额归 providerReserve 而非压缩缓冲。
 +      contextLimit: number
 +      inputLimit: number
 +      usableInput: number
@@ -296,11 +304,15 @@ new file mode 100644
 +export interface ContextUsagePaths {
 +  cwd: string
 +  worktree?: string
++  // 可选 shell 来自同步配置，仅用于工具描述估算，不参与执行或权限判定。
++  shell?: string
++  // home/config 可覆盖扫描位置；测试不必读真实用户的全局指令目录。
 +  home?: string
 +  config?: string
 +}
 +
 +export interface ComputeContextDataInput {
++  // messages 与 parts 保留全历史，窗口裁剪发生在 computeContextData 内。
 +  messages: Message[]
 +  parts: Record<string, Part[]>
 +  providers: Provider[]
@@ -310,29 +322,25 @@ new file mode 100644
 +  vcs?: VcsInfo
 +  paths: ContextUsagePaths
 +  columns?: number
++  // 显式空数组同样覆盖扫描结果，测试与调用方可阻止不相关磁盘观察。
 +  instructionFiles?: Array<{ path: string; content: string }>
 +  skills?: Array<{ name: string; description: string; path: string }>
++  // 自定义定义是完整覆盖，不把 catalog 偷偷合并进注入的工具集合。
 +  toolDefinitions?: Array<{ name: string; text: string }>
 +}
 +
-+// 指令文件查找顺序：AGENTS.md → CLAUDE.md（除非禁用）→ CONTEXT.md
 +const INSTRUCTION_FILES = [
 +  "AGENTS.md",
 +  ...(truthy("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT") ? [] : ["CLAUDE.md"]),
 +  "CONTEXT.md",
 +]
 +
-+function estimate(input: unknown) {
-+  // 字符串直接估算避免序列化开销；对象走稳定序列化以保证相同结构产生可复现的 token 数
-+  return estimateTokens(typeof input === "string" ? input : stableJson(input))
-+}
-+
-+// 稳定 JSON 序列化：按键排序以保证相同结构的 token 估算可复现
 +function stableJson(input: unknown): string {
 +  if (input === undefined) return ""
 +  try {
 +    return JSON.stringify(input, (_, value) => {
 +      if (!value || typeof value !== "object" || Array.isArray(value)) return value
++      // 只排序对象键，数组顺序仍表达参数语义，不能为了稳定性重排数组。
 +      return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
 +    })
 +  } catch {
@@ -341,44 +349,45 @@ new file mode 100644
 +}
 +
 +function estimateFileToken(url: string, mime: string) {
-+  // data: URL 内联附件按 base64 解码后估算，与远程 URL 的纯字符串估算逻辑不同
++  // 内联图片/PDF 沿已有编码负载启发式与图像封顶；不能把整份 data URL 当普通文本重复估算。
 +  if (url.startsWith("data:")) return estimateDataUrlInputTokens(url, mime)
 +  return estimate(url)
 +}
 +
-+// 过滤已压缩历史：保留最近一次压缩摘要后的尾部消息，丢弃被压缩的旧消息
++// 裁剪只认成功摘要与匹配的用户父 ID；正在压缩的请求仍需保留原上下文供重试。
 +export function filterCompactedMessages(msgs: Iterable<WithParts>) {
 +  const result = [] as WithParts[]
 +  const completed = new Set<string>()
 +  let retain: string | undefined
 +  for (const msg of msgs) {
 +    result.push(msg)
-+    // 已找到保留目标，持续收集直到命中
++    // retain 跨过旧摘要继续扫描至 tail_start_id，保留区不再由更早的压缩边界截断。
 +    if (retain) {
 +      if (msg.info.id === retain) break
 +      continue
 +    }
-+    // 遇到带 compaction 部件的用户消息，确定保留起点
++    // 普通用户消息即使被 summary 引用也不构成压缩边界，必须同时存在 compaction 部件。
 +    if (msg.info.role === "user" && completed.has(msg.info.id)) {
 +      const part = msg.parts.find((item) => item.type === "compaction")
 +      if (!part) continue
-+      // 没有 tail_start_id 表示全部压缩，无需保留任何旧消息
++      // 全量压缩仍保留刚刚 push 的请求，删除旧历史不能把生成摘要所依据的本轮用户记录删掉。
 +      if (!part.tail_start_id) break
 +      retain = part.tail_start_id
 +      if (msg.info.id === retain) break
 +      continue
 +    }
-+    // 助手消息完成且带摘要时，标记其父用户消息为已完成轮次
++    // 失败摘要不能成为裁剪依据，否则重试前的真实历史会被隐藏。
 +    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error) {
++      // 摘要 parentID 指向用户压缩请求，裁剪匹配该身份而非摘要助手自身 ID。
 +      completed.add(msg.info.parentID)
 +    }
 +  }
-+  // 反转为时间正序
++  // 倒序只用于找到最新边界，返回值恢复时间顺序以保持 findLast 用户选择与工具载荷顺序。
 +  result.reverse()
 +  return result
 +}
 +
-+// 按部件类型统计消息 token：区分用户文本、助手文本、推理、工具调用与结果、附件、压缩摘要
++// 当前窗口按投影用途分类；工具请求是输出，工具结果是下一轮输入，不能合并计入同一栏。
 +function messageTokens(messages: WithParts[]) {
 +  const details: ContextUsageData["details"]["messages"] = {
 +    userText: 0,
@@ -389,7 +398,6 @@ new file mode 100644
 +    attachments: 0,
 +    compactionSummary: 0,
 +  }
-+  // read 工具加载的指令路径，用于后续去重
 +  const loadedInstructionPaths = new Set<string>()
 +  const text = [] as string[]
 +  const toolNames = new Set<string>()
@@ -398,8 +406,8 @@ new file mode 100644
 +    for (const part of msg.parts) {
 +      switch (part.type) {
 +        case "text": {
-+          // synthetic 和 ignored 的文本部件不发送到 API，跳过统计
-+          if (part.ignored || part.synthetic) continue
++          // synthetic 正文也发送给模型；只有 ignored 文本被投影排除。
++          if (part.ignored) continue
 +          text.push(part.text)
 +          const tokens = estimate(part.text)
 +          if (msg.info.role === "user") details.userText += tokens
@@ -408,37 +416,40 @@ new file mode 100644
 +          break
 +        }
 +        case "reasoning":
-+          // 推理 token 单独计入输出分类，不并入助手文本以保留可观测性
++          // reasoning 文本是窗口载荷估算，不替代 provider tokens.reasoning 的确认消费。
 +          details.reasoning += estimate(part.text)
 +          break
 +        case "tool": {
 +          toolNames.add(part.tool)
-+          details.toolCalls += estimate(part.state.input)
++          // JSON 标点和字段名也属于调用载荷；字符数/4 仅用于显示估算。
++          details.toolCalls += estimate(stableJson(part.state.input))
 +          if (part.state.status === "completed") {
-+            // read 工具的 loaded 元数据记录已加载文件路径
++            // metadata 是 wire unknown；只接纳字符串路径，避免把其他工具元数据当文件名读取。
++            // 只有完成的 read 提供 loaded 证明，未完成或错误工具不产生指令来源。
 +            const loaded = part.tool === "read" ? part.state.metadata?.loaded : undefined
 +            if (Array.isArray(loaded)) {
 +              for (const item of loaded) if (typeof item === "string") loadedInstructionPaths.add(item)
 +            }
 +            // 已压缩的工具结果用占位符估算，避免读取已清除的大体积输出
-+            details.toolResults += part.state.time.compacted
-+              ? estimate("[Old tool result content cleared]")
-+              : estimate(part.state.output)
++            const output = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
++            details.toolResults += estimate(output)
++            // 内联证明必须来自已计入窗口的同一正文，压缩前残留 output 不能证明指令仍可见。
++            text.push(output)
 +            for (const attachment of part.state.attachments ?? []) {
 +              details.attachments += estimateFileToken(attachment.url, attachment.mime)
 +            }
 +          }
-+          // pending 状态估算 raw 输入：尚未执行，仅 schema 调用部分计入工具调用开销
++          // 未解析 raw 属于流式请求载荷；完成/错误状态不得再把残留 raw 加入输出估算。
 +          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw)
 +          if (part.state.status === "error") details.toolResults += estimate(part.state.error)
 +          break
 +        }
 +        case "file":
-+          // 文件附件按 URL 类型分流估算：data: URL 解码后算，远程 URL 估算字符串本身
++          // data URL 使用既有视觉/PDF 启发式，普通 URL 只估算引用文本，不能把二者都按 base64 长度计费。
 +          details.attachments += estimateFileToken(part.url, part.mime)
 +          break
 +        case "subtask":
-+          // 子任务 prompt+description 计入用户文本：子任务由用户侧发起，语义等价于用户输入
++          // subtask 是用户发起的任务载荷，不能因最终由子代理执行就挪到助手输出分类。
 +          details.userText += estimate(`${part.prompt}\n${part.description}`)
 +          break
 +      }
@@ -454,7 +465,6 @@ new file mode 100644
 +  }
 +}
 +
-+// 汇总已确认用量：优先从 step-finish 部件提取，无确认时回退到助手消息自身的 token 字段
 +function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
 +  const usage: ContextUsageData["details"]["usage"] = {
 +    input: 0,
@@ -466,9 +476,11 @@ new file mode 100644
 +    cost: 0,
 +  }
 +  let confirmed = false
++  // 部件与消息携带同一生产者结果，存在确认部件时不能再加一次消息用量。
 +  for (const msg of messages) {
 +    for (const part of msg.parts) {
 +      if (part.type !== "step-finish") continue
++      // 零 token 的 step-finish 也已确认，历史回退取决于部件存在性而非总额真值。
 +      confirmed = true
 +      usage.input += part.tokens.input
 +      // output 包含 reasoning，因为推理 token 也计入输出
@@ -480,7 +492,7 @@ new file mode 100644
 +    }
 +  }
 +
-+  // 无 step-finish 确认时，回退到助手消息自身的 token 累计
++  // 消息级字段仅服务没有确认部件的历史格式；这条回退不能与已有部件账本叠加。
 +  if (!confirmed) {
 +    for (const msg of messages) {
 +      if (msg.info.role !== "assistant") continue
@@ -498,7 +510,7 @@ new file mode 100644
 +}
 +
 +async function exists(filepath: string) {
-+  // 静默吞错：文件不存在是扫描时的预期分支，不应抛出中断遍历
++  // 指令发现允许目录不存在或不可访问；只有估算降级，不改变运行时工具的失败出口。
 +  try {
 +    await fs.access(filepath)
 +    return true
@@ -508,7 +520,7 @@ new file mode 100644
 +}
 +
 +async function readText(filepath: string) {
-+  // 静默吞错：读取失败返回空串，与"文件不存在"语义一致，避免调用方逐个 try/catch
++  // 读不到的指令不制造内容占位 token；已加载的消息文本仍由 messageTokens 完整保留。
 +  try {
 +    return await fs.readFile(filepath, "utf8")
 +  } catch {
@@ -516,24 +528,24 @@ new file mode 100644
 +  }
 +}
 +
-+// 从 start 向上遍历到 stop（或根目录），返回所有祖先目录（含 start）
++// 保留从 cwd 到 worktree 的全部祖先，嵌套项目的规则不能只扫描仓库根目录。
 +function parents(start: string, stop?: string) {
 +  const result: string[] = []
 +  let current = path.resolve(start)
-+  // stop 为工作树根边界：向上遍历不越过 worktree，避免扫描到无关的上级目录
++  // 仓库根之外的 AGENTS.md 不属于项目来源，祖先遍历以传入 worktree 为边界而非进程 cwd。
 +  const root = stop ? path.resolve(stop) : path.parse(current).root
 +  while (true) {
 +    result.push(current)
 +    if (current === root) break
 +    const next = path.dirname(current)
-+    // 已到根，防止无限循环
++    // cwd 不在 stop 之下时仍在文件系统根终止，避免一个未命中的 worktree 造成死循环。
 +    if (next === current) break
 +    current = next
 +  }
 +  return result
 +}
 +
-+// 向上查找同名文件的全部匹配（先近后远）
++// 同类型祖先规则全部保留；父目录存在 AGENTS.md 不应覆盖更近目录的同名规则。
 +async function findUpAll(filename: string, start: string, stop?: string) {
 +  const result: string[] = []
 +  for (const dir of parents(start, stop)) {
@@ -543,13 +555,13 @@ new file mode 100644
 +  return result
 +}
 +
-+// 递归扫描技能文件：收集目录树中所有 SKILL.md 的绝对路径
++// 技能目录缺失是可选配置，不生成空技能；递归只收集普通文件 SKILL.md，目录名不能充当技能。
 +async function scanSkillFiles(root: string, result: Set<string>) {
-+  // 使用 .catch 避免 let 类型标注导致的 Dirent 重载歧义
++  // 一处不可访问目录只终止该分支，其余项目/home/config 来源仍可进入去重集合。
 +  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => null)
 +  if (!entries) return
 +  for (const entry of entries) {
-+    // entry.name 在某些类型版本下为 Buffer，强制转为 string
++    // readdir 默认 utf8 返回字符串；目录路径必须保持平台编码，不能按字节拆成多个技能路径。
 +    const name = entry.name as string
 +    const item = path.join(root, name)
 +    if (entry.isDirectory()) {
@@ -560,27 +572,27 @@ new file mode 100644
 +  }
 +}
 +
-+// 收集指令文件：优先用外部传入，否则按 INSTRUCTION_FILES 顺序向上查找
++// 显式传入 [] 表示无需磁盘扫描，不能用 length 判断并重新读取用户 home。
 +async function gatherInstructionFiles(input: ComputeContextDataInput) {
 +  if (input.instructionFiles) return input.instructionFiles
 +  const paths = new Set<string>()
 +  const cwd = input.paths.cwd
 +  const worktree = input.paths.worktree
 +
-+  // 项目级指令文件：从 cwd 向上查找到 worktree 边界
++  // 禁用项目配置只关闭项目来源；全局及显式 config.instructions 仍按各自契约参与估算。
 +  if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
 +    for (const file of INSTRUCTION_FILES) {
 +      const matches = await findUpAll(file, cwd, worktree)
 +      if (matches.length > 0) {
 +        for (const match of matches) paths.add(path.resolve(match))
-+        // 首个命中的指令文件类型即停止：AGENTS.md 与 CLAUDE.md 不应同时加载，避免重复
++        // 同类型祖先规则全部加入后停止类型扫描，AGENTS.md 与 CLAUDE.md 不叠加。
 +        break
 +      }
 +    }
 +  }
 +
 +  const home = input.paths.home ?? os.homedir()
-+  // 全局指令文件：配置目录或 home 下的 AGENTS.md / CLAUDE.md
++  // 全局来源按优先级取第一份，不能把同一配置通过环境路径与输入路径重复相加。
 +  const globalFiles = [
 +    ...(Flag.OPENCODE_CONFIG_DIR ? [path.join(Flag.OPENCODE_CONFIG_DIR, "AGENTS.md")] : []),
 +    ...(input.paths.config ? [path.join(input.paths.config, "AGENTS.md")] : []),
@@ -593,11 +605,11 @@ new file mode 100644
 +    }
 +  }
 +
-+  // 用户配置的额外指令：支持 ~ 展开和绝对/相对路径
++  // 额外 instructions 不受项目文件类型停止规则限制，显式配置必须独立解析并参与路径去重。
 +  const configured = Array.isArray(input.config?.instructions) ? input.config.instructions : []
 +  for (const raw of configured) {
 +    if (typeof raw !== "string") continue
-+    // 跳过远程 URL，仅处理本地文件
++    // 估算不能为了读取远程 instructions 发起网络请求；实际服务端加载行为不在此复制。
 +    if (raw.startsWith("https://") || raw.startsWith("http://")) continue
 +    const expanded = raw.startsWith("~/") ? path.join(home, raw.slice(2)) : raw
 +    const matches = path.isAbsolute(expanded)
@@ -614,25 +626,25 @@ new file mode 100644
 +  return files
 +}
 +
-+// 将技能列表转换为 Skill.Info 兼容形状（content 留空，仅用于格式化）
 +function skillInfo(skills: Array<{ name: string; description: string; path: string }>) {
 +  return skills.map((skill) => ({
 +    name: skill.name,
 +    description: skill.description,
 +    location: skill.path,
++    // 技能尚未执行时正文留空，公告不会提前携带完整技能内容。
 +    content: "",
 +  }))
 +}
 +
-+// 收集技能：优先用外部传入，否则扫描 .claude/.agents/.opencode 等目录
 +async function gatherSkills(input: ComputeContextDataInput) {
++  // 调用方已提供技能时，不再访问用户 home 或项目技能目录。
 +  if (input.skills) return input.skills
 +  const matches = new Set<string>()
 +  const home = input.paths.home ?? os.homedir()
 +  const cwd = input.paths.cwd
 +  const worktree = input.paths.worktree
 +
-+  // 外部技能目录（.claude/skills、.agents/skills）：home 和项目祖先目录
++  // 关闭 external skills 时不触碰 .claude/.agents；.opencode 与显式 skills.paths 仍保留。
 +  if (!truthy("OPENCODE_DISABLE_EXTERNAL_SKILLS")) {
 +    for (const dir of [".claude", ".agents"]) {
 +      await scanSkillFiles(path.join(home, dir, "skills"), matches)
@@ -644,7 +656,7 @@ new file mode 100644
 +    }
 +  }
 +
-+  // .opencode 配置目录：项目祖先目录中的 .opencode + home/.opencode
++  // 相同配置目录可能来自多个入口，Set 防止同一 SKILL.md 因路径来源不同而多次估算。
 +  const configDirs = new Set([input.paths.config, Flag.OPENCODE_CONFIG_DIR].filter((x): x is string => !!x))
 +  for (const dir of parents(cwd, worktree)) {
 +    const configDir = path.join(dir, ".opencode")
@@ -654,12 +666,12 @@ new file mode 100644
 +  if (await exists(homeConfig)) configDirs.add(homeConfig)
 +
 +  for (const dir of configDirs) {
-+    // 同时兼容 skill/ 和 skills/ 两种目录名
++    // 两种已发布目录拼写都扫描，最后按文件路径去重；不能把重复公告当作两项技能能力。
 +    await scanSkillFiles(path.join(dir, "skill"), matches)
 +    await scanSkillFiles(path.join(dir, "skills"), matches)
 +  }
 +
-+  // 用户配置的额外技能路径
++  // 相对 skills.paths 基于会话 cwd 而非 TUI process.cwd，附着到远程/其他项目时保持输入归属。
 +  const configured = input.config?.skills?.paths
 +  if (Array.isArray(configured)) {
 +    for (const raw of configured) {
@@ -669,7 +681,7 @@ new file mode 100644
 +    }
 +  }
 +
-+  // 解析 SKILL.md frontmatter，提取 name 和 description
++  // 缺失或非字符串元数据的文件不广告为可用技能，不能以文件名猜测 description 来补空项。
 +  const skills = [] as Array<{ name: string; description: string; path: string }>
 +  for (const filepath of matches) {
 +    const content = await readText(filepath)
@@ -677,6 +689,7 @@ new file mode 100644
 +    try {
 +      const parsed = matter(content)
 +      if (typeof parsed.data.name !== "string" || typeof parsed.data.description !== "string") continue
++      // 名称和描述直接提取 frontmatter 字段，不能用正文标题推断广告内容。
 +      skills.push({ name: parsed.data.name, description: parsed.data.description, path: filepath })
 +    } catch {
 +      continue
@@ -685,36 +698,20 @@ new file mode 100644
 +  return skills
 +}
 +
-+// 扫描工具定义目录：读取 .ts 源文件提取 Tool.define 的 id 和参数 schema
-+// 注意：V2 TUI 无法访问 packages/opencode/src/tool/，此函数在 TUI 中将返回空数组
-+async function scanToolDefinitions() {
-+  const toolDir = fileURLToPath(new URL("../../../../tool/", import.meta.url))
-+  const result = [] as Array<{ name: string; text: string }>
-+  const entries = await fs.readdir(toolDir).catch(() => null)
-+  if (!entries) return result
-+  for (const entry of entries) {
-+    // 仅扫描 .ts 源文件：工具定义以 TypeScript 模块组织，.txt 等描述文件由导入解析
-+    if (!entry.endsWith(".ts")) continue
-+    const filepath = path.join(toolDir, entry)
-+    const source = await readText(filepath)
-+    // 从源码中正则提取 Tool.define("id") 的工具名
-+    const id = source.match(/Tool\.define(?:<[^>]+>)?\(\s*["']([^"']+)["']/)?.[1]
-+    if (!id) continue
-+    // 尝试提取 .txt 描述文件导入
-+    const descriptionImport = source.match(/import\s+([A-Z_]+)\s+from\s+["']\.\/([^"']+\.txt)["']/)
-+    const description = descriptionImport ? await readText(path.join(toolDir, descriptionImport[2])) : ""
-+    // 提取 Parameters 常量块作为 schema 文本
-+    const parameterStart = source.search(/(?:export\s+)?const\s+Parameters\s*=/)
-+    const parameterEnd = source.search(/export\s+const\s+\w+Tool\s*=\s*Tool\.define/)
-+    const parameters = parameterStart >= 0
-+      ? source.slice(parameterStart, parameterEnd > parameterStart ? parameterEnd : undefined)
-+      : ""
-+    result.push({ name: id, text: [`Tool: ${id}`, description, parameters].filter(Boolean).join("\n") })
-+  }
-+  return result
++// 两份 Task 参数都是手工运输的完整 JSON；字段说明也参与字符估算，不能当作自动生成资产排除。
++export function resolveToolDescriptions(paths: ContextUsagePaths, background = enabledByExperimental("OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS")) {
++  return Object.entries(EMBEDDED_TOOL_CATALOG).map(([name, entry]) => {
++    // TaskTool 默认广告 BaseParameters；后台开关开启才同时广告完整参数与后台运行说明。
++    const parameters = name === "task" && !background ? EMBEDDED_TOOL_CATALOG.task.baseParameters : entry.parameters
++    const description = name === "task" && background
++      ? [entry.description, EMBEDDED_TOOL_CATALOG.task.backgroundDescription].join("\n\n")
++      : entry.description
++    // 序列化必须保留 optional/required/default 与嵌套字段；这里只选择 owner 资产，不重建 Schema。
++    return { name, text: [`Tool: ${name}`, description.replaceAll("${cwd}", paths.cwd).replaceAll("${worktree}", paths.worktree ?? paths.cwd), JSON.stringify(parameters)].join("\n") }
++  })
 +}
 +
-+// 收集活跃工具名：从最后一条用户消息的 tools 映射和历史工具调用部件中提取
++// 用户 tools 映射与历史调用是两个既有输入来源，缺省映射不能被解释成已明确禁用所有工具。
 +function activeToolNames(messages: WithParts[], lastUser: Message | undefined) {
 +  const names = new Set<string>()
 +  if (lastUser?.role === "user" && lastUser.tools) {
@@ -728,7 +725,7 @@ new file mode 100644
 +  return names
 +}
 +
-+// 动态工具文本：task 工具输出可用子代理列表，skill 工具输出技能列表
++// primary agent 不作为 task 子代理广告；task/skill 追加的是动态能力文本，不是再次执行工具。
 +function dynamicToolText(name: string, input: ComputeContextDataInput, skills: Array<{ name: string; description: string; path: string }>) {
 +  if (name === "task") {
 +    const description = (input.agents ?? [])
@@ -742,7 +739,7 @@ new file mode 100644
 +  return ""
 +}
 +
-+// 观察到的工具输入样本：最多取 3 条历史调用，用于估算重复调用的 schema 开销
++// 历史调用样本只代表已观察参数形状，无法证明工具完整的参数契约。
 +function observedToolShape(name: string, messages: WithParts[]) {
 +  const samples: unknown[] = []
 +  for (const msg of messages) {
@@ -753,16 +750,16 @@ new file mode 100644
 +  return samples.length ? `Observed inputs:\n${stableJson(samples)}` : ""
 +}
 +
-+// 工具定义 token：合并静态 schema 文本、动态工具文本和观察到的输入样本
++// 注入定义是目录的完整覆盖；不能再叠加 embedded catalog，否则测试和自定义定义都会重复计数。
 +async function toolDefinitionTokens(
 +  input: ComputeContextDataInput,
 +  messages: WithParts[],
 +  skills: Array<{ name: string; description: string; path: string }>,
 +  lastUser: Message | undefined,
 +) {
-+  const scanned = input.toolDefinitions ?? await scanToolDefinitions()
++  const scanned = input.toolDefinitions ?? resolveToolDescriptions(input.paths)
 +  const active = activeToolNames(messages, lastUser)
-+  // 用户未显式禁用工具且无活跃工具时，默认全部内置工具活跃
++  // 只在 tools 缺省时补全集，显式空映射没有可用能力，不能因 active 为空再次恢复所有定义。
 +  if (lastUser?.role === "user" && lastUser.tools === undefined && active.size === 0) {
 +    for (const item of scanned) active.add(item.name)
 +  }
@@ -777,7 +774,7 @@ new file mode 100644
 +  return details.toSorted((a, b) => a.name.localeCompare(b.name))
 +}
 +
-+// 基础系统提示词：优先用 agent 自定义 prompt，无 agent prompt 时回退到模型默认提示
++// agent 自定义 prompt 完整替换模型模板，不能同时拼入两份族模板把系统开销翻倍。
 +function baseSystemPrompt(
 +  input: ComputeContextDataInput,
 +  lastUser: Message | undefined,
@@ -785,12 +782,13 @@ new file mode 100644
 +) {
 +  const agent = lastUser?.role === "user" ? input.agents?.find((item) => item.name === lastUser.agent) : undefined
 +  if (agent?.prompt) return agent.prompt
++  // 未找到模型时只省略族模板；环境与用户 system 仍由调用方正常组装。
 +  if (!model) return ""
-+  // 无 agent 自定义 prompt 时计入模型默认系统提示（与 runtime provider() 同文本）
++  // 模板字符串来自静态 asset，估算不再读取源码路径；packed binary 与源码运行使用同一文本。
 +  return systemProviderPrompt(model).join("\n")
 +}
 +
-+// 环境信息文本：模型身份、工作目录、git 状态、平台信息 + 工具使用指引 + 静态段落
++// 分段间的换行也是字符载荷；环境与族提示分别组装后统一估算，不能按段落名称补固定 token。
 +function environmentText(input: ComputeContextDataInput, modelID: string, providerID: string, toolNames: string[]) {
 +  const lines = [
 +    `You are powered by the model named ${modelID}. The exact model ID is ${providerID}/${modelID}`,
@@ -801,7 +799,7 @@ new file mode 100644
 +    "  Is directory a git repo: unknown",
 +    `  Current branch: ${input.vcs?.branch ?? "(unknown)"}`,
 +    `  Platform: ${process.platform}`,
-+    // Windows 平台需要额外的 shell 兼容提示
++    // 这段历史环境模板描述宿主平台，具体工具 shell 模板另有配置来源，二者并非可互换的测量值。
 +    ...(process.platform === "win32"
 +      ? [
 +          "  Shell syntax: use PowerShell syntax, not Unix shell syntax.",
@@ -815,9 +813,10 @@ new file mode 100644
 +  return [lines.join("\n"), toolUsageSection(toolNames), ...staticSections()].join("\n\n")
 +}
 +
-+// 当前模型解析：优先用最后一条用户消息指定的模型，否则回退到 local 记录的模型
++// 会话最后用户模型优先于当前 UI 选择；只改变选择器不应把旧请求窗口切到另一个模型。
 +function currentModel(input: ComputeContextDataInput, lastUser: Message | undefined) {
 +  const selected = lastUser?.role === "user" ? lastUser.model : input.lastUserModel
++  // 模型名只在所属 provider 内解析，不跨网关猜测相同 ID 的限制。
 +  const provider = input.providers.find((item) => item.id === selected?.providerID)
 +  const model = selected?.modelID ? provider?.models[selected.modelID] : undefined
 +  return {
@@ -827,7 +826,7 @@ new file mode 100644
 +  }
 +}
 +
-+// 窗口可用 token：从模型输入限制中扣除压缩缓冲区
++// usable 不超过 context；异常小窗口也只显示零可用输入，不让 reserve 产生负数占用。
 +function windowTokens(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
 +  if (!model) return 0
 +  const context = model.limit.context
@@ -835,15 +834,15 @@ new file mode 100644
 +  return Math.max(0, Math.min(context, overflowUsable({ cfg: input.config ?? ({} as Config), model })))
 +}
 +
-+// 窗口详情：上下文限制、输入限制、可用输入、提供者预留、压缩缓冲区
++// 两种预留拥有不同来源：provider input 差额不是自动压缩的阈值，不能合并显示。
 +function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
 +  const contextLimit = model?.limit.context ?? 0
-+  // 输入限制不超过上下文限制
++  // catalog 的 input 可能大于 context，先夹住才能让 reserve 与 buffer 保持非负。
 +  const inputLimit = model?.limit.input ? Math.min(model.limit.input, contextLimit) : contextLimit
 +  const usableInput = windowTokens(input, model)
-+  // 提供者预留 = 上下文限制 - 输入限制（模型保留给输出/系统使用的部分）
++  // 缺省 input 用 context 填充，未知限制不制造 reserve；非零差额也不属于本会话消费。
 +  const providerReserve = Math.max(0, contextLimit - inputLimit)
-+  // 压缩缓冲区 = 输入限制 - 可用输入（触发自动压缩前的安全余量）
++  // buffer 只覆盖 input 与 usable 的差额，未知模型/极小窗口也不显示负缓冲。
 +  const compactionBuffer = Math.max(0, inputLimit - usableInput)
 +  return {
 +    contextLimit,
@@ -854,19 +853,19 @@ new file mode 100644
 +  }
 +}
 +
-+// 网格尺寸：按上下文限制和终端宽度自适应计算网格列数与行数
++// 网格密度受终端宽度限制，而 token 分母始终是模型窗口，resize 不能改变计数口径。
 +function gridSize(contextLimit: number, columns?: number, rows?: number) {
 +  const width = columns ?? process.stdout.columns ?? 80
 +  const narrow = width < 80
 +  if (narrow) {
-+    // 窄终端使用更小的网格，避免挤压其他面板
++    // 窄屏缩小列数而非裁掉分类；右侧明细仍按原始 token 展示，网格只改变采样密度。
 +    return {
 +      width: Math.max(5, Math.min(10, Math.floor(Math.max(12, width - 8) / 2))),
 +      height: rows ?? (contextLimit >= 1_000_000 ? 10 : 5),
 +    }
 +  }
 +
-+  // 按上下文窗口大小选择网格宽度档位
++  // 大模型增加采样格数但不能越过可用列宽，百万窗口也不能挤掉分类标签。
 +  const modelWidth = contextLimit >= 1_000_000 ? 32 : contextLimit >= 200_000 ? 24 : contextLimit >= 100_000 ? 16 : 10
 +  const maxWidth = Math.max(10, Math.floor(Math.min(width * 0.36, Math.max(20, width - 72)) / 2))
 +  const modelHeight = contextLimit >= 1_000_000 ? 14 : contextLimit >= 200_000 ? 12 : 10
@@ -876,17 +875,17 @@ new file mode 100644
 +  }
 +}
 +
-+// 上下文网格：将 token 分类映射为字符网格行，自由空间和压缩缓冲区分别填充
++// 网格是有损采样：小于半格的分类可无符号，右侧整数明细仍保留它，不能从符号数还原 token。
 +export function contextGrid(categories: ContextCategory[], contextLimit: number, options?: { columns?: number; rows?: number }) {
 +  const { width: gridW, height: gridH } = gridSize(contextLimit, options?.columns, options?.rows)
 +  const total = gridW * gridH
 +  const cells: GridSquare[] = []
-+  // 压缩缓冲区放在网格尾部，单独计算其格子数
++  // buffer 从尾部分配，避免前面的大额 reserve 抢走安全缓冲的最后一格。
 +  const tail = categories.find((category) => category.name === "Autocompact buffer")
 +  const body = categories.filter((category) => category.name !== "Autocompact buffer")
 +
 +  const countFor = (category: ContextCategory, remaining: number) => {
-+    // 按比例计算格子数，非延迟分类在占比 ≥0.5 时至少占 1 格
++    // 小分类只在超过半格时可见，不能每项强占一格并让许多 tiny 工具淹没实际窗口比例。
 +    const exact = contextLimit > 0 ? (category.tokens / contextLimit) * total : 0
 +    let count = Math.round(exact)
 +    if (category.tokens > 0 && !category.isDeferred && count === 0 && exact >= 0.5) count = 1
@@ -896,13 +895,14 @@ new file mode 100644
 +    }
 +  }
 +
-+  // 缓冲区优先分配尾部格子：保证压缩缓冲区在网格末尾可视化，与自由空间区分
++  // reserve/free 与其他分类共享 bodyLimit，先扣除尾部容量才能避免大额 reserve 吞掉压缩缓冲。
 +  const tailCount = tail ? countFor(tail, total).count : 0
 +  const bodyLimit = total - tailCount
++  // 剩余容量约束每次分配，即使估算超过窗口也不会渲染无限格子。
 +  for (const category of body) {
 +    const { exact, count } = countFor(category, bodyLimit - cells.length)
 +    for (let i = 0; i < count; i++) {
-+      // 格子饱满度 = 比例余量，用于选择填充字符
++      // 超窗口估算的余量仍夹在 [0,1]，否则饱满度会越过已定义的两档填充符号。
 +      const fullness = Math.max(0, Math.min(1, exact - i))
 +      cells.push({
 +        symbol: category.name === "Free space" ? "⛶" : category.name === "Model reserve" ? "⛝" : fullness >= 0.7 ? "⛁" : "⛀",
@@ -914,7 +914,7 @@ new file mode 100644
 +    if (cells.length >= bodyLimit) break
 +  }
 +
-+  // 剩余空间填充自由空间格子
++  // 舍入产生的空格归 free，而不是再计入某个 prompt 分类；token 总额不由格子数反推。
 +  const free = categories.find((item) => item.name === "Free space")
 +  while (cells.length < bodyLimit) {
 +    cells.push({
@@ -924,7 +924,7 @@ new file mode 100644
 +      fullness: 0,
 +    })
 +  }
-+  // 尾部填充压缩缓冲区格子
++  // 尾部饱满度使用 tail 自身比例而非总 used，安全缓冲不会因消息增长被画成消息占用。
 +  if (tail) {
 +    const exact = contextLimit > 0 ? (tail.tokens / contextLimit) * total : 0
 +    while (cells.length < total) {
@@ -938,15 +938,15 @@ new file mode 100644
 +    }
 +  }
 +
-+  // 按行宽切分为二维网格
++  // 只切已有有限 cells，最后一行不足列宽也不增加虚构 used token。
 +  const rows: GridSquare[][] = []
 +  for (let i = 0; i < cells.length; i += gridW) rows.push(cells.slice(i, i + gridW))
 +  return rows
 +}
 +
-+// 计算上下文使用数据：汇总消息、指令、技能、工具定义的 token 分类与网格
++// 窗口分类使用裁剪结果；确认消费独立交给 usageTotals，不能从字符估算的 used 反算计费用量。
 +export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
-+  // 消息按时间倒序过滤压缩历史，再反转回正序
++  // filter 接受新到旧的序列，源数组仍保持原顺序，不能原位 reverse 改掉 Sync 的消息顺序。
 +  const raw = input.messages.map((msg) => ({ info: msg, parts: input.parts[msg.id] ?? [] }))
 +  const compacted = filterCompactedMessages(raw.toReversed())
 +  const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
@@ -958,7 +958,7 @@ new file mode 100644
 +  const instructions = await gatherInstructionFiles(input)
 +  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
 +  const messageText = msg.text.join("\n")
-+  // 加载的指令路径去重：已在消息文本中出现的跳过
++  // Read 的指令可能在工具 output 而非 text 部件；只为未在已计数正文内出现的 loaded 路径读盘。
 +  const loadedInstructions = [] as Array<{ path: string; tokens: number }>
 +  for (const filepath of msg.loadedInstructionPaths) {
 +    if (messageText.includes(`Instructions from: ${filepath}`)) continue
@@ -975,7 +975,7 @@ new file mode 100644
 +    tokens: estimate(skillsSection(skillInfo([skill]))),
 +  }))
 +  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser)
-+  // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
++  // 用户 system 是同一请求的附加系统载荷；存在自定义 agent prompt 也不能省略该字段。
 +  const systemText = [
 +    baseSystemPrompt(input, lastUser, modelInfo.model),
 +    environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
@@ -985,16 +985,17 @@ new file mode 100644
 +  const instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
 +  const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
 +  const toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-+  // 输入消息 = 用户文本 + 工具结果 + 附件
++  // 工具返回内容会成为下一轮输入，即使部件归助手消息也不能挪入 Output Messages。
 +  const inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
-+  // 输出消息 = 助手文本 + 推理 + 工具调用 + 压缩摘要
++  // 摘要本身仍是窗口内输出载荷；已裁剪的旧正文不能因 summary 还有父 ID 又被重新计入。
 +  const outputMessageTokens =
 +    msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
 +  const messageTotal = inputMessageTokens + outputMessageTokens
 +  const window = windowDetails(input, modelInfo.model)
-+  // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息
++  // used 只包含发送载荷；free、模型预留与压缩缓冲不是 token 消费，不能再次加入分子。
++  // 分类分别 round 后相加会有短文本舍入误差；确认消费仍独立读取 provider 字段。
 +  const used = envTokens + instructionTokens + loadedInstructionTokens + skillTokens + toolDefTokens + messageTotal
-+  // 自由空间 = 可用输入 - 已用（无模型限制时为 0）
++  // 超出 usable 时自由空间归零，但 used 保留真实估算，不能为了百分比好看裁掉超额载荷。
 +  const free = maxTokens ? Math.max(0, window.usableInput - used) : 0
 +
 +  const categories: ContextCategory[] = [
@@ -1004,7 +1005,7 @@ new file mode 100644
 +    { name: "Tool definitions", tokens: toolDefTokens, color: "warning" },
 +    { name: "Input Messages", tokens: inputMessageTokens, color: "warning" },
 +    { name: "Output Messages", tokens: outputMessageTokens, color: "accent" },
-+    // 自由空间和缓冲区标记为延迟计算，网格中按比例填充
++    // free 非零也不能进入 used；isDeferred 只影响网格可见性门槛，不改变百分比分子。
 +    { name: "Free space", tokens: free, color: "textMuted", isDeferred: true },
 +    ...(window.providerReserve > 0
 +      ? [{ name: "Model reserve", tokens: window.providerReserve, color: "textMuted" as const, isDeferred: true }]
@@ -1012,13 +1013,14 @@ new file mode 100644
 +    { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
 +  ]
 +
++  // 返回脱离流式 proxy 的数值与字符串，resize 消费同一轮完成的估算结果。
 +  return {
 +    model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
 +    totalTokens: used,
 +    maxTokens,
 +    percentage: maxTokens ? used / maxTokens : 0,
 +    categories,
-+    // 无模型限制时用已用+缓冲+自由作为网格基数，保证网格有内容
++    // 未知窗口只选择可渲染的网格分母，maxTokens 与百分比仍保留未知值 0。
 +    gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
 +    details: {
 +      instructions: instructionDetails,
@@ -1035,9 +1037,12 @@ diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/sr
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/routes/session/context-usage.tsx
-@@ -0,0 +1,348 @@
-+import { createMemo, createResource, For, Show } from "solid-js"
-+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
+@@ -0,0 +1,366 @@
++import { createEffect, createMemo, createResource, For, onCleanup, Show } from "solid-js"
++import { useTerminalDimensions } from "@opentui/solid"
++import type { Binding, Keymap, KeymapEvent } from "@opentui/keymap"
++import { useTuiConfig } from "../../config"
++import { useOpencodeKeymap } from "../../keymap"
 +import { useDialog } from "../../ui/dialog"
 +import { useLocal } from "../../context/local"
 +import { useProject } from "../../context/project"
@@ -1047,37 +1052,38 @@ new file mode 100644
 +import { Locale } from "../../util/locale"
 +import {
 +  computeContextData,
++  type ComputeContextDataInput,
 +  type ContextCategoryColor,
 +  type ContextUsageData,
 +  type GridSquare,
 +} from "../../util/context-usage"
 +
-+// 格式化 token 数为人类可读的 k/m 简写
++// 显示缩写不改变底层 token，明细相加仍使用原始整数，不能把四舍五入结果当账本。
 +function formatTokens(tokens: number) {
-+  // 阈值对齐模型上下文档位（1m/200k/100k），便于一眼读出量级
++  // 先判断百万档，避免百万级窗口仍被显示成四位数 k 并挤掉右侧占比。
 +  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`
 +  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`
 +  return String(tokens)
 +}
 +
-+// 计算百分比字符串，分母为 0 时返回 0.0%
++// 未知模型窗口没有可比较分母；显示 0.0% 而不是向终端输出 Infinity/NaN。
 +function percent(tokens: number, max: number) {
-+  // 分母为 0 时返回 0.0% 而非 NaN：模型限制未知时不应显示异常值
++  // 明细占比始终以窗口为分母，不能换成 usable 后让 reserve 项显示超过自身容量的比例。
 +  if (!max) return "0.0%"
 +  return `${((tokens / max) * 100).toFixed(1)}%`
 +}
 +
-+// 固定宽度文本：截断后 padEnd 对齐，保证列布局不偏移
++// 数值字段与路径先截断再补齐，长指令路径不能挤到旁边的网格列。
 +function fixed(input: string, width: number) {
 +  return Locale.truncate(input, width).padEnd(width)
 +}
 +
-+// 从主题中按分类颜色名取实际颜色值，回退到 textMuted
++// 分类和网格共用颜色解析，secondary 等新增分类不能只在一处被降级成 muted。
 +function color(theme: ReturnType<typeof useTheme>["theme"], name: ContextCategoryColor) {
 +  return theme[name] ?? theme.textMuted
 +}
 +
-+// 分类标记符：用不同 Unicode 符号区分系统提示、指令、技能、工具、消息、自由空间
++// 符号补充颜色辨识；输入与工具定义共享颜色时仍须有不同标记。
 +function categoryMarker(name: string) {
 +  if (name === "System prompt") return "◆"
 +  if (name === "Instructions") return "◇"
@@ -1089,25 +1095,24 @@ new file mode 100644
 +  return "×"
 +}
 +
-+// 显示路径仅保留文件名部分，兼容 Windows 反斜杠和 Unix 正斜杠
++// 保存的路径可能来自另一平台，两种分隔符都识别，不能按 TUI 宿主系统假设路径格式。
 +function displayPath(input: string) {
 +  return input.split(/[\\/]/).pop() || input
 +}
 +
-+// 上下文使用面板底部状态行：有确认用量时显示会话总计，否则显示当前窗口用量
++// footer 的确认总额与实时窗口是不同口径；尚无确认消费时使用窗口信息，不制造 Session Totals。
 +export function contextUsageFooter(data: ContextUsageData, columns: number) {
 +  const usage = data.details.usage
-+  // 宽度按终端列数自适应，最小 36 字符
-+  // 最小 36 字符保证关键字段可见；18 为右侧关闭提示预留的列宽
++  // footer 留出关闭提示的固定宽度；总额中间截断也不能覆盖右侧 esc 操作。
 +  const width = Math.max(36, columns - 18)
 +  const text =
-+    // 有确认用量（step-finish）时显示会话总计，否则回退到当前窗口余量
++    // 金额单独为正也不能证明存在 token 总额；零 token 会话仍显示实时窗口而非伪造账本。
 +    usage.total > 0
 +      ? [
 +          `Session Totals`,
 +          `Input ${formatTokens(usage.input)}`,
 +          `Output ${formatTokens(usage.output)}`,
-+          // 推理 token 仅在大于 0 时显示
++          // reasoning 是独立确认字段，显示它不会再次改变 Output 或 total 的数值。
 +          usage.reasoning > 0 ? `Reason ${formatTokens(usage.reasoning)}` : undefined,
 +          `Cache W/R ${formatTokens(usage.cacheWrite)}/${formatTokens(usage.cacheRead)}`,
 +          usage.cost > 0 ? `Cost $${usage.cost.toFixed(4)}` : undefined,
@@ -1119,24 +1124,14 @@ new file mode 100644
 +          `Usable ${formatTokens(data.details.window.usableInput)}`,
 +          `Buffer ${formatTokens(data.details.window.compactionBuffer)}`,
 +        ].join("  ")
++  // 中间截断保留两端身份，显示缩略不回写 provider 的确认总额。
 +  return fixed(Locale.truncateMiddle(text, width), width)
 +}
 +
-+// 上下文网格组件：按行列渲染 GridSquare，颜色取自主题
++// 网格只消费 computeContextData 的有限 cells，渲染层不再从比例构造另一份分配状态。
 +function ContextGrid(props: { rows: GridSquare[][] }) {
 +  const { theme } = useTheme()
-+  // 网格颜色映射：将分类颜色名解析为主题色值
-+  const gridColor = (name: ContextCategoryColor) => {
-+    if (name === "primary") return theme.primary
-+    if (name === "secondary") return theme.secondary
-+    if (name === "warning") return theme.warning
-+    if (name === "accent") return theme.accent
-+    if (name === "info") return theme.info
-+    if (name === "success") return theme.success
-+    return theme.textMuted
-+  }
-+
-+  // flexShrink={0} 防止网格被压缩：保证格子符号完整显示，不因空间不足被截断
++  // 渲染只为每个采样符号补一个空格，不能在此按 fullness 再次生成额外 cells 改变分配比例。
 +  return (
 +    <box flexDirection="column" flexShrink={0}>
 +      <For each={props.rows}>
@@ -1144,7 +1139,7 @@ new file mode 100644
 +          <box flexDirection="row" flexShrink={0}>
 +            <For each={row}>
 +              {(square) => (
-+                <text fg={gridColor(square.color)} flexShrink={0}>
++                <text fg={color(theme, square.color)} flexShrink={0}>
 +                  {square.symbol + " "}
 +                </text>
 +              )}
@@ -1156,14 +1151,14 @@ new file mode 100644
 +  )
 +}
 +
-+// 分类列表组件：按 Prompt/Conversation/Window 三组展示 token 明细
++// window 预留仅展示模型容量，Prompt/Conversation 展示实际载荷，组间不重复计算分类总额。
 +function CategoryList(props: { data: ContextUsageData }) {
 +  const { theme } = useTheme()
-+  // 标签和数值列宽固定，保证对齐
-+  // 固定列宽：label 20 字符覆盖最长分类名，value 14 字符覆盖 "999.9k 100.0%"
++  // 标签列不能随某项 token 数增长而变宽，否则 resize 会把数值列推到网格上。
 +  const labelWidth = 20
++  // 数值列只截断展示文本，超窗口百分比仍保留大于 100% 的实际估算。
 +  const valueWidth = 14
-+  // 分类分组：Prompt 组含系统提示/指令/技能/工具定义；Conversation 组含输入/输出消息；Window 组含自由空间/预留/缓冲区
++  // 无 provider reserve 时整项不存在，按分类过滤而非补一个看似有测量依据的零值。
 +  const groups = createMemo(() => [
 +    {
 +      title: "Prompt",
@@ -1211,20 +1206,19 @@ new file mode 100644
 +  )
 +}
 +
-+// 上下文使用明细行：输入/输出/提示三行，按终端宽度截断避免挤压网格
++// 明细只显示代表性路径与计数，完整分类 token 仍来自 data；隐藏长列表不应减少已用量。
 +export function contextUsageDetailLines(data: ContextUsageData, columns: number) {
 +  const messages = data.details.messages
-+  // 行宽按终端列数自适应，最小 36 字符
-+  // 行宽 = 终端列数 - 8（左侧缩进 2 + 右侧留白 6），最小 36 防止过度截断
++  // 按调用时列宽响应 resize；36 列下限只保证基础字段可读，不宣称最窄终端能容纳整行。
 +  const lineWidth = Math.max(36, columns - 8)
-+  // 路径显示宽度限制在 18-58 之间：太短看不出文件名，太长挤占其他字段
++  // 路径中间截断保留文件尾部，basename 仍按两种分隔符解析，不能依赖宿主平台的 path.basename。
 +  const detailWidth = Math.max(18, Math.min(58, Math.floor(columns / 3)))
-+  // 合并指令文件和已加载指令为统一列表
++  // 磁盘规则与 read 加载的规则有不同来源，明细并列展示，但不在 UI 再次估算其正文。
 +  const files = [
 +    ...data.details.instructions.map((item) => ({ label: item.path, tokens: item.tokens })),
 +    ...data.details.loadedInstructions.map((item) => ({ label: item.path, tokens: item.tokens })),
 +  ]
-+  // 输入明细：用户文本 + 工具结果 + 附件
++  // 用户正文之外的工具结果和文件也会发送为输入，只按 role 展示会漏掉助手承载的返回内容。
 +  const input = [
 +    `User ${formatTokens(messages.userText)}`,
 +    `Tool results ${formatTokens(messages.toolResults)}`,
@@ -1232,7 +1226,7 @@ new file mode 100644
 +  ]
 +    .filter(Boolean)
 +    .join("  ")
-+  // 输出明细：助手文本 + 推理 + 工具调用 + 压缩摘要（仅 >0 时显示）
++  // 摘要单列只在非零时展示；其 token 已归输出总额，UI 不能再把 Summary 加入其他计数。
 +  const output = [
 +    `Text ${formatTokens(messages.assistantText)}`,
 +    `Reasoning ${formatTokens(messages.reasoning)}`,
@@ -1241,7 +1235,7 @@ new file mode 100644
 +  ]
 +    .filter(Boolean)
 +    .join("  ")
-+  // 提示明细：首个指令文件的路径 + 工具数 + 技能数
++  // 只取首个路径限制展示宽度；工具/技能数量仍来自完整列表，不能随明细截断减少能力数。
 +  const prompt = [
 +    ...files.slice(0, 1).map((item) => `Instruction ${formatTokens(item.tokens)} ${Locale.truncateMiddle(displayPath(item.label), detailWidth)}`),
 +    data.details.toolDefs.length > 0 ? `Tools ${data.details.toolDefs.length}` : undefined,
@@ -1255,15 +1249,15 @@ new file mode 100644
 +    output ? `Output  ${output}` : undefined,
 +    prompt ? `Prompt  ${prompt}` : undefined,
 +  ]
-+    // 过滤空行和纯空白行
++    // 可选项全部为空时省略整行，避免空 Prompt 明细占用有限高度并挤掉真实输入输出。
 +    .filter((line): line is string => !!line && line.trim().length > 0)
 +    .map((line) => fixed(Locale.truncateMiddle(line, lineWidth), lineWidth))
 +}
 +
-+// 明细组件：渲染 contextUsageDetailLines 的每一行为单行文本
++// 明细行长度由同一 formatter 限制，组件不能拼回被截断的路径再使网格溢出。
 +function Details(props: { data: ContextUsageData; columns: number }) {
 +  const { theme } = useTheme()
-+  // memo 包装：columns 或 data 变化时才重算明细行，避免每次渲染都重新截断
++  // 只在完整结果和列宽上建立展示 memo，不能重新订阅原始部件让一行混合两个计算版本。
 +  const lines = createMemo(() => contextUsageDetailLines(props.data, props.columns))
 +  return (
 +    <box flexDirection="column" gap={0} paddingTop={1}>
@@ -1278,7 +1272,37 @@ new file mode 100644
 +  )
 +}
 +
-+// 上下文使用面板：从 sync/local/project 收集输入，异步计算上下文数据并渲染网格与明细
++// SDK 输入只有 wire 数据；在 tracked memo 内序列化才能订阅嵌套字段，unwrap 不会建立订阅。
++export function contextUsageResource(input: () => ComputeContextDataInput) {
++  const snapshot = createMemo<ComputeContextDataInput>(() => JSON.parse(JSON.stringify(input())))
++  // fetcher 被 Solid untrack；传入脱离 store proxy 的快照，异步 await 后也不会读到另一版本。
++  return createResource(snapshot, computeContextData)
++}
++
++// 此注册入口由面板与真实 keymap harness 共用，关闭键不经过另一个 matcher 或全局退出命令。
++export function registerContextUsageKeys<TTarget extends object, TEvent extends KeymapEvent>(
++  keymap: Keymap<TTarget, TEvent>,
++  input: { bindings: () => readonly Binding<TTarget, TEvent>[]; enabled: () => boolean; onClose: () => void },
++) {
++  createEffect(() => {
++    // 弹层打开即撤掉面板 layer，其 modal/escape 处理继续拥有优先权，不能先关面板再冒泡。
++    if (!input.enabled()) return
++    // 配置更新会重新注册；Solid 在重跑及卸载前清理旧 layer，不能留下关闭旧面板的回调。
++    onCleanup(keymap.registerLayer({
++      priority: 1,
++      bindings: [{ key: "escape" }, { key: "ctrl+c" }, ...input.bindings()].map((binding) => ({
++        ...binding,
++        // 配置里的 app.exit 仅提供按键/序列；当前面板把动作替换为 onClose，不调用应用退出。
++        cmd: input.onClose,
++        // 两个开关分别阻止宿主传播和 keymap 内继续匹配，用户配置的 fallthrough 不能放行全局退出。
++        preventDefault: true,
++        fallthrough: false,
++      })),
++    }))
++  })
++}
++
++// 面板仍使用唯一 resource；消息追加与部件原位更新都经同一 tracked 快照触发。
 +export function ContextUsagePanel(props: { sessionID: string; onClose: () => void }) {
 +  const sync = useSync()
 +  const local = useLocal()
@@ -1286,13 +1310,14 @@ new file mode 100644
 +  const dimensions = useTerminalDimensions()
 +  const dialog = useDialog()
 +  const { theme } = useTheme()
-+  useRenderer()
++  const keymap = useOpencodeKeymap()
++  const tuiConfig = useTuiConfig()
 +
-+  // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
++  // 外层只选择会话输入；深层字段由 contextUsageResource 的 tracked 序列化订阅，不能在 fetcher 里读 proxy。
 +  const input = createMemo(() => {
-+    // 展开拷贝消息数组：避免直接引用 sync 内部状态，防止后续 mutation 影响响应式追踪
++    // 消息追加时更新成员集合，text/raw/tokens 的原位修改仍由内层快照单独追踪。
 +    const messages = [...(sync.data.message[props.sessionID] ?? [])]
-+    // 按 messageID 分组部件列表
++    // 只取当前会话消息关联的部件，其他会话的 delta 不应刷新本窗口的估算。
 +    const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
 +    const paths = project.instance.path()
 +    return {
@@ -1303,25 +1328,20 @@ new file mode 100644
 +      agents: [...sync.data.agent],
 +      lastUserModel: local.model.current(),
 +      vcs: sync.data.vcs,
-+      paths: { cwd: paths.directory, worktree: paths.worktree },
++      paths: { cwd: paths.directory, worktree: paths.worktree, shell: sync.data.config.shell },
 +      columns: dimensions().width,
 +    }
 +  })
 +
-+  // 异步计算上下文数据，Solid 自动追踪 input 变化并重新计算
-+  // createResource 自动追踪 input memo 变化并异步重算，加载中 data() 为 undefined
-+  const [data] = createResource(() => computeContextData(input()))
++  // 一个 resource 处理所有来源变化，Solid 丢弃旧请求的迟到结果；不追加 polling 或独立刷新计时器。
++  const [data] = contextUsageResource(input)
 +
-+  // 键盘处理：escape 或 Ctrl+C 关闭面板；对话框打开时不拦截按键
-+  useKeyboard((evt) => {
-+    if (dialog.stack.length > 0) return
-+    // V2 TUI 由 keymap 统一管理应用级退出键绑定，此处仅响应 escape 和 Ctrl+C
-+    if (evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
-+      props.onClose()
-+      // 阻止冒泡：防止退出键被上层 keymap 二次处理导致重复关闭
-+      evt.preventDefault()
-+      evt.stopPropagation()
-+    }
++  // 关闭只调用路由的 onClose，不能复用 Session interrupt 将展示操作升级为模型执行取消。
++  registerContextUsageKeys(keymap, {
++    // gather 保留默认 Ctrl+D、leader 序列与用户覆盖；不能把 app_exit 缩成固定的 Ctrl+C。
++    bindings: () => tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
++    enabled: () => dialog.stack.length === 0,
++    onClose: props.onClose,
 +  })
 +
 +  return (
@@ -1334,7 +1354,7 @@ new file mode 100644
 +      paddingRight={1}
 +      marginTop={1}
 +    >
-+      {/* 标题行：面板名称 + 总量/上限/百分比摘要 */}
++      {/* 标题读取同一 resource 结果的总量与分母，流式刷新不能把新 used 与旧窗口限制拼成占比。 */}
 +      <box flexDirection="row" justifyContent="space-between" marginBottom={1} height={1}>
 +        <box flexDirection="row" gap={1}>
 +          <text fg={theme.primary}>{"◇"}</text>
@@ -1354,22 +1374,22 @@ new file mode 100644
 +      <Show when={data()}>
 +        {(d) => (
 +          <box flexDirection="column" gap={1}>
-+            {/* 模型标识行 */}
++            {/* 模型标签使用计算结果的请求身份，切换 UI 选择不能单独改名而仍展示旧请求的用量。 */}
 +            <box height={1}>
 +              <text fg={theme.textMuted}>{d().model}</text>
 +            </box>
-+            {/* 网格 + 分类列表并排 */}
++            {/* 网格和分类列表共享同一完成快照，异步读取期间不在左右两列各触发一次计算。 */}
 +            <box flexDirection="row" gap={2}>
 +              <ContextGrid rows={d().gridRows} />
 +              <CategoryList data={d()} />
 +            </box>
-+            {/* 明细行：输入/输出/提示 */}
++            {/* 明细消费已算好的路径与整数，渲染不能重新访问磁盘使同一结果在两次绘制间变动。 */}
 +            <Details data={d()} columns={dimensions().width} />
 +          </box>
 +        )}
 +      </Show>
 +
-+      {/* 底部状态行：会话总计或当前窗口用量 + 关闭提示 */}
++      {/* 首次加载没有结果才显示 Loading；刷新期间仍展示原 resource 值，不把暂未完成当零消费。 */}
 +      <box flexDirection="row" justifyContent="space-between" marginTop={1} height={1}>
 +        <Show when={data()} fallback={<text fg={theme.textMuted}>Loading...</text>}>
 +          {(d) => <text fg={theme.textMuted}>{contextUsageFooter(d(), dimensions().width)}</text>}
@@ -1388,13 +1408,22 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,569 @@
 +import { describe, expect, test } from "bun:test"
-+import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
-+import { computeContextData, filterCompactedMessages } from "../src/util/context-usage"
-+import { contextUsageDetailLines, contextUsageFooter } from "../src/routes/session/context-usage"
++import { createComputed, createRoot, createSignal } from "solid-js"
++import { createStore } from "solid-js/store"
++import { createBindingLookup } from "@opentui/keymap/extras"
++import { registerCommaBindings, registerTimedLeader } from "@opentui/keymap/addons"
++import { createTestKeymap, type TestKeymapEvent, type TestKeymapTarget } from "@opentui/keymap/testing"
++import { estimate } from "@opencode-ai/core/util/token"
++import { TuiKeybind } from "../src/config/keybind"
++import { tmpdir } from "./fixture/fixture"
++import type { Agent, Message, Part, Provider, TextPart } from "@opencode-ai/sdk/v2"
++import { computeContextData, filterCompactedMessages, resolveToolDescriptions } from "../src/util/context-usage"
++import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
++import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
 +
-+// 测试用 Provider：上下文 20k、输入 19.9k、输出 100，用于验证窗口与缓冲区计算
++// 窗口/输入/输出故意不相等，才能让测试区分模型预留与压缩缓冲而非只验证零差额。
 +const provider: Provider = {
 +  id: "test",
 +  name: "Test",
@@ -1419,7 +1448,7 @@ new file mode 100644
 +      },
 +      release_date: "",
 +      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-+      // input(19900) < context(20000)：预留 100 给 providerReserve，buffer = 100
++      // 输出 100 与 context-input 的 100 相等但来源独立，测试分别锁定两栏，不能合并成一个 200。
 +      limit: { context: 20_000, input: 19_900, output: 100 },
 +      status: "active",
 +      options: {},
@@ -1428,7 +1457,7 @@ new file mode 100644
 +  },
 +}
 +
-+// 构造用户消息：可指定 tools 映射控制活跃工具集
++// tools 保留 undefined 与显式映射的区别；缺省广告全部工具不能被空对象替代。
 +function user(id: string, tools?: Record<string, boolean>): Message {
 +  return {
 +    id,
@@ -1441,7 +1470,7 @@ new file mode 100644
 +  } as Message
 +}
 +
-+// 构造助手消息：parentID 关联用户消息，summary 标记为压缩摘要
++// 摘要父 ID 指向 compaction 用户消息，测试不能用无父关联的 summary 伪造裁剪边界。
 +function assistant(id: string, parentID: string, summary = false): Message {
 +  return {
 +    id,
@@ -1457,24 +1486,143 @@ new file mode 100644
 +    summary,
 +    cost: 0,
 +    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+    // finish="stop"：正常完成，满足 filterCompactedMessages 的 completed 判定条件
++    // summary fixture 必须同时有 finish；缺少这个字段只会测试未完成轮次，无法验证真实裁剪。
 +    finish: "stop",
 +  } as Message
 +}
 +
-+// 构造文本部件：绑定到指定消息 ID
-+function text(messageID: string, value: string): Part {
++// 构造 TextPart：保留 text 判别，展开后 synthetic/ignored 仍属于文本部件。
++function text(messageID: string, value: string): TextPart {
 +  return {
 +    id: `${messageID}-text`,
 +    sessionID: "s",
 +    messageID,
 +    type: "text",
 +    text: value,
-+  } as Part
++  }
 +}
 +
 +describe("context usage", () => {
-+  // 验证消息、指令、技能、工具、缓冲区、自由空间分类均正确计数
++  test("subscribes to in-place text, pending input, and confirmed token changes", async () => {
++    const mounted = createRoot((dispose) => {
++      const [store, setStore] = createStore({
++        messages: [user("1"), assistant("2", "1"), assistant("3", "1")],
++        parts: {
++          "1": [text("1", "abcd")],
++          "2": [{ id: "raw", sessionID: "s", messageID: "2", type: "tool" as const, callID: "call", tool: "bash",
++            state: { status: "pending" as const, input: {}, raw: "" } }],
++          "3": [{ id: "sf", sessionID: "s", messageID: "3", type: "step-finish" as const, reason: "stop", cost: 0,
++            tokens: { input: 10, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }],
++        },
++        providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
++      })
++      // 挂载生产 helper 的唯一 resource，不能在测试中复制 JSON 快照或计算公式。
++      const [data] = contextUsageResource(() => store)
++      let notify: ((value: NonNullable<ReturnType<typeof data>>) => void) | undefined
++      createComputed(() => {
++        // refreshing 的旧值不是新一轮结果；只在真实 resource 完成时交付观察值。
++        if (data.state !== "ready") return
++        const value = data()
++        if (value) notify?.(value)
++      })
++      const next = () => new Promise<NonNullable<ReturnType<typeof data>>>((resolve) => { notify = resolve })
++      return { dispose, setStore, next }
++    })
++    try {
++      const initial = await mounted.next()
++      // 数组身份与长度不变，只替换 text 字段，必须被 tracked 快照捕获。
++      const textChanged = mounted.next()
++      mounted.setStore("parts", "1", 0, "text", "abcdefghijkl")
++      expect((await textChanged).details.messages.userText).toBe(3)
++      // bus raw delta 更新嵌套 pending state，不能依赖 Part 数组重新赋值。
++      const rawChanged = mounted.next()
++      mounted.setStore("parts", "2", 0, "state", "raw", "abcdefgh")
++      expect((await rawChanged).details.messages.toolCalls).toBe(initial.details.messages.toolCalls + 2)
++      // 确认用量原位变化同样刷新 footer；之前结果是快照，不随 store 变动。
++      const usageChanged = mounted.next()
++      mounted.setStore("parts", "3", 0, "tokens", "input", 25)
++      expect((await usageChanged).details.usage.input).toBe(25)
++      expect(initial.details.usage.input).toBe(10)
++    } finally { mounted.dispose() }
++    // 默认及用户覆盖都走真实 keymap dispatch；配置映射只提供 app.exit 的按键，不复制面板处理逻辑。
++    for (const custom of [false, true]) {
++      // 官方纯 host 保留真实序列和传播状态，测试不用 renderer 或伪造不存在的旧 keybind.match。
++      const harness = createTestKeymap({ defaultKeys: true })
++      const offComma = registerCommaBindings(harness.keymap)
++      const offLeader = registerTimedLeader(harness.keymap, { trigger: TuiKeybind.LeaderDefault, name: "leader", timeoutMs: 2000 })
++      const lookup = createBindingLookup<TestKeymapTarget, TestKeymapEvent>({
++        app_exit: custom ? { key: "ctrl+z", preventDefault: false, fallthrough: true } : TuiKeybind.defaultValue("app_exit"),
++      }, { commandMap: TuiKeybind.CommandMap })
++      let closed = 0
++      let exited = 0
++      const close = () => { closed++ }
++      // 真正的全局 app.exit 同时存在，不能只测单独面板 layer 后假定应用不会退出。
++      const offGlobal = harness.keymap.registerLayer({
++        commands: [{ name: "app.exit", run: () => { exited++ } }],
++        bindings: lookup.gather("app_exit", ["app.exit"]),
++      })
++      const panel = createRoot((dispose) => {
++        const [popup, setPopup] = createSignal(false)
++        registerContextUsageKeys(harness.keymap, {
++          bindings: () => lookup.gather("app_exit", ["app.exit"]), enabled: () => !popup(), onClose: close,
++        })
++        return { dispose, setPopup }
++      })
++      try {
++        await Promise.resolve()
++        expect(harness.keymap.getActiveKeys({ includeBindings: true }).flatMap((key) => key.bindings ?? []).some((binding) => binding.command === close)).toBe(true)
++        for (const name of ["escape", "c", custom ? "z" : "d"]) {
++          const before = closed
++          const event = harness.host.press(name, name === "escape" ? undefined : { ctrl: true })
++          // 自定义配置故意允许两种传播；这组相反输入能暴露面板没有强制消费事件的实现。
++          expect(closed).toBe(before + 1)
++          expect(exited).toBe(0)
++          expect(event.defaultPrevented).toBe(true)
++          expect(event.propagationStopped).toBe(true)
++        }
++        if (!custom) {
++          const before = closed
++          harness.host.press("x", { ctrl: true })
++          // leader 前缀本身不关闭，必须由同一 keymap 完成后续 q 序列。
++          expect(closed).toBe(before)
++          harness.host.press("q")
++          expect(closed).toBe(before + 1)
++          expect(exited).toBe(0)
++        }
++        panel.setPopup(true)
++        await Promise.resolve()
++        // 更高优先级的 dialog 可掩盖未撤销的面板 layer，另查真实活跃集合才能发现该残留。
++        expect(harness.keymap.getActiveKeys({ includeBindings: true }).flatMap((key) => key.bindings ?? []).some((binding) => binding.command === close)).toBe(false)
++        let dialogClosed = 0
++        const offDialog = harness.keymap.registerLayer({ priority: 2, bindings: [{ key: "ctrl+c", cmd: () => { dialogClosed++ } }] })
++        const before = closed
++        harness.host.press("c", { ctrl: true })
++        // 弹层消费真实事件时面板回调保持不动，不能仅检查 binding 存在就声称具备 popup 优先级。
++        expect(dialogClosed).toBe(1)
++        expect(closed).toBe(before)
++        expect(exited).toBe(0)
++        offDialog()
++        panel.setPopup(false)
++        await Promise.resolve()
++        harness.host.press(custom ? "z" : "d", { ctrl: true })
++        expect(closed).toBe(before + 1)
++        panel.dispose()
++        // 卸载之后恢复全局动作，能捕获残留 layer；单测关面板成功无法证明 owner 清理正确。
++        harness.host.press(custom ? "z" : "d", { ctrl: true })
++        expect(closed).toBe(before + 1)
++        expect(exited).toBe(1)
++        expect(harness.diagnostics.errors).toEqual([])
++      } finally {
++        // host 与 leader timer 比面板 owner 活得更久；断言失败也须清理，不能让下个 case 继承监听。
++        panel.dispose()
++        offGlobal()
++        offLeader()
++        offComma()
++        harness.cleanup()
++      }
++    }
++  })
++
 +
 +  // 无 custom agent prompt 时，System 分类必须计入 default/provider 系统提示词（禁止空 stub）
 +  test("system prompt category includes model base provider prompt text", async () => {
@@ -1486,19 +1634,71 @@ new file mode 100644
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +    })
-+    const system = data.categories.find((item) => item.name === "System prompt")
-+    // default.txt ~8kB；仅 environment+static 远低于该量级。空 stub 会让本断言失败。
-+    expect(system?.tokens).toBeGreaterThan(800)
++    // 同输入只替换 agent prompt，环境段落不能掩盖模板缺失。
++    const custom = await computeContextData({
++      messages: [user("1")], parts: { "1": [text("1", "hi")] }, providers: [provider],
++      agents: [{ name: "general", prompt: "x" } as Agent],
++      config: {}, paths: { cwd: process.cwd(), worktree: process.cwd() },
++    })
++    expect(data.categories.find((item) => item.name === "System prompt")!.tokens - custom.categories.find((item) => item.name === "System prompt")!.tokens).toBeGreaterThan(100)
++    // 缺省定义来自内嵌完整 catalog，无需历史工具调用或测试注入才能广告能力。
++    expect(data.details.toolDefs.length).toBeGreaterThan(10)
++    expect(data.details.toolDefs.every((item) => item.tokens > 0)).toBe(true)
++    // 独立完整对象锁定默认广告：只检查字段数量无法发现 task_id 文档或 required 被替换。
++    const base = {
++      $schema: "https://json-schema.org/draft/2020-12/schema", type: "object",
++      properties: {
++        description: { type: "string", description: "A short (3-5 words) description of the task" },
++        prompt: { type: "string", description: "The task for the agent to perform" },
++        subagent_type: { type: "string", description: "The type of specialized agent to use for this task" },
++        task_id: { type: "string", description: "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)" },
++        command: { type: "string", description: "The command that triggered this task" },
++      }, required: ["description", "prompt", "subagent_type"],
++    }
++    const full = { ...base, properties: { ...base.properties,
++      background: { type: "boolean", description: "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress" },
++    } }
++    const backgroundDescription = "Background mode: background=true launches the subagent asynchronously and returns immediately. Foreground is the default; use it when you need the result before continuing. Use background only for independent work that can run while you continue elsewhere. You will be notified automatically when it finishes."
++    expect(TOOL_CATALOG.task.baseParameters).toEqual(base)
++    expect(TOOL_CATALOG.task.parameters).toEqual(full)
++    expect(TOOL_CATALOG.task.backgroundDescription).toBe(backgroundDescription)
++    const flags = ["OPENCODE_EXPERIMENTAL", "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"] as const
++    const previous = flags.map((key) => process.env[key])
++    try {
++      // 覆盖无开关、实验伞、专用关闭与单独开启；全部调用生产 resolver，不在测试中复制条件。
++      for (const [umbrella, dedicated, enabled] of [[undefined, undefined, false], ["true", undefined, true], ["true", "false", false], ["false", "yes", true]] as const) {
++        for (const [key, value] of [[flags[0], umbrella], [flags[1], dedicated]] as const) {
++          if (value === undefined) delete process.env[key]
++          else process.env[key] = value
++        }
++        const task = resolveToolDescriptions({ cwd: process.cwd() }).find((entry) => entry.name === "task")!
++        // 完整文本检查同时约束参数选择、后台说明的有无和分隔符，非空 token 无法提供这个保证。
++        expect(task.text).toBe(["Tool: task", enabled ? [TOOL_CATALOG.task.description, backgroundDescription].join("\n\n") : TOOL_CATALOG.task.description, JSON.stringify(enabled ? full : base)].join("\n"))
++      }
++    } finally {
++      // 恢复缺失与显式值的区别，后续 provider/flag 测试不能继承本 case 的后台模式。
++      flags.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
++    }
++    // Question.Prompt 只广告 base，不包含内部 Info 才支持的 custom 字段。
++    expect(TOOL_CATALOG.question.parameters.properties.questions.items.required).toEqual(["question", "header", "options"])
++    expect(TOOL_CATALOG.question.parameters.properties.questions.items.properties.options.items.required).toEqual(["label", "description"])
++    // LSP 的运行时枚举与一基坐标约束都是定义开销，不能留下 operations 符号。
++    expect(TOOL_CATALOG.lsp.parameters.properties.operation.enum).toHaveLength(9)
++    expect(TOOL_CATALOG.lsp.parameters.properties.line.minimum).toBe(1)
++    // Todo.status 是带描述的字符串，目录不能擅自收窄成枚举并改变广告契约。
++    expect(TOOL_CATALOG.todowrite.parameters.properties.todos.items.required).toEqual(["content", "status", "priority"])
 +  })
 +
 +  
-+test("counts message, instruction, skill, tool, buffer, and free categories", async () => {
-+    // 用户显式启用 bash 工具，助手消息携带工具调用结果，覆盖主要分类路径
++  test("counts message, instruction, skill, tool, buffer, and free categories", async () => {
++    // 历史调用与显式 bash 映射同时存在，注入定义的唯一来源仍是 toolDefinitions，不能再叠加真实目录。
 +    const messages = [user("1", { bash: true }), assistant("2", "1")]
 +    const parts: Record<string, Part[]> = {
-+      "1": [text("1", "abcdefgh")],
++      // synthetic 指令正文发送给模型；ignored 文本不参与分类。
++      "1": [{ ...text("1", "abcdefgh"), synthetic: true }, { ...text("1", "ignored"), ignored: true }],
 +      "2": [
 +        text("2", "abcdefghijkl"),
++        { id: "2-reason", sessionID: "s", messageID: "2", type: "reasoning", text: "abcd", time: { start: 1, end: 2 } },
 +        {
 +          id: "2-tool",
 +          sessionID: "s",
@@ -1518,6 +1718,7 @@ new file mode 100644
 +      ],
 +    }
 +
++    // 分类 oracle 使用固定文本与 schema 注入，磁盘内容变化不能影响消息分栏的精确断言。
 +    const data = await computeContextData({
 +      messages,
 +      parts,
@@ -1526,51 +1727,83 @@ new file mode 100644
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
-+      // 内容固定 8 字符 = 2 token，便于断言精确值而非近似范围
++      // 注入正文避开真实 home/config 文件，确保这个 oracle 检查的是分类而非本机规则长度。
 +      instructionFiles: [{ path: "/tmp/AGENTS.md", content: "abcdefgh" }],
-+      // 技能描述固定 8 字符 = 2 token，与指令文件保持一致便于对称验证
++      // 单项技能仍包含公告标签，不能把 description 的 2 token 误当成完整 Skills 分类值。
 +      skills: [{ name: "demo", description: "abcdefgh", path: "/tmp/SKILL.md" }],
 +      toolDefinitions: [{ name: "bash", text: "abcdefghijklmnop" }],
 +    })
 +
-+    // 用户文本 8 字符 → 2 token
++    // synthetic 的 8 字符被计入而 ignored 的 7 字符被排除；两种错误过滤都会改变这个值。
 +    expect(data.details.messages.userText).toBe(2)
-+    // 助手文本 12 字符 → 3 token
++    // 推理另有一个部件，助手文本仍只为 3，防止把 reasoning 混入 assistantText 后再次相加。
 +    expect(data.details.messages.assistantText).toBe(3)
-+    // 工具结果 16 字符 → 4 token
++    // completed 工具结果归输入，不能把这个 4 加入工具调用开销或助手正文。
 +    expect(data.details.messages.toolResults).toBe(4)
-+    // 指令文件 8 字符 → 2 token
++    // instructionFiles 是完整覆盖，真实 AGENTS.md 不应偷偷叠加进注入的 2 token。
 +    expect(data.details.instructions[0]?.tokens).toBe(2)
 +    // 工具定义包含 schema + 观察到的输入，token > 4
 +    expect(data.details.toolDefs.find((item) => item.name === "bash")?.tokens).toBeGreaterThan(4)
-+    // 系统提示词含环境信息 + 静态段落，token > 100
++    // 自定义 schema 不关闭环境/系统载荷，不能通过减少分类项让整体占用看似更低。
 +    expect(data.categories.find((item) => item.name === "System prompt")?.tokens).toBeGreaterThan(100)
-+    // 输入消息 = 用户文本 2 + 工具结果 4 = 6
++    // 输入分类包含 synthetic 正文和工具结果，两者来自不同角色，不应按 message.role 粗分。
 +    expect(data.categories.find((item) => item.name === "Input Messages")?.tokens).toBe(6)
-+    // 输出消息 = 助手文本 3 + 工具调用 3 + 推理 0 + 摘要 0 = 6... 实际 7（含工具调用 input 估算）
-+    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(7)
-+    // 压缩缓冲区 = 输入限制 19900 - 可用输入 19800 = 100
++    // 助手文本 3、调用输入 4、推理 1 都归输出；工具结果仍只归输入。
++    expect(data.details.messages.reasoning).toBe(1)
++    expect(data.categories.find((item) => item.name === "Output Messages")?.tokens).toBe(8)
++    // 小输出模型只预留输出上限对应的缓冲，不能使用固定 20k 把整个窗口扣成零。
 +    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(100)
-+    // 模型预留 = 上下文限制 20000 - 输入限制 19900 = 100
++    // providerReserve 只反映 catalog 的输入差额，不能再把 100 输出限额叠加进来。
 +    expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(100)
-+    // 窗口详情：输入限制 19900、可用输入 19800、缓冲区 100
++    // 同时检查输入上限与 usable，避免只显示正确 buffer 标签却使用错误压缩阈值。
 +    expect(data.details.window).toMatchObject({ inputLimit: 19_900, usableInput: 19_800, compactionBuffer: 100 })
-+    // 自由空间 = 可用输入 - 已用 > 0
++    // 小 fixture 应留下可用输入空间；若 reserve 被再次加到 used，这个余量会错误下降。
 +    expect(data.categories.find((item) => item.name === "Free space")?.tokens).toBeGreaterThan(0)
-+    // 网格 10×10 = 100 格
++    // 100 列终端使用固定采样密度，分类个数增加也不能把总 cells 增长成无限列表。
 +    expect(data.gridRows.flat()).toHaveLength(100)
-+    // 最后一格是压缩缓冲区
++    // buffer 预先保留尾部，free 填补舍入空格时不能把它覆盖成自由空间。
 +    expect(data.gridRows.flat().at(-1)?.categoryName).toBe("Autocompact buffer")
++    await using tmp = await tmpdir()
++    const filepath = `${tmp.path}/AGENTS.md`
++    const current = "Changed instructions on disk after the historical Read completed."
++    await Bun.write(filepath, current)
++    // 这份 wire output 保留实际 Read 的 reminder 包装，磁盘刻意保存不同版本以发现偷偷重读。
++    const output = `<path>${tmp.path}/file.txt</path>\n<type>file</type>\n<content>\n1: old file\n</content>\n\n<system-reminder>\nInstructions from: ${filepath}\nOld instructions already visible to the model.\n</system-reminder>`
++    // satisfies 校验真实 ToolPart 判别与完成状态，metadata.loaded 和正文不能放在虚构的 text/agent 部件上。
++    const read = {
++      id: "read", sessionID: "s", messageID: "2", type: "tool", callID: "read-call", tool: "read",
++      state: { status: "completed", input: { filePath: `${tmp.path}/file.txt` }, output, title: "file.txt",
++        metadata: { loaded: [filepath] }, time: { start: 1, end: 2 } },
++    } satisfies Part
++    // 空 instructionFiles 隔离当轮系统规则扫描；AGENTS 文件在磁盘真实存在，只能由 loaded 分支观察。
++    const request = { messages: [user("1", { read: true }), assistant("2", "1")], parts: { "1": [], "2": [read] },
++      providers: [provider], paths: { cwd: tmp.path }, instructionFiles: [], skills: [], toolDefinitions: [] }
++    const inline = await computeContextData(request)
++    // 旧正文全部归 toolResults；loaded 不是另一份载荷，当前磁盘版本不能再进入 Instructions 分栏。
++    expect(inline.details.messages.toolResults).toBe(estimate(output))
++    expect(inline.details.loadedInstructions).toEqual([])
++    expect(inline.categories.find((item) => item.name === "Instructions")?.tokens).toBe(0)
++    const notInline = await computeContextData({ ...request, parts: { "1": [], "2": [{ ...read,
++      state: { ...read.state, output: "Read file contents without an inline instruction reminder." } }] } })
++    // metadata.loaded 的未内联分支仍补充真实磁盘规则，不能用一律忽略 loaded 来让去重样例通过。
++    expect(notInline.details.loadedInstructions).toEqual([{ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${current}`) }])
++    // 磁盘补充仅归 Instructions，不能写回 toolResults 并让同一正文在两个分类中出现。
++    expect(notInline.details.messages.toolResults).toBe(estimate("Read file contents without an inline instruction reminder."))
++    const compacted = await computeContextData({ ...request, parts: { "1": [], "2": [{ ...read,
++      state: { ...read.state, time: { start: 1, end: 2, compacted: 3 } } }] } })
++    // 原 output 仍留在部件上，但窗口只计占位符；内联证明也必须忽略这份已不可见的旧正文。
++    expect(compacted.details.messages.toolResults).toBe(estimate("[Old tool result content cleared]"))
++    expect(compacted.details.loadedInstructions).toEqual(notInline.details.loadedInstructions)
 +  })
 +
-+  // 验证提供者输入预留与真实压缩缓冲区分离：大上下文 + 小输入限制场景
++  // 真实小 input/大 context 情形能暴露 reserve 被当作 compaction buffer 的错误分配。
 +  test("splits provider input reserve from the real autocompact buffer", async () => {
 +    const constrained: Provider = {
 +      ...provider,
 +      models: {
 +        model: {
 +          ...provider.models.model,
-+          // context >> input：模拟 Anthropic 式预留，providerReserve = 131100 远大于 buffer
++          // 输入上限刻意小于窗口的一半；误用 context 仍有非零余量，只检查非零无法发现这个错误。
 +          limit: { context: 204_800, input: 73_700, output: 32_000 },
 +        },
 +      },
@@ -1592,10 +1825,7 @@ new file mode 100644
 +      toolDefinitions: [],
 +    })
 +
-+    // 上下文 204800、输入 73700、输出 32000
-+    // 可用输入 = 73700 - min(20000, min(32000, 32000)) = 73700 - 20000 = 53700
-+    // 提供者预留 = 204800 - 73700 = 131100
-+    // 压缩缓冲区 = 73700 - 53700 = 20000
++    // 输出 cap 为 32k，默认输入缓冲只扣 20k；完整窗口 oracle 同时锁定 usable 与输入上限。
 +    expect(data.details.window).toMatchObject({
 +      contextLimit: 204_800,
 +      inputLimit: 73_700,
@@ -1603,17 +1833,19 @@ new file mode 100644
 +      providerReserve: 131_100,
 +      compactionBuffer: 20_000,
 +    })
++    // provider reserve 属于模型容量，既不计入 used，也不从 usable 再扣一次。
 +    expect(data.categories.find((item) => item.name === "Model reserve")?.tokens).toBe(131_100)
++    // 压缩缓冲独立于 context-input 差额，不能把 131100 当作安全余量。
 +    expect(data.categories.find((item) => item.name === "Autocompact buffer")?.tokens).toBe(20_000)
-+    // 自由空间在压缩缓冲区之前（分类顺序）
++    // 自由空间只能位于 buffer 前面，尾部安全缓冲不能因类别排序移到 used 之间。
 +    expect(data.categories.findIndex((item) => item.name === "Free space")).toBeLessThan(
 +      data.categories.findIndex((item) => item.name === "Autocompact buffer"),
 +    )
-+    // 最后一格仍是压缩缓冲区
++    // 大额 provider reserve 不能抢走 buffer 的尾格；这项断言独立于小窗口 fixture。
 +    expect(data.gridRows.flat().at(-1)?.categoryName).toBe("Autocompact buffer")
 +  })
 +
-+  // 验证用户未显式禁用工具时，全部内置工具定义被估算
++  // 缺省 tools 没有权限上的子集含义，无历史调用也不能把定义折叠成空列表。
 +  test("estimates all built-in tool definitions when the request did not explicitly disable tools", async () => {
 +    const data = await computeContextData({
 +      messages: [user("1"), assistant("2", "1")],
@@ -1628,19 +1860,19 @@ new file mode 100644
 +      columns: 100,
 +      instructionFiles: [],
 +      skills: [],
-+      // 两个内置工具定义：用户未指定 tools 时应全部估算
++      // 固定两个定义隔离本机实验 flag，测试缺省广告语义不能依赖环境里启用了哪些工具。
 +      toolDefinitions: [
 +        { name: "bash", text: "bash description" },
 +        { name: "read", text: "read description" },
 +      ],
 +    })
 +
-+    // 用户未指定 tools 且无活跃工具 → 全部 scanned 工具默认活跃
++    // 两个注入工具均无历史调用，若实现从已调用部件推导定义集合，这个完整集合断言必然失败。
 +    expect(data.details.toolDefs.map((item) => item.name)).toEqual(["bash", "read"])
 +    expect(data.categories.find((item) => item.name === "Tool definitions")?.tokens).toBeGreaterThan(0)
 +  })
 +
-+  // 验证明细行按终端宽度截断，不溢出到网格区域
++  // 超长 Windows 路径保留文件尾部，验证中间截断而非简单 slice 掩盖真正的文件身份。
 +  test("context usage detail lines are bounded so they do not push into the grid", async () => {
 +    const data = await computeContextData({
 +      messages: [user("1", { bash: true }), assistant("2", "1")],
@@ -1653,30 +1885,30 @@ new file mode 100644
 +      agents: [],
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
-+      // Windows 风格长路径验证截断
++      // 宿主可以是 Unix，保存的 Windows 路径仍应按两种分隔符保留 AGENTS.md 的文件尾部。
 +      instructionFiles: [{ path: "F:\\very\\long\\nested\\workspace\\path\\that\\should\\not\\overflow\\AGENTS.md", content: "body" }],
 +      skills: [],
 +      toolDefinitions: [{ name: "bash", text: "bash description" }],
 +    })
 +
-+    // 模拟 80 列终端：验证长路径在窄终端下被正确截断
++    // formatter 使用调用时的 80 列，而不是 compute 时的 100 列，resize 必须独立重排明细。
 +    const lines = contextUsageDetailLines(data, 80)
-+    // 最多 3 行：输入、输出、提示
++    // 文件数量或工具数量增加也只能改变三行内容，不能把明细展开成长列表挤走网格。
 +    expect(lines.length).toBeLessThanOrEqual(3)
-+    // 每行不超过 72 字符（80 - 8）
++    // 独立检查上界，避免某条路径绕开 formatter 后仍因其他行正常而被平均长度掩盖。
 +    expect(lines.every((line) => line.length <= 72)).toBe(true)
-+    // 截断后 padEnd 到固定宽度 72
++    // 再检查精确补齐，防止只满足上界却让连续 resize 后的明细列位置跳动。
 +    expect(lines.every((line) => line.length === 72)).toBe(true)
-+    // 包含文件名、输入、输出、提示标签
++    // 截断必须保留文件身份与三类入口，不能为了守住宽度直接删掉整条重要明细。
 +    expect(lines.join("\n")).toContain("AGENTS.md")
 +    expect(lines.join("\n")).toContain("Input")
 +    expect(lines.join("\n")).toContain("Output")
 +    expect(lines.join("\n")).toContain("Prompt")
-+    // 无技能时不显示 "Skills 0"
++    // 空技能列表没有可用能力，明细不能制造一个看似有已注册工具的 Skills 占位项。
 +    expect(lines.join("\n")).not.toContain("Skills 0")
 +  })
 +
-+  // 验证底部状态行从 step-finish 部件提取已确认的输入/输出/推理/缓存用量
++  // 确认 fixture 与消息正文估算无关，footer 必须取 provider 字段而非用字符数近似计费用量。
 +  test("footer reports confirmed session input, output, reasoning, and cache totals", async () => {
 +    const data = await computeContextData({
 +      messages: [user("1"), assistant("2", "1")],
@@ -1689,13 +1921,13 @@ new file mode 100644
 +            messageID: "2",
 +            type: "step-finish",
 +            reason: "stop",
-+            // 非零成本验证 footer 的 Cost 字段渲染
++            // 非零 cost 独立于 tokens，能暴露把金额当 token 或遗漏费用展示的两种错误。
 +            cost: 0.01,
 +            tokens: {
 +              input: 100,
 +              output: 40,
 +              reasoning: 10,
-+              // 缓存读 20/写 5：验证 footer 的 Cache W/R 字段顺序为 write/read
++              // cache 仍是确认 producer 的两个独立数值，若被正文长度替代，总额和 W/R 次序断言会同时失败。
 +              cache: { read: 20, write: 5 },
 +            },
 +          } as Part,
@@ -1713,57 +1945,57 @@ new file mode 100644
 +
 +    // input=100, output=40+10=50, reasoning=10, cacheRead=20, cacheWrite=5
 +    expect(data.details.usage).toMatchObject({ input: 100, output: 50, reasoning: 10, cacheRead: 20, cacheWrite: 5 })
-+    // 有确认用量时显示 Session Totals
++    // 正文仅有 hello/world，账本的 100 输入来自 step-finish；显示总额不能取短正文的字符估算。
 +    expect(contextUsageFooter(data, 100)).toContain("Session Totals")
 +    // 输出含推理：Output 50
 +    expect(contextUsageFooter(data, 100)).toContain("Output 50")
-+    // 缓存读/写：Cache W/R 5/20
++    // 非对称缓存数值才能验证 W/R 展示次序，两个字段相等会掩盖反转。
 +    expect(contextUsageFooter(data, 100)).toContain("Cache W/R 5/20")
-+    // 底部行宽度 = max(36, 100-18) = 82
++    // 有确认字段时也要留关闭提示宽度，不能因为切到 Session Totals 就绕过 formatter。
 +    expect(contextUsageFooter(data, 100).length).toBe(82)
 +  })
 +
-+  // 验证压缩历史过滤：保留压缩摘要后的尾部消息，丢弃被压缩的旧消息
++  // 真实 tail 同时跨用户与助手记录，fixture 不把保留区压缩成只有 summary 的特殊例外。
 +  test("filters compacted history and keeps summary plus retained tail", () => {
-+    // 按时间倒序输入（最旧在前）：old → old answer → tail → tail answer → compaction → summary
++    // fixture 先按时间正序构造，调用处显式 toReversed 进入倒序裁剪路径。
 +    const messages = [
 +      { info: user("1"), parts: [text("1", "old")] },
 +      { info: assistant("2", "1"), parts: [text("2", "old answer")] },
++      // tail_start_id 的用户消息本身也保留，不能只留下其助手回复。
 +      { info: user("3"), parts: [text("3", "tail")] },
 +      { info: assistant("4", "3"), parts: [text("4", "tail answer")] },
 +      {
 +        info: user("5"),
-+        // compaction 部件声明 tail_start_id = "3"，保留从消息 3 开始的尾部
++        // 边界放在一对中间轮次之前，能暴露实现只保留最新助手回复却丢弃它所回答的用户消息。
 +        parts: [{ id: "c", sessionID: "s", messageID: "5", type: "compaction", auto: true, tail_start_id: "3" } as Part],
 +      },
 +      { info: assistant("6", "5", true), parts: [text("6", "summary")] },
 +    ]
 +
-+    // 过滤后应保留 3/4/5/6（tail + compaction + summary）
++    // 旧 1/2 与保留的 3/4 同时存在，断言能发现全部历史未裁剪和 tail 被全部丢弃两类错误。
 +    const result = filterCompactedMessages(messages.toReversed()).map((item) => item.info.id)
-+    // 保留 tail_start_id="3" 起的尾部 + compaction + summary，丢弃被压缩的 1/2
++    // 精确顺序要求先 tail 后请求/摘要；只比较集合会掩盖倒序结果或 summary 移到窗口开头。
 +    expect(result).toEqual(["3", "4", "5", "6"])
 +  })
 +})
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -74,6 +74,8 @@
+@@ -74,6 +74,7 @@
  import { normalizePath } from "../../util/path"
  import { PermissionPrompt } from "./permission"
  import { QuestionPrompt } from "./question"
-+// 上下文使用面板：显示 token 分布和上下文占用
 +import { ContextUsagePanel } from "./context-usage"
  import { DialogExportOptions } from "../../ui/dialog-export-options"
  import * as Model from "../../util/model"
  import { formatTranscript } from "../../util/transcript"
-@@ -237,7 +239,11 @@
+@@ -237,7 +238,11 @@
      if (session()?.parentID) return []
      return children().flatMap((x) => sync.data.question[x.id] ?? [])
    })
 -  const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
 -  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
-+  // 上下文面板可见性：独立信号，面板打开时隐藏其他 UI 避免冲突
++  // 权限/问题拥有插槽优先级，打开面板不能同时启用普通输入；关闭只恢复可见性而不回复审批。
 +  const [contextVisible, setContextVisible] = createSignal(false)
 +  const visible = createMemo(
 +    () => !session()?.parentID && permissions().length === 0 && questions().length === 0 && !contextVisible(),
@@ -1771,11 +2003,11 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0 || contextVisible())
  
    const pending = createMemo(() => {
-@@ -609,6 +615,18 @@
+@@ -609,6 +614,18 @@
        },
      },
      {
-+      // 上下文使用：切换面板显示，标题随状态变化
++      // 命令只切换本会话视图信号，不向 runner 发起 prompt、resume 或 interrupt，查看不会改变执行账本。
 +      title: contextVisible() ? "Hide context usage" : "Context usage",
 +      value: "session.context",
 +      category: "Session",
@@ -1790,51 +2022,109 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
        title: "Unshare session",
        value: "session.unshare",
        category: "Session",
-@@ -1323,6 +1341,9 @@
+@@ -1323,6 +1340,10 @@
                      directory={sync.session.get(questions()[0].sessionID)?.directory}
                    />
                  </Show>
++                {/* 面板归此 Show owner 管理，隐藏时释放订阅，已开始的文件读取仍可自然完成。 */}
 +                <Show when={permissions().length === 0 && questions().length === 0 && contextVisible()}>
 +                  <ContextUsagePanel sessionID={route.sessionID} onClose={() => setContextVisible(false)} />
 +                </Show>
                  <Show when={session()?.parentID}>
                    <SubagentFooter />
                  </Show>
-diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
---- a/packages/opencode/src/session/system.ts
-+++ b/packages/opencode/src/session/system.ts
-@@ -112,20 +112,25 @@
-   if (has("todo")) items.push(``, `Keep todo state current while working: only one item should be in_progress at a time.`, `Move an item to in_progress before completing it; do not jump directly from pending to completed.`, `If your understanding changes, update the todo list before continuing implementation.`)
-   items.push(
-     ` - Reserve bash for system commands and terminal operations requiring shell execution`,
--    // 批量并行调用指引：先规划完整批次，再一次性发出
--    `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent calls you will make.`,
--    `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue them one at a time.`,
--    `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*").`,
--    `After the first batch returns, identify all newly relevant directories/files and issue the second broad independent batch.`,
--    `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
--    `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch.`,
-+    // SMARK：首批工具调用应覆盖已知的读/搜/glob/目录列举/状态检查，避免串行发现
-+    `THINK FIRST before using tools. Before your first tool call, decide the FULL first batch of independent reads, searches, globs, directory listings, and status checks you already know you need.`,
-+    // SMARK：禁止在已有多条独立调用时只发一条 discovery，必须同响应并行
-+    `BATCH independent tool calls in the SAME response so they can run in parallel. Do not issue only one discovery call when several independent discovery calls are already obvious.`,
-+    // SMARK：目录勘察首波包含 monorepo packages/*
-+    `For directory surveys, use a wide first wave. Example independent batch: glob("*"), glob("*/*"), glob("*/package.json"), glob("*/README*"), glob("*/src/*"), glob("*/packages/*").`,
-+    // SMARK：后续批次用 next...together，强调同一轮继续并行
-+    `After the first batch returns, identify all newly relevant directories/files and issue the next independent batch together.`,
-+    `BAD: glob("*") -> wait -> glob("*/*") -> wait -> glob("one-dir/*").`,
-+    // SMARK：GOOD 路径要求对重要 discovered roots 发第二波独立批次
-+    `GOOD: broad independent batch -> summarize discovered structure -> second broad independent batch for important discovered roots.`,
-     `Sequential calls are ONLY for true dependencies, conflicts, or cases where the next target cannot be known without the previous result.`,
--    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output, because it renders poorly for the user.`,
-+    // SMARK：分隔符拼接 bash 输出在 TUI 中渲染差，用分号说明而非 because 从句
-+    `DO NOT chain bash commands with separators like \`echo "====";\` to simulate grouped output; it renders poorly for the user.`,
-+    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
-     // 并行写入安全：仅限非冲突文件
-     `Parallel writes are allowed ONLY when target files or edit ranges cannot conflict.`,
-     // 单文件多处修改优先用一次编辑
-     `For multiple changes in one file, prefer one edit/patch containing all non-overlapping changes.`,
--    `Use bash only when dedicated tools are insufficient or when real terminal execution is required.`,
-   )
-   return ["# Using your tools", ...items].join("\n")
- }
+diff --git a/packages/tui/package.json b/packages/tui/package.json
+--- a/packages/tui/package.json
++++ b/packages/tui/package.json
+@@ -60,6 +60,7 @@
+     "fuzzysort": "catalog:",
++    "gray-matter": "4.0.3",
+     "open": "10.1.2",
+     "opentui-spinner": "catalog:",
+     "remeda": "catalog:",
+     "strip-ansi": "7.1.2",
+     "solid-js": "catalog:"
+diff --git a/packages/tui/src/util/tool-definition-catalog.json b/packages/tui/src/util/tool-definition-catalog.json
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/util/tool-definition-catalog.json
+@@ -0,0 +1,68 @@
++{
++  "invalid": {
++    "description": "Do not use",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"tool":{"type":"string"},"error":{"type":"string"}},"required":["tool","error"]}
++  },
++  "question": {
++    "description": "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- When `custom` is enabled (default), a \"Type your own answer\" option is added automatically; don't include \"Other\" or catch-all options\n- Answers are returned as arrays of labels; set `multiple: true` to allow selecting more than one\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"questions":{"type":"array","items":{"type":"object","properties":{"question":{"type":"string","description":"Complete question"},"header":{"type":"string","description":"Very short label (max 30 chars)"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string","description":"Display text (1-5 words, concise)"},"description":{"type":"string","description":"Explanation of choice"}},"required":["label","description"]},"description":"Available choices"},"multiple":{"type":"boolean","description":"Allow selecting multiple choices"}},"required":["question","header","options"]},"description":"Questions to ask"}},"required":["questions"]}
++  },
++  "bash": {
++    "description": "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.\n\nBe aware: OS: ${os}, Shell: ${shell}\n\nAll commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory.\n\nUse `/tmp` for temporary work outside the workspace. This directory has already been created, already exists, and is pre-approved for external directory access.\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow directory verification and quoting rules for paths with spaces.\n\n# Git repository state changes\n\n# 只读检查允许列表（含 rev-parse / remote -v）\nRead-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.\n\n# 写操作必须由最新用户消息明确要求该操作类型\nDo not run git commands that modify refs, history, the index, the working tree, stashes, or remotes\nunless the latest user message explicitly requests that exact kind of operation.\nThis includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`,\n`git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`,\nand `git stash push/pop/apply/drop/clear`.\nDebugging, fixing tests, syncing a branch, resolving a blocker, or make-it-work is not authorization for these commands.\nIf such an operation seems necessary, explain why and ask first.\n\n# Git Safety Protocol\n- NEVER update the git config\n- NEVER run destructive/irreversible git commands (force push, hard reset, etc) unless the user explicitly requests them\n- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it\n- NEVER run force push to main/master; warn the user if they request it\n- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:\n  (1) User explicitly requested amend, OR the commit succeeded and pre-commit hooks auto-modified files that need including\n  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')\n  (3) Commit has NOT been pushed to remote (verify: git status shows \"Your branch is ahead\")\n- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit\n- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)\n- NEVER commit changes unless the latest user message explicitly asks you to.\n  Prior approval to make code changes, debug, test, or inspect git status is not approval to commit.\n\n# Committing changes with git\nOnly create commits when the latest user message explicitly asks you to create a commit. If unclear, ask first.\n- Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.\n- Write a concise commit message that matches the repo style.\n- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.\n\n# GitHub\n- Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.\n- Review all commits included in the PR, not just the latest commit.\n- Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"command":{"type":"string","description":"The command to execute"},"description":{"type":"string","description":"Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status."},"timeout":{"minimum":-9007199254740991,"type":"integer","exclusiveMinimum":0,"maximum":9007199254740991,"description":"Optional timeout in milliseconds"},"workdir":{"type":"string","description":"The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands."},"compress_output":{"type":"boolean","description":"Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important."}},"required":["command"]}
++  },
++  "read": {
++    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 2000 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file or directory to read"},"offset":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The line number to start reading from (1-indexed)"},"limit":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The maximum number of lines to read (defaults to 2000)"}},"required":["filePath"]}
++  },
++  "glob": {
++    "description": "# glob 工具：优先专用搜索，避免 shell find 绕过忽略规则\n- Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n- Returns matching file paths\n- Use this tool when you need to find files by name patterns\n- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 2+ independent branches and does not block your next local step.\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"pattern":{"type":"string","description":"The glob pattern to match files against"},"path":{"type":"string","description":"The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided."}},"required":["pattern"]}
++  },
++  "grep": {
++    "description": "# grep 工具：优先专用内容搜索，避免 shell grep 丢上下文\n- Fast content search tool that works with any codebase size\n- Searches file contents using regular expressions\n- Supports full regex syntax (eg. \"log.*Error\", \"function\\s+\\w+\", etc.)\n- Filter files by pattern with the include parameter (eg. \"*.js\", \"*.{ts,tsx}\")\n- Returns file paths and line numbers with matching lines\n- Use this tool when you need to find files containing specific patterns\n- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.\n- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"pattern":{"type":"string","description":"The regex pattern to search for in file contents"},"path":{"type":"string","description":"The directory to search in. Defaults to the current working directory."},"include":{"type":"string","description":"File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")"}},"required":["pattern"]}
++  },
++  "edit": {
++    "description": "Performs exact string replacements in files. \n\nUsage:\n- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. \n- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.\n- The edit will FAIL if `oldString` is not found in the file with an error \"oldString not found in content\".\n- The edit will FAIL if `oldString` is found multiple times in the file with an error \"Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match.\" Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.\n- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file to modify"},"oldString":{"type":"string","description":"The text to replace"},"newString":{"type":"string","description":"The text to replace it with (must be different from oldString)"},"replaceAll":{"type":"boolean","description":"Replace all occurrences of oldString (default false)"}},"required":["filePath","oldString","newString"]}
++  },
++  "write": {
++    "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.\n- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.\n- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.\n- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"content":{"type":"string","description":"The content to write to the file"},"filePath":{"type":"string","description":"The absolute path to the file to write (must be absolute, not relative)"}},"required":["content","filePath"]}
++  },
++  "task": {
++    "description": "# task 工具：禁止跨会话复用非法 task_id，须显式新建\nLaunch a new agent to handle complex, multistep tasks autonomously.\n\nWhen using the Task tool, you must specify a subagent_type parameter to select which agent type to use.\n\nUse task when:\n- The user invokes a custom slash command; pass the slash command invocation as the full prompt.\n- A broad codebase question splits into 2+ independent search/read branches.\n- A non-blocking subtask can run in parallel while you continue useful local work.\n- A specialized agent clearly matches the task and can materially advance the request.\n- You need an isolated review/research pass and the user requested or accepted that workflow.\n\nDo NOT use task when:\n- You need to read a known file path; use read.\n- You need to find files by name; use glob.\n- You need to search known keywords, symbols, error text, or a small set of files; use grep/read.\n- The next local step is blocked on the result and you can search or read it yourself.\n- The task is trivial, would duplicate work you are already doing, or would only save context.\n- The task is normal debugging, implementation, or verification work in the current thread.\n\nPrompting rules:\n- Make the prompt self-contained unless resuming with task_id.\n- State whether the agent should research only or edit files.\n- For code-editing subtasks, specify the owned files/modules and avoid overlapping write scopes with other agents.\n- Include relevant paths, constraints, and expected final output.\n- Ask for concise findings when you only need a summary.\n- Tell the agent how to verify its work when verification is possible.\n\n\nUsage notes:\n- Launch independent agents in parallel in one response when their scopes do not overlap.\n- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.\n- Reuse task_id only when continuing the same subagent context is useful.\n- The agent result is returned to you, not directly to the user; summarize relevant results yourself.\n\nExample usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):\n\n<example_agent_descriptions>\n\"explorer\": use this agent for broad, independent codebase exploration across multiple unrelated areas\n\"reviewer\": use this agent for an isolated review pass after the user requested or accepted review\n</example_agent_description>\n\n<example>\nuser: \"Where is the database lock error thrown?\"\n<commentary>\nThe target is a known error string, so use grep/read directly instead of Task.\n</commentary>\nassistant: Uses grep for \"database is locked\", then reads the matching files.\n</example>\n\n<example>\nuser: \"Compare the server lifecycle, permission model, and streaming event flow.\"\n<commentary>\nThis has 3 independent research branches and can run in parallel, so Task may be useful.\n</commentary>\nassistant: Uses Task to launch independent exploration for each non-overlapping branch.\n</example>\n",
++    "backgroundDescription": "Background mode: background=true launches the subagent asynchronously and returns immediately. Foreground is the default; use it when you need the result before continuing. Use background only for independent work that can run while you continue elsewhere. You will be notified automatically when it finishes.",
++    "baseParameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"description":{"type":"string","description":"A short (3-5 words) description of the task"},"prompt":{"type":"string","description":"The task for the agent to perform"},"subagent_type":{"type":"string","description":"The type of specialized agent to use for this task"},"task_id":{"type":"string","description":"This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"},"command":{"type":"string","description":"The command that triggered this task"}},"required":["description","prompt","subagent_type"]},
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"description":{"type":"string","description":"A short (3-5 words) description of the task"},"prompt":{"type":"string","description":"The task for the agent to perform"},"subagent_type":{"type":"string","description":"The type of specialized agent to use for this task"},"task_id":{"type":"string","description":"This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)"},"command":{"type":"string","description":"The command that triggered this task"},"background":{"type":"boolean","description":"Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress"}},"required":["description","prompt","subagent_type"]}
++  },
++  "webfetch": {
++    "description": "- Fetches content from a specified URL\n- Takes a URL and optional format as input\n- Fetches the URL content, converts to requested format (markdown by default)\n- Returns the content in the specified format\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: if another tool is present that offers better web fetching capabilities, is more targeted to the task, or has fewer restrictions, prefer using that tool instead of this one.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - Format options: \"markdown\" (default), \"text\", or \"html\"\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"url":{"type":"string","description":"The URL to fetch content from"},"format":{"type":"string","enum":["text","markdown","html"],"description":"The format to return the content in (text, markdown, or html). Defaults to markdown.","default":"markdown"},"timeout":{"type":"number","description":"Optional timeout in seconds (max 120)"}},"required":["url"]}
++  },
++  "todowrite": {
++    "description": "Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.\n\nUse todowrite when:\n- The task has 3 or more meaningful steps.\n- The user explicitly asks for a todo list or progress tracking.\n- The user provides multiple tasks or requirements.\n- The work needs planning, implementation, and verification phases.\n- New instructions change the plan and the task list should be updated.\n\nDo not use todowrite when:\n- The task is a single straightforward action.\n- The task is trivial or purely informational.\n- Tracking would add noise without improving execution.\n\n## States\n- `pending` - not started\n- `in_progress` - actively working (exactly ONE at a time)\n- `completed` - finished successfully\n- `cancelled` - no longer needed\n\n## Rules\n- Update status in real time; don't batch completions\n- Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.\n- Keep exactly one `in_progress` while work remains\n- If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker\n- Preserve user-provided commands verbatim (flags, args, order)\n- Items should be specific and actionable; break large work into smaller steps\n\n## Examples\n\nUse it:\n- \"Add a dark mode toggle and run the tests\" -> multi-step feature + explicit verification\n- \"Rename getCwd -> getCurrentWorkingDirectory across the repo\" -> grep reveals 15 occurrences in 8 files\n- \"Implement registration, catalog, cart, checkout\" -> multiple complex features\n\nSkip it:\n- \"How do I print Hello World in Python?\" -> informational\n- \"Add a comment to calculateTotal\" -> single edit\n- \"Run npm install and tell me what happened\" -> one command\n\nWhen in doubt, use it.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string","description":"Brief description of the task"},"status":{"type":"string","description":"Current status of the task: pending, in_progress, completed, cancelled"},"priority":{"type":"string","description":"Priority level of the task: high, medium, low"}},"required":["content","status","priority"]},"description":"The updated todo list"}},"required":["todos"]}
++  },
++  "websearch": {
++    "description": "- Search the web using the session's web search provider - performs real-time web searches and can scrape content from specific URLs\n- Provides up-to-date information for current events and recent data\n- Supports configurable result counts and returns the content from the most relevant websites\n- Use this tool for accessing information beyond knowledge cutoff\n- Searches are performed automatically within a single API call\n\nUsage notes:\n  - Supports live crawling modes when available: 'fallback' (backup if cached unavailable) or 'preferred' (prioritize live crawling)\n  - Search types when available: 'auto' (balanced), 'fast' (quick results), 'deep' (comprehensive search)\n  - Configurable context length for optimal LLM integration\n  - Domain filtering and advanced search options available\n\nThe current year is {{year}}. You MUST use this year when searching for recent information or current events\n- Example: If the current year is 2026 and the user asks for \"latest AI news\", search for \"AI news 2026\", NOT \"AI news 2025\"\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"query":{"type":"string","description":"Websearch query"},"numResults":{"type":"number","description":"Number of search results to return (default: 8)"},"livecrawl":{"type":"string","enum":["fallback","preferred"],"description":"Live crawl mode - 'fallback': use live crawling as backup if cached content unavailable, 'preferred': prioritize live crawling (default: 'fallback')"},"type":{"type":"string","enum":["auto","fast","deep"],"description":"Search type - 'auto': balanced search (default), 'fast': quick results, 'deep': comprehensive search"},"contextMaxCharacters":{"type":"number","description":"Maximum characters for context string optimized for LLMs (default: 10000)"}},"required":["query"]}
++  },
++  "skill": {
++    "description": "Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.\n\nUse this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.\n\nThe skill name must match one of the skills listed in your system prompt.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string","description":"The name of the skill from available_skills"}},"required":["name"]}
++  },
++  "apply_patch": {
++    "description": "Use the `apply_patch` tool to edit files. Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, you get a sequence of file operations.\nYou MUST include a header to specify the action you are taking.\nEach operation starts with one of three headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place (optionally with a rename).\n\nExample patch:\n\n```\n*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n*** Update File: src/app.py\n*** Move to: src/main.py\n@@ def greet():\n-print(\"Hi\")\n+print(\"Hello, world!\")\n*** Delete File: obsolete.txt\n*** End Patch\n```\n\nIt is important to remember:\n\n- You must include a header with your intended action (Add/Delete/Update)\n- You must prefix new lines with `+` even when creating a new file\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"patchText":{"type":"string","description":"The full patch text that describes all changes to be made"}},"required":["patchText"]}
++  },
++  "lsp": {
++    "description": "Interact with Language Server Protocol (LSP) servers to get code intelligence features.\n\nSupported operations:\n- goToDefinition: Find where a symbol is defined\n- findReferences: Find all references to a symbol\n- hover: Get hover information (documentation, type info) for a symbol\n- documentSymbol: Get all symbols (functions, classes, variables) in a document\n- workspaceSymbol: List project-wide symbols matching a query string\n- goToImplementation: Find implementations of an interface or abstract method\n- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)\n- incomingCalls: Find all functions/methods that call the function at a position\n- outgoingCalls: Find all functions/methods called by the function at a position\n\nAll operations require:\n- filePath: The file to operate on\n- line: The line number (1-based, as shown in editors)\n- character: The character offset (1-based, as shown in editors)\n\nworkspaceSymbol also accepts:\n- query: A query string to filter symbols by. Empty string requests all symbols.\n\nFor workspaceSymbol, filePath is not sent in the LSP workspace/symbol request. It is used by opencode to select and start the matching LSP server.\n\nNote: LSP servers must be configured for the file type. If no server is available, an error will be returned.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"operation":{"type":"string","enum":["goToDefinition","findReferences","hover","documentSymbol","workspaceSymbol","goToImplementation","prepareCallHierarchy","incomingCalls","outgoingCalls"],"description":"The LSP operation to perform"},"filePath":{"type":"string","description":"The absolute or relative path to the file"},"line":{"type":"integer","minimum":1,"maximum":9007199254740991,"description":"The line number (1-based, as shown in editors)"},"character":{"type":"integer","minimum":1,"maximum":9007199254740991,"description":"The character offset (1-based, as shown in editors)"},"query":{"type":"string","description":"Search query for workspaceSymbol. Empty string requests all symbols."}},"required":["operation","filePath","line","character"]}
++  },
++  "plan_exit": {
++    "description": "Use this tool when you have completed the planning phase and are ready to exit plan agent.\n\nThis tool will ask the user if they want to switch to build agent to start implementing the plan.\n\nCall this tool:\n- After you have written a complete plan to the plan file\n- After you have clarified any questions with the user\n- When you are confident the plan is ready for implementation\n\nDo NOT call this tool:\n- Before you have created or finalized the plan\n- If you still have unanswered questions about the implementation\n- If the user has indicated they want to continue planning\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{}}
++  }
++}
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -954,6 +954,7 @@
+         "clipboardy": "4.0.0",
+         "diff": "catalog:",
+         "effect": "catalog:",
+         "fuzzysort": "catalog:",
++        "gray-matter": "4.0.3",
+         "open": "10.1.2",
+         "opentui-spinner": "catalog:",

@@ -6,7 +6,6 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E9=87=8D=E6=9E=84=E7=AC=94?=
  =?UTF-8?q?=E5=90=88=E5=B9=B6=E5=86=85=E6=A0=B8=E9=87=8D=E5=90=AF=E5=8A=9F?=
 
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-index 91bbf41fcb..1ea7a541f0 100644
 --- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 @@ -23,7 +23,7 @@ export const VscodeNotebookDescriptions = {
@@ -18,18 +17,13 @@ index 91bbf41fcb..1ea7a541f0 100644
    ].join("\n"),
  
    output: [
-@@ -41,16 +41,18 @@ export const VscodeNotebookDescriptions = {
-     "After any successful edit, call vscode_notebook_summary again before further cell-index-sensitive operations.",
-   ].join("\n"),
- 
-+  // env 描述含 restart；删除 kernel 描述块
-+  // save 描述禁止 unprompted 自动落盘
+@@ -44,12 +44,10 @@ export const VscodeNotebookDescriptions = {
    env: [
 -    "Report VS Code notebook runtime state and saved notebook metadata.",
 -    "filePath is required. Use this when debugging kernel, interpreter, package, working-directory, or environment issues.",
 -    "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
 -  ].join("\n"),
--  // 工具描述：内核重启，清状态，filePath 必填
+-
 -  kernel: [
 -    "Restart the Jupyter kernel for a VS Code notebook.",
 -    "filePath is required. Use this when the kernel is unresponsive, packages have been installed, or a clean runtime state is needed.",
@@ -39,15 +33,11 @@ index 91bbf41fcb..1ea7a541f0 100644
 +    "Operations:",
 +    "  info      — probe the active kernel/interpreter and report saved .ipynb metadata",
 +    "  configure — open the notebook and trigger kernel selection (run before first execution)",
-+    // restart 文案：清空变量后需重跑 setup cells
 +    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward.",
 +    "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
    ].join("\n"),
- 
-+
  }
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
-index fb1cf5ea07..c0eb2ff75b 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
 @@ -59,9 +59,9 @@ const runArgs = {
@@ -55,18 +45,16 @@ index fb1cf5ea07..c0eb2ff75b 100644
      .int()
      .positive()
 -    .max(600_000)
-+    .max(3_000_000) // run timeout 上界 3000s：对齐长 cell 执行契约
++    .max(3_000_000)
      .optional()
 -    .describe("Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000."),
 +    .describe("Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 3000000."),
  }
  
  const outputArgs = {
-@@ -175,27 +175,25 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-       },
+@@ -175,23 +175,16 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
      }),
      vscode_notebook_env: tool({
-+      // 唯一 env 工具：删除独立 restart 工具，避免双入口
        description: VscodeNotebookDescriptions.env,
 -      args: requiredFilePath,
 -      execute: async (args, context) => ({
@@ -74,357 +62,240 @@ index fb1cf5ea07..c0eb2ff75b 100644
 -        metadata: { endpoint: "/notebook/env" },
 -      }),
 -    }),
--    // 插件工具：重启内核，30s 超时；filePath 必填
--    // 中间工具：#92 删除并改 env.operation=restart
 -    vscode_notebook_restart_kernel: tool({
 -      description: VscodeNotebookDescriptions.kernel,
        args: {
          ...requiredFilePath,
--        // reason 可选：只影响日志/返回 data，不改变重启语义
--        // reason 只进日志/data，不改变重启语义
 -        reason: z.string().optional().describe("Why the kernel is being restarted, for logging and user context."),
-+        // operation 必选枚举：禁止隐式 info 掩盖 restart 意图
-+        operation: z
-+          .enum(["info", "configure", "restart", "save"])
-+          .describe("Which notebook environment operation to perform."),
++        operation: z.enum(["info", "configure", "restart", "save"]).describe("Which notebook environment operation to perform."),
 +        reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
-+      },
-+      execute: async (args, context) => {
-+        // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
-+        const timeout = 120_000
-+        return {
-+          output: await call("/notebook/env", args, context, timeout),
-+          // metadata 带回 operation，便于 agent 对账
-+          metadata: { endpoint: "/notebook/env", operation: args.operation },
-+        }
        },
--      execute: async (args, context) => ({
+       execute: async (args, context) => ({
 -        output: await call("/notebook/kernel", args, context, 30_000),
 -        metadata: { endpoint: "/notebook/kernel" },
--      }),
++        output: await call("/notebook/env", args, context, 120_000),
++        metadata: { endpoint: "/notebook/env", operation: args.operation },
+       }),
      }),
- 
    },
+ }
+ }
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index 22970b3722..32e2adfa33 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -17,9 +17,8 @@
-  *   POST /notebook/edit         – insert/delete/replace cells
-  *   POST /notebook/output       – artifact-first output export
-  *   POST /notebook/cell-output  – alias for /notebook/output
-- *   POST /notebook/env          – kernel/environment snapshot
-- // HTTP 面新增 kernel 端点，与 env 快照分离
-- *   POST /notebook/kernel       – restart Jupyter kernel
-+ *   POST /notebook/env          – notebook environment operations (info/configure/restart/save)
-+ // env 统一承载 info/configure/restart/save
+@@ -12,8 +12,7 @@
+  *   POST /notebook/output      - 将已有输出按原始字节导出为文件
+  *   POST /notebook/cell-output - /notebook/output 的别名，使用相同认证
+- *   POST /notebook/env         - 实际活动内核与保存的元数据分列报告
+- *   POST /notebook/kernel      - 请求重启指定笔记本的 Jupyter 内核
++ *   POST /notebook/env         - 环境操作 info/configure/restart/save
+  * 所有 notebook 端点要求 filePath；路径或 URI 绑定目标文档，不由当前编辑器焦点决定。
+  * 导出文件响应同时保留 artifactPath 与 artifactURI，包括远程 scheme 和 authority。
   */
- import * as http from "node:http"
- import * as vscode from "vscode"
-@@ -31,7 +30,6 @@ import { runNotebook } from "./notebook/run"
+ import http from "node:http"
+@@ -26,6 +25,5 @@ import { runNotebook } from "./notebook/run"
  import { editNotebook } from "./notebook/edit"
  import { readNotebookCellOutput } from "./notebook/output"
  import { notebookEnv } from "./notebook/env"
 -import { restartNotebookKernel } from "./notebook/kernel"
  
- // 强制 127.0.0.1 监听，不暴露 0.0.0.0
  const BRIDGE_HOST = "127.0.0.1"
-@@ -169,7 +167,7 @@ export async function startBridge(output: { appendLine(value: string): void }):
-         .then((handle) => {
-           registry = handle
+@@ -32,7 +30,7 @@ const BRIDGE_HOST = "127.0.0.1"
+ // 桥接服务仅绑定本机回环地址，杜绝网络暴露
+ 
+ // 路由集合先决定是否读取请求体，未知路径不能因无关 JSON 内容从 404 变成 500。
+-const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env", "/notebook/kernel"])
++const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env"])
+ 
+ export type BridgeInfo = { port: number; token: string }
+ // 导出的 BridgeInfo 必须同时携带端口与 token，终端模块不能把地址当成访问凭证。
+@@ -196,7 +194,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
+           // 注册期间的卸载仍走原关闭屏障，不交付已经取消的凭证。
+           if (closing) return reject(new Error("VS Code bridge startup cancelled"))
            output.appendLine(`[bridge] registry ${handle.id}`)
 -          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "notebook/kernel", "manifest"]) {
 +          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "manifest"]) {
              output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : ``}`)
            }
            resolve({ port: address.port, token })
-@@ -214,14 +212,13 @@ async function routeRequest(
-       return await readNotebookCellOutput(filePath, undefined, cellId)
-     }
+@@ -228,12 +226,9 @@ async function routeRequest(
+   return await withFileLock(filePath, async () => {
+     switch (pathname) {
+       case "/notebook/env":
+-        return await notebookEnv(filePath)
+-
+-      case "/notebook/kernel":
+-        return await restartNotebookKernel(body)
++        return await notebookEnv(body)
  
-+    // env 统一承载 info/configure/restart/save；删除 /notebook/kernel
-     case "/notebook/env":
--      return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
-+      // bridge 只转发 body；operation 校验在 env
-+      return await notebookEnv(body)
+       case "/notebook/summary":
+         return await notebookSummary(filePath)
  
-     // 路由到内核重启 handler，body 已在 filePath 锁内读入
-     // 独立 kernel 端点（#91 中间态；#92 将并入 env）
--    case "/notebook/kernel":
--      // 内核重启：filePath 必填语义在 handler 内校验
--      return await restartNotebookKernel(body)
-   }
- 
-   return undefined
+       case "/notebook/source":
 diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/commands.ts
-index a947f75d93..cef8a61a1d 100644
 --- a/sdks/vscode/src/notebook/commands.ts
 +++ b/sdks/vscode/src/notebook/commands.ts
-@@ -6,7 +6,6 @@
-  * They are NOT called by the bridge server — only by the user via the command palette.
-  */
- import * as vscode from "vscode"
+@@ -8,7 +8,6 @@ import { runNotebook } from "./run"
+ import { editNotebook } from "./edit"
+ import { readNotebookCellOutput } from "./output"
+ import { notebookEnv } from "./env"
 -import { restartNotebookKernel } from "./kernel"
- import { openJsonDocument } from "../util"
- import { c1, copilotLikeCellId } from "./format"
- import { notebookSummary } from "./summary"
-@@ -28,28 +27,9 @@ import { notebookEnv } from "./env"
- // 注册 notebook 命令面板命令：提供调试用的 cell 选择和操作入口
- // 注册命令面板命令：提供调试用的 cell 操作入口
+ 
  export async function notebookBridgeTools(output: vscode.OutputChannel) {
--  // 显示 QuickPick：让用户选择 cell
--const picked = await vscode.window.showQuickPick(
-+  // 命令面板：原生 notebook bridge 工具列表（无独立 restart 项）
-+  const picked = await vscode.window.showQuickPick(
-     [
--      {
--        // 命令面板入口：可选 reason 后重启当前笔记本内核
--        // 面板入口可选 reason；#92 删除此 label
--        label: "vscode_notebook_restart_kernel",
--        // 命令面板：可选填写 reason 后重启内核
--        description: "restart Jupyter kernel, clear all runtime state",
--        run: async () => {
--          const notebook = await selectNotebook()
--          if (!notebook) return undefined
--          const reason = await vscode.window.showInputBox({
--            prompt: "Restart reason (optional)",
--            ignoreFocusOut: true,
--          })
--          // reason 可选：只影响日志/返回 data，不改变重启语义
--          // 命令面板用 notebook URI 作为 filePath 主路径
--          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason ?? undefined })
--        },
--      },
--
-       {
-         label: "vscode_notebook_summary",
-         description: "structure, cells, execution, output MIME",
-@@ -85,10 +65,33 @@ const picked = await vscode.window.showQuickPick(
+   // palette 与 HTTP 路由导入同一组处理器，交互调试不能再维护一套执行实现。
+@@ -49,25 +48,27 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
        },
        {
          label: "vscode_notebook_env",
 -        description: "kernel/environment capability snapshot",
-+        // QuickPick 标签必须是 info|configure|restart|save 字面量
 +        description: "info / configure / restart / save operations",
          run: async () => {
+           // 环境探测也绑定已选文档，取消选择不能发布一个无目标快照。
            const notebook = await selectNotebook()
 -          return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
-+          if (!notebook) return undefined
+-        },
+-      },
+-      {
+-        label: "vscode_notebook_restart_kernel",
+-        description: "restart Jupyter kernel, clear all runtime state",
+-        run: async () => {
+-          const notebook = await selectNotebook()
+           if (!notebook) return undefined
 +          const operation = await vscode.window.showQuickPick(
 +            [
 +              { label: "info", description: "kernel / interpreter / saved metadata snapshot" },
 +              { label: "configure", description: "open notebook + trigger kernel selection" },
-+              // restart 作为 env 子操作，不单独挂 label
 +              { label: "restart", description: "restart Jupyter kernel, clear all runtime state" },
 +              { label: "save", description: "persist notebook document to disk" },
 +            ],
-+            // Select operation 文案固定，供自动化匹配
 +            { title: "vscode_notebook_env", placeHolder: "Select operation" },
 +          )
 +          if (!operation) return undefined
-+          const reason = await vscode.window.showInputBox({
+           const reason = await vscode.window.showInputBox({
+-            prompt: "Restart reason (optional)",
 +            prompt: "Brief reason for this operation (optional)",
-+            ignoreFocusOut: true,
-+          })
-+          // 面板只调用 notebookEnv，避免引用已删 kernel 模块
-+          return notebookEnv({
-+            filePath: notebook.uri.toString(),
-+            operation: operation.label,
-+            reason: reason ?? undefined,
-+          })
+             ignoreFocusOut: true,
+           })
+           if (reason === undefined) return undefined
+-          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason || undefined })
++          return notebookEnv({ filePath: notebook.uri.toString(), operation: operation.label, reason: reason || undefined })
          },
        },
      ],
-@@ -98,8 +101,7 @@ const picked = await vscode.window.showQuickPick(
-       matchOnDescription: true,
-     },
-   )
--  // 用户取消选择：不执行任何操作
--if (!picked) return
-+  if (!picked) return
- 
-   output.show(true)
-   output.appendLine(`[notebook-bridge] ${picked.label}`)
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
-index 1997dda32c..1897a237e0 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -1,43 +1,19 @@
+@@ -1,6 +1,6 @@
  /**
-- * `vscode_notebook_env` — reports notebook runtime and saved metadata.
-- *
-- * Runtime source:
-- *   active Jupyter kernel process via Jupyter stable API:
-- // 运行时探测通过 executeCode，而非信任 notebook 文件声明
-- *   api.kernels.getKernel(notebook.uri) + kernel.executeCode(probe).
-- *
-- * Metadata source:
-- *   saved .ipynb file metadata.kernelspec / metadata.language_info.
-- *
-- * Important:
-- *   saved metadata is NOT treated as active runtime. If no started kernel exists,
-- // 无活动内核时不得把 saved metadata 伪装成 active runtime
-- *   runtime is reported as no-active-kernel even if metadata says "ML".
-+ * `vscode_notebook_env` — notebook environment operations (info/configure/restart/save).
-  */
- import * as vscode from "vscode"
+- * vscode_notebook_env 分别报告实际活动内核与保存的笔记本元数据。
++ * vscode_notebook_env 提供 info/configure/restart/save 环境操作。
+  *
+  * 运行时来源：Jupyter 稳定 API 的 api.kernels.getKernel(notebook.uri)，
+  * Python 信息由该内核的 executeCode 探针取得。
+  *
+@@ -12,7 +12,7 @@
+ import vscode from "vscode"
  import { TextDecoder } from "node:util"
 -import { extensionState, extensionInfo } from "../util"
 +import { extensionState, extensionInfo, stringProp } from "../util"
  import { resolveNotebook } from "./resolve"
  
--// 内核输出项：MIME 类型和原始字节数据，用于序列化执行结果
  type KernelOutputItem = { mime: string; data: Uint8Array }
  type KernelOutput = { items: KernelOutputItem[] }
--
--// Jupyter 内核接口：语言、状态和 executeCode 方法，用于运行时探测
- interface KernelLike {
-   readonly language: string
-   readonly status?: string
-   executeCode(code: string, token: vscode.CancellationToken): AsyncIterable<KernelOutput>
- }
--
--// Jupyter 扩展接口：通过 kernels.getKernel 获取活跃内核
--type JupyterLike = {
--  kernels?: {
--    getKernel?(uri: vscode.Uri): Promise<KernelLike | undefined>
--  }
--}
--
--// 活跃运行时：包含语言、内核状态和 Python 环境信息（版本、路径、conda 环境）
-+type JupyterLike = { kernels?: { getKernel?(uri: vscode.Uri): Promise<KernelLike | undefined> } }
- type ActiveRuntime = {
-   language: string
-   kernelStatus: string
-@@ -52,62 +28,263 @@ type ActiveRuntime = {
-     platform: string | null
-   }
- }
--
- type SavedMetadata = {
-   kernelDisplayName: string | null
-   kernelName: string | null
-   language: string | null
-   languageVersion: string | null
- }
-+type Operation = "info" | "configure" | "restart" | "save"
- 
+@@ -61,9 +61,31 @@ type SavedMetadata = {
+-// 八秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
 -const PROBE_TIMEOUT_MS = 8_000
-+// probe 30s 避免慢内核误判无活动内核
-+// probe 30s：慢内核下过短会误判 no-active-kernel
++// 三十秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
 +const PROBE_TIMEOUT_MS = 30_000
  const decoder = new TextDecoder("utf-8")
-+const JUPYTER_ID = "ms-toolsai.jupyter"
-+// 固定公开命令，不依赖 vscode.lm.invokeTool
 +const RESTART_CMD = "jupyter.restartkernel"
 +const CONFIG_SECTION = "jupyter"
 +const CONFIG_KEY = "askForKernelRestart"
 +const SELECT_KERNEL_CMD = "notebook.selectKernel"
  
--// 环境探测：检测活跃 Jupyter 内核和保存的元数据，不将元数据视为活跃运行时
--// 区分活动内核与盘上 metadata：二者不可互相替代
--// 活动内核与盘上 metadata 分列报告：二者不可互相替代
 -export async function notebookEnv(filePath: string) {
--  // filePath 必填：禁止静默落到 active notebook
-+// 兼容 string filePath→info；Record 走 operation 分发
-+// 字符串 filePath 兼容旧调用；Record 走 operation 分发
-+export async function notebookEnv(input: Record<string, unknown> | string) {
-+  const body: Record<string, unknown> = typeof input === "string" ? { filePath: input, operation: "info" } : input
-+  const filePath = stringProp(body, "filePath")
++export async function notebookEnv(input: Record<string, unknown>) {
++  const filePath = stringProp(input, "filePath")
 +  if (!filePath) throw new Error("filePath is required")
-+  // 缺省 operation=info，避免空 operation 抛错
-+  const operation = stringProp(body, "operation") ?? "info"
-+  // 非法 operation 硬失败，禁止静默落到 info
-+  if (!["info", "configure", "restart", "save"].includes(operation)) {
-+    throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save.`)
-+  }
-+  const reason = stringProp(body, "reason")
++  const operation = stringProp(input, "operation") ?? "info"
++  if (!["info", "configure", "restart", "save"].includes(operation)) throw new Error(`Invalid operation "${operation}". Must be one of: info, configure, restart, save.`)
++  const reason = stringProp(input, "reason")
    const notebook = await resolveNotebook(filePath)
-+  switch (operation as Operation) {
-+    // configure：showNotebook + selectKernel，不读 Jupyter 内部 controller
++  // 路径无法打开时直接拒绝，不能把解析失败包装成 no-active-kernel 快照。
++  switch (operation) {
++    case "info":
++      return await infoNotebook(notebook, reason)
 +    case "configure":
 +      return await configureNotebook(notebook, reason)
-+    // restart：仅私有函数入口，面板/插件都走 env.operation
 +    case "restart":
 +      return await restartNotebookKernel(notebook, reason)
-+    // save：用 dirty 前后差补救 notebook.save 假阴性
 +    case "save":
 +      return await saveNotebook(notebook, reason)
-+    default:
-+      return await infoNotebook(notebook, reason)
 +  }
 +}
 +
 +async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) {
-+  // getKernel 仅在至少执行过一 cell 后可用
+-  // 路径无法打开时直接拒绝，不能把解析失败包装成 no-active-kernel 快照。
    const activeRuntime = await getActiveRuntime(notebook.uri)
    const savedMetadata = await readSavedNotebookMetadata(notebook.uri)
--
-+  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
+@@ -71,16 +93,20 @@ export async function notebookEnv(filePath: string) {
    return {
      ran: false,
      summary: [
--      `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
-+      `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState(JUPYTER_ID)}.`,
++      "Operation: info",
+       `Notebook runtime: ${activeRuntime ? formatActiveRuntime(activeRuntime) : "no-active-kernel"}; Python/Jupyter extensions: ${extensionState("ms-python.python")}/${extensionState("ms-toolsai.jupyter" )}.`,
        `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
        activeRuntime
--        ? "Runtime source: actual active Jupyter kernel process via api.kernels.getKernel + executeCode."
--        : "Runtime source: none; Jupyter stable API exposes only started kernels associated with the open notebook.",
-+        // 不把 saved metadata 当 runtime fallback
-+        ? "Runtime source: active kernel (api.kernels.getKernel + executeCode probe)."
-+        : "Runtime source: none. Jupyter public API only exposes kernels that have been started by executing at least one code cell.",
+         ? "运行时来源：通过 api.kernels.getKernel 与 executeCode 查询实际活动的 Jupyter 内核进程。"
+         : "运行时来源：无；Jupyter 稳定 API 仅暴露与打开笔记本关联且已启动的内核。",
        activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
 +      reason ? `Reason: ${reason}` : undefined,
      ].filter(Boolean).join("\n"),
      data: {
--      path: notebook.uri.fsPath || notebook?.uri.toString(),
-+      path: primaryPath,
+       path: notebook.uri.fsPath || notebook.uri.toString(),
 +      operation: "info",
 +      reason,
        runtime: activeRuntime,
        saved_metadata: savedMetadata,
--      active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
--      extensions: {
--        python: extensionInfo("ms-python.python"),
--        jupyter: extensionInfo("ms-toolsai.jupyter"),
-+      extensions: { python: extensionInfo("ms-python.python"), jupyter: extensionInfo(JUPYTER_ID) },
-+    },
-+    note: "Runtime is probed from the active kernel process; saved metadata is reported separately and is not treated as runtime fallback.",
-+  }
-+}
-+
-+// configure：show + selectKernel，不读 Jupyter 内部 controller
+       // active_notebook 只记录 UI 焦点；路径解析失败或焦点指向别的文档时，不能拿它补齐本次目标的 runtime。
+       active_notebook: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
+@@ -94,6 +120,169 @@ export async function notebookEnv(filePath: string) {
+   }
+ }
+ 
 +async function configureNotebook(notebook: vscode.NotebookDocument, reason?: string) {
 +  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 +  const startedAt = Date.now()
-+  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
++  const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
 +  if (!jupyter) {
 +    return { ran: true, summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.", data: { path: primaryPath, operation: "configure", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
 +  }
 +  if (!jupyter.isActive) await jupyter.activate()
-+  await vscode.window.showNotebookDocument(notebook, { preview: false })
++  try {
++    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
++  } catch {
++    // 显示失败不阻止已打开文档按 URI 选核。
++  }
 +  const allCommands = await vscode.commands.getCommands(true)
-+  // selectKernel 未注册时仍返回，由上层 status 机解释
 +  const hasSelect = allCommands.includes(SELECT_KERNEL_CMD)
-+  if (hasSelect) // 绑定目标 notebook；已选核时跳过重复弹层
++  if (hasSelect) {
 +    await vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
 +      notebookUri: notebook.uri,
-+      // 已选核跳过 picker；notebookUri 绑定 filePath 目标本
 +      skipIfAlreadySelected: true,
 +    })
++  }
 +  return {
 +    ran: true,
-+    summary: ["Operation: configure", hasSelect ? "Kernel selection triggered." : "notebook.selectKernel not registered; select manually.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
++    summary: ["Operation: configure", hasSelect ? "Kernel selection triggered. The kernel will start on first cell execution." : "notebook.selectKernel not registered; select manually.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
 +    data: { path: primaryPath, operation: "configure", reason, jupyterFound: true, selectKernelCommandFound: hasSelect, durationMs: Date.now() - startedAt },
 +    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
 +  }
 +}
 +
-+// 私有 restart：仅 env.operation=restart 调用
 +async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
 +  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 +  const startedAt = Date.now()
-+  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
++  const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
 +  if (!jupyter) {
 +    return { ran: true, summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.", data: { path: primaryPath, operation: "restart", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
 +  }
@@ -434,17 +305,17 @@ index 1997dda32c..1897a237e0 100644
 +    return { ran: true, summary: "jupyter.restartkernel command is not registered.", data: { path: primaryPath, operation: "restart", reason, restartCommandFound: false, durationMs: Date.now() - startedAt } }
 +  }
 +  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
-+  const original = config.get(CONFIG_KEY)
-+  // 仅当原 askForKernelRestart=true 才临时关闭并 finally 恢复
++  const original = config.get<boolean>(CONFIG_KEY)
++  // 仅临时关闭已启用的确认，finally 恢复用户设置。
 +  const needsRestore = original === true
 +  if (needsRestore) await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
 +  try {
-+    // 显式 notebookUri，避免重启错绑 active 编辑器
++    // Jupyter 命令内部可能吞错，返回值只表示 requested。
 +    await vscode.commands.executeCommand(RESTART_CMD, { notebookEditor: { notebookUri: notebook.uri } })
 +    return {
 +      ran: true,
-+      summary: ["Operation: restart", "Kernel restart requested. All runtime state should be cleared.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
-+      data: { path: primaryPath, operation: "restart", reason, requested: true, durationMs: Date.now() - startedAt },
++      summary: ["Operation: restart", "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
++      data: { path: primaryPath, operation: "restart", reason, requested: true, askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore, durationMs: Date.now() - startedAt },
 +    }
 +  } catch (error) {
 +    const message = error instanceof Error ? error.message : String(error)
@@ -454,7 +325,6 @@ index 1997dda32c..1897a237e0 100644
 +  }
 +}
 +
-+// save：dirty settle 后以 !afterDirty 判定成功；禁止未请求自动保存的策略写在 note
 +async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string) {
 +  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 +  const startedAt = Date.now()
@@ -478,7 +348,7 @@ index 1997dda32c..1897a237e0 100644
 +        beforeDirty: notebook.isDirty,
 +        afterDirty: notebook.isDirty,
 +        durationMs: Date.now() - startedAt,
-       },
++      },
 +    }
 +  }
 +
@@ -498,11 +368,11 @@ index 1997dda32c..1897a237e0 100644
 +    saveError = error instanceof Error ? error.message : String(error)
 +  }
 +
-+  // 远程/大 notebook 序列化可能在 save() resolve 后才清 dirty
++  // 序列化器可能在 save() 返回后才清除 dirty。
 +  await waitForDirtyStateToSettle(notebook, DIRTY_SETTLE_TIMEOUT_MS)
 +  const afterDirty = notebook.isDirty
 +  const afterVersion = notebook.version
-+  // save() false 可能是 not-dirty 或失败；以 afterDirty===false 确认成功
++  // save() 的 false 也可能表示无需保存，以最终 dirty 状态确认。
 +  const saved = !afterDirty
 +
 +  return {
@@ -531,25 +401,13 @@ index 1997dda32c..1897a237e0 100644
 +      saveReturned,
 +      saveError,
 +      durationMs: Date.now() - startedAt,
-     },
--    note:
--      "Runtime is probed from the active kernel process; saved metadata is reported separately and is not used as runtime fallback.",
-+    // note 写入 unprompted 策略，约束 agent 不得擅自 save
++    },
 +    note: "Save should only be called when the user explicitly requests it. Do not save ipynb files unprompted — prefer to leave dirty notebooks for user review.",
-   }
- }
- 
--// 获取活跃运行时：通过 Jupyter 扩展 API 查询当前 notebook 的内核
--// 获取活跃运行时：仅当 Jupyter 扩展可用且内核存在时返回
--// 优先 Jupyter getKernel；无活动内核时明确 no-active-kernel
-+// DIRTY_SETTLE：序列化异步清 dirty 的最长等待 10s
++  }
++}
++
 +const DIRTY_SETTLE_TIMEOUT_MS = 10_000
 +
-+/**
-+ * Waits for the notebook's dirty bit to clear (up to timeoutMs).
-+ * Some notebook serializers update dirty state asynchronously after save().
-+ */
-+// 监听 onDidChangeNotebookDocument；超时后仍返回，由 afterDirty 判定
 +async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, timeoutMs: number) {
 +  if (!notebook.isDirty) return
 +  await new Promise<void>((resolve) => {
@@ -568,32 +426,18 @@ index 1997dda32c..1897a237e0 100644
 +  })
 +}
 +
-+
-+
  async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {
    try {
-     // 查找 Jupyter 扩展：通过 ID 匹配 ms-toolsai.jupyter
--const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
-+    const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
-     if (!ext) return null
- 
-     // 获取 Jupyter API：如果扩展未激活则先激活
--const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-+    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-     const kernel = await api?.kernels?.getKernel?.(uri)
-     if (!kernel) return null
- 
+     // 扩展缺失是无运行时证据，不能从 Python 扩展的安装状态猜出 Jupyter 内核。
 diff --git a/sdks/vscode/src/notebook/kernel.ts b/sdks/vscode/src/notebook/kernel.ts
 deleted file mode 100644
-index a7aa581f50..0000000000
 --- a/sdks/vscode/src/notebook/kernel.ts
 +++ /dev/null
-@@ -1,125 +0,0 @@
+@@ -1,98 +0,0 @@
 -/**
 - * `vscode_notebook_restart_kernel` — restarts the Jupyter kernel for a notebook.
 - *
 - * Uses the public `jupyter.restartkernel` command. Before invocation it temporarily
-- // 改配置前保存原值，finally 必须恢复用户偏好
 - * sets `jupyter.askForKernelRestart=false` to suppress the Jupyter restart
 - * confirmation modal, then restores the original value afterward.
 - *
@@ -601,24 +445,15 @@ index a7aa581f50..0000000000
 - * never triggered. Kernel restart errors are swallowed by Jupyter's public command
 - * path (`.catch(noop)`), so this handler reports `requested` rather than `confirmed`.
 - */
--import * as vscode from "vscode"
+-import vscode from "vscode"
 -import { resolveNotebook } from "./resolve"
 -import { stringProp } from "../util"
 -
--// 依赖官方 Jupyter 扩展公开命令，不走 LM tool 代理
--// 固定扩展 ID：探测/安装文案与运行时同一字符串
 -const JUPYTER_ID = "ms-toolsai.jupyter"
--// 使用公开 restart 命令；错误可能被 Jupyter 吞掉故报告 requested
 -const RESTART_CMD = "jupyter.restartkernel"
 -const CONFIG_SECTION = "jupyter"
--// 临时关闭确认弹窗，避免桥接路径被 UI 模态阻塞
--// 仅当原值为 true 才写入 false，避免无意义配置抖动
 -const CONFIG_KEY = "askForKernelRestart"
 -
--// 重启 Jupyter 内核：清变量与执行态；reason 仅日志
--// 临时关闭 askForKernelRestart，避免模态确认卡住 headless 桥
--// 重启 Jupyter 内核：清变量与执行态；reason 仅用于日志上下文
--// 报告 requested 而非 confirmed：Jupyter 公开命令内部 catch 吞错
 -export async function restartNotebookKernel(input: Record<string, unknown>) {
 -  const filePath = stringProp(input, "filePath")
 -  if (!filePath) throw new Error("filePath is required")
@@ -627,10 +462,7 @@ index a7aa581f50..0000000000
 -  const reason = stringProp(input, "reason")
 -  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 -
--  // Ensure the Jupyter extension is present and active
 -  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
--  // 未安装 Jupyter 扩展时硬失败，给出可操作 summary
--  // 扩展未装：硬失败 summary，指导安装 ms-toolsai.jupyter
 -  if (!jupyter) {
 -    return {
 -      ran: true,
@@ -638,13 +470,9 @@ index a7aa581f50..0000000000
 -      data: { path: primaryPath, reason, jupyterFound: false },
 -    }
 -  }
--  // 扩展已装未激活则先 activate 再查命令注册
 -  if (!jupyter.isActive) await jupyter.activate()
 -
--  // Ensure the public restart command is registered
 -  const allCommands = await vscode.commands.getCommands(true)
--  // 命令未注册：扩展损坏或版本不兼容
--  // 命令未注册：扩展损坏/版本不兼容，勿静默成功
 -  if (!allCommands.includes(RESTART_CMD)) {
 -    return {
 -      ran: true,
@@ -653,26 +481,19 @@ index a7aa581f50..0000000000
 -    }
 -  }
 -
--  // Temporarily suppress Jupyter's built-in restart confirmation modal.
--  // The public command internally calls `shouldAskForRestart()` which reads
--  // `jupyter.askForKernelRestart`; setting it to false skips the modal.
 -  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
 -  const original = config.get<boolean>(CONFIG_KEY)
--  // finally 必须恢复 askForKernelRestart，禁止永久改用户偏好
+-  // 仅临时关闭已启用的确认，finally 恢复用户设置。
 -  const needsRestore = original === true
 -
 -  if (needsRestore) {
--    // 全局配置改写范围与 Jupyter 读取路径一致
 -    await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
 -  }
 -
 -  const startedAt = Date.now()
 -  try {
--    // The public command swallows errors internally (`.catch(noop)`), so
--    // this invocation will not reject on kernel-level failures.
--    // 不走 vscode.lm.invokeTool，避免 LM 确认弹层
+-    // Jupyter 命令内部可能吞错，返回值只表示 requested。
 -    await vscode.commands.executeCommand(RESTART_CMD, {
--      // 显式 notebookUri，避免重启错绑 active 编辑器
 -      notebookEditor: { notebookUri: notebook.uri },
 -    })
 -
@@ -687,11 +508,9 @@ index a7aa581f50..0000000000
 -      data: {
 -        path: primaryPath,
 -        reason,
--        // 成功仅表示已请求，不保证内核已完全清空
 -        requested: true,
 -        askForKernelRestartOriginal: original,
 -        askForKernelRestartSuppressed: needsRestore,
--        // 诊断耗时：含 activate 与命令调用
 -        durationMs: Date.now() - startedAt,
 -      },
 -    }
@@ -708,7 +527,6 @@ index a7aa581f50..0000000000
 -      },
 -    }
 -  } finally {
--    // Restore the user's original setting so no permanent change is left behind
 -    if (needsRestore) {
 -      await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
 -    }

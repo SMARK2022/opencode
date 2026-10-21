@@ -1,88 +1,272 @@
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -342,10 +342,29 @@
-     },
-   })
- })
-+
-+// PowerShell UTF-8 包装：强制 Console I/O 为 UTF-8（无 BOM），并把退出码透传给外层
-+// 使用 UTF8Encoding($false) 避免 BOM；$OutputEncoding 与 Console 输出一致
-+function psUtf8(command: string) {
-+  return [
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -28,12 +28,10 @@
+-export const utf8Environment = (env: Readonly<Record<string, string | undefined>> = process.env, platform: string = process.platform) => {
++export const utf8Environment = (platform: string = process.platform) => {
+   if (platform !== "win32") return {}
+   return {
+     // Python 管道编码与 UTF-8 模式分别控制输出编码和解释器默认编码。
+     PYTHONIOENCODING: "utf-8",
+     PYTHONUTF8: "1",
+-    // 追加而非替换已有 Java/Ruby 参数，保留用户的内存、代理与加载选项。
+-    JAVA_TOOL_OPTIONS: `${env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
+-    RUBYOPT: `${env.RUBYOPT || ""} -Eutf-8`.trim(),
++    // 不注入 Java/Ruby 参数；用户原值由宿主继承，V1 插件 extras 仍最后覆盖。
+   }
+ }
+ 
+@@ -179,3 +177,22 @@
+ }
+ 
++export function cmd(file: string, command: string, platform: string = process.platform) {
++  if (platform !== "win32" || !ps(file)) return { command, args: [], shell: file }
++  // UTF-16LE base64 只传输脚本文本；Console 与管道生产端使用无 BOM 的 UTF-8。
++  const script = [
 +    "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)",
 +    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
 +    "$OutputEncoding = [Console]::OutputEncoding",
 +    command,
++    // 换行隔开用户尾注释；仅透传实际 native exit，不把 cmdlet 的空值变成退出码。
 +    "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }",
-+  ].join(String.fromCharCode(10))
++  ].join("\n")
++  return {
++    command: file,
++    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
++    // 显式 argv 不能再经 shell 包装，否则引号和中文会被第二次解释。
++    shell: false,
++  }
 +}
 +
-+// 将命令编码为 PowerShell -EncodedCommand 格式（UTF-16LE base64）
-+// PowerShell 的 -Command 参数会丢失非 ASCII 字符，-EncodedCommand 解决此问题
-+function psEncoded(command: string) {
-+  return Buffer.from(psUtf8(command), "utf16le").toString("base64")
-+}
- 
+ export function args(file: string, command: string, cwd: string) {
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -338,15 +338,8 @@
  function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
-   if (process.platform === "win32" && Shell.ps(shell)) {
+-  if (process.platform === "win32" && Shell.ps(shell)) {
 -    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
-+    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", // 使用 -EncodedCommand 传递 UTF-16LE base64 编码，确保中文正确输出
-+    "-EncodedCommand", psEncoded(command)], {
-       cwd,
-       env,
-       stdin: "ignore",
-@@ -573,8 +592,7 @@
-       const utf8EnvOverrides = isWin ? {
-         PYTHONIOENCODING: "utf-8",
-         PYTHONUTF8: "1",
--        JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
--        RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim()
-+// 仅保留 Python UTF-8 环境变量；Java/Ruby 的编码覆盖范围太广已移除
-       } : {}
+-      cwd,
+-      env,
+-      stdin: "ignore",
+-      detached: false,
+-    })
+-  }
+-
+-  return ChildProcess.make(command, [], {
+-    shell,
++  // 编码仅发生在授权后的 spawn 边界；AST 与权限 metadata 继续使用原始输入。
++  const invocation = Shell.cmd(shell, command)
++  return ChildProcess.make(invocation.command, invocation.args, {
++    shell: invocation.shell,
+     cwd,
+     env,
+     stdin: "ignore",
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -232,6 +232,8 @@
+-              const command = ChildProcess.make(input.command, [], {
++              // Core 使用同一实际 shell 生产 argv，授权资源仍是上方的 input.command。
++              const invocation = Shell.cmd(shell, input.command)
++              const command = ChildProcess.make(invocation.command, invocation.args, {
+                 cwd: target.canonical,
+-                shell,
++                shell: invocation.shell,
+                 // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
+                 extendEnv: true,
+                 // V2 尚无插件 shell.env owner；这里只叠加源编码设置，不能恢复 legacy hook。
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -27,14 +27,13 @@
+-    expect(Shell.utf8Environment(env, "linux")).toEqual({})
+-    expect(Shell.utf8Environment(env, "darwin")).toEqual({})
+-    expect(Shell.utf8Environment(env, "win32")).toEqual({
++    expect(Shell.utf8Environment("linux")).toEqual({})
++    expect(Shell.utf8Environment("darwin")).toEqual({})
++    expect(Shell.utf8Environment("win32")).toEqual({
+       PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
+-      JAVA_TOOL_OPTIONS: "-Xmx1g -Dfile.encoding=UTF-8", RUBYOPT: "-w -Eutf-8",
+     })
+-    // 空值必须 trim 掉前导空格；任意非编码变量仍由 process 环境继承。
+-    expect(Shell.utf8Environment({}, "win32")).toEqual({
++    // 只覆盖 Python；用户显式 Java/Ruby 原值在环境合并中保留，不能重建旧 oracle。
++    expect({ ...env, ...Shell.utf8Environment("win32") }).toEqual({
+       PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
+-      JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8", RUBYOPT: "-Eutf-8",
++      PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w",
+     })
+     expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
+   })
  
-       return {
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1197,3 +1197,40 @@
+@@ -184,7 +184,7 @@
+-  each("basic", () =>
++  each("basic", (item) =>
+     runIn(
+       projectRoot,
+       Effect.gen(function* () {
+         const result = yield* run({
+           command: "echo test",
+         })
+@@ -191,5 +191,23 @@
+         expect(result.metadata.exit).toBe(0)
+         expect(result.metadata.output).toContain("test")
++        if (process.platform !== "win32" || !PS.has(item.label)) return
++        // 在既有每-shell 实进程测试中验证中文、单双引号、表格与 native 最后退出码。
++        const command = [
++          `Write-Output '桌面 大学文档 毕业设计 压缩感知 ''单引号'' "双引号"'`,
++          `[pscustomobject]@{ Name = '中文表格' } | Format-Table -HideTableHeaders`,
++          `[Console]::Error.Write("中文错误")`,
++          `& '${process.execPath.replaceAll("'", "''")}' -e 'process.exit(7)' # 尾注释`,
++        ].join("\n")
++        const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++        const encoded = yield* run({ command, compress_output: false }, capture(requests))
++        expect(encoded.metadata.exit).toBe(7)
++        for (const text of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
++          expect(encoded.output).toContain(text)
++        }
++        expect(encoded.output).not.toContain("\uFFFD")
++        expect(requests.some((request) => request.metadata.command === command)).toBe(true)
++        expect((yield* run({ command: "Write-Output '中文'; exit 9" })).metadata.exit).toBe(9)
++
+       }),
      ),
    )
- })
-+
-+// Windows 平台 PowerShell UTF-8 输出编码测试
-+describe("tool.shell windows encoding", () => {
-+  if (process.platform !== "win32") return
-+
-+  for (const item of ps) {
-+    it.live(
-+      `PowerShell outputs Chinese without replacement characters [${item.label}]`,
-+      () =>
-+        withShell(
-+          item,
-+          Effect.gen(function* () {
-+            const tmp = yield* tmpdirScoped()
-+            yield* runIn(
-+              tmp,
-+              Effect.gen(function* () {
-+                const bash = yield* initBash()
-+                // 测试中文输出不产生替换字符（\uFFFD）
-+                // 验证 -EncodedCommand 机制正确传递 UTF-8 中文
-+                const result = yield* bash.execute(
-+                  {
-+                    command: `Write-Output "桌面 大学文档 毕业设计 压缩感知"`,
-+                  },
-+                  ctx,
-+                )
-+                expect(result.output).toContain("桌面")
-+                expect(result.output).toContain("大学文档")
-+                expect(result.output).toContain("毕业设计")
-+                // 不应出现替换字符，说明编码正确
-+                expect(result.output).not.toContain("\uFFFD")
-+              }),
-+            )
-+          }),
-+        ),
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -211,11 +211,9 @@
+-            // 真实 leaf 的环境必须继承宿主，四项 Windows 覆盖与已有 options 精确对应。
++            // extendEnv 保留用户显式 Java/Ruby 值，leaf 的两项覆盖不能重写它们。
+             expect(runs[0]?.extendEnv).toBe(true)
+             expect(runs[0]?.env).toEqual(process.platform === "win32" ? {
+               PYTHONIOENCODING: "utf-8",
+               PYTHONUTF8: "1",
+-              JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
+-              RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim(),
+             } : {})
+             expect(runs).toHaveLength(1)
+             // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
+             const contexts = yield* SystemContextRegistry.Service
+@@ -363,68 +361,116 @@
+                   expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
+                   expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
+-                  expect(runs).toMatchObject([{ command, shell }])
++                  expect(runs).toMatchObject([{ command: cmd ? command : shell, shell: cmd ? shell : false }])
+                 }
+               }), appProcess, shell)
+             }
+             // 配置 Git Bash 仍执行原 Unix 命令，不能把 Windows OS 当成 Windows shell。
+             reset()
+             yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
+               const command = "head input | grep needle; ls; find ."
+               expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
+               expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
+               expect(runs).toMatchObject([{ command, shell: "C:\\Program Files\\Git\\bin\\bash.exe" }])
+             }), appProcess, "C:\\Program Files\\Git\\bin\\bash.exe")
+           })))
+       },
+       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+     ),
+   )
+ 
+   it.live("resolves a relative workdir from the active Location", () =>
+     Effect.acquireUseRelease(
+       Effect.promise(() => tmpdir()),
+       (tmp) => {
+         reset()
+         return Effect.promise(() => fs.mkdir(path.join(tmp.path, "src"))).pipe(
+           Effect.andThen(
+             withTool(tmp.path, (registry) => executeTool(registry, call({ command: "pwd", workdir: "src" }))),
+           ),
+           Effect.andThen(
+             Effect.sync(() => expect(runs).toMatchObject([{ cwd: realpathSync(path.join(tmp.path, "src")) }])),
+           ),
+         )
+       },
+       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+     ),
+   )
+ 
+   it.live("rejects a workdir that stops being a directory during approval", () =>
+     Effect.acquireUseRelease(
+       Effect.promise(() => tmpdir()),
+       (tmp) => {
+         reset()
+         const workdir = path.join(tmp.path, "src")
+         afterPermission = (input) =>
+           input.action === "bash"
+             ? Effect.promise(async () => {
+                 await fs.rm(workdir, { recursive: true })
+                 await fs.writeFile(workdir, "not a directory")
+               }).pipe(Effect.orDie)
+             : Effect.void
+         return Effect.promise(() => fs.mkdir(workdir)).pipe(
+           Effect.andThen(
+             withTool(tmp.path, (registry) => executeTool(registry, call({ command: "pwd", workdir: "src" }))),
+           ),
+           Effect.andThen(
+             Effect.sync(() => {
+               expect(runs).toEqual([])
+               expect(assertions.map((input) => input.action)).toEqual(["bash"])
+             }),
+           ),
+         )
+       },
+       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+     ),
+   )
+ 
++  if (process.platform === "win32") {
++    it.live("preserves PowerShell UTF-8, quotes, inherited env and exit through the real Core leaf", () =>
++      Effect.acquireUseRelease(
++        Effect.promise(() => tmpdir()),
++        (tmp) => Effect.gen(function* () {
++          const shells = [Bun.which("pwsh"), Bun.which("powershell")].filter((file): file is string => Boolean(file))
++          expect(shells.length).toBeGreaterThan(0)
++          for (const shell of shells) {
++            reset()
++            const command = [
++              `Write-Output '桌面 大学文档 毕业设计 压缩感知 ''单引号'' "双引号"'`,
++              `[pscustomobject]@{ Name = '中文表格' } | Format-Table -HideTableHeaders`,
++              // stderr 直接经过 Console 编码；表格与 stdout 正确不能替代这条独立生产端检查。
++              `[Console]::Error.Write("中文错误")`,
++              `& '${process.execPath.replaceAll("'", "''")}' -e 'process.stdout.write(JSON.stringify([process.env.JAVA_TOOL_OPTIONS ?? null, process.env.RUBYOPT ?? null])); process.exit(7)' # 尾注释`,
++            ].join("\n")
++            // 走 registry、真实 AppProcess 和原始 request 授权，不把编码串当资源或重跑解码。
++            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++              const settled = yield* settleTool(registry, call({ command, compress_output: false }))
++              // fixture 的 Bun 路径在临时 Location 外；完整匹配 advisory，不能省略警告或只检查退出码子串。
++              const status = `Warnings:\n- Command argument references external directory ${path.join(path.dirname(process.execPath), "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.\n\nCommand exited with code 7.`
++              if (settled.result.type !== "content") throw new Error("expected content")
++              expect(settled.result.value).toHaveLength(2)
++              const first = settled.result.value[0]
++              const second = settled.result.value[1]
++              if (first?.type !== "text" || second?.type !== "text") throw new Error("expected two text parts")
++              const text = first.text
++              const actualStatus = second.text
++              expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
++              expect(text).not.toContain("\uFFFD")
++              expect(actualStatus).toBe(status)
++              for (const expected of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
++                expect(text).toContain(expected)
++              }
++              // native 子进程回显实际继承值；仅检查 leaf 的覆盖键无法发现继承时追加的 Java/Ruby 参数。
++              expect(text).toContain(JSON.stringify([process.env.JAVA_TOOL_OPTIONS ?? null, process.env.RUBYOPT ?? null]))
++              expect(assertions).toMatchObject([{ action: "bash", resources: [command], save: [command] }])
++              // native 的 7、纯 cmdlet 的 0 与显式 exit 9 区分透传、旧 LASTEXITCODE 泄漏和用户退出优先。
++              expect((yield* settleTool(registry, call({ command: "Write-Output '中文'" }))).output?.structured).toMatchObject({ exit: 0 })
++              expect((yield* settleTool(registry, call({ command: "Write-Output '中文'; exit 9" }))).output?.structured).toMatchObject({ exit: 9 })
++            }), LayerNode.compile(AppProcess.node), shell)
++          }
++        }),
++        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++      ),
 +    )
 +  }
-+})
++
+   if (process.platform !== "win32") {

@@ -1,54 +1,402 @@
 From b4bf93f8cbcdead7b42b08afbfbb5975817b2624 Mon Sep 17 00:00:00 2001
 From: SMARK <3222301373@qq.com>
 Date: Sat, 2 May 2026 04:50:55 +0800
-Subject: [PATCH] =?UTF-8?q?feat:=20=E4=BC=98=E5=8C=96=20token=20=E4=BC=B0?=
- =?UTF-8?q?=E7=AE=97=E9=80=BB=E8=BE=91=EF=BC=8C=E6=94=AF=E6=8C=81=E4=BB=8E?=
- =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E7=AB=AF=E8=8E=B7=E5=8F=96=E5=AE=9E=E6=97=B6?=
- =?UTF-8?q?=E8=BE=93=E5=85=A5=20token=20=E4=BC=B0=E7=AE=97?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] feat(session): estimate resolved request input without billing it
 
-
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -164,6 +164,19 @@
++// 请求体估算与 provider tokens 分离；confirmed 只说明校准样本已经结算。
++// bodyChars 保留实际请求体的字符基数，不能拿输出正文校准输入用量。
++export interface InputEstimate extends Schema.Schema.Type<typeof InputEstimate> {}
++export const InputEstimate = Schema.Struct({
++  input: Schema.Finite,
++  bodyChars: Schema.Finite,
++  confirmed: Schema.Boolean,
++  afterPartID: Schema.String.pipe(optional),
++  // 同轮解析出的显示预算独立于 token 校准样本，后续模型选择不能改写它。
++  contextLimit: Schema.Finite.pipe(optional),
++}).annotate({ identifier: "Session.Message.InputEstimate" })
++
+ export interface Assistant extends Schema.Schema.Type<typeof Assistant> {}
+ export const Assistant = Schema.Struct({
+   ...Base,
+   type: Schema.Literal("assistant"),
+   agent: Schema.String,
+   model: Model.Ref,
++  inputEstimate: InputEstimate.pipe(optional),
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -14,1 +14,2 @@
+ import { Session } from "../session"
++import { SessionMessage } from "../session-message"
+@@ -471,3 +472,5 @@
+   summary: Schema.optional(Schema.Boolean),
+   cost: Schema.Finite,
++  // V1 复用 canonical 元数据，不把 provisional input 混入 tokens.input。
++  inputEstimate: optional(SessionMessage.InputEstimate),
+   tokens: Schema.Struct({
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -164,1 +164,9 @@
++// 首包前只有请求估算，不伪造助手；Started 仍由真实 provider 响应触发。
++export const RequestEstimated = Event.define({
++  type: "session.next.request.estimated",
++  ...options,
++  schema: { ...Base, messageID: SessionMessage.ID, model: Model.Ref, inputEstimate: SessionMessage.InputEstimate },
++})
++export type RequestEstimated = typeof RequestEstimated.Type
++
+ export namespace Step {
+@@ -172,2 +180,4 @@
+       model: Model.Ref,
++      // Started 携带当前实际请求的估算；旧事件缺省仍可重放。
++      inputEstimate: SessionMessage.InputEstimate.pipe(optional),
+       snapshot: Schema.String.pipe(optional),
+@@ -491,1 +501,2 @@
++  RequestEstimated,
+   ContextUpdated,
+@@ -525,1 +536,2 @@
++  RequestEstimated,
+   ContextUpdated,
+diff --git a/packages/schema/src/session.ts b/packages/schema/src/session.ts
+--- a/packages/schema/src/session.ts
++++ b/packages/schema/src/session.ts
+@@ -31,3 +31,6 @@
+   // 未确认下一轮的上下文基数；缺省表示无在途估算，零表示已确认的零基数。
+   pendingInput: Schema.Finite.pipe(optional),
++  // 实际请求体的 provisional input 优先于继承基数；零也是有效估算。
++  // 此字段不进入 input/output/cost，不表示 provider 已确认或已计费。
++  estimatedInput: Schema.Finite.pipe(optional),
+   model: Schema.Struct({
+@@ -34,3 +37,5 @@
+     providerID: Schema.String,
+     modelID: Schema.String,
++    // 冻结预算优先于 Catalog 查找；零表示未知，不能拿同 API 的其他 alias 补齐。
++    contextLimit: Schema.Finite.pipe(optional),
+   }).pipe(optional),
+diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
+--- a/packages/core/src/util/token.ts
++++ b/packages/core/src/util/token.ts
+@@ -5,1 +5,14 @@
+ export const estimate = (input: string) => Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
++
++export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number }>) {
++  const sample = history.reduce((sum, item) => {
++    // 调用方已筛选同模型确认样本，最近累计达到 16000 字符后不再接纳旧样本。
++    if (sum.bodyChars >= 16000 || item.input <= 0 || item.bodyChars <= 0) return sum
++    return { bodyChars: sum.bodyChars + item.bodyChars, input: sum.input + item.input }
++  }, { bodyChars: 0, input: 0 })
++  // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
++  const ratio = sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
++  // 两个请求 owner 共用 canonical JSON 字符口径，不另行解析 schema 或附件。
++  const bodyChars = JSON.stringify(body).length
++  return { input: Math.max(0, Math.round(bodyChars / ratio)), bodyChars, confirmed: false }
++}
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -47,2 +47,4 @@
+   toolChoice?: "auto" | "required" | "none"
++  // 回调属于 processor，LLM 只交付已解析的最终请求体，不写账本。
++  onRequestPrepared?: (body: unknown) => Effect.Effect<void>
+ }
+@@ -243,1 +245,3 @@
+         if (native.type === "supported") {
++          // native adapter 已完成消息 lowering 和实际工具广告，运输尚未开始。
++          if (input.onRequestPrepared) yield* input.onRequestPrepared(native.body)
+@@ -338,2 +342,10 @@
+                   }
++                  if (args.type === "stream" && input.onRequestPrepared) {
++                    // middleware 此处已得到 SDK 的 JSON Schema 工具与变换后消息。
++                    // OAuth/workflow 的 system 没有重复进入普通 messages。
++                    await bridge.promise(input.onRequestPrepared({
++                      system: isWorkflow ? prepared.system : [],
++                      messages: args.params.prompt, tools: args.params.tools, providerOptions: args.params.providerOptions,
++                    }))
++                  }
+                   return args.params
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -25,3 +25,3 @@
+ export type StreamResult =
+-  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown> }
++  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown>; readonly body: unknown }
+   | { readonly type: "unsupported"; readonly reason: string }
+@@ -103,1 +103,3 @@
++  // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
++  const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })
+   const stream = Stream.scoped(
+@@ -108,7 +110,3 @@
+         const provider = input.llmClient
+-          .stream(
+-            LLMRequest.update(request, {
+-              tools: [...request.tools, ...toDefinitions(tools)],
+-            }),
+-          )
++          .stream(advertised)
+           .pipe(
+@@ -143,2 +141,3 @@
+     ...current,
++    body: { system: advertised.system, messages: advertised.messages, tools: advertised.tools, providerOptions: advertised.providerOptions },
+     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -31,1 +31,2 @@
+ import { Usage, type LLMEvent } from "@opencode-ai/llm"
++import { Token } from "@opencode-ai/core/util/token"
+@@ -540,2 +541,5 @@
+             ctx.assistantMessage.tokens = usage.tokens
++            // 只有本 step 的实际确认能把请求体样本标记为可校准。
++            if (ctx.assistantMessage.inputEstimate)
++              ctx.assistantMessage.inputEstimate.confirmed = true
+             yield* session.updatePart({
+@@ -745,3 +749,22 @@
+             yield* status.set(ctx.sessionID, { type: "busy" })
+-            const stream = llm.stream(streamInput)
++            const stream = llm.stream({ ...streamInput, onRequestPrepared: (body) => Effect.gen(function* () {
++              const history = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
++              const samples = history.toReversed().flatMap((message) => {
++                const info = message.info
++                // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
++                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id
++                  || !info.inputEstimate?.confirmed) return []
++                return [{ bodyChars: info.inputEstimate.bodyChars,
++                  input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
++              })
++              // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
++              ctx.assistantMessage.inputEstimate = {
++                ...Token.estimateRequest(body, samples),
++                contextLimit: ctx.model.limit.context,
++                // V1 单助手多 step：新的确认 part 会立即遮掉此轮估算。
++                afterPartID: history.find(message => message.info.id === ctx.assistantMessage.id)?.parts.at(-1)?.id,
++              }
++              // 快照提交只刷新元数据；recordAssistant 仍只从 step-finish 结算。
++              yield* publishAssistant(ctx.assistantMessage, events)
++            }) })
+ 
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -47,1 +47,2 @@
+ import { llmClient } from "../../effect/app-node-platform"
++import { Token } from "../../util/token"
+@@ -286,2 +287,12 @@
+       const startSnapshot = yield* snapshots.capture()
++      // ContextEpoch 仍决定 baseline 和历史选择，估算不另建历史或改变请求。
++      const samples = context.toReversed().flatMap((message) => {
++        // publisher 保存实际 provider/API model ID；边界只去除品牌，不换成 Session 的 catalog 别名。
++        if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
++          || !message.inputEstimate?.confirmed || !message.tokens) return []
++        return [{ bodyChars: message.inputEstimate.bodyChars,
++          input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
++      })
++      let inputEstimate: SessionMessage.InputEstimate | undefined
++      // 只使用现有 provider step；不启动第二次 stream 或 advisory wake。
+       const publisher = createLLMEventPublisher(events, {
+@@ -295,2 +306,4 @@
+         snapshot: startSnapshot,
++        // compile 回调晚于 publisher 创建，真实 Started 时才读取该轮估算。
++        inputEstimate: () => inputEstimate,
+       })
+@@ -301,2 +314,20 @@
+       let overflowFailure: ProviderErrorEvent | undefined
+-      const providerStream = llm.stream(request).pipe(
++      const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
++        // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
++        inputEstimate = {
++          ...Token.estimateRequest(body, samples),
++          contextLimit: model.defaults?.limits?.context ?? model.route.defaults.limits?.context ?? 0,
++        }
++        // 使用实际已提升输入身份；较新的未提升 queue 不能接管这个请求。
++        const promoted = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable)
++          .where(and(eq(SessionInputTable.session_id, session.id), isNotNull(SessionInputTable.promoted_seq)))
++          .orderBy(desc(SessionInputTable.promoted_seq)).limit(1).get().pipe(Effect.orDie)
++        // Durable event 保存唯一 provisional 快照，沿现有请求身份投影，不新增请求表或第二次 stream。
++        if (promoted) yield* events.publish(SessionEvent.RequestEstimated, {
++          sessionID: session.id, messageID: SessionMessage.ID.make(promoted.id), timestamp: yield* DateTime.now,
++          model: { id: ModelV2.ID.make(model.id), providerID: ProviderV2.ID.make(model.provider),
++            ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }) },
++          inputEstimate,
++        })
++        // 不提前创建助手，空 EOF、失败、overflow 与中断继续使用原来的 owner。
++      })).pipe(
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -13,2 +13,3 @@
+   readonly snapshot?: string
++  readonly inputEstimate?: () => SessionMessage.InputEstimate | undefined
+ }
+@@ -82,3 +83,4 @@
+       timestamp: yield* timestamp,
++      inputEstimate: input.inputEstimate?.(),
+       snapshot: input.snapshot,
+     }, { finalizer })
+diff --git a/packages/llm/src/route/client.ts b/packages/llm/src/route/client.ts
+--- a/packages/llm/src/route/client.ts
++++ b/packages/llm/src/route/client.ts
+@@ -157,3 +157,3 @@
+ export interface StreamMethod {
+-  (request: LLMRequest): Stream.Stream<LLMEvent, LLMError>
++  (request: LLMRequest, onPrepared?: (body: unknown) => Effect.Effect<void>): Stream.Stream<LLMEvent, LLMError>
+ }
+@@ -374,7 +374,9 @@
+-const streamRequestWith = (runtime: TransportRuntime) => (request: LLMRequest) =>
++const streamRequestWith = (runtime: TransportRuntime) => (request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]) =>
+   Stream.unwrap(
+     Effect.gen(function* () {
+       const compiled = yield* compile(request)
++      // 估算复用 compile 的协议正文；运输 metadata 和信封不扩展 token 观察接口。
++      if (onPrepared) yield* onPrepared(compiled.body)
+       return compiled.route.streamPrepared(compiled.prepared, compiled.request, runtime)
+     }),
+   )
+@@ -396,8 +398,9 @@
+-export function stream(request: LLMRequest): Stream.Stream<LLMEvent, LLMError> {
++export function stream(request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]): Stream.Stream<LLMEvent, LLMError> {
+   return Stream.unwrap(
+     Effect.gen(function* () {
+-      return (yield* Service).stream(request)
++      const client = yield* Service
++      return client.stream(request, onPrepared)
+     }),
+   ) as Stream.Stream<LLMEvent, LLMError>
+ }
+ 
+@@ -410,6 +413,7 @@
+-export const streamRequest = (request: LLMRequest) =>
++export const streamRequest = (request: LLMRequest, onPrepared?: Parameters<StreamMethod>[1]) =>
+   Stream.unwrap(
+     Effect.gen(function* () {
+-      return (yield* Service).stream(request)
++      const client = yield* Service
++      return client.stream(request, onPrepared)
+     }),
+   )
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -142,1 +142,3 @@
+       "session.next.prompt.completed": () => Effect.void,
++      // 估算事件仅供现有 Session SELECT 读取，不创建消息或触发用量结算。
++      "session.next.request.estimated": () => Effect.void,
+@@ -204,2 +206,4 @@
+               model: event.data.model,
++              // 原生助手的 tokens 在 Ended 前仍缺省，元数据不会触发结算。
++              inputEstimate: event.data.inputEstimate,
+               time: { created: event.data.timestamp },
+@@ -218,2 +222,4 @@
+           draft.tokens = event.data.tokens
++          // 零输入也完成确认；迟到结算继续修订同一助手快照。
++          if (draft.inputEstimate) draft.inputEstimate.confirmed = true
+           if (event.data.snapshot || event.data.files)
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -75,1 +75,10 @@
++    ), native_estimate AS (
++      -- 复用 durable event 保存首包前估算；请求身份仍属于原 current_request。
++      SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind = 'native'
++      WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.request.estimated.1'
++        AND json_extract(e.data, '$.messageID') = r.id
++        AND NOT EXISTS (SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
++          AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = r.id
++          AND terminal.type IN ('session.next.prompt.completed.1', 'session.next.prompt.failed.1'))
++      ORDER BY e.seq DESC LIMIT 1
+     ), last_step AS (
+@@ -82,6 +91,11 @@
+-      SELECT CASE WHEN a.kind = 'native' THEN a.data
++      SELECT CASE WHEN a.kind = 'native' AND coalesce((SELECT seq FROM native_estimate), -1) > a.position THEN '{}'
++        -- 估算已替换旧 step，但既有 settled 请求累计保持原值。
++        WHEN a.kind = 'native' THEN a.data
+-        WHEN json_extract(a.data, '$.time.completed') IS NULL AND EXISTS (
++        WHEN json_extract(a.data, '$.time.completed') IS NULL AND (
++          (json_extract(a.data, '$.inputEstimate.confirmed') = 0
++            AND coalesce((SELECT id FROM last_step), '') <= coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), ''))
++          OR EXISTS (
+           SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = "session"."id"
+             AND p.id > coalesce((SELECT id FROM last_step), '')
+-        ) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
++        )) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
+       FROM last_assistant a
+@@ -98,2 +112,4 @@
+-      'assistantID', (SELECT id FROM last_assistant),
++      'assistantID', (SELECT id FROM last_assistant
++        WHERE kind = 'v1' OR position >= coalesce((SELECT seq FROM native_estimate), -1)),
++      -- 首包前不冒用上一助手，确认后仍返回真实的最后助手身份。
+       'stepInput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.input'), 0)
+@@ -112,1 +128,11 @@
++      -- 只投影当前助手未确认的请求体估算，不从累计或旧用户恢复 bootstrap。
++      -- native tokens 存在（包括全零）或 V1 新 step-finish 到达时立即停止估算。
++      'estimatedInput', coalesce((SELECT json_extract(e.data, '$.inputEstimate.input') FROM native_estimate e
++        WHERE e.seq > coalesce((SELECT position FROM last_assistant), -1)),
++        (SELECT json_extract(a.data, '$.inputEstimate.input') FROM last_assistant a
++        WHERE json_extract(a.data, '$.time.completed') IS NULL
++          AND json_extract(a.data, '$.inputEstimate.confirmed') = 0
++          AND (a.kind = 'v1' OR json_extract(a.data, '$.tokens') IS NULL)
++          AND NOT EXISTS (SELECT 1 FROM last_step p WHERE a.kind = 'v1'
++            AND p.id > coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), '')))),
+       -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
+@@ -113,4 +139,9 @@
+-      'model', json((SELECT json_object(
++      'model', json(coalesce((SELECT json_object(
++        'providerID', json_extract(data, '$.model.providerID'), 'modelID', json_extract(data, '$.model.id'),
++        'contextLimit', coalesce(json_extract(data, '$.inputEstimate.contextLimit'), 0)) FROM native_estimate
++        WHERE seq > coalesce((SELECT position FROM last_assistant), -1)), (SELECT json_object(
+         'providerID', coalesce(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')),
+-        'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id'))
++        'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id')),
++        'contextLimit', CASE WHEN kind = 'native' THEN coalesce(json_extract(data, '$.inputEstimate.contextLimit'), 0)
++          ELSE json_extract(data, '$.inputEstimate.contextLimit') END
+-      ) FROM last_assistant))
++      ) FROM last_assistant)))
+@@ -127,2 +158,3 @@
+       pendingInput: Schema.NullOr(Schema.Finite),
++      estimatedInput: Schema.NullOr(Schema.Finite),
+-      model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
++      model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String, contextLimit: Schema.NullOr(Schema.Finite) })),
+@@ -133,2 +165,3 @@
+       pendingInput: fields.pendingInput ?? undefined,
++      estimatedInput: fields.estimatedInput ?? undefined,
+-      model: fields.model ?? undefined,
++      model: fields.model ? { ...fields.model, contextLimit: fields.model.contextLimit ?? undefined } : undefined,
 diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
 --- a/packages/tui/src/util/token-estimate.ts
 +++ b/packages/tui/src/util/token-estimate.ts
 @@ -1,4 +1,4 @@
--import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
-+import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+-import type { AssistantMessage, Message, Part, Provider, SessionRequestUsage } from "@opencode-ai/sdk/v2"
++import type { AssistantMessage, Part, SessionRequestUsage } from "@opencode-ai/sdk/v2"
  import { estimate } from "@opencode-ai/core/util/token"
  
  export type UsageInfo = {
-@@ -10,16 +10,6 @@
-   cost: string | undefined
+@@ -11,9 +11,3 @@
  }
  
--// 系统提示词的 token 开销估算常量
--// 服务端组装的系统提示包含模型身份、工作目录、git 上下文、平台信息、技能和用户指令，
--// 典型长度 1500-4000 字符；取 800 token 作为下界估算，避免低估引导上下文
+-// 服务端系统提示包含模型身份、目录、git、平台、技能和用户指令；800 仅粗估未知开销，provider 确认后不作为真实输入下限。
 -export const SYSTEM_PROMPT_OVERHEAD = 800
 -
--// 工具定义的 token 开销估算常量
--// 每个工具包含名称、描述和 JSON Schema；15-25 个活跃工具可达 3000-8000+ 字符，
--// 取 2000 token 作为合理上界，确保引导估算覆盖工具定义占用
+-// 工具名称、描述和 JSON Schema 在 15-25 个活跃工具下可达 3000-8000+ 字符；2000 沿用源典型开销，不是精确上界。
 -export const TOOL_DEFINITION_OVERHEAD = 2000
 -
- // 估算 data URL（base64 编码的图片/PDF）的输入 token 数
- // 图片按每 750 字符约 1 token 估算（Anthropic 视觉编码），上限 1600 token
- // PDF 按每 1100 字符约 1 token 估算；其他类型回退到通用文本估算
-@@ -36,36 +26,7 @@
-   return Math.max(1, estimate(url.slice(comma + 1)))
+ export function estimateDataUrlInputTokens(url: string, mime: string) {
+@@ -31,29 +25,3 @@
  }
  
--// 估算用户输入部件列表的 token 数
--// 遍历 text/file/agent/subtask 四种部件类型，分别按其内容特征估算
--// synthetic 和 ignored 的 text 部件跳过，因为它们不发送到 API
--export function estimateUserInputTokens(parts: ReadonlyArray<{ type: string; [key: string]: any }>) {
+-export function estimateUserInputTokens(parts: ReadonlyArray<Part>) {
 -  return parts.reduce((sum, part) => {
--    if (part.type === "text" && !part.synthetic && !part.ignored) {
+-    // synthetic 文件、编辑器和 MCP 正文也发送给模型，只有 ignored 文本不计入。
+-    if (part.type === "text" && !part.ignored) {
 -      return sum + estimate(part.text ?? "")
 -    }
 -    if (part.type === "file") {
+-      // text/plain 和目录已展开成 synthetic 正文，模型投影跳过原附件，不能重复计数。
+-      if (part.mime === "text/plain" || part.mime === "application/x-directory") return sum
 -      return sum + estimateDataUrlInputTokens(part.url ?? "", part.mime ?? "")
 -    }
 -    if (part.type === "agent") {
@@ -61,31 +409,21 @@ diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/tok
 -  }, 0)
 -}
 -
--// 估算单次请求的系统开销：系统提示词 + 工具定义
--// 此值用于引导估算——当尚无助手回复时，用户输入加上此开销即为预估上下文
 -export function estimateRequestOverhead(): number {
+-  // 首轮无助手确认时用系统提示和工具定义粗估引导上下文。
 -  return SYSTEM_PROMPT_OVERHEAD + TOOL_DEFINITION_OVERHEAD
 -}
 -
--// 累加指定助手消息列表中所有 step-finish 部件的已确认 token
--// step-finish 是 API 返回的每轮确认点，包含真实的 input/output/cache token
--// input 包含 cache.read + cache.write，因为缓存 token 也计入上下文窗口
-+/** 累加所有已完成 request 的 step-finish 确认 token（不含当前 step 的流式追加） */
  export function sumConfirmed(
-   items: AssistantMessage[],
-   getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
-@@ -89,62 +50,15 @@
-   )
+@@ -82,45 +50,3 @@
  }
  
--// 获取指定助手消息的上下文大小
--// 从部件列表末尾向前查找最后一个 step-finish，返回其全部 token 总和
--// 末尾查找是因为上下文大小以最新一轮确认为准，早期 step-finish 的值已过时
 -export function getContextSize(
 -  item: AssistantMessage,
--  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
+-  getParts: (id: string) => ReadonlyArray<Part>,
 -): number {
 -  const parts = getParts(item.id)
+-  // 上下文以最新一轮确认为准，倒序只取最后 step-finish，早期确认不再代表当前大小。
 -  for (let i = parts.length - 1; i >= 0; i--) {
 -    const p = parts[i]
 -    if (p.type === "step-finish") {
@@ -101,470 +439,867 @@ diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/tok
 -  return 0
 -}
 -
--// 引导估算：在助手回复前预估用户输入的上下文 token
--// 策略：如果存在上一轮助手消息，用其上下文大小 + 当前用户输入；
--// 否则用用户输入 + 系统开销（系统提示词 + 工具定义）。
--// previousAssistant 通过 parentID 不匹配最后用户消息来排除当前请求的助手
 -export function getBootstrapInputTokens(
--  users: UserMessage[],
--  assistants: AssistantMessage[],
--  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
+-  messages: ReadonlyArray<Message>,
+-  request: SessionRequestUsage | undefined,
+-  getParts: (id: string) => ReadonlyArray<Part>,
 -): number {
--  const lastUser = users.at(-1)
--  const lastUserParts = lastUser ? getParts(lastUser.id) : []
--  const estimatedPromptInputTokens = estimateUserInputTokens(lastUserParts)
--  // 查找属于上一轮请求的助手消息（parentID 不匹配当前最后用户消息）
--  const previousAssistant = lastUser ? assistants.findLast((item) => item.parentID !== lastUser.id) : assistants.at(-1)
--
--  const requestOverhead = estimateRequestOverhead()
+-  // 请求身份来自持久化投影，显示窗口最后一个用户可能属于其他请求。
+-  const user = messages.find((item) => item.id === request?.messageID && item.role === "user")
+-  // 用户被窗口淘汰时零表示缺少可估正文，不能借用旧用户内容。
+-  if (!user) return 0
+-  const estimatedPromptInputTokens = estimateUserInputTokens(getParts(user.id))
+-  // 只借用用户之前的助手上下文，防止排队或混合入口中的较新回复混入本次估算。
+-  const previousAssistant = messages.findLast(
+-    (item): item is AssistantMessage => item.role === "assistant" && item.parentID !== user.id && item.time.created < user.time.created,
+-  )
 -  const previousContextSize = previousAssistant ? getContextSize(previousAssistant, getParts) : 0
--
--  // 有历史上下文时累加用户输入；否则用用户输入 + 系统开销
+-  // 历史上下文取最后一步，不取全部请求累计；固定开销只用于没有可见历史确认的引导。
 -  return previousContextSize > 0
 -    ? previousContextSize + estimatedPromptInputTokens
--    : estimatedPromptInputTokens + requestOverhead
+-    : estimatedPromptInputTokens + estimateRequestOverhead()
 -}
 -
--// 计算最终 token：当前 step 确认值 + 流式估算 + 引导 token
--// 流式估算从最后一个 step-finish 之后的部分部件提取，按字符数 / 4 近似 token
--// hasInFlightTail 判断尾部是否有未完成工具调用，有则当前 step 尚未确认
--// bootstrapInputTokens 在 requestConfirmed.input 为 0 时作为 totalInput 的补充
-+/**
-+ * 合并 step-finish 真实值、流式追加估算，以及 assistant message 上的服务端请求体估算。
-+ * finish-step 到达前，prompt.ts 会先把真实请求体估算写入 lastAssistant.tokens.input。
-+ */
  export function computeFinalTokens(
-   lastAssistant: AssistantMessage,
-   lastParts: ReadonlyArray<{ type: string; [key: string]: any }>,
-   requestConfirmed: { input: number; output: number },
+@@ -127,6 +53,5 @@
+   lastAssistant: AssistantMessage | undefined,
+   lastParts: ReadonlyArray<Part>,
+   request: SessionRequestUsage,
 -  bootstrapInputTokens: number,
  ) {
-+  // 定位最后一个 step-finish 索引，划分已确认区与流式追加区
    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-   // 流式输出估算：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
-@@ -183,15 +97,23 @@
-     !hasInFlightTail && lastStepFinish
-       ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-       : 0
--  // 修复：currentInput 应该反映当前步骤的真实输入（包括 bootstrap 或确认值）
--  const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
-+
-+  // finish-step 到达前，用 assistant message 上的服务端请求体估算（含 cache）作为当前 step 输入
-+  // cache token 同样占用上下文窗口，需与 input 一并累加以匹配服务端口径
-+  const assistantInputEstimate =
-+    lastSFIdx < 0 ? lastAssistant.tokens.input + lastAssistant.tokens.cache.read + lastAssistant.tokens.cache.write : 0
-+  const currentStepInput = currentStepInputConfirmed || assistantInputEstimate
-+  // 上一轮累计 = 总确认值 - 当前 step 已确认值（无确认时全部算作上一轮）
-+  const previousInput = currentStepInputConfirmed ? requestConfirmed.input - currentStepInputConfirmed : requestConfirmed.input
-+  const previousOutput = currentStepOutputConfirmed ? requestConfirmed.output - currentStepOutputConfirmed : requestConfirmed.output
-+  // 当前 step 输入叠加流式 pending 工具输入，得到实时输入估算
-+  const currentInput = currentStepInput + pendingInputTokens
-   const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
- 
--  // 修复：totalInput 应该始终包含当前步骤的完整上下文
--  // 如果当前步骤已确认（有 step-finish），使用确认值；否则使用 bootstrap 估算
--  const currentStepTotalInput = currentStepInputConfirmed > 0 ? currentStepInputConfirmed : bootstrapInputTokens
--  const totalInput = requestConfirmed.input + currentStepTotalInput + pendingInputTokens
--  const totalOutput = requestConfirmed.output + pendingOutputTokens
-+  // 总输入对齐 requestConfirmed：上一轮累计 + 当前 step + 流式追加
-+  const totalInput = previousInput + currentStepInput + pendingInputTokens
-+  // 总输出避免重复计算 pending 部分：上一轮累计 + 当前 step 输出
-+  const totalOutput = previousOutput + currentOutput
- 
+@@ -148,3 +73,5 @@
+         if (i <= lastSFIdx) return sum
++        // server 请求体已包含游标之前的工具结果，只为之后的新结果追加下一轮输入估算。
++        if (request.estimatedInput !== undefined && p.id <= (lastAssistant.inputEstimate?.afterPartID ?? "")) return sum
+         if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
+         return sum
+@@ -158,4 +85,1 @@
+-  // input 为零不足以判定未确认，还须检查 output、step-finish 与完成时间；assistantID 存在而缓存缺失时相信投影。
+-  const unconfirmed = request.pendingInput === undefined && request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
+-    && lastSFIdx < 0 && (!request.assistantID || (!!lastAssistant && lastAssistant.time.completed === undefined))
+   const lastStepFinish = lastParts[lastSFIdx]
+@@ -162,14 +86,20 @@
+   // 最新助手可以没有 parts，投影仍提供末步基数；可见零确认或完成先到时立即遮掉旧估算。
+   const projectedPendingInput = !lastAssistant || (lastAssistant.time.completed === undefined && (lastSFIdx < 0 || hasInFlightTail))
+     ? request.pendingInput : undefined
+-  // 下一步继承末步完整上下文，输出、reasoning 和缓存输入均进入历史，不能用全部请求累计替代。
+-  const pendingStepInput = hasInFlightTail && lastStepFinish?.type === "step-finish"
++  // 零估算有效；确认 part 或完成先到时立即遮掉旧 Session provisional input。
++  const estimatedInput = (!lastAssistant || lastAssistant.time.completed === undefined)
++    && lastAssistant?.inputEstimate?.confirmed !== true
++    && (lastSFIdx < 0 || (lastAssistant?.inputEstimate?.afterPartID ?? "") >= (lastStepFinish?.id ?? ""))
++    ? request.estimatedInput : undefined
++  // 首轮只消费服务端实际请求估算，确认值包括零均不受本地 bootstrap 下限约束。
++  const pendingStepInput = estimatedInput ?? (hasInFlightTail && lastStepFinish?.type === "step-finish"
++    // 下一步继承末步完整上下文，输出、reasoning 和缓存输入均进入历史，不能用全部请求累计替代。
+     ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
+       + lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
+-    : projectedPendingInput ?? (unconfirmed ? bootstrapInputTokens : 0)
++    : projectedPendingInput ?? 0)
+-  // 完成态确认值包括零均有权威性，不用 bootstrap 作下限或重新补一轮输入。
++  // 确认 step 读取完整 Session 投影，parts 只补未确认尾部；完成态零值同样有权威性。
+-  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + pendingStepInput
+-  const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + pendingOutputTokens
++  const currentInput = (hasInFlightTail || estimatedInput !== undefined ? 0 : request.stepInput) + pendingInputTokens + pendingStepInput
++  const currentOutput = (hasInFlightTail || estimatedInput !== undefined ? 0 : request.stepOutput) + pendingOutputTokens
+-  // durable 累计已含末步确认，只能再加尚未结算的下一步估算，避免 100 变 200。
++  // durable 累计独立于可见助手与 V1 part 缓存，末步已确认用量只叠加未结算的下一步估算。
+   const totalInput = request.input + pendingInputTokens + pendingStepInput
+   const totalOutput = request.output + pendingOutputTokens
+@@ -177,1 +107,2 @@
++  // 此函数仅返回显示值，不写 Session.tokens 或费用，不成为持久化账本的第二个 owner。
    return {
-     input: currentInput,
-
+@@ -185,9 +116,12 @@
+ export function getContextLimit(
+-  provider: ReadonlyArray<Provider>,
++  provider: ReadonlyArray<{ id: string; models: Record<string, { limit: { context: number } }> }>,
+   providerID: string | undefined,
+   modelID: string | undefined,
++  contextLimit?: number,
+ ): number | undefined {
++  // 本轮冻结预算包括零均有权威性；仅旧 V1 Catalog ID 沿用原字典查找。
++  if (contextLimit !== undefined) return contextLimit
+   // 模型缺省时没有可算上限，保留 undefined，不能拿系统开销代替上下文窗口。
+   if (!providerID || !modelID) return undefined
+   return provider.find((item) => item.id === providerID)?.models[modelID]?.limit.context
+ }
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -41,7 +41,7 @@
- import { Locale } from "../../util/locale"
- import { errorMessage } from "../../util/error"
+@@ -43,3 +43,3 @@
  import { formatDuration, formatDurationCompact } from "../../util/format"
--import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
-+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+-import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
  import { createColors, createFrames } from "../../ui/spinner"
- import { useDialog } from "../../ui/dialog"
- import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
-@@ -284,34 +284,17 @@
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
--    // 引导估算：在助手回复前预估用户输入的上下文 token
-     const getParts = (id: string) => sync.data.part[id] ?? []
- 
-     // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-     const lastUser = users.at(-1)
--    // 查找当前请求对应的模型，用于计算 context 百分比
--    const requestModel =
--      lastUser &&
--      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-+    // parentID 匹配确保只选取由当前用户消息触发的助手回复，排除历史轮次
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
--    // 引导 token：用户输入 + 系统开销 或 上一轮上下文 + 用户输入
--    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
--
--    // 本次请求尚无助手回复时显示引导估算值
-+    // 本次请求尚无助手回复时，等待服务端写入 tokens.input 后再显示
-     if (requestAssistants.length === 0) {
--      if (!isRunning) return
--      const tokens = bootstrapInputTokens
--      // 计算引导 token 占上下文窗口的百分比
--      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
--      return {
--        input: tokens,
--        output: 0,
--        totalInput: tokens,
--        totalOutput: 0,
--        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
--        cost: undefined,
--      }
-+      // 服务端尚未写入估算值前不显示，避免客户端引导估算与服务端口径不一致
-+      return
-     }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-@@ -325,7 +308,8 @@
-       output: currentOutput,
-       totalInput,
-       totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-+    } = computeFinalTokens(last, lastParts, requestConfirmed)
-+    // 移除 bootstrapInputTokens 参数，改由服务端 prompt.ts 写入真实估算到 assistant.tokens.input
-     // requestTokens 用于 context 百分比和显示
+@@ -289,5 +289,3 @@
+     const request = session?.request
+-    // 引导只读取匹配持久化身份的正文；缓存后来的用户不应覆盖当前请求。
+-    const getParts = (id: string) => sync.data.part[id] ?? []
+-    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
++    // 首轮等待真实请求体估算；身份与窗口外确认累计继续取 Session.request。
+     // 空闲无回复仍隐藏；运行中无回复进入共享估算，不借用旧请求的确认值。
+@@ -304,3 +302,3 @@
+     // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
+-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
++    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
      const requestTokens = currentInput + currentOutput
-     const actualTotalTokens = currentInput + currentOutput
-
+@@ -315,4 +313,4 @@
+     const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+-    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
+-    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
++    const contextLimit = getContextLimit(sync.data.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
++    const pct = requestTokens > 0 && contextLimit ? `${Math.round((requestTokens / contextLimit) * 100)}%` : undefined
+     // 恢复源提交的请求费用范围；服务端来源并不使 Session.cost 等同请求 cost。
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -5,7 +5,7 @@
- import { SplitBorder } from "../../ui/border"
- import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+@@ -7,3 +7,3 @@
  import { Locale } from "../../util/locale"
--import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
-+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+-import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { useTerminalDimensions } from "@opentui/solid"
- import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
-@@ -57,34 +57,17 @@
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
--    // 引导估算：在助手回复前预估用户输入的上下文 token
-     const getParts = (id: string) => sync.data.part[id] ?? []
- 
-     // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-     const lastUser = users.at(-1)
--    // 查找当前请求对应的模型，用于计算 context 百分比
--    const requestModel =
--      lastUser &&
--      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-+    // parentID 过滤确保子代理页脚只统计当前请求的助手消息
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
--    // 引导 token：用户输入 + 系统开销 或 上一轮上下文 + 用户输入
--    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
--
--    // 本次请求尚无助手回复时显示引导估算值
-+    // 本次请求尚无助手回复时，等待服务端写入 tokens.input 后再显示
-     if (requestAssistants.length === 0) {
--      if (!isRunning) return
--      const tokens = bootstrapInputTokens
--      // 计算引导 token 占上下文窗口的百分比
--      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
--      return {
--        input: tokens,
--        output: 0,
--        totalInput: tokens,
--        totalOutput: 0,
--        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
--        cost: undefined,
--      }
-+      // 子代理场景同样等待服务端估算，避免双端估算口径分歧
-+      return
-     }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-@@ -98,7 +81,8 @@
-       output: currentOutput,
-       totalInput,
-       totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-+    } = computeFinalTokens(last, lastParts, requestConfirmed)
-+    // 子代理页脚复用 computeFinalTokens，参数与主提示栏保持一致
+@@ -61,5 +61,3 @@
+     const request = session()?.request
+-    // 子代理只估算自己的用户正文，不能从父 Session 借入工具上下文或用量。
+-    const getParts = (id: string) => sync.data.part[id] ?? []
+-    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
++    // 子代理只消费自己的服务端请求体估算，不借用父 Session 或本地 bootstrap。
+     // 无回复且空闲保持隐藏；运行中使用引导，确认后仍读自己的完整投影。
+@@ -76,3 +74,3 @@
+     // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
+-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
++    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
      const requestTokens = currentInput + currentOutput
-     const totalTokens = totalInput + totalOutput
- 
-
+@@ -89,4 +87,4 @@
+     const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+-    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
+-    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
++    const contextLimit = getContextLimit(sync.data.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
++    const pct = requestTokens > 0 && contextLimit ? `${Math.round((requestTokens / contextLimit) * 100)}%` : undefined
+     // 恢复 footer 的请求费用 hunk，不把子代理 Session.cost 当作请求费用。
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -3,7 +3,7 @@
- import type { BuiltinTuiPlugin } from "../builtins"
- import { createEffect, createMemo, createSignal } from "solid-js"
+@@ -5,3 +5,3 @@
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
--import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
-+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
+-import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
  
- const id = "internal:sidebar-context"
- 
-@@ -37,35 +37,16 @@
-     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = messages.filter((item): item is UserMessage => item.role === "user")
- 
--    // 引导估算：在助手回复前预估用户输入的上下文 token
-     const getParts = (id: string) => props.api.state.part(id)
- 
--    // 无助手消息时显示引导估算值（运行中）或零值（空闲）
-+    // 无助手消息时显示零值，等待服务端写入 tokens.input 后再显示
-     const lastUser = users.at(-1)
-+    // 侧边栏上下文同样按 parentID 过滤当前请求的助手消息
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
--    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
- 
-     if (requestAssistants.length === 0) {
--      if (!isRunning()) {
--        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
--      }
--      // 引导估算：显示预估的输入 token 和百分比
--      const requestModel =
--        lastUser &&
--        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
--      const percent =
--        bootstrapInputTokens > 0 && requestModel?.limit.context
--          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
--          : null
--      return {
--        tokens: bootstrapInputTokens,
--        totalTokens: bootstrapInputTokens,
--        input: bootstrapInputTokens,
--        output: 0,
--        totalInput: bootstrapInputTokens,
--        totalOutput: 0,
--        percent,
--      }
-+      // 空闲或运行中均返回零值，待服务端写入后再由响应式更新触发显示
-+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
-     }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-@@ -79,7 +60,8 @@
-       output,
-       totalInput,
-       totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-+    } = computeFinalTokens(last, lastParts, requestConfirmed)
-+    // 侧边栏移除 bootstrap 参数，依赖服务端写入的 assistant.tokens.input
+@@ -38,5 +38,3 @@
+     const request = session()?.request
+-    // 侧栏和 Prompt 共用引导 owner，synthetic 文件正文也参与首轮输入估算。
+-    const getParts = (id: string) => props.api.state.part(id)
+-    const bootstrapInputTokens = getBootstrapInputTokens(messages, request, getParts)
++    // 三个视图共享服务端 provisional input；侧栏不维护第二个估算/累计 owner。
+     // 空闲无回复保持全字段零值，避免新 Session 留下上一请求的费用或百分比。
+@@ -52,3 +50,3 @@
+     // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
+-    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
++    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
      const tokens = input + output
-     const totalTokens = totalInput + totalOutput
-     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -1224,7 +1224,6 @@
-             time: { created: Date.now() },
-             sessionID,
-           }
--          yield* sessions.updateMessage(msg)
- 
-           const finalizeInterruptedAssistant = Effect.gen(function* () {
-             if (msg.time.completed) return
-@@ -1295,6 +1294,51 @@
-             ]
-             const format = lastUser.format ?? { type: "text" as const }
-             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
-+            // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
-+            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
-+            // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-+            // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，
-+            // 按累积字符量停止（≥16000），不按轮数，代替固定 /4
-+            const systemText = [
-+              ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),
-+              ...system,
-+              ...(lastUser.system ? [lastUser.system] : []),
-+            ].join("\n")
-+            const messagesText = JSON.stringify(messages)
-+            // 合并 agent 与 session 权限，仅估算实际发送的工具定义
-+            const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
-+            const toolsText = Object.entries(tools)
-+              .filter(([name]) => lastUser.tools?.[name] !== false && !disabledTools.has(name))
-+              .map(([name, tool]) => {
-+                const item = tool as { description?: string; inputSchema?: unknown }
-+                return `Tool: ${name}\n${item.description ?? ""}\n${JSON.stringify(item.inputSchema)}`
-+              })
-+              .join("\n")
-+            // 三段字符总量近似请求体，除以 chars-per-token 得 token 估算
-+            const inputChars = [systemText, messagesText, toolsText].join("\n").length
-+            let historyOutputTokens = 0
-+            let historyOutputChars = 0
-+            // 逆序遍历至累积 16000 字符即停，近期输出更具代表性
-+            for (let i = msgs.length - 1; i >= 0 && historyOutputChars < 16000; i--) {
-+              const m = msgs[i]
-+              if (m.info.role !== "assistant") continue
-+              const sf = m.parts.findLast((p) => p.type === "step-finish")
-+              if (!sf) continue
-+              const chars = m.parts
-+                .filter((p) => p.type === "text" || p.type === "reasoning")
-+                .reduce((sum, p) => sum + ((p as any).text?.length ?? 0), 0)
-+              const tokens = (sf.tokens.output ?? 0) + (sf.tokens.reasoning ?? 0)
-+              historyOutputTokens += tokens
-+              historyOutputChars += chars
-+            }
-+            // 样本不足（<500 字符）时回退 /4，避免少量数据导致比值失真
-+            const charsPerToken = historyOutputTokens > 0 && historyOutputChars > 500
-+              ? historyOutputChars / historyOutputTokens
-+              : 4
-+            const estimatedInput = Math.round(inputChars / charsPerToken)
-+            // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
-+            handle.message.tokens.input = estimatedInput
-+            yield* sessions.updateMessage(handle.message)
-             const result = yield* handle.process({
-               user: lastUser,
-               agent,
-@@ -1302,10 +1346,8 @@
-               sessionID,
-               parentSessionID: session.parentID,
-               system,
--              messages: [
--                ...modelMsgs,
--                ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
--              ],
-+              // 复用上方组装的 messages，避免重复拼接 MAX_STEPS_PROMPT
-+              messages,
-               tools,
-               model,
-               toolChoice: format.type === "json_schema" ? "required" : undefined,
-
+@@ -57,3 +55,3 @@
+     const modelRef = request.model ?? messages.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
+-    const model = modelRef ? props.api.state.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
++    const contextLimit = getContextLimit(props.api.state.provider, modelRef?.providerID, modelRef?.modelID, request.model?.contextLimit)
+     return {
+@@ -66,3 +64,3 @@
+       // 没有当前 step 的上下文或模型上限时，保留缺省百分比而不捏造测量值。
+-      percent: tokens > 0 && model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
++      percent: tokens > 0 && contextLimit ? Math.round((tokens / contextLimit) * 100) : null,
+       // 请求费用是所有助手 cost 的完整求和，不是最后 step 的费用。
 diff --git a/packages/tui/test/util/token-estimate.test.ts b/packages/tui/test/util/token-estimate.test.ts
-new file mode 100644
---- /dev/null
+--- a/packages/tui/test/util/token-estimate.test.ts
 +++ b/packages/tui/test/util/token-estimate.test.ts
-@@ -0,0 +1,125 @@
-+import { describe, expect, test } from "bun:test"
-+import type { AssistantMessage, Part } from "@opencode-ai/sdk/v2"
-+import { computeFinalTokens } from "../../src/util/token-estimate"
+@@ -1,7 +1,7 @@
+ import { expect, test } from "bun:test"
+-import type { AssistantMessage, Part, SessionRequestUsage, StepFinishPart, UserMessage } from "@opencode-ai/sdk/v2"
+-import { computeFinalTokens, estimateUserInputTokens, getBootstrapInputTokens } from "../../src/util/token-estimate"
++import type { AssistantMessage, Part, SessionRequestUsage, StepFinishPart } from "@opencode-ai/sdk/v2"
++import { computeFinalTokens, estimateDataUrlInputTokens, getContextLimit, sumConfirmed } from "../../src/util/token-estimate"
++import { Token } from "@opencode-ai/core/util/token"
+ 
+-test("bootstrap yields to confirmed usage and preserves projected request totals", () => {
+-  const user: UserMessage = { id: "u", sessionID: "s", role: "user", time: { created: 1 }, agent: "build", model: { providerID: "p", modelID: "m" } }
++test("prepared input yields to confirmation and preserves projected request totals", () => {
+   const assistant: AssistantMessage = {
+@@ -12,17 +12,10 @@
+   const request: SessionRequestUsage = { messageID: "u", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 }
+-  const identity = { sessionID: "s", messageID: "u" }
+-  // 三种 synthetic producer 都送出正文；ignored 再长也不应改变输入估算。
+-  const parts: Part[] = [
+-    { ...identity, id: "file", type: "file", mime: "text/plain", url: "file:///context.txt" },
+-    { ...identity, id: "data-text", type: "file", mime: "text/plain", url: `data:text/plain;base64,${"x".repeat(800)}` },
+-    { ...identity, id: "file-text", type: "text", synthetic: true, text: "f".repeat(800) },
+-    { ...identity, id: "editor", type: "text", synthetic: true, text: "e".repeat(800) },
+-    { ...identity, id: "mcp", type: "text", synthetic: true, text: "m".repeat(800) },
+-    { ...identity, id: "ignored", type: "text", synthetic: true, ignored: true, text: "i".repeat(4000) },
+-    { ...identity, id: "plain", type: "text", text: "test" },
+-  ]
+-  expect(estimateUserInputTokens(parts)).toBe(601)
+-  expect(getBootstrapInputTokens([user], request, () => parts)).toBe(3401)
+-  // 缓存缺失不能借用另一个用户，也不能凭空创建 2800 的系统开销输入。
+-  expect(getBootstrapInputTokens([{ ...user, id: "other" }], request, () => parts)).toBe(0)
++  const body = { system: ["system"], messages: [{ role: "user", content: "abcdefgh" }], tools: [] }
++  const estimate = Token.estimateRequest(body, [])
++  expect(estimate).toEqual({ input: 21, bodyChars: 82, confirmed: false })
++  const advertised = { ...request, assistantID: assistant.id, estimatedInput: estimate.input }
++  expect(computeFinalTokens(undefined, [], advertised)).toEqual({ input: 21, output: 0, totalInput: 21, totalOutput: 0 })
++  expect(computeFinalTokens(assistant, [], advertised)).toEqual({ input: 21, output: 0, totalInput: 21, totalOutput: 0 })
++  expect(estimateDataUrlInputTokens(`data:image/png;base64,${"x".repeat(1500)}`, "image/png")).toBe(2)
++  expect(estimateDataUrlInputTokens(`data:application/pdf;base64,${"x".repeat(2200)}`, "application/pdf")).toBe(2)
+   const active = { ...request, assistantID: "a" }
+@@ -29,3 +22,3 @@
+   const text: Part = { id: "tail", sessionID: "s", messageID: "a", type: "text", text: "abcdefgh" }
+-  expect(computeFinalTokens(undefined, [], request, 2800)).toEqual({ input: 2800, output: 0, totalInput: 2800, totalOutput: 0 })
+-  expect(computeFinalTokens(assistant, [text], active, 2800)).toEqual({ input: 2800, output: 2, totalInput: 2800, totalOutput: 2 })
++  expect(computeFinalTokens(undefined, [], request)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens(assistant, [text], active)).toEqual({ input: 0, output: 2, totalInput: 0, totalOutput: 2 })
+@@ -37,3 +30,3 @@
+-  expect(computeFinalTokens(assistant, [finish], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
+-  expect(computeFinalTokens({ ...assistant, time: { created: 2, completed: 0 } }, [text], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens(assistant, [finish], active)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens({ ...assistant, time: { created: 2, completed: 0 } }, [text], active)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
+   const settled = { ...active, input: 4000, output: 30, stepInput: 1000, stepOutput: 10 }
+@@ -41,2 +34,2 @@
+   // 单步完成的 100 已进入请求累计，不能再加末步 100 或 2800 的引导。
+-  expect(computeFinalTokens(completed, [], { ...active, input: 100, output: 10, stepInput: 100, stepOutput: 10 }, 2800)).toEqual({ input: 100, output: 10, totalInput: 100, totalOutput: 10 })
++  expect(computeFinalTokens(completed, [], { ...active, input: 100, output: 10, stepInput: 100, stepOutput: 10 })).toEqual({ input: 100, output: 10, totalInput: 100, totalOutput: 10 })
+@@ -43,4 +36,4 @@
+   // 请求累计刻意大于末 step，能发现退回缓存求和或把两种范围合并的问题。
+-  expect(computeFinalTokens(completed, [], settled, 2800)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
+-  expect(computeFinalTokens(undefined, [], settled, 2800)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
+-  expect(computeFinalTokens(undefined, [], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens(completed, [], settled)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(undefined, [], settled)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(undefined, [], active)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
+@@ -49,5 +42,3 @@
+-  // 下一请求引导以末步上下文为基数，不能把全部请求累计或固定开销再叠加。
+-  const previous = { ...completed, id: "previous", parentID: "prior", time: { created: 0, completed: 0 } }
+-  expect(getBootstrapInputTokens([previous, user, assistant], request, (id) => id === "previous" ? [confirmedFinish] : parts)).toBe(1611)
++  expect(sumConfirmed([completed], () => [confirmedFinish])).toEqual({ input: 1000, output: 10 })
+-  expect(computeFinalTokens(assistant, [confirmedFinish], confirmed, 2800)).toEqual({ input: 1000, output: 10, totalInput: 1000, totalOutput: 10 })
++  expect(computeFinalTokens(assistant, [confirmedFinish], confirmed)).toEqual({ input: 1000, output: 10, totalInput: 1000, totalOutput: 10 })
+   // 1000 输入和 10 输出成为下一步上下文；完成前的新增估算只进入累计一次。
+@@ -54,2 +45,2 @@
+-  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed, 2800)).toEqual({ input: 1010, output: 2, totalInput: 2010, totalOutput: 12 })
++  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed)).toEqual({ input: 1010, output: 2, totalInput: 2010, totalOutput: 12 })
+   const tool: Part = {
+@@ -59,3 +50,3 @@
+   // 工具的 8 字符补 2 输入；多步累计 4000 不替代末步上下文 1010。
+-  expect(computeFinalTokens(assistant, [confirmedFinish, tool], confirmed, 2800)).toEqual({ input: 1012, output: 1, totalInput: 2012, totalOutput: 11 })
+-  expect(computeFinalTokens(assistant, [confirmedFinish, tool], { ...settled, stepInput: 0, stepOutput: 0 }, 2800)).toEqual({ input: 1012, output: 1, totalInput: 5012, totalOutput: 31 })
++  expect(computeFinalTokens(assistant, [confirmedFinish, tool], confirmed)).toEqual({ input: 1012, output: 1, totalInput: 2012, totalOutput: 11 })
++  expect(computeFinalTokens(assistant, [confirmedFinish, tool], { ...settled, stepInput: 0, stepOutput: 0 })).toEqual({ input: 1012, output: 1, totalInput: 5012, totalOutput: 31 })
+@@ -64,4 +55,4 @@
+   const nextRequest = { ...settled, assistantID: "next", stepInput: 0, stepOutput: 0, pendingInput: 1010 }
+-  expect(computeFinalTokens(nextAssistant, [], nextRequest, 2800)).toEqual({ input: 1010, output: 0, totalInput: 5010, totalOutput: 30 })
+-  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], nextRequest, 2800)).toEqual({ input: 1010, output: 2, totalInput: 5010, totalOutput: 32 })
+-  expect(computeFinalTokens(undefined, [], nextRequest, 2800)).toEqual({ input: 1010, output: 0, totalInput: 5010, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [], nextRequest)).toEqual({ input: 1010, output: 0, totalInput: 5010, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], nextRequest)).toEqual({ input: 1010, output: 2, totalInput: 5010, totalOutput: 32 })
++  expect(computeFinalTokens(undefined, [], nextRequest)).toEqual({ input: 1010, output: 0, totalInput: 5010, totalOutput: 30 })
+@@ -68,4 +59,4 @@
+   // 零基数不触发 bootstrap；确认事件先于 Session 快照到达也必须停止旧估算。
+-  expect(computeFinalTokens(nextAssistant, [], { ...nextRequest, input: 0, output: 0, pendingInput: 0 }, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
+-  expect(computeFinalTokens({ ...nextAssistant, time: { created: 2, completed: 0 } }, [], nextRequest, 2800)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
+-  expect(computeFinalTokens(nextAssistant, [{ ...finish, messageID: "next" }], nextRequest, 2800)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [], { ...nextRequest, input: 0, output: 0, pendingInput: 0 })).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens({ ...nextAssistant, time: { created: 2, completed: 0 } }, [], nextRequest)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [{ ...finish, messageID: "next" }], nextRequest)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
+@@ -72,3 +63,29 @@
+   // 工具结果只补下一轮输入，已确认零的旧 step 不应触发新的 bootstrap。
+-  expect(computeFinalTokens(assistant, [finish, tool], active, 2800)).toEqual({ input: 2, output: 1, totalInput: 2, totalOutput: 1 })
++  expect(computeFinalTokens(assistant, [finish, tool], active)).toEqual({ input: 2, output: 1, totalInput: 2, totalOutput: 1 })
++  // 已有 fixture 扩展 server 分支；独立常数 oracle 不复制 estimator 实现。
++  const prepared = { ...nextRequest, estimatedInput: 777 }
++  const captured = { ...nextAssistant, inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, afterPartID: "tool" } }
++  expect(computeFinalTokens(captured, [tool], prepared)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
++  expect(computeFinalTokens(undefined, [], prepared)).toEqual({ input: 777, output: 0, totalInput: 4777, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [tool], prepared)).toEqual({ input: 779, output: 1, totalInput: 4779, totalOutput: 31 })
++  expect(computeFinalTokens(nextAssistant, [], { ...prepared, estimatedInput: 0 })).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens({ ...nextAssistant, time: { created: 2, completed: 0 } }, [], prepared)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [finish], prepared)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  expect(Token.estimateRequest("abcdefgh", [])).toEqual({ input: 3, bodyChars: 10, confirmed: false })
++  expect(Token.estimateRequest("abcdefgh", [{ bodyChars: 800, input: 100 }])).toEqual({ input: 1, bodyChars: 10, confirmed: false })
++  expect(Token.estimateRequest("abcdefgh", [{ bodyChars: 800, input: 0 }])).toEqual({ input: 3, bodyChars: 10, confirmed: false })
++  const providers = [{ id: "p", models: {
++    "test-model": { api: { id: "api-test-model" }, limit: { context: 2000 } },
++    "other-alias": { api: { id: "api-test-model" }, limit: { context: 8000 } },
++    "api-test-model": { api: { id: "api-test-model" }, limit: { context: 4000 } },
++  } }]
++  const frozen = { ...prepared, model: { providerID: "p", modelID: "api-test-model", contextLimit: 2000 } }
++  const limit = getContextLimit(providers, frozen.model.providerID, frozen.model.modelID, frozen.model.contextLimit)
++  expect(limit).toBe(2000)
++  expect(limit && Math.round((computeFinalTokens(undefined, [], frozen).input / limit) * 100)).toBe(39)
++  expect(getContextLimit(providers, "p", "test-model")).toBe(2000)
++  providers[0].models["test-model"].limit.context = 9000
++  expect(getContextLimit(providers, "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
++  expect(getContextLimit(providers, "p", "api-test-model", 0)).toBe(0)
++  expect(getContextLimit([], "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
+ })
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -165,2 +165,13 @@
+         const assistantMessageID = SessionMessage.ID.make(`msg_native_usage_${factor}`)
++        // 首包前估算使用真实请求身份，不创建助手，也不重置历史确认累计。
++        yield* events.publish(SessionEvent.RequestEstimated, {
++          sessionID, messageID: SessionMessage.ID.make("msg_native_request"), timestamp: DateTime.makeUnsafe(factor),
++          model, inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
++        })
++        expect((yield* sessions.get(sessionID)).request).toMatchObject({
++          messageID: "msg_native_request", input: factor === 1 ? 0 : 14, output: factor === 1 ? 0 : 4,
++          stepInput: 0, stepOutput: 0, estimatedInput: 777,
++        })
++        expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++        expect((yield* sessions.get(sessionID)).request?.model).toEqual({ providerID: model.providerID, modelID: model.id, contextLimit: factor === 1 ? 2000 : 8000 })
+         yield* events.publish(SessionEvent.Step.Started, {
+@@ -167,1 +178,2 @@
+           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
++          inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
+@@ -172,1 +184,4 @@
++        // Started 估算不改变任何确认累计或费用；get/list 共用 canonical 投影。
++        expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBe(777)
++        expect((yield* sessions.list({ project: Project.ID.global })).find(item => item.id === sessionID)?.request?.estimatedInput).toBe(777)
+         const ended = yield* events.publish(SessionEvent.Step.Ended, {
+@@ -196,1 +211,14 @@
+       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
++      const selected = ModelV2.Ref.make({
++        providerID: model.providerID, id: ModelV2.ID.make("other-alias"), variant: ModelV2.VariantID.make("later"),
++      })
++      // 真实切换 producer 创建独立消息，不能覆盖已有用户与请求身份。
++      yield* sessions.switchModel({ sessionID, model: selected })
++      expect((yield* sessions.get(sessionID)).model?.id).toBe(selected.id)
++      expect((yield* sessions.get(sessionID)).model?.variant).toBe(ModelV2.VariantID.make("later"))
++      expect((yield* sessions.messages({ sessionID, order: "asc" })).at(-1)).toMatchObject({ type: "model-switched", model: selected })
++      expect(yield* sessions.message({ sessionID, messageID: SessionMessage.ID.make("msg_native_request") })).toMatchObject({ type: "user", text: "request" })
++      expect((yield* sessions.get(sessionID)).request?.model).toEqual({ providerID: model.providerID, modelID: model.id, contextLimit: 8000 })
++      expect((yield* sessions.list({ project: Project.ID.global })).find(item => item.id === sessionID)?.request?.model?.contextLimit).toBe(8000)
++      expect((yield* sessions.get(sessionID)).tokens).toEqual(expected.tokens)
+@@ -288,1 +316,6 @@
+       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
++      // V1 元数据先到，tokens 仍为零；真实请求体估算不进入确认 input=42。
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next,
++        inputEstimate: { input: 777, bodyChars: 3108, confirmed: false } } })
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, estimatedInput: 777 })
++      // fixture 后续零 step-finish 必须直接遮掉 provisional input，不能等待完成时间。
+@@ -293,1 +326,2 @@
+       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
+@@ -301,4 +335,30 @@
+       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+       expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
+       expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++      // 原生零确认没有 V1 part，必须依靠 tokens 是否存在而不是数字真值。
++      const zeroRequest = SessionMessage.ID.make("msg_zero_estimate")
++      const zeroAssistant = SessionMessage.ID.make("msg_zero_estimate_assistant")
++      const inputEstimate = { input: 777, bodyChars: 3108, confirmed: false }
++      yield* events.publish(SessionEvent.Prompted, { sessionID, messageID: zeroRequest,
++        timestamp: DateTime.makeUnsafe(14), prompt: Prompt.make({ text: "zero" }), delivery: "steer" })
++      yield* events.publish(SessionEvent.RequestEstimated, { sessionID, messageID: zeroRequest,
++        timestamp: DateTime.makeUnsafe(15), model, inputEstimate })
++      yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID: zeroAssistant,
++        timestamp: DateTime.makeUnsafe(16), agent: "build", model, inputEstimate })
++      yield* events.publish(SessionEvent.Step.Ended, { sessionID, assistantMessageID: zeroAssistant,
++        timestamp: DateTime.makeUnsafe(17), finish: "stop", cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
++      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
++      // 空成功只闭合现有请求，估算事件不制造零用量助手或额外 provider turn。
++      const emptyRequest = SessionMessage.ID.make("msg_empty_estimate")
++      yield* events.publish(SessionEvent.Prompted, { sessionID, messageID: emptyRequest,
++        timestamp: DateTime.makeUnsafe(18), prompt: Prompt.make({ text: "empty" }), delivery: "steer" })
++      yield* events.publish(SessionEvent.RequestEstimated, { sessionID, messageID: emptyRequest,
++        timestamp: DateTime.makeUnsafe(19), model, inputEstimate })
++      yield* events.publish(SessionEvent.PromptCompleted, { sessionID, messageID: emptyRequest,
++        timestamp: DateTime.makeUnsafe(20), requestIDs: [emptyRequest] })
++      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
+     }).pipe(Effect.provide(sessionsLayer)),
+diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/event-v2-bridge.ts
+--- a/packages/opencode/src/event-v2-bridge.ts
++++ b/packages/opencode/src/event-v2-bridge.ts
+@@ -65,3 +65,8 @@
+           event.type === SessionEvent.Prompted.type ||
++          // 估算及零助手终态也刷新同一个 Session 读投影，不发送新 durable Updated。
++          event.type === SessionEvent.RequestEstimated.type ||
++          event.type === SessionEvent.PromptCompleted.type ||
++          event.type === SessionEvent.PromptFailed.type ||
++          event.type === SessionEvent.Step.Failed.type ||
+           event.type === SessionEvent.Step.Started.type ||
+           event.type === SessionEvent.Step.Ended.type ||
+diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/test/session-runner-model.test.ts
+--- a/packages/core/test/session-runner-model.test.ts
++++ b/packages/core/test/session-runner-model.test.ts
+@@ -2,5 +2,6 @@
+-import { LLM } from "@opencode-ai/llm"
+-import { LLMClient } from "@opencode-ai/llm/route"
+-import { DateTime, Effect } from "effect"
++import { LLM, ModelID } from "@opencode-ai/llm"
++import { LLMClient, RequestExecutor } from "@opencode-ai/llm/route"
++import { DateTime, Effect, Stream } from "effect"
+ import { Headers } from "effect/unstable/http"
++import { Token } from "@opencode-ai/core/util/token"
+ import { Credential } from "@opencode-ai/core/credential"
+@@ -350,3 +351,62 @@
++  it.effect("estimates each stream after catalog system defaults are lowered", () =>
++    Effect.gen(function* () {
++      const client = yield* LLMClient.Service
++      const estimates: ReturnType<typeof Token.estimateRequest>[] = []
++      const calls = { prepare: 0, frames: 0 }
++      for (const raw of ["", "x".repeat(8000)]) {
++        const resolved = yield* SessionRunnerModel.fromCatalogModel(
++          ModelV2.Info.make({
++            ...model({ type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic.example/v1" }),
++            providerID: ProviderV2.ID.make("claudecode"),
++            request: { headers: {}, body: { apiKey: "fixture", system: raw } },
++            limit: { context: 100_000, output: 20 },
++          }),
++        )
++        expect(resolved.id).toBe(ModelID.make("api-test-model"))
++        expect(resolved.route.defaults.limits?.context).toBe(100_000)
++        const route = resolved.route.with({
++          transport: {
++            ...resolved.route.transport,
++            prepare(input) {
++              calls.prepare++
++              return resolved.route.transport.prepare(input)
++            },
++            frames() {
++              calls.frames++
++              expect(estimates).toHaveLength(calls.frames)
++              return Stream.empty
++            },
++          },
++        })
++        const input = LLM.request({
++          model: route.model({ id: resolved.id }),
++          http: { body: { metadata: { fixture: raw } } },
++          system: "Session system", prompt: "hello", cache: "none",
++          tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object", properties: { text: { type: "string" } } } }],
++          providerOptions: { anthropic: { thinking: { type: "disabled" } } },
++        })
++        expect(input.providerOptions?.anthropic?.system).toBeUndefined()
++        yield* client.stream(input, (body) => Effect.sync(() => {
++          estimates.push(Token.estimateRequest(body, []))
++          expect(body).toMatchObject({
++            system: expect.arrayContaining([{ type: "text", text: "Session system" }, { type: "text", text: raw }]),
++            messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
++            tools: expect.arrayContaining([{ name: "echo", description: "Echo", input_schema: { type: "object", properties: { text: { type: "string" } } } }]),
++          })
++          // metadata 与 system 同增 8000，估算仍只增长正文的 8000；运输附加字段不能再计一遍。
++          expect(body).not.toHaveProperty("metadata.fixture")
++        })).pipe(Stream.runDrain)
++      }
++      expect(calls).toEqual({ prepare: 2, frames: 2 })
++      expect(estimates).toHaveLength(2)
++      expect(Math.max(...estimates.map(item => item.bodyChars)) - Math.min(...estimates.map(item => item.bodyChars))).toBe(8000)
++      expect(Math.max(...estimates.map(item => item.input)) - Math.min(...estimates.map(item => item.input))).toBe(2000)
++    }).pipe(
++      Effect.provide(LLMClient.layer),
++      Effect.provideService(RequestExecutor.Service, { execute: () => Effect.die("Prepared fixture must not send provider IO") }),
++    ),
++  )
 +
-+function assistant(tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read: number; write: number } }, completed?: number): AssistantMessage {
-+  return {
-+    id: "2",
-+    sessionID: "s",
-+    role: "assistant",
-+    time: { created: 2, completed },
-+    parentID: "1",
-+    modelID: "model",
-+    providerID: "test",
-+    mode: "general",
-+    agent: "general",
-+    path: { cwd: ".", root: "." },
-+    cost: 0,
-+    tokens: { input: tokens?.input ?? 0, output: tokens?.output ?? 0, reasoning: tokens?.reasoning ?? 0, cache: tokens?.cache ?? { read: 0, write: 0 } },
-+  } as AssistantMessage
+   it.effect("rejects catalog APIs without a native route", () =>
+     Effect.gen(function* () {
+       const failure = yield* SessionRunnerModel.fromCatalogModel(
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect, test } from "bun:test"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
++import { Token } from "@opencode-ai/core/util/token"
+ import { APICallError } from "ai"
+ import { MessageV2 } from "../../src/session/message-v2"
+ import { ProviderTransform } from "@/provider/transform"
+ import type { Provider } from "@/provider/provider"
+@@ -263,8 +264,12 @@
+             type: "text",
+-            text: "ignored",
++            text: "i".repeat(4000),
+             ignored: true,
+           },
++          { ...basePart(messageID, "file-text"), type: "text", synthetic: true, text: "f".repeat(800) },
++          { ...basePart(messageID, "editor"), type: "text", synthetic: true, text: "e".repeat(800) },
++          { ...basePart(messageID, "mcp"), type: "text", synthetic: true, text: "m".repeat(800) },
++          { ...basePart(messageID, "data-text"), type: "file", mime: "text/plain", url: `data:text/plain;base64,${"x".repeat(800)}` },
+           {
+             ...basePart(messageID, "p3"),
+             type: "file",
+             mime: "image/png",
+@@ -302,7 +307,11 @@
+     ]
+ 
+-    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
++    const messages = await MessageV2.toModelMessages(input, model)
++    expect(messages).toStrictEqual([
+       {
+         role: "user",
+         content: [
+           { type: "text", text: "hello" },
++          { type: "text", text: "f".repeat(800) },
++          { type: "text", text: "e".repeat(800) },
++          { type: "text", text: "m".repeat(800) },
+@@ -317,4 +326,5 @@
+         ],
+       },
+     ])
++    expect(Token.estimateRequest({ system: [], messages, tools: [] }, [])).toEqual({ input: 697, bodyChars: 2789, confirmed: false })
+   })
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -23,6 +23,7 @@
+   | EventSessionNextPromptAdmitted
+   | EventSessionNextPromptFailed
+   | EventSessionNextPromptCompleted
++  | EventSessionNextRequestEstimated
+   | EventSessionNextContextUpdated
+   | EventSessionNextSynthetic
+   | EventSessionNextShellStarted
+@@ -362,6 +363,7 @@
+   }
+   summary?: boolean
+   cost: number
++  inputEstimate?: SessionMessageInputEstimate
+   tokens: {
+     total?: number
+     input: number
+@@ -896,6 +898,17 @@
+           requestIDs: Array<string>
+         }
+       }
++    | {
++        id: string
++        type: "session.next.request.estimated"
++        properties: {
++          timestamp: number
++          sessionID: string
++          messageID: string
++          model: ModelRef
++          inputEstimate: SessionMessageInputEstimate
++        }
++      }
+     | {
+         id: string
+         type: "session.next.context.updated"
+@@ -946,6 +959,7 @@
+           assistantMessageID: string
+           agent: string
+           model: ModelRef
++          inputEstimate?: SessionMessageInputEstimate
+           snapshot?: string
+         }
+       }
+@@ -1680,6 +1694,7 @@
+     | SyncEventSessionNextPromptAdmitted
+     | SyncEventSessionNextPromptFailed
+     | SyncEventSessionNextPromptCompleted
++    | SyncEventSessionNextRequestEstimated
+     | SyncEventSessionNextContextUpdated
+     | SyncEventSessionNextSynthetic
+     | SyncEventSessionNextShellStarted
+@@ -2821,6 +2836,7 @@
+   | SessionNextPromptAdmitted
+   | SessionNextPromptFailed
+   | SessionNextPromptCompleted
++  | SessionNextRequestEstimated
+   | SessionNextContextUpdated
+   | SessionNextSynthetic
+   | SessionNextShellStarted
+@@ -2951,6 +2967,7 @@
+   | SessionNextPromptAdmitted
+   | SessionNextPromptFailed
+   | SessionNextPromptCompleted
++  | SessionNextRequestEstimated
+   | SessionNextContextUpdated
+   | SessionNextSynthetic
+   | SessionNextShellStarted
+@@ -3127,7 +3144,9 @@
+   stepInput: number
+   stepOutput: number
+   pendingInput?: number
++  estimatedInput?: number
+   model?: {
+     providerID: string
+     modelID: string
++    contextLimit?: number
+   }
+@@ -3134,6 +3153,14 @@
+ }
+ 
++export type SessionMessageInputEstimate = {
++  input: number
++  bodyChars: number
++  confirmed: boolean
++  afterPartID?: string
++  contextLimit?: number
 +}
 +
-+function text(id: string, text: string): Part {
-+  return { id, sessionID: "s", messageID: "2", type: "text", text } as Part
+ export type ModelRef = {
+   id: string
+   providerID: string
+   variant?: string
+@@ -3519,6 +3546,24 @@
+   }
+ }
+ 
++export type SyncEventSessionNextRequestEstimated = {
++  type: "sync"
++  id: string
++  syncEvent: {
++    type: "session.next.request.estimated.1"
++    id: string
++    seq: number
++    aggregateID: string
++    data: {
++      timestamp: number
++      sessionID: string
++      messageID: string
++      model: ModelRef
++      inputEstimate: SessionMessageInputEstimate
++    }
++  }
 +}
 +
-+function stepFinish(input: number, output: number, reasoning = 0, cacheRead = 0, cacheWrite = 0): Part {
-+  return {
-+    id: "sf",
-+    sessionID: "s",
-+    messageID: "2",
-+    type: "step-finish",
-+    reason: "stop",
-+    cost: 0,
-+    tokens: { input, output, reasoning, cache: { read: cacheRead, write: cacheWrite } },
-+  } as Part
+ export type SyncEventSessionNextContextUpdated = {
+   type: "sync"
+   id: string
+@@ -3602,6 +3647,7 @@
+       assistantMessageID: string
+       agent: string
+       model: ModelRef
++      inputEstimate?: SessionMessageInputEstimate
+       snapshot?: string
+     }
+   }
+@@ -4299,6 +4345,7 @@
+   type: "assistant"
+   agent: string
+   model: ModelRef
++  inputEstimate?: SessionMessageInputEstimate
+   content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
+   snapshot?: {
+     start?: string
+@@ -4487,6 +4534,27 @@
+   }
+ }
+ 
++export type SessionNextRequestEstimated = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "session.next.request.estimated"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    timestamp: number
++    sessionID: string
++    messageID: string
++    model: ModelRef
++    inputEstimate: SessionMessageInputEstimate
++  }
 +}
 +
-+describe("token estimate — computeFinalTokens", () => {
-+  // 核心不变式：step-finish 到达前，input 取自 assistant.tokens.input 的服务端估算
-+  test("uses assistant message tokens.input before the first step-finish (daemon estimate)", () => {
-+    const result = computeFinalTokens(
-+      assistant({ input: 5200 }),
-+      [text("p1", "Hello")],
-+      { input: 0, output: 0 },
-+    )
+ export type SessionNextContextUpdated = {
+   id: string
+   metadata?: {
+@@ -4586,6 +4654,7 @@
+     assistantMessageID: string
+     agent: string
+     model: ModelRef
++    inputEstimate?: SessionMessageInputEstimate
+     snapshot?: string
+   }
+ }
+@@ -6601,6 +6670,18 @@
+   }
+ }
+ 
++export type EventSessionNextRequestEstimated = {
++  id: string
++  type: "session.next.request.estimated"
++  properties: {
++    timestamp: number
++    sessionID: string
++    messageID: string
++    model: ModelRef
++    inputEstimate: SessionMessageInputEstimate
++  }
++}
 +
-+    expect(result.input).toBe(5200)
-+    expect(result.output).toBe(1)
-+    expect(result.totalInput).toBe(5200)
-+    expect(result.totalOutput).toBe(1)
-+  })
-+
-+  test("uses step-finish tokens and ignores assistant estimate once confirmed", () => {
-+  // step-finish 到达后，真实确认值优先于服务端估算，确保最终显示准确
-+    const result = computeFinalTokens(
-+      assistant({ input: 9999 }, 3),
-+      [stepFinish(5100, 200, 10, 20, 30)],
-+      { input: 5370, output: 350 },
-+    )
-+
-+    expect(result.input).toBe(5150)
-+    expect(result.output).toBe(210)
-+    expect(result.totalInput).toBe(5370)
-+    expect(result.totalOutput).toBe(350)
-+  })
-+
-+  test("streaming text + assistant estimate: shows estimate for input, text for output", () => {
-+    const result = computeFinalTokens(
-+      assistant({ input: 8000 }),
-+      [text("p1", "abcdefgh")],
-+      { input: 0, output: 0 },
-+    )
-+
-+    expect(result.input).toBe(8000)
-+    expect(result.output).toBe(2)
-+  })
-+
-+  test("streaming text without assistant estimate or step-finish returns 0 input", () => {
-+    const result = computeFinalTokens(
-+      assistant({ input: 0 }),
-+      [text("p1", "abcdefgh")],
-+      { input: 0, output: 0 },
-+    )
-+
-+    expect(result.input).toBe(0)
-+    expect(result.output).toBe(2)
-+  })
-+
-+  test("pending tool call adds to streaming output estimate", () => {
-+    const toolPending: Part = {
-+      id: "t1",
-+      sessionID: "s",
-+      messageID: "2",
-+      type: "tool",
-+      callID: "c1",
-+      tool: "bash",
-+      state: { status: "pending", input: {}, raw: "pending-raw-text" },
-+    } as Part
-+
-+    const result = computeFinalTokens(
-+      assistant({ input: 5000 }),
-+      [text("p1", "ab"), toolPending, text("p2", "cd")],
-+      { input: 0, output: 0 },
-+    )
-+
-+    expect(result.input).toBe(5000)
-+    expect(result.output).toBe(5)
-+  })
-+
-+  // 多轮请求场景：totalInput 需累加历史确认值，验证 previousInput 计算正确
-+  test("multiple requests: respects previous confirmed tokens", () => {
-+    const requestConfirmed = { input: 5000, output: 200 }
-+
-+    const result = computeFinalTokens(
-+      assistant({ input: 7000 }),
-+      [text("p1", "abcdefgh")],
-+      requestConfirmed,
-+    )
-+
-+    expect(result.input).toBe(7000)
-+    expect(result.output).toBe(2)
-+    expect(result.totalInput).toBe(12000)
-+    expect(result.totalOutput).toBe(202)
-+  })
-+})
+ export type EventSessionNextContextUpdated = {
+   id: string
+   type: "session.next.context.updated"
+@@ -6655,6 +6736,7 @@
+     assistantMessageID: string
+     agent: string
+     model: ModelRef
++    inputEstimate?: SessionMessageInputEstimate
+     snapshot?: string
+   }
+ }
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -248,6 +248,7 @@
+       readonly stepInput: number
+       readonly stepOutput: number
+       readonly pendingInput?: number
++      readonly estimatedInput?: number
+-      readonly model?: { readonly providerID: string; readonly modelID: string }
++      readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
+     }
+     readonly tokens: {
+@@ -321,6 +322,7 @@
+       readonly stepInput: number
+       readonly stepOutput: number
+       readonly pendingInput?: number
++      readonly estimatedInput?: number
+-      readonly model?: { readonly providerID: string; readonly modelID: string }
++      readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
+     }
+     readonly tokens: {
+@@ -370,6 +372,7 @@
+       readonly stepInput: number
+       readonly stepOutput: number
+       readonly pendingInput?: number
++      readonly estimatedInput?: number
+-      readonly model?: { readonly providerID: string; readonly modelID: string }
++      readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
+     }
+     readonly tokens: {
+@@ -620,6 +623,13 @@
+         readonly type: "assistant"
+         readonly agent: string
+         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++        readonly inputEstimate?: {
++          readonly input: number
++          readonly bodyChars: number
++          readonly confirmed: boolean
++          readonly afterPartID?: string
++          readonly contextLimit?: number
++        }
+         readonly content: ReadonlyArray<
+           | { readonly type: "text"; readonly id: string; readonly text: string }
+           | {
+@@ -838,6 +848,26 @@
+           readonly requestIDs: ReadonlyArray<string>
+         }
+       }
++    | {
++        readonly id: string
++        readonly metadata?: { readonly [x: string]: JsonValue }
++        readonly type: "session.next.request.estimated"
++        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
++        readonly location?: { readonly directory: string; readonly workspaceID?: string }
++        readonly data: {
++          readonly timestamp: number
++          readonly sessionID: string
++          readonly messageID: string
++          readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++          readonly inputEstimate: {
++            readonly input: number
++            readonly bodyChars: number
++            readonly confirmed: boolean
++            readonly afterPartID?: string
++            readonly contextLimit?: number
++          }
++        }
++      }
+     | {
+         readonly id: string
+         readonly metadata?: { readonly [x: string]: JsonValue }
+@@ -903,6 +933,13 @@
+           readonly assistantMessageID: string
+           readonly agent: string
+           readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++          readonly inputEstimate?: {
++            readonly input: number
++            readonly bodyChars: number
++            readonly confirmed: boolean
++            readonly afterPartID?: string
++            readonly contextLimit?: number
++          }
+           readonly snapshot?: string
+         }
+       }
+@@ -1360,6 +1397,26 @@
+         readonly requestIDs: ReadonlyArray<string>
+       }
+     }
++  | {
++      readonly id: string
++      readonly metadata?: { readonly [x: string]: unknown }
++      readonly type: "session.next.request.estimated"
++      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
++      readonly location?: { readonly directory: string; readonly workspaceID?: string }
++      readonly data: {
++        readonly timestamp: number
++        readonly sessionID: string
++        readonly messageID: string
++        readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++        readonly inputEstimate: {
++          readonly input: number
++          readonly bodyChars: number
++          readonly confirmed: boolean
++          readonly afterPartID?: string
++          readonly contextLimit?: number
++        }
++      }
++    }
+   | {
+       readonly id: string
+       readonly metadata?: { readonly [x: string]: unknown }
+@@ -1425,6 +1482,13 @@
+         readonly assistantMessageID: string
+         readonly agent: string
+         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++        readonly inputEstimate?: {
++          readonly input: number
++          readonly bodyChars: number
++          readonly confirmed: boolean
++          readonly afterPartID?: string
++          readonly contextLimit?: number
++        }
+         readonly snapshot?: string
+       }
+     }
+@@ -1826,6 +1890,13 @@
+         readonly type: "assistant"
+         readonly agent: string
+         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++        readonly inputEstimate?: {
++          readonly input: number
++          readonly bodyChars: number
++          readonly confirmed: boolean
++          readonly afterPartID?: string
++          readonly contextLimit?: number
++        }
+         readonly content: ReadonlyArray<
+           | { readonly type: "text"; readonly id: string; readonly text: string }
+           | {
+@@ -1998,6 +2069,13 @@
+         readonly type: "assistant"
+         readonly agent: string
+         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
++        readonly inputEstimate?: {
++          readonly input: number
++          readonly bodyChars: number
++          readonly confirmed: boolean
++          readonly afterPartID?: string
++          readonly contextLimit?: number
++        }
+         readonly content: ReadonlyArray<
+           | { readonly type: "text"; readonly id: string; readonly text: string }
+           | {

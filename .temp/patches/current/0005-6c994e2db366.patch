@@ -1,11 +1,12 @@
 diff --git a/packages/tui/src/util/signal.ts b/packages/tui/src/util/signal.ts
 --- a/packages/tui/src/util/signal.ts
 +++ b/packages/tui/src/util/signal.ts
-@@ -16,6 +16,39 @@
+@@ -16,6 +16,43 @@
    return [get, debounced]
  }
  
-+// 节流信号：首次更新立即触发，后续在节流窗口内最多再触发一次尾部更新
++// 固定窗口从首值开始计时，后续输入不延长窗口，避免持续流式更新饿死尾值。
++// 窗口关闭后允许新的首值立即发布，因此这不是任意两次发布都相隔 ms 的限速器。
 +export function createThrottledSignal<T>(value: T, ms: number): [Accessor<T>, (value: T) => void] {
 +  const [get, set] = createSignal<T>(value)
 +  let timer: ReturnType<typeof setTimeout> | undefined
@@ -13,12 +14,14 @@ diff --git a/packages/tui/src/util/signal.ts b/packages/tui/src/util/signal.ts
 +  let hasPending = false
 +
 +  const throttled = (next: T) => {
-+    // 首次调用立即设置，并启动节流窗口
++    // 空闲时同步发布首值，让首次用量显示无需等待一个窗口。
++    // 用函数包装 next，使泛型中的函数值作为数据保存，而非被 Solid 当作 updater 执行。
 +    if (!timer) {
 +      set(() => next)
 +      timer = setTimeout(() => {
 +        timer = undefined
-+        // 尾部刷新：窗口内有新值则补发一次
++        // 单次调用没有尾值，不重复发布；有多次调用时只保留最后一次的快照。
++        // hasPending 独立于 lastValue，允许 undefined 作为有效尾值清空消费者的显示。
 +        if (hasPending) {
 +          hasPending = false
 +          set(() => lastValue as T)
@@ -26,11 +29,12 @@ diff --git a/packages/tui/src/util/signal.ts b/packages/tui/src/util/signal.ts
 +      }, ms)
 +      return
 +    }
-+    // 窗口内的后续调用暂存，等待尾部刷新
++    // 覆盖待发快照而不重启计时，使最终状态在输入停止后仍能发布。
 +    lastValue = next
 +    hasPending = true
 +  }
 +
++  // 计时器归创建时的 Solid owner 所有；卸载时取消尾值，而不是向已卸载视图补发。
 +  onCleanup(() => {
 +    if (timer) clearTimeout(timer)
 +  })
@@ -66,23 +70,23 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
      if (!props.sessionID) return
      const session = sync.session.get(props.sessionID)
      const msg = sync.data.message[props.sessionID] ?? []
-@@ -267,12 +269,28 @@
+@@ -268,15 +270,30 @@
      if (!last) return
  
      // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 -    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
 +    const parts = sync.data.part[last.id] ?? []
 +    const chars = parts.reduce((sum, part) => {
+       // ignored 文本不进入模型输出，计入字符估算会把隐藏的合成内容收费化。
        if (part.type === "text" && !part.ignored) return sum + part.text.length
        if (part.type === "reasoning") return sum + part.text.length
        return sum
      }, 0)
 -    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +
-+    // 流式输出时，估算最后一个 step-finish 之后的工具输出 token
-+    // 消息完成后 API 的 input_tokens 已包含这些，仅在流式中补充以提供实时反馈
-+    // 找到最后一个 step-finish part 的索引，之后的 completed tool parts 产出尚未计入的字符
++    // 以最后一个 step-finish 排除已结算历史；缺失时索引为 -1，首轮工具结果也进入未确认区段。
 +    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
++    // 完成标记关闭临时估算，让静态显示回到 API 计数，避免估算长期叠加。
 +    const toolOutputChars = !last.time.completed
 +      ? parts.reduce((sum, part, i) => {
 +          if (i <= lastStepFinishIdx) return sum
@@ -91,18 +95,21 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
 +        }, 0)
 +      : 0
 +
-+    // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 +    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
++    // 四字符换算仅用于实时提示，不能替代 input/cache 的服务端计数或作为计费依据。
 +    const input = inputBase + Math.round(toolOutputChars / 4)
+     // reasoning 与正文由 API 分开回传，输出流量必须包含两者才能覆盖思考阶段。
      const outputActual = last.tokens.output + last.tokens.reasoning
+     // 四字符仅是等待 API usage 时的显示近似，不写回消息或参与计费。
      const outputEstimated = Math.round(chars / 4)
-     // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
-@@ -290,6 +308,10 @@
+     // 流式阶段取实际值与估算值的较大值，完成后回到 API 实值，避免临时峰值变成永久用量。
+@@ -295,6 +313,11 @@
        cost: cost > 0 ? money.format(cost) : undefined,
      }
    })
 +
-+  // 节流 usage 信号，避免流式输出时频繁刷新导致 UI 卡顿
++  // 只合并发布给视图的快照，usageRaw 仍跟踪每次变更，不能据此认为统计计算也被节流。
++  // 无会话或无助手时的 undefined 必须进入尾值，使 Match 最终撤下旧用量而非保留旧快照。
 +  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
 +  createEffect(() => setUsageThrottled(usageRaw()))
  
@@ -134,7 +141,7 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
      // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
      const last = msg().findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) {
-@@ -29,12 +32,27 @@
+@@ -32,13 +35,29 @@
      }
  
      // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
@@ -145,11 +152,13 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
        if (part.type === "reasoning") return sum + part.text.length
        return sum
      }, 0)
+-    // 缓存命中仍占上下文输入，不能因为无需重复生成就从流量中扣除。
 -    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +
-+    // 流式输出时，估算最后一个 step-finish 之后的工具输出 token
-+    // 找到最后一个 step-finish part 的索引，之后的 completed tool parts 产出尚未计入的字符
++    // sidebar 的 part 来源是插件 API；step-finish 分界只在同一条助手消息的 parts 中解释。
++    // 分界之前的工具结果不再加估算，否则上下文百分比会把历史工具文本重复放大。
 +    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
++    // 完成消息不补工具字符，避免临时估算进入静态用量。
 +    const toolOutputChars = !last.time.completed
 +      ? parts.reduce((sum, part, i) => {
 +          if (i <= lastStepFinishIdx) return sum
@@ -158,17 +167,19 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 +        }, 0)
 +      : 0
 +
-+    // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
++    // 缓存命中仍占上下文输入，不能因为无需重复生成就从流量中扣除。
 +    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
++    // percent 与 tokens 共用这一输入值，保持同一快照内口径一致。
 +    const input = inputBase + Math.round(toolOutputChars / 4)
      const outputActual = last.tokens.output + last.tokens.reasoning
      const outputEstimated = Math.round(chars / 4)
      // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
-@@ -49,6 +67,10 @@
+@@ -55,6 +75,11 @@
      }
    })
  
-+  // 节流 state 信号，避免流式输出时频繁刷新导致 UI 卡顿
++  // 插件视图始终需要可读对象，用零值而非 undefined 支撑 state().tokens 等直接读取。
++  // tokens、input、output、percent 整体发布，避免侧栏在同一帧显示不同版本的统计字段。
 +  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null }, 50)
 +  createEffect(() => setStateThrottled(stateRaw()))
 +
@@ -193,7 +204,7 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
  import { useTerminalDimensions } from "@opentui/solid"
  import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
  
-@@ -30,19 +31,36 @@
+@@ -30,20 +31,37 @@
      return { label, index: index + 1, total: siblings.length }
    })
  
@@ -211,14 +222,16 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 +    const parts = sync.data.part[last.id] ?? []
 +    const chars = parts.reduce((sum, part) => {
        if (part.type === "text" && !part.ignored) return sum + part.text.length
+       // 子代理可能先流出思考而无正文；reasoning 字符也必须驱动实时输出显示。
        if (part.type === "reasoning") return sum + part.text.length
        return sum
      }, 0)
 -    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +
-+    // 流式输出时，估算最后一个 step-finish 之后的工具输出 token
-+    // 找到最后一个 step-finish part 的索引，之后的 completed tool parts 产出尚未计入的字符
++    // 子代理 footer 只读取当前路由消息的 parts，不把父会话的工具输出混入本轮估算。
++    // 仅 completed 工具有稳定 output；pending/running 的部分结果不满足这个估算契约。
 +    const lastStepFinishIdx = parts.reduce((idx: number, part, i) => (part.type === "step-finish" ? i : idx), -1)
++    // 消息完成后撤销工具字符补量，避免离开流式阶段后仍显示临时估算输入。
 +    const toolOutputChars = !last.time.completed
 +      ? parts.reduce((sum, part, i) => {
 +          if (i <= lastStepFinishIdx) return sum
@@ -227,17 +240,17 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 +        }, 0)
 +      : 0
 +
-+    // 输入 token = API 返回的 input/cache 之和 + 流式中工具输出字符估算
 +    const inputBase = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const input = inputBase + Math.round(toolOutputChars / 4)
      const outputActual = last.tokens.output + last.tokens.reasoning
      const outputEstimated = Math.round(chars / 4)
      // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
-@@ -67,6 +85,10 @@
+@@ -68,6 +87,11 @@
      }
    })
  
-+  // 节流 usage 信号，避免流式输出时频繁刷新导致 UI 卡顿
++  // footer 的 Show 以 usage 是否存在决定可见性，空结果必须参与节流而不能被过滤。
++  // 此处在组件 owner 下创建计时器；切换导致卸载时，旧 footer 的待发快照由 helper 取消。
 +  const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
 +  createEffect(() => setUsageThrottled(usageRaw()))
 +

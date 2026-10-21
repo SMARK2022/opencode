@@ -1,39 +1,220 @@
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -285,15 +285,16 @@
-     // 计算消息指纹，用于计费头和 CCH 签名
-     const fp = computeFingerprint(firstUserText, VERSION)
- 
--    // 2. 系统块合并已禁用：不再注入伪造的系统块，保留原始 system
--    // let newSystem = buildSystemBlocks(fp)
--    // if (originalBody.system) {
--    //   if (Array.isArray(originalBody.system)) {
--    //     newSystem = newSystem.concat(originalBody.system)
--    //   } else {
--    //     newSystem.push({ type: "text" as const, text: originalBody.system })
--    //   }
--    // }
-+    // 2. 合并 System Blocks：仅注入计费头块，保留原始 system
-+    let newSystem: any[] = [buildBillingHeaderBlock(fp)]
-+    // 原始 system 可能是数组或字符串，两种形式都需合并到计费头之后
-+    if (originalBody.system) {
-+      if (Array.isArray(originalBody.system)) {
-+        newSystem = newSystem.concat(originalBody.system)
-+      } else {
-+        newSystem.push({ type: "text" as const, text: originalBody.system })
-+      }
-+    }
+@@ -257,3 +257,14 @@
++    // 24 仅恢复计费消费者；首 user 的首 text 决定指纹，不拼接工具或附件文字。
++    const content: unknown = (originalBody.messages ?? []).find((message: { role?: string }) => message.role === "user")?.content
++    const firstText: unknown = Array.isArray(content)
++      ? content.find((block) => block?.type === "text")?.text : content
++    const fp = computeFingerprint(typeof firstText === "string" ? firstText : "", VERSION)
++    // 数组的缓存属性和附加字段原样保留，字符串包括空串也转换为 text block。
++    const system: unknown = originalBody.system
++    const newSystem: unknown[] = [buildBillingHeaderBlock(fp),
++      ...(Array.isArray(system) ? system : typeof system === "string" ? [{ type: "text", text: system }] : []),
++    ]
++    // 不恢复 buildSystemBlocks 或两段身份；真正的 agent/project 指令仍来自原始 system。
  
      // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
      const newMetadata = {
-@@ -346,7 +347,7 @@
- 
+@@ -311,5 +322,6 @@
      const patchedBody = {
-       ...originalBody,
--      // system: newSystem, // 已禁用：不再注入伪造系统块
+-      // 撤销适配器身份及计费注入，完整保留 Session owner 组装的原始 system。
+-      ...originalBody,
++      // 首字段首块固定为自有 billing，用户同名 cch 文字不能参与定位。
 +      system: newSystem,
++      ...Object.fromEntries(Object.entries(originalBody).filter(([key]) => key !== "system")),
        metadata: newMetadata,
        tools: patchedTools,
-       ...(thinking ? { thinking } : {}),
+@@ -319,3 +331,3 @@
+-    // billing block 已停止注入，没有 adapter 占位符可修补；用户的同名文本必须保持原样。
+-    const finalBodyStr = JSON.stringify(patchedBody)
++    // 所有 metadata/thinking/tools 合并完毕后修补最终字节，继续复用源保留的 patchCch。
++    const finalBodyStr = patchCch(JSON.stringify(patchedBody))
+ 
+
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -113,3 +113,3 @@
+-      !["thinking", "metadata", "output_config"].includes(key))) : httpBody },
++      !["system", "thinking", "metadata", "output_config"].includes(key))) : httpBody },
+     // metadata 不再出现在后置 overlay，保证最终 user_id 由专用 adapter 决定。
+     ...(claudecode ? { providerOptions: { anthropic: {
+@@ -118,3 +118,5 @@
+       thinking: body.thinking,
++      // 原始 system 转交 typed 协议校验与合并，不能从 HTTP overlay 覆盖自有计费首块。
++      system: body.system,
+       metadata: body.metadata,
+       output_config: body.output_config,
+
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -1,3 +1,4 @@
+ import { Effect, Schema } from "effect"
+-import { randomUUID } from "node:crypto"
++import { createHash, randomUUID } from "node:crypto"
++import { HttpTransport } from "../route/transport"
+ import { Route } from "../route/client"
+@@ -50,3 +51,7 @@
+ type AnthropicTextBlock = Schema.Schema.Type<typeof AnthropicTextBlock>
+ 
++// 原始 system 的附加 JSON 字段属于调用方，不能在 typed 编码时静默剥离。
++const AnthropicSystemBlock = Schema.StructWithRest(AnthropicTextBlock, [Schema.Record(Schema.String, Schema.Unknown)])
++const decodeSystem = ProviderShared.validateWith(Schema.decodeUnknownEffect(Schema.Union([Schema.String, Schema.Array(AnthropicSystemBlock)])))
++
+ const AnthropicImageBlock = Schema.Struct({
+@@ -167,4 +172,5 @@
+ const AnthropicBodyFields = {
++  // billing 固定为首字段首块；最终字节签名不扫描用户消息中的同名文本。
++  system: optionalArray(AnthropicSystemBlock),
+   model: Schema.String,
+-  system: optionalArray(AnthropicTextBlock),
+   messages: Schema.Array(AnthropicMessage),
+@@ -568,6 +574,17 @@
+           cache_control: cacheControl(breakpoints, part.cache),
+         }))
++  const rawSystem = request.model.provider === "claudecode" ? anthropicOptions(request)?.system : undefined
++  const originalSystem = rawSystem === undefined ? undefined : yield* decodeSystem(rawSystem)
++  // 全部 system 必须先于 history 领取同一预算，原始块不能绕过四断点上限。
++  const retainedSystem = originalSystem === undefined ? [] : typeof originalSystem === "string"
++    ? [{ type: "text" as const, text: originalSystem }] : originalSystem.map((block) => ({
++      ...block,
++      // none 只禁用自动标记；显式原始 TTL 保留，但超额标记由上游 cacheControl 裁剪。
++      cache_control: block.cache_control && cacheControl(breakpoints, {
++        type: "ephemeral", ttlSeconds: block.cache_control.ttl === "1h" ? 3600 : undefined,
++      }) ? block.cache_control : undefined,
++    }))
+   const messages = yield* lowerMessages(request, breakpoints)
+   if (breakpoints.dropped > 0) {
+     yield* Effect.logWarning(
+       `Anthropic Messages: dropped ${breakpoints.dropped} cache breakpoint(s); the API allows at most ${ANTHROPIC_BREAKPOINT_CAP} per request.`,
+@@ -584,6 +601,15 @@
+   const outputConfig = anthropicOptions(request)?.output_config
++  // 指纹只服务于专用计费块；普通 Anthropic 不采样消息，也不执行无消费者的 SHA。
++  const billing = claudecode ? (() => {
++    // 首 user 的首 text 采样与源 helper 一致，短消息缺失位置补字符零。
++    const firstUserText = messages.find((message) => message.role === "user")?.content.find((block) => block.type === "text")?.text ?? ""
++    const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
++    const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
++    // 三位版本后缀和五位占位保持源 wire 契约，不添加身份或缓存断点。
++    return [{ type: "text" as const, text: `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;` }]
++  })() : []
+   return {
+-    model: request.model.id,
+-    // 与 V1 的 20 同步撤销身份注入，保留真实 typed system lowering 的所有上游能力。
+-    system,
++    // 只恢复 billing，20 撤销的两段身份没有任何新消费者。
++    system: claudecode ? [...billing, ...(system ?? []), ...retainedSystem] : system,
++    model: request.model.id,
+     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
+@@ -899,8 +925,22 @@
++// 复用现有 HTTP 执行/取消路径，只在最终 overlay 编码之后修补自有五位 CCH。
++const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
+ export const route = Route.make({
+   id: ADAPTER,
+   provider: "anthropic",
+   protocol,
+   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
+   auth: Auth.none,
+-  // billing 阶段结束后复用标准 transport；用户的 cch 同名内容不再进入修补逻辑。
+-  framing: Framing.sse,
++  transport: {
++    ...transport,
++    prepare: (input) => Effect.gen(function* () {
++      if (input.request.model.provider !== "claudecode") return yield* transport.prepare(input)
++      const parts = yield* HttpTransport.jsonRequestParts(input)
++      // Schema/return 保证自有 ASCII 首块；URL、MCP 和用户 UTF-8 内容不影响定位。
++      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
++      if (!parts.bodyText.startsWith(`${prefix}00000;`)) return yield* invalid("ClaudeCode billing layout changed before transport")
++      // xxHash64 零种子低 20 位只覆盖占位值，不重新解析或编码已合并的请求。
++      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
++      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
++      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
++    }),
++  },
+
+diff --git a/packages/tui/src/prompt/part.ts b/packages/tui/src/prompt/part.ts
+--- a/packages/tui/src/prompt/part.ts
++++ b/packages/tui/src/prompt/part.ts
+@@ -24,6 +24,8 @@
+ export function expandTrackedPastedText(text: string, ranges: { start: number; end: number; text: string }[]) {
++  // 源24修复 UTF-16 与 extmark 坐标错配；现 extmark 是显示宽度，沿用 grapheme 切片。
+   return ranges
+     .slice()
++    // 从右向左展开，前面的显示坐标不因中文、组合字符或 emoji 替换而漂移。
+     .sort((a, b) => b.start - a.start)
+     .reduce((result, part) => displaySlice(result, 0, part.start) + part.text + displaySlice(result, part.end), text)
+ }
+
+diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
+--- a/packages/llm/test/provider/anthropic-messages.test.ts
++++ b/packages/llm/test/provider/anthropic-messages.test.ts
+@@ -1,3 +1,4 @@
+ import { describe, expect } from "bun:test"
++import { createHash } from "node:crypto"
+ import { Effect } from "effect"
+ import { HttpClientRequest } from "effect/unstable/http"
+@@ -902,3 +903,6 @@
+-      // 20 撤销的只是自有身份阶段，四个工具缓存和真正 system/history 仍由上游 owner 保留。
+-      expect(claude.body.system?.map((block) => block.text)).toEqual(["system-tail"])
++      // 24 只恢复计费首块，上游 system-tail 与四个工具缓存保持原有顺序和预算。
++      expect(claude.body.system?.map((block) => block.text)).toEqual([
++        expect.stringMatching(/^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/),
++        "system-tail",
++      ])
+ 
+@@ -927,1 +931,52 @@
++  it.effect("preserves raw ClaudeCode system and signs final wire bytes", () =>
++    Effect.gen(function* () {
++      const route = AnthropicMessages.route.with({ provider: "claudecode" })
++      // 原始 5m/1h 显式 TTL 与 0/3/4 个工具标记组合，均经过真实 Schema/prepare。
++      for (const raw of ["原始字符串", [
++        { type: "text", text: "原始数组", cache_control: { type: "ephemeral", ttl: "5m" }, source: "retained" },
++        { type: "text", text: "第二块", cache_control: { type: "ephemeral", ttl: "1h" }, source: "second" },
++      ]]) {
++        for (const count of [0, 3, 4]) {
++          const input = LLM.request({ model: route.model({ id: "claude-sonnet-4-5" }), cache: "none",
++            system: "Session system", messages: [Message.user([{ type: "text", text: "abcdefghijklmnopqrstuv", cache: new CacheHint({ type: "ephemeral" }) }])],
++            // 四工具的优先级在所有 system 之前，history 只能领取 system 之后的剩余预算。
++            tools: ["t1", "t2", "t3", "t4"].slice(0, count).map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} }, cache: new CacheHint({ type: "ephemeral" }) })),
++            providerOptions: { anthropic: { system: raw, metadata: { retained: "yes" }, thinking: { type: "disabled" }, output_config: { effort: "high" } } },
++            http: { body: { extra: "中文 cch=00000;" } },
++          })
++          const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input)
++          // 手工列出原始块预期，额外属性和缓存标记不能被 typed 编码剥离。
++          expect(prepared.body.system?.slice(1)).toEqual(typeof raw === "string"
++            ? [{ type: "text", text: "Session system" }, { type: "text", text: "原始字符串" }]
++            : [{ type: "text", text: "Session system" },
++              { type: "text", text: "原始数组", cache_control: count < 4 ? { type: "ephemeral", ttl: "5m" } : undefined, source: "retained" },
++              { type: "text", text: "第二块", cache_control: count < 3 ? { type: "ephemeral", ttl: "1h" } : undefined, source: "second" },
++            ])
++          // 显式 raw 标记必须先消耗预算，不能先给 history 标记再凑数删 system。
++          expect(prepared.body.messages[0]?.content[0]?.cache_control).toEqual(count === 0 || (count === 3 && typeof raw === "string") ? { type: "ephemeral" } : undefined)
++          expect(prepared.body.system?.[0]?.cache_control).toBeUndefined()
++          expect(prepared.body.metadata).toMatchObject({ retained: "yes" })
++          expect(prepared.body.thinking).toEqual({ type: "disabled" })
++          expect(prepared.body.output_config).toEqual({ effort: "high" })
++          expect(prepared.body.tools?.map((tool) => tool.name)).toEqual([...(["t1", "t2", "t3", "t4"].slice(0, count)), "Read"])
++          expect(prepared.body.tools?.filter((tool) => tool.cache_control !== undefined)).toHaveLength(count)
++          const wire = yield* route.prepareTransport(prepared.body, input)
++          const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
++          const text = yield* Effect.promise(() => web.text())
++          // 固定样本的采样字符为 e/h/u；预期输入独立于生产采样代码。
++          const fp = createHash("sha256").update("59cf53e54c78ehu2.1.117").digest("hex").slice(0, 3)
++          const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=`
++          expect(text.startsWith(prefix)).toBe(true)
++          const offset = prefix.length
++          // 只还原自有五位占位，独立校验最终 overlay/metadata/thinking 的完整 UTF-8 字节。
++          const zeroed = text.slice(0, offset) + "00000" + text.slice(offset + 5)
++          const cch = (Bun.hash.xxHash64(new TextEncoder().encode(zeroed)) & 0xfffffn).toString(16).padStart(5, "0")
++          expect(text.slice(offset, offset + 5)).toBe(cch)
++          expect(text).toContain("中文 cch=00000;")
++          expect(text).not.toContain("You are Claude Code")
++          expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
++        }
++      }
++    }),
++  )
+ })
 

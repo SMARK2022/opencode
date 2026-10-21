@@ -47,3 +47,10 @@
 你必须按上述循环处理全部 644 项，确认所有 records、original 身份、manifest、current 累计 apply、测试与批次 verdict 完整闭合，确认最近成功状态最多五个，确认 source 和 target worktree 未被改写，再报告整体 `PASS`。任何空 current、遗漏 source 行为、测试删除、未应用 patch、未解决 blocker、状态 provenance 失败或未完成独立审计都保持 `BLOCK`。
 
 默认不要创建 commit。只有收到用户明确提交指令时，才检查 `git status`、相关 staged/unstaged diff 和最近提交风格；工作区存在其他内容时使用 `git commit --only -- <本 GOAL 路径...>`，同一文件混有无关 hunk 时停止。禁止 amend、`--no-verify`、跳 hook、push、清理无关修改和空 commit。
+
+
+## 最重要的最高要求，覆盖前面的冲突语义(高效且允许部分风险及语义损失的推进)
+
+注意当前全部 patch 已重放，当前复查以上游优势与 SMARK 有效语义的融合、真实 V1/V2 职责为重点。主 agent 用官方脚本物化累计终点并验证，再按完整五项批次并行正反审计；审计员只读，不运行物化、安装、测试或复制工作区。复查不以历史 PASS 闭合、中间 state 保留、source Git 再生成或逐项 typecheck 为准入条件；直接核对完整 original/current、manifest、source proof、最终源码及同版本累计验证证据。当前证据缺失仍报告，但继续完成行为调查；不倒填历史 verdict，不以末态通过掩盖前项语义丢失。逐 hunk 行为、E/C、错误/并发/清理及双审要求不变。批量复查优先一次并行 50 项；同轮审计员不得互读对方结论。只修改 current 与对应 record，临时内容放 `D:/Temp/opencode/`，不得手改 original/state 或复制工作区。
+
+同时请注意，第一次接触一批patch时，请注意整体需要保持的语义是：尽可能的保持既有patch的修改不做改动，只在必要时候进行相应的精准推荐不超过25%的修改，尽量减少patch后续重放的分支的负担，同时修改方向应当检查同样的逻辑是否有更加精简准确适当稳定的方式，同时要求注释均为中文，同时修改应当避免origin patch中不包含的加固、兼容、fallback职责外安全护栏等内容。保持修改克制，保持高效，理论上而言应当保持较高的进行效率，可以适当弱化部分审计标准，同时理论上审计员给出的观点会过度强调安全、兼容、fallback等职责外安全护栏的必要性，但主agent应当保持克制，适度重复调用进行rebuttal，阐述用户希望以更高的效率为主，可以放行部分不算大范围语义损失的情况，只进行部分提醒即可，不以SHA-256、字节数、E/C、注释行数等指标为过度严苛的准入条件。同时任何Agent应当避免进行SHA-256等校验码的计算，这本身算是过度审计。

@@ -4,92 +4,129 @@ Date: Mon, 4 May 2026 19:58:19 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E5=BB=B6=E8=BF=9F=E6=B5=8B=E8=AF=95?=
  =?UTF-8?q?=EF=BC=8C=E5=A2=9E=E5=8A=A0API=20URL=E7=9A=84=E9=BB=98=E8=AE=A4?=
  =?UTF-8?q?=E9=85=8D=E7=BD=AE=EF=BC=8C=E4=BC=98=E5=8C=96=E6=A8=A1=E5=9E=8B?=
+ =?UTF-8?q?API=E7=9A=84=E8=8E=B7=E5=8F=96=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
+diff --git a/packages/core/src/provider.ts b/packages/core/src/provider.ts
+--- a/packages/core/src/provider.ts
++++ b/packages/core/src/provider.ts
+@@ -1,7 +1,10 @@
+ export * as ProviderV2 from "./provider"
+ 
+ import { Types } from "effect"
+ import { Provider } from "@opencode-ai/schema/provider"
++import { AnthropicMessages } from "@opencode-ai/llm/protocols/anthropic-messages"
++import { Gemini } from "@opencode-ai/llm/protocols/gemini"
++import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
+ 
+ export const ID = Provider.ID
+ export type ID = typeof ID.Type
+@@ -19,7 +22,19 @@
+ export const Request = Provider.Request
+ export type Request = Provider.Request
+ 
+ export const Info = Provider.Info
+ export type Info = Provider.Info
+ 
+ export type MutableInfo = Omit<Types.DeepMutable<Info>, "api"> & { api: MutableApi }
++
++// 默认地址复用实际协议的端点常量；显式 URL 即使为空也优先，不能被默认值覆盖。
++const SDK_DEFAULT_API_URL = new Map([
++  ["@ai-sdk/anthropic", AnthropicMessages.DEFAULT_BASE_URL],
++  ["@ai-sdk/google", Gemini.DEFAULT_BASE_URL],
++  ["@ai-sdk/openai", OpenAIResponses.DEFAULT_BASE_URL],
++])
++
++export function apiUrl(input: { npm?: string; api?: string }) {
++  // 未知 SDK 保持地址未解析，避免借用另一协议的主机误导显示与探测。
++  return input.api ?? (input.npm ? SDK_DEFAULT_API_URL.get(input.npm) : undefined) ?? ""
++}
+diff --git a/packages/core/src/catalog.ts b/packages/core/src/catalog.ts
+--- a/packages/core/src/catalog.ts
++++ b/packages/core/src/catalog.ts
+@@ -80,13 +80,19 @@
+     const projectModel = (model: ModelV2.Info, provider: ProviderV2.Info) => {
+-      const api =
++      // 先完成提供者继承再补默认地址，保留自定义提供者的端点优先级。
++      const inherited =
+         model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0
+           ? { ...provider.api, id: model.api.id }
+           : model.api.type === "aisdk" && provider.api.type === "aisdk" && !model.api.url
+             ? { ...model.api, url: provider.api.url, settings: { ...provider.api.settings, ...model.api.settings } }
+             : model.api.type === "aisdk" && provider.api.type === "aisdk"
+               ? { ...model.api, settings: { ...provider.api.settings, ...model.api.settings } }
+               : model.api
++      // 合并后的 SDK baseURL 保持优先；无效设置仍由 SDK 校验，不能用默认值掩盖配置错误。
++      const api = inherited.type === "aisdk" && inherited.url === undefined &&
++        (inherited.settings?.baseURL === undefined || typeof inherited.settings?.baseURL === "string")
++        ? { ...inherited, url: ProviderV2.apiUrl({ npm: inherited.package, api: typeof inherited.settings?.baseURL === "string" ? inherited.settings.baseURL : undefined }) || undefined }
++        : inherited
+       const request = {
+         headers: { ...provider.request.headers, ...model.request.headers },
+         body: { ...provider.request.body, ...model.request.body },
+         variant: model.request.variant,
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
-index d32678bf5f..20ebf61fe4 100644
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -37,6 +37,21 @@ const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
- // 请求默认超时 5 分钟：覆盖无显式 timeout 的 provider 请求
- const DEFAULT_TIMEOUT_MS = 300_000
- 
-+// SDK 默认 API URL：未显式配置 api 时回退到三大官方端点
-+// 三大 SDK 官方端点：provider 未配 api 时兜底
-+const SDK_DEFAULT_API_URL: Record<string, string> = {
-+  "@ai-sdk/anthropic": "https://api.anthropic.com/v1",
-+  "@ai-sdk/google": "https://generativelanguage.googleapis.com/v1beta",
-+  "@ai-sdk/openai": "https://api.openai.com/v1",
-+}
-+
-+// 优先显式 api，否则按 npm 包映射；无映射时返回空串
-+// 优先显式 api；否则 npm 映射；未知 npm 返回空串
-+function apiUrl({ npm, api }: { npm: string; api?: string }): string {
-+  return api ?? SDK_DEFAULT_API_URL[npm] ?? ""
-+}
-+
-+
- function wrapSSE(res: Response, ms: number, ctl: AbortController) {
-   if (typeof ms !== "number" || ms <= 0) return res
-   if (!res.body) return res
-@@ -1271,9 +1286,13 @@
+@@ -1294,17 +1294,15 @@
+ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model): Model {
++  // 网关可能改写 SDK，先确定实际包再补端点和生成变体，避免套用原协议的默认值。
++  const npm = cloudflareGatewayNpm(provider.id, model.id) ?? model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible"
+   const base: Model = {
+     id: ModelV2.ID.make(model.id),
+     providerID: ProviderV2.ID.make(provider.id),
+     name: model.name,
      family: model.family,
      api: {
        id: model.id,
 -      url: model.provider?.api ?? provider.api ?? "",
-+      // models.dev 模型：写入解析后的默认 api.url
-+      url: apiUrl({
-+        npm: model.provider?.npm ?? provider.npm ?? "@ai-sdk/openai-compatible",
-+        api: model.provider?.api ?? provider.api,
-+      }),
-       npm:
-         cloudflareGatewayNpm(provider.id, model.id) ??
-         model.provider?.npm ??
-         provider.npm ??
-         "@ai-sdk/openai-compatible",
-@@ -1450,7 +1466,27 @@ const layer = Layer.effect(
+-      npm:
+-        cloudflareGatewayNpm(provider.id, model.id) ??
+-        model.provider?.npm ??
+-        provider.npm ??
+-        "@ai-sdk/openai-compatible",
++      url: ProviderV2.apiUrl({ npm, api: model.provider?.api ?? provider.api }),
++      npm,
+     },
+     status: model.status ?? "active",
+     headers: {},
+@@ -1514,7 +1512,16 @@
            const existing = baseType ? database[baseType] : database[providerID]
            // 克隆现有提供者的模型，覆盖 providerID 和 api 配置
            const inheritedModels = existing
 -            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => [mid, { ...model, providerID: ProviderV2.ID.make(providerID), api: { ...model.api, npm: provider.npm ?? model.api.npm, url: provider.api ?? model.api.url ?? "" } }]))
-+            ? Object.fromEntries(
-+                Object.entries(existing.models).map(([mid, model]) => {
-+                  const npm = provider.npm ?? model.api.npm
-+                  // #75：继承克隆覆盖 npm 后必须丢掉旧 variants，否则 npm 相等分支会复用 anthropic adaptive
-+                  const next = {
-+                    ...model,
-+                    providerID: ProviderV2.ID.make(providerID),
-+                    api: {
-+                      ...model.api,
-+                      npm,
-+                      // 继承克隆：子 provider 覆盖 npm/api 后仍走默认映射
-+                      url: apiUrl({ npm, api: provider.api ?? model.api.url }),
-+                    },
-+                  }
-+                  if (npm !== model.api.npm) {
-+                    // variants 置 undefined，触发后续 ProviderTransform.variants 按新 npm 重算
-+                    ;(next as { variants?: Model["variants"] }).variants = undefined
-+                  }
-+                  return [mid, next]
-+                }),
-+              )
++            ? Object.fromEntries(Object.entries(existing.models).map(([mid, model]) => {
++                const npm = provider.npm ?? model.api.npm
++                return [mid, {
++                  ...model,
++                  providerID: ProviderV2.ID.make(providerID),
++                  api: { ...model.api, npm, url: ProviderV2.apiUrl({ npm, api: provider.api ?? model.api.url }) },
++                  // SDK 变化后须重新生成协议变体，不能复用父提供者原协议的推理参数。
++                  variants: npm === model.api.npm ? model.variants : undefined,
++                }]
++              }))
              : {}
            const parsed: Info = {
              id: ProviderV2.ID.make(providerID),
-@@ -1483,7 +1519,8 @@ const layer = Layer.effect(
+@@ -1548,10 +1555,11 @@
+             const parsedModel: Model = {
+               id: ModelV2.ID.make(modelID),
                api: {
                  id: apiID,
                  npm: apiNpm,
 -                url: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api ?? "",
-+                // 配置模型解析：合并 modelsDev/existing 后统一 apiUrl
-+url: apiUrl({ npm: apiNpm, api: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api }),
++                // 用合并后的包补默认地址，同时保留模型覆盖、提供者覆盖和继承地址的原优先级。
++                url: ProviderV2.apiUrl({ npm: apiNpm, api: model.provider?.api ?? provider?.api ?? existingModel?.api.url ?? modelsDev[baseType ?? providerID]?.api }),
                },
                status: model.status ?? existingModel?.status ?? "active",
                name,
+               providerID: ProviderV2.ID.make(providerID),
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
-index ffe70ccf03..3cfe618346 100644
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -1,11 +1,16 @@
+@@ -1,10 +1,14 @@
  import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
  import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
  import type { BuiltinTuiPlugin } from "../builtins"
@@ -98,142 +135,194 @@ index ffe70ccf03..3cfe618346 100644
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 +import { useLocal } from "../../context/local"
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
+ import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
  
  const id = "internal:sidebar-context"
-+// 侧边栏 RTT 探测间隔：串行 setTimeout，避免 interval 重叠
-+// 侧边栏 RTT 探测间隔：串行 setTimeout，避免 interval 重叠
++// 探测完成后再计下一秒，慢连接不会叠加并发请求。
 +const PING_INTERVAL = 1_000
  
  const money = new Intl.NumberFormat("en-US", {
-   style: "currency",
-@@ -14,6 +19,111 @@ const money = new Intl.NumberFormat("en-US", {
- 
+@@ -15,5 +19,6 @@
  function View(props: { api: TuiPluginApi; session_id: string }) {
    const theme = () => props.api.theme.current
-+  // 读当前选中模型，决定 ping 的 provider/model
-+const local = useLocal()
-+
-+  // 当前模型 API origin：local.model 优先，回退最近 assistant；空/非法 URL 不探测
-+  // 解析 API origin：local.model 优先，回退最近 assistant
-+// 空串/非法 URL 返回 null，避免 new URL 抛错刷 offline
-+const targetApiUrl = createMemo(() => {
++  const local = useLocal()
+   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+   const session = createMemo(() => props.api.state.session.get(props.session_id))
+ 
+@@ -79,7 +84,91 @@
+   // sidebar 总有零值 state，零值到正值可触发增长；tokens/percent 的单独变化不会续期。
+   const flow = createTokenFlowPulse(state)
+ 
++  // 沿源功能跟随当前选择；历史 API ID 不能唯一标识 Catalog 别名。
++  const targetApiUrl = createMemo(() => {
++    // 等待持久化选择就绪，避免冷启动时探测随后会被恢复状态替换的临时模型。
++    if (!local.model.ready) return null
 +    const selected = local.model.current()
-+    const messages = props.api.state.session.messages(props.session_id)
-+    const lastAsst = messages.filter((m) => m.role === "assistant").at(-1)
-+    const last =
-+      lastAsst && lastAsst.role === "assistant"
-+        ? (lastAsst as { providerID?: string; modelID?: string })
-+        : undefined
-+    const providerID = selected?.providerID ?? last?.providerID
-+    const modelID = selected?.modelID ?? last?.modelID
-+    if (!providerID || !modelID) return null
-+    const provider = props.api.state.provider.find((item) => item.id === providerID)
-+    const model = provider?.models[modelID]
-+    const configuredBaseUrl = provider?.options?.baseURL
-+    const baseUrl =
-+      typeof configuredBaseUrl === "string" && configuredBaseUrl !== ""
-+        ? configuredBaseUrl
-+        : model?.api?.url
-+    if (typeof baseUrl !== "string" || baseUrl === "") return null
-+    try {
-+      // 只 ping origin：避免路径 404，更接近纯网络 RTT
-+      return new URL(baseUrl).origin
-+    } catch {
-+      return null
-+    }
++    if (!selected) return null
++    const provider = props.api.state.provider.find((item) => item.id === selected.providerID)
++    const model = provider?.models[selected.modelID]
++    if (!model) return null
++    // 提供者 baseURL 沿实际 SDK/native 适配器的优先级，显示与发往的端点保持一致。
++    const configuredBaseUrl = provider?.options.baseURL
++    const baseUrl = typeof configuredBaseUrl === "string" && configuredBaseUrl !== "" ? configuredBaseUrl : model.api.url
++    // 配置缺失或地址非法时不创建探测，不能把未解析的配置误报为网络离线。
++    if (typeof baseUrl !== "string" || !URL.canParse(baseUrl)) return null
++    const url = new URL(baseUrl)
++    // 只探测 HTTP origin，避免协议路径的路由与处理耗时混入网络 RTT。
++    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null
 +  })
 +
-+  // latency 仅在 ok 时有值；down/init 清空
-+const [latency, setLatency] = createSignal<number | null>(null)
-+  // ping 三态：init 静音 / ok 着色 / down offline
-+const [pingStatus, setPingStatus] = createSignal<"ok" | "down" | "init">("init")
-+  // 代理路径 🌐，直连 ⚡，帮助诊断路由
-+const [isProxy, setIsProxy] = createSignal(false)
++  const [latency, setLatency] = createSignal<number | null>(null)
++  const [pingStatus, setPingStatus] = createSignal<"ok" | "down" | "init">("init")
++  const [isProxy, setIsProxy] = createSignal(false)
 +
 +  createEffect(
 +    on(targetApiUrl, (url) => {
-+      if (!url) {
-+        setLatency(null)
-+        setPingStatus("init")
-+        setIsProxy(false)
-+        return
-+      }
++      // 切换 origin 时清除旧测量，不能把上一模型的 RTT 显示给新选择。
++      setLatency(null)
++      setPingStatus("init")
++      setIsProxy(false)
++      if (!url) return
 +
-+      // URL 变更或卸载时置 false，丢弃在途响应
-+let active = true
++      let active = true
 +      let timer: ReturnType<typeof setTimeout> | undefined
++      const controller = new AbortController()
++      // 视图清理须中止在途请求；仅忽略迟到结果仍会留下提供者网络 IO。
++      onCleanup(() => {
++        active = false
++        controller.abort()
++        if (timer) clearTimeout(timer)
++      })
++
 +      const ping = async () => {
 +        if (!active) return
 +        const t0 = Date.now()
++        // 从探测开始统一计三秒，后续请求沿同一信号，不因代理刷新重新开启超时窗口。
++        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(3000)])
 +        try {
-+          // 与业务请求相同 purpose，反映真实代理路径
-+const route = await NetworkProxy.resolveProxyRoute(url, "provider")
++          // provider 用途复用源系统代理策略，代理图标与所选路由保持一致。
++          const route = await NetworkProxy.resolveProxyRoute(url, "provider")
 +          if (!active) return
 +          setIsProxy(route.type === "proxy")
-+          const res = await NetworkProxy.routedFetch(url, {
-+            method: "HEAD",
-+            signal: AbortSignal.timeout(3000),
-+            purpose: "provider",
-+          } as RequestInit)
-+          const elapsed = Date.now() - t0
++          // 运输调用始终附回同一取消信号，避免代理重试移除调用方信号后留下在途请求。
++          const res = await NetworkProxy.fetchWithRoute(
++            (input, init?: RequestInit) => fetch(input, { ...init, signal }),
++            url,
++            { method: "HEAD", signal, purpose: "provider" },
++          )
 +          if (!active) return
-+          // 仅 502/503/504 记 offline；其余状态仍展示 RTT
-+          // 仅网关错误记 offline；其它 4xx/5xx 仍展示 RTT
-+if (res.status === 502 || res.status === 503 || res.status === 504) {
-+            setPingStatus("down")
-+            setLatency(null)
-+          } else {
-+            setPingStatus("ok")
-+            setLatency(elapsed)
-+          }
++          // 认证拒绝仍证明网络可达；按源语义仅将三类网关故障记为离线。
++          const down = res.status === 502 || res.status === 503 || res.status === 504
++          setPingStatus(down ? "down" : "ok")
++          setLatency(down ? null : Date.now() - t0)
 +        } catch {
-+          if (active) {
-+            setPingStatus("down")
-+            setLatency(null)
-+          }
++          if (!active) return
++          setPingStatus("down")
++          setLatency(null)
 +        }
-+        // 串行调度：上次结束后再等 1s，避免 interval 重叠
-+if (active) timer = setTimeout(ping, PING_INTERVAL)
++        // 当前探测结算后才排下一次，保留源功能的一秒串行间隔。
++        if (active) timer = setTimeout(ping, PING_INTERVAL)
 +      }
 +
-+      ping()
-+      onCleanup(() => {
-+        active = false
-+        if (timer) clearTimeout(timer)
-+      })
++      void ping()
 +    }),
 +  )
 +
-+  // RTT 着色：<300 success / <800 warning / 否则 error
-+  // RTT 着色阈值：<300 success / <800 warning / 否则 error
-+const latencyDisplay = createMemo(() => {
++  // RTT 颜色只反映连接耗时，不把提供者认证状态混入延迟等级。
++  const latencyDisplay = createMemo(() => {
 +    const icon = isProxy() ? "🌐" : "⚡"
-+    if (pingStatus() === "init") return { text: `${icon} ...`, fg: theme().textMuted }
 +    if (pingStatus() === "down") return { text: `${icon} offline`, fg: theme().error }
-+    const l = latency()!
-+    const fg = l < 300 ? theme().success : l < 800 ? theme().warning : theme().error
-+    return { text: `${icon} ${l}ms`, fg }
++    const value = latency()
++    if (value === null) return { text: `${icon} ...`, fg: theme().textMuted }
++    return { text: `${icon} ${value}ms`, fg: value < 300 ? theme().success : value < 800 ? theme().warning : theme().error }
 +  })
 +
-   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
-   const session = createMemo(() => props.api.state.session.get(props.session_id))
-   const cost = createMemo(() => session()?.cost ?? 0)
-@@ -102,7 +212,16 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
+   return (
+     <box>
+       <text fg={theme().text}>
+         <b>Context</b>
+@@ -87,7 +176,10 @@
+       {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
        <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})</text>
-       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens</text>
-       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
--      <text fg={theme().textMuted}>{money.format(cost())} spent</text>
-+      {/* 无可用 API URL 时不渲染延迟段，避免永远显示 ... */}
+-      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens</text>
+-      <text fg={theme().textMuted}>{state().percent != null ? `${state().percent}% of ctx limit` : "—"}</text>
+-      <text fg={theme().textMuted}>{money.format(state().cost)} spent</text>
++      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens{state().percent != null ? ` · ${state().percent}%` : ""}</text>
++      {/* 未解析到 origin 时隐藏探测，避免冷启动一直显示没有目标的等待状态。 */}
 +      <text fg={theme().textMuted}>
-+        {money.format(cost())} spent
-+        {targetApiUrl() && (
-+          <>
-+            {" · "}
-+            <span style={{ fg: latencyDisplay().fg }}>{latencyDisplay().text}</span>
-+          </>
-+        )}
++        {money.format(state().cost)} spent
++        {targetApiUrl() && <>{" · "}<span style={{ fg: latencyDisplay().fg }}>{latencyDisplay().text}</span></>}
 +      </text>
      </box>
    )
- }
+diff --git a/packages/core/test/catalog.test.ts b/packages/core/test/catalog.test.ts
+--- a/packages/core/test/catalog.test.ts
++++ b/packages/core/test/catalog.test.ts
+@@ -207,10 +207,36 @@
+       expect(required(yield* catalog.model.get(providerID, modelID)).api).toEqual({
+         id: modelID,
+         type: "aisdk",
+         package: "@ai-sdk/openai-compatible",
+         url: "https://provider.example.com",
+       })
++
++      // 通过真实继承与投影验证三个协议的默认端点，避免只测孤立地址表。
++      for (const [npm, url] of [
++        ["@ai-sdk/anthropic", "https://api.anthropic.com/v1"],
++        ["@ai-sdk/google", "https://generativelanguage.googleapis.com/v1beta"],
++        ["@ai-sdk/openai", "https://api.openai.com/v1"],
++      ]) {
++        yield* catalog.transform((catalog) => {
++          catalog.provider.update(providerID, (provider) => { provider.api = { type: "aisdk", package: npm } })
++          // 两个别名共享 wire ID，固定这个冲突才能发现用 API ID 反查 Catalog 键的错误。
++          catalog.model.update(providerID, modelID, (model) => { model.api.id = ModelV2.ID.make("wire-model") })
++          catalog.model.update(providerID, ModelV2.ID.make("alias"), (model) => {
++            model.api = { id: ModelV2.ID.make("wire-model"), type: "aisdk", package: npm, settings: { baseURL: "https://alias.example.com/v1" } }
++          })
++        })
++        // 公共投影应直接提供端点，读取展示元数据无需建立运输或解析凭证。
++        const model = required(yield* catalog.model.get(providerID, modelID))
++        expect(model.id).toBe(modelID)
++        expect(model.api.id).toBe(ModelV2.ID.make("wire-model"))
++        expect(model.api.url).toBe(url)
++        // 别名的 SDK 设置仍优先，不能被另一别名补入的默认地址覆盖。
++        const alias = required(yield* catalog.model.get(providerID, ModelV2.ID.make("alias")))
++        expect(alias.api.id).toBe(model.api.id)
++        expect(alias.api.url).toBe("https://alias.example.com/v1")
++        expect(alias.api.type === "aisdk" && alias.api.settings?.baseURL).toBe("https://alias.example.com/v1")
++      }
+     }),
+   )
+ 
+   it.effect("resolves provider and model request merges", () =>
+diff --git a/packages/opencode/test/provider/provider.test.ts b/packages/opencode/test/provider/provider.test.ts
+--- a/packages/opencode/test/provider/provider.test.ts
++++ b/packages/opencode/test/provider/provider.test.ts
+@@ -1477,10 +1477,27 @@
+   expect(model.api.url).toBe("")
+   expect(model.capabilities.temperature).toBe(false)
+   expect(model.capabilities.reasoning).toBe(false)
+   expect(model.capabilities.attachment).toBe(false)
+   expect(model.capabilities.toolcall).toBe(true)
+   expect(model.capabilities.interleaved).toEqual({ field: "reasoning_text" })
+   expect(model.release_date).toBe("")
++
++  // 调用真实规范化 owner 验证默认地址，原未知包 fixture 继续约束不猜测端点的行为。
++  for (const [npm, url] of [
++    ["@ai-sdk/anthropic", "https://api.anthropic.com/v1"],
++    ["@ai-sdk/google", "https://generativelanguage.googleapis.com/v1beta"],
++    ["@ai-sdk/openai", "https://api.openai.com/v1"],
++  ]) {
++    const parsed = Provider.fromModelsDevProvider({ ...provider, npm }).models["gpt-5.4"]
++    expect(parsed.api.url).toBe(url)
++    expect(parsed.api.npm).toBe(npm)
++    // 显式地址和显式空串都保持原值，补默认不能改写调用者的配置意图。
++    expect(Provider.fromModelsDevProvider({ ...provider, npm, api: "https://custom.example.com/v1" }).models["gpt-5.4"].api.url).toBe("https://custom.example.com/v1")
++    expect(Provider.fromModelsDevProvider({ ...provider, npm, api: "" }).models["gpt-5.4"].api.url).toBe("")
++    // 模型覆盖仍高于提供者地址，固定两者同时存在的用例避免颠倒优先级。
++    const overridden = Provider.fromModelsDevProvider({ ...provider, npm, api: "https://provider.example.com/v1", models: { "gpt-5.4": { ...provider.models["gpt-5.4"], provider: { npm, api: "https://model.example.com/v1" } } } }).models["gpt-5.4"]
++    expect(overridden.api.url).toBe("https://model.example.com/v1")
++  }
+ })
+ 
+ test("models.dev reasoning options replace generated variants and unsupported toggles fall back", () => {

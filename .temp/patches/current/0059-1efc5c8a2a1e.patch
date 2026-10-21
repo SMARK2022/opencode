@@ -1,42 +1,20 @@
-diff --git a/packages/opencode/src/util/media.ts b/packages/opencode/src/util/media.ts
---- a/packages/opencode/src/util/media.ts
-+++ b/packages/opencode/src/util/media.ts
-@@ -48,7 +48,8 @@
-   try {
-     const mod = await import("sharp")
-     // 处理 ESM/CJS 互操作
--    sharpCached = (mod as any).default ?? mod
-+    // sharp 模块类型断言：确保返回的是 sharp 模块本身而非模块命名空间
-+    sharpCached = ((mod as any).default ?? mod) as typeof import("sharp")
-     return sharpCached as typeof import("sharp")
-   } catch {
-     sharpCached = SHARP_UNAVAILABLE  // 标记为不可用
+From 1efc5c8a2a1e5aaa1d2dd994c1013f3ffd2a0a1f Mon Sep 17 00:00:00 2001
+From: SMARK2022 <3222301373@qq.com>
+Date: Thu, 30 Apr 2026 17:10:34 +0800
+Subject: [PATCH] test(image): retain optional resizer intent through Photon output
 
-diff --git a/packages/opencode/package.json b/packages/opencode/package.json
---- a/packages/opencode/package.json
-+++ b/packages/opencode/package.json
-@@ -156,4 +156,8 @@
-   "overrides": {
-     "drizzle-orm": "catalog:"
-   }
-+,
-+  "optionalDependencies": {
-+    "sharp": "0.33.5"
-+  }
- }
-
-
-
-
-diff --git a/bun.lock b/bun.lock
-index 49b3ab0f16ca59db4e89379c9ea64b31a44c0504..65ec793bd9fb67cabcfd94c5851756c3adfce10c 100644
---- a/bun.lock
-+++ b/bun.lock
-@@ -563,6 +563,7 @@
-     "packages/opencode": {
-       "name": "opencode",
-       "version": "1.18.32-smark",
-+      "optionalDependencies": { "sharp": "0.33.5" }, // #59：可选压缩依赖，复用上游既有 0.33.5 解析树
-       "bin": {
-         "opencode": "./bin/opencode",
-       },
+diff --git a/packages/opencode/test/image/image.test.ts b/packages/opencode/test/image/image.test.ts
+--- a/packages/opencode/test/image/image.test.ts
++++ b/packages/opencode/test/image/image.test.ts
+@@ -74,6 +74,11 @@
+       source.free()
+       expect(resized.get_width()).toBeLessThanOrEqual(2_000)
+       expect(resized.get_height()).toBeLessThanOrEqual(2_000)
++      // Photon 必须真正缩放并保持单像素高度，输出声明也须匹配实际 PNG 编码。
++      expect(resized.get_width()).toBe(2_000)
++      expect(resized.get_height()).toBe(1)
++      expect(result.mime).toBe("image/png")
++      expect(result.url.startsWith("data:image/png;base64,")).toBe(true)
+       resized.free()
+     }),
+   )

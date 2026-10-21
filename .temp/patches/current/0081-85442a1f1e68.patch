@@ -8,32 +8,24 @@ diff --git a/sdks/vscode/src/notebook/format.ts b/sdks/vscode/src/notebook/forma
 index eb0a21a0d4..bdab7fdc44 100644
 --- a/sdks/vscode/src/notebook/format.ts
 +++ b/sdks/vscode/src/notebook/format.ts
-@@ -223,15 +223,14 @@ export function runtimeLabel(notebook: vscode.NotebookDocument) {
- 
+@@ -184,8 +184,7 @@
  /**
-  * Computes 1-based inclusive physical line ranges for every cell in the virtual document.
-- * Headers (`--: ...`) do NOT consume line numbers; only source lines and blank separators do.
-+ * Headers (`--: ...`) do NOT consume line numbers; headers and visual separators do NOT consume line numbers.
-  *
-  * Layout per cell:
-  *   --:  header line            (no line number)
-  *   N:   source line 0          (numbered)
-  *   ...
-  *   N+k: source line last       (numbered)
-- *   N+k+1: (blank separator)    (numbered)
-- *
-+  *
-  * Returns a Map from cell index to `{ start, end }` where both are 1-based inclusive.
+  * 为每格计算虚拟源码中的一基闭区间，Map 的键仍为内部零基 cell.index。
+- * --: 格头不占编号；源码行与格间空分隔行占编号。
+- * 每格布局为未编号格头、N..N+k 正文和 N+k+1 空分隔行。
++ * --: 格头和视觉分隔行均不占编号，只有源码行进入连续范围。
   */
- // 计算虚拟行号范围：为每个 cell 分配连续的虚拟行号区间，用于源码视图
-@@ -250,7 +249,9 @@ export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
-     } else {
-       ranges.set(cell.index, { start: next, end: next }) // empty cell — point range
+ export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
+   const ranges = new Map<number, { start: number; end: number }>()
+   let next = 1
+@@ -197,8 +196,8 @@ export function computeVirtualRanges(notebook: vscode.NotebookDocument) {
+       // 空格仍占一个可定位的点区间，不能与下一格共用 start。
+       ranges.set(cell.index, { start: next, end: next })
      }
--    next += count + 1 // source lines + blank separator
-+    // 分隔行不占号：步进只计源码行
-+    // 空 cell 至少占 1，防止 next 卡住导致后续 range 重叠
-+    next += Math.max(1, count) // 分隔行不占号；空 cell 至少占 1
+-    // 分隔空行只推动下一格起点，不进入当前格的可编辑闭区间。
+-    next += Math.max(1, count) + 1
++    // 分隔行不占号；空格至少占一个点，避免后续范围重叠。
++    next += Math.max(1, count)
    }
    return ranges
  }
@@ -41,15 +33,16 @@ diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/sourc
 index 09e03f23f1..2ead9b305c 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -7,7 +7,6 @@
-  *   A: <source line 0>                                          (1-based global)
-  *   ...
-  *   B: <source line last>
-- *   B+1: (blank line)
-  *
-  * Cell headers do NOT consume line numbers. Line ranges in headers are
-  // 无 cellId 时返回全本；有 cellId 时只导出目标 cell 虚拟切片
-@@ -80,7 +79,6 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -1,7 +1,7 @@
+ /**
+  * vscode_notebook_source 返回一基全局虚拟源码，身份解析仍归 resolve。
+  * 每格使用未编号头部 --: --- cN kind/lang id=#VSC-xxx lines=N range=[A,B] ---。
+- * A..B 为该格的源码闭区间，B+1 为空分隔行；格头不消耗全局编号。
++ * A..B 为该格的源码闭区间；格头和视觉分隔行均不消耗全局编号。
+  * cellId 可限定窗口，offset 始终解释为全局编号；编辑或重排后应重新读取。
+  * 读取不执行、保存单元格或切换内核。
+  */
+@@ -66,8 +66,7 @@ export async function notebookSource(input: Record<string, unknown>) {
    let bytes = 0
    let rendered = 0
    let cut = false
@@ -57,28 +50,30 @@ index 09e03f23f1..2ead9b305c 100644
    let lastRenderedLine = 0
    const outputCells: string[] = []
  
-@@ -93,8 +91,6 @@ export async function notebookSource(input: Record<string, unknown>) {
-     const srcEnd = Math.min(globalEnd, cellRange.end)
- 
+   for (const cell of notebook.getCells()) {
+@@ -81,11 +80,8 @@ export async function notebookSource(input: Record<string, unknown>) {
      if (srcStart > srcEnd) {
--      // No source lines from this cell in range — skip cell entirely
--      globalLineNum = cellRange.end // advance counter
+-      globalLineNum = cellRange.end
        continue
      }
  
-@@ -114,21 +110,22 @@ export async function notebookSource(input: Record<string, unknown>) {
-     rendered++
- 
-     // Render source lines
+-    // 每格从共享 start 重新对齐，跳过前格时不能漏算其空分隔行而让编号偏移一行。
+-    globalLineNum = cellRange.start - 1
+     if (rendered >= limit) {
+       cut = true
+       break
+     }
+@@ -101,21 +97,20 @@ export async function notebookSource(input: Record<string, unknown>) {
+     // 格头计入字节但不占编号正文预算，limit=1 也必须能读取并推进一行源码。
 -    const sourceLines = cell.document.getText().split(/\r?\n/)
 -    for (let i = 0; i < sourceLines.length; i++) {
 -      globalLineNum++
-+    // lineAt：避免整 cell getText+split 的内存与 EOL 误差
 +    for (let i = 0; i < cell.document.lineCount; i++) {
-+      // 全局行号由 cell 虚拟起点 + 局部行偏移合成
++      // 直接按共享起点定位，分页跳过前格也不依赖累积计数。
 +      const globalLineNum = cellRange.start + i
        if (globalLineNum < globalStart) continue
        if (globalLineNum > globalEnd) {
+-        // 单格窗口的终点不重算局部编号，下一格仍由共享范围起点对齐。
 -        globalLineNum = cellRange.end
          break
        }
@@ -86,6 +81,7 @@ index 09e03f23f1..2ead9b305c 100644
          cut = true
          break
        }
+       // 长行预览明确带截短标记，不能让调用方把 2000 字符当成完整源行。
 -      const src = sourceLines[i].length > 2000
 -        ? sourceLines[i].substring(0, 2000) + "... (line truncated to 2000 chars)"
 -        : sourceLines[i]
@@ -94,13 +90,12 @@ index 09e03f23f1..2ead9b305c 100644
 +        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
 +        : sourceLine
        const outLine = `${globalLineNum}: ${src}`
+       // UTF-8 预算包括真实行号前缀，多字节正文不能用字符数冒充输出字节。
        const outBytes = Buffer.byteLength(outLine, "utf8")
-       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
-@@ -143,23 +140,9 @@ export async function notebookSource(input: Record<string, unknown>) {
- 
+@@ -133,21 +128,6 @@ export async function notebookSource(input: Record<string, unknown>) {
      if (cut) break
- 
--    // Blank separator
+-
+-    // 空分隔行占全局编号，预算足够时才输出，不能加入前格的可编辑 range。
 -    globalLineNum++
 -    if (globalLineNum >= globalStart && globalLineNum <= globalEnd) {
 -      if (rendered < limit) {
@@ -116,31 +111,29 @@ index 09e03f23f1..2ead9b305c 100644
 -    }
    }
  
+   // 字节或行数截断时只从最后实际输出的正文编号续读，不能跳过尚未返回的源码。
 -  if (!cut) lastRenderedLine = Math.min(globalEnd, globalLineNum)
 +  if (!cut) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
    const more = lastRenderedLine < globalEnd
- 
-   let output = warning ? `${warning}\n\n` : ""
-@@ -173,8 +156,6 @@ export async function notebookSource(input: Record<string, unknown>) {
-     output += `\n\n(Output capped at 12 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
+@@ -164,7 +144,5 @@ export async function notebookSource(input: Record<string, unknown>) {
    } else if (more) {
      output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
 -  } else {
--    output += `\n\n(End of file — total ${totalLines} lines)`
+-    output += `\n\n(End of file - total ${totalLines} lines)`
    }
    output += "\n</content>"
  
+   return {
 diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
 index 658dbf97cd..83e4649be5 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -65,7 +65,8 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+@@ -50,7 +50,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
      `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
      `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
      "",
--    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document.`,
-+    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
-+    // 虚拟源码约定：header/分隔行不占全局行号
+-    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定；range=[A,B] 是虚拟源码的一基闭区间。`,
++    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定；range=[A,B] 是虚拟源码的一基闭区间；格头和视觉分隔行不占编号。`,
      "",
      'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',
      ...cells.map((cell) => {

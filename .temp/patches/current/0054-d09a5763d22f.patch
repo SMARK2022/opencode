@@ -37,28 +37,26 @@ diff --git a/packages/opencode/test/installation/installation.test.ts b/packages
          const result = yield* Installation.use.latest("npm")
          expect(result).toBe("1.5.0")
 -        expect(npmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
-+        // 支持自定义 registry（如 npmmirror.com），不硬编码 npmjs.org
-+    expect(npmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
++        // registry 由用户配置决定，npm/bun/pnpm 的包路径断言只固定包名与发布 channel。
++        expect(npmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
        }),
      )
  
-@@ -110,7 +111,8 @@
+@@ -110,7 +111,7 @@
        Effect.gen(function* () {
          const result = yield* Installation.use.latest("bun")
          expect(result).toBe("1.6.0")
 -        expect(bunCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
-+        // 支持自定义 registry（如 npmmirror.com），不硬编码 npmjs.org
-+    expect(bunCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
++        expect(bunCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
        }),
      )
  
-@@ -124,7 +126,8 @@
+@@ -124,7 +125,7 @@
        Effect.gen(function* () {
          const result = yield* Installation.use.latest("pnpm")
          expect(result).toBe("1.7.0")
 -        expect(pnpmCalls).toContain(`https://registry.npmjs.org/opencode-ai/${InstallationChannel}`)
-+        // 支持自定义 registry（如 npmmirror.com），不硬编码 npmjs.org
-+    expect(pnpmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
++        expect(pnpmCalls.some((url) => url.endsWith(`/opencode-ai/${InstallationChannel}`))).toBe(true)
        }),
      )
  

@@ -1,8 +1,8 @@
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -0,0 +1,949 @@
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -0,0 +1,1012 @@
 +/**
 + * 用于优化大模型上下文的 Bash 输出压缩器。
 + *
@@ -20,9 +20,9 @@ new file mode 100644
 + *   - BashTool 的截断文件路径应当仍然保留完整的原始输出，以便用户或模型后续可以查看完整日志。
 + */
 +
-+// 定义压缩配置的接口，用于控制各个压缩策略的阈值
++// 配置只影响模型呈现，不能改变进程执行、授权或原始日志的写盘内容。
 +export type CompressionConfig = {
-+  // 是否启用压缩功能
++  // 单次 false 必须绕过所有折叠策略；诊断采样仍独立运行以观察窗口外错误。
 +  enabled: boolean
 +
 +  /**
@@ -82,7 +82,7 @@ new file mode 100644
 +  diagnosticLineMaxChars: number
 +}
 +
-+// 记录各种压缩策略命中的次数以及总的压缩效果
++// 统计针对进入压缩器的有界可见窗口；不能把它冒充整个磁盘日志的收益。
 +export type CompressionStats = {
 +  originalBytes: number        // 压缩前原始总字节数
 +  compressedBytes: number      // 压缩后总字节数
@@ -97,13 +97,13 @@ new file mode 100644
 +  applied: boolean             // 是否真正应用了任何压缩（即节省了空间）
 +}
 +
-+// 压缩后的结果和对应的统计信息
++// 文本与统计同一次计算返回，避免调用者重复压缩导致比例和实际输出不一致。
 +export type CompressResult = {
 +  text: string                 // 压缩后的文本
 +  stats: CompressionStats      // 压缩统计
 +}
 +
-+// 用于评估某次字符串替换操作是否“划算”的内部结构
++// 候选收益包含替换标签，扫描阶段与最终应用阶段必须使用相同计量单位。
 +type Score = {
 +  originalBytes: number        // 替换前字节数
 +  replacementBytes: number     // 替换后字节数
@@ -112,7 +112,7 @@ new file mode 100644
 +  profitable: boolean          // 是否满足 minSavedBytes 和 minSavingRatio 的“划算”阈值
 +}
 +
-+// 多行重复块的候选对象
++// 消耗行数指向原始数组，替换标签的行数不能用于推进扫描游标。
 +type BlockCandidate = {
 +  width: number                // 这个块包含多少行
 +  repeats: number              // 连续重复了多少次
@@ -121,13 +121,13 @@ new file mode 100644
 +  score: Score                 // 评估得分
 +}
 +
-+// 单行的记录，用于流式诊断时记录行号和行内容
++// CR 重绘也形成诊断帧；这里的编号是采集帧序号，不冒充原文件的 LF 行号。
 +type LineRecord = {
 +  no: number                   // 行号（从1开始）
 +  text: string                 // 行内容
 +}
 +
-+// 一个完整的诊断上下文，包含中心错误行及前后的上下文行
++// 中心帧身份用于可见性去重，重叠上下文合并后仍需保留最近错误的中心。
 +export type DiagnosticContext = {
 +  centerLine: number           // 触发这个上下文的中心错误行号
 +  lines: LineRecord[]          // 包含上下文的所有行
@@ -140,9 +140,12 @@ new file mode 100644
 +  warningLikeLines: number     // 包含警告关键词的行数
 +  fatalLikeLines: number       // 包含致命错误关键词的行数
 +  contexts: DiagnosticContext[]// 合并整理后的所有诊断上下文块
++  // 采样损失与输出截断分别报告；遗漏段仍可从调用方保留的原始文件恢复。
++  discardedChars: number
++  truncatedFrames: number
 +}
 +
-+// 渲染诊断附录信息的选项
++// 可见性判断必须读取最终窗口，不能用截断前文本认定错误已经交给模型。
 +export type RenderAppendixOptions = {
 +  durationMs: number           // 命令执行耗时
 +  exitCode: number | null      // 命令退出码
@@ -152,41 +155,41 @@ new file mode 100644
 +
 +// 默认配置，支持从环境变量读取进行动态调整
 +export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
-+  // 总开关，可通过 OPENCODE_EXPERIMENTAL_BASH_OUTPUT_COMPRESSION 关闭
++  // 环境开关是默认值；调用方显式 enabled 可以覆盖它，保持源配置优先级。
 +  enabled: process.env.OPENCODE_EXPERIMENTAL_BASH_OUTPUT_COMPRESSION !== "0",
 +
-+  // 默认最小节省 80 字节
++  // 80 字节覆盖说明标签成本，避免几条短日志被更长的说明替换。
 +  minSavedBytes: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_SAVED_BYTES ?? 80),
-+  // 默认至少压缩 50% 空间
++  // 默认至少减半才牺牲精确排版，微小收益不足以支持有损呈现。
 +  minSavingRatio: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_SAVING_RATIO ?? 0.5),
 +
-+  // 最大扫描的块行数为 12 行
++  // 12 行限制每个起点的候选数量，防止多行扫描扩展到整个捕获窗口。
 +  maxBlockLines: Number(process.env.OPENCODE_BASH_COMPRESSION_MAX_BLOCK_LINES ?? 12),
-+  // 块必须至少重复 2 次
++  // 两次是块重复的最小证据，实际替换仍受字节收益门槛约束。
 +  minBlockRepeats: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_BLOCK_REPEATS ?? 2),
 +
-+  // 单行必须连续出现至少 3 次
++  // 三次降低偶发相同行的折叠概率；两条相同诊断仍保持原始上下文。
 +  minSameLineRepeats: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_SAME_LINE_REPEATS ?? 3),
 +
-+  // 行内模式最大长度 64 字符
++  // 模式宽度上限与行长上限共同约束嵌套扫描，不能只限制替换结果长度。
 +  maxInlinePatternLength: Number(process.env.OPENCODE_BASH_COMPRESSION_MAX_INLINE_PATTERN_LENGTH ?? 64),
-+  // 行内模式最少重复 4 次
++  // 四次重复减少普通源码短片段误判，收益检查再排除短标签净增长。
 +  minInlineRepeatCount: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_INLINE_REPEAT_COUNT ?? 4),
-+  // 行长超过 80 字节才触发
++  // 行内候选另按 UTF-8 字节检查，字符预筛不会把中文字符数当作最终收益。
 +  minInlineRunBytes: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_INLINE_RUN_BYTES ?? 80),
 +  // 最大支持 4096 字符的行内压缩，防止正则引擎卡死
 +  maxInlineLineLength: Number(process.env.OPENCODE_BASH_COMPRESSION_MAX_INLINE_LINE_LENGTH ?? 4096),
 +
-+  // 至少 4 次回车更新才折叠
++  // 少量 CR 可能是精确格式内容，默认四帧才视作可折叠进度刷新。
 +  minCarriageReturnFrames: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_CR_FRAMES ?? 4),
 +
-+  // 命令运行超 2000ms 才提取错误上下文
++  // 两秒门槛避免短命令把同一错误再附录一次，采样损失提示不受此门槛隐藏。
 +  diagnosticMinRuntimeMs: Number(process.env.OPENCODE_BASH_DIAGNOSTIC_MIN_RUNTIME_MS ?? 2000),
-+  // 上下文半径为 3 行 (上3下3)
++  // 前后三帧提供定位线索，采集器只持有这些邻域而不是整个历史。
 +  diagnosticContextRadius: Number(process.env.OPENCODE_BASH_DIAGNOSTIC_CONTEXT_RADIUS ?? 3),
-+  // 最多展示 5 个独立的错误上下文
++  // 最近五个上下文优先，防止早期噪声占满结束时的诊断预算。
 +  maxDiagnosticContexts: Number(process.env.OPENCODE_BASH_DIAGNOSTIC_MAX_CONTEXTS ?? 5),
-+  // 每行最多保留 100 字符
++  // 附录每帧最多百字符，详细内容由原始文件承担，避免附录重新膨胀输出。
 +  diagnosticLineMaxChars: Number(process.env.OPENCODE_BASH_DIAGNOSTIC_LINE_MAX_CHARS ?? 100),
 +}
 +
@@ -206,6 +209,8 @@ new file mode 100644
 +// 匹配 ANSI 控制字符（颜色、清屏等），含有 ANSI 的行在行内压缩时被跳过
 +const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/
 +const ANSI_GLOBAL_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
++// 诊断分帧容量不依赖命令是否换行，也不依赖可能被环境配置放大的呈现阈值。
++const MAX_DIAGNOSTIC_FRAME_CHARS = 4096
 +
 +// 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
 +function stripAnsi(text: string) {
@@ -219,22 +224,25 @@ new file mode 100644
 +
 +// 合并传入配置与默认配置
 +function configOf(config?: Partial<CompressionConfig>): CompressionConfig {
++  // 部分覆盖保留其它策略的默认值，禁用不是另一套压缩实现。
 +  return { ...DEFAULT_COMPRESSION_CONFIG, ...config }
 +}
 +
 +// 计算文本真实字节大小
 +function byteLen(text: string) {
-+  // 纯 ASCII 直接返回长度以提升性能
++  // ASCII 的字符数等于 UTF-8 字节数，可避免对大量普通日志重复编码。
 +  if (/^[\x00-\x7f]*$/.test(text)) return text.length
-+  // 包含 Unicode 时计算 utf-8 字节数
++  // 非 ASCII 必须按实际编码计量，否则中文日志会虚报节省比例。
 +  return Buffer.byteLength(text, "utf-8")
 +}
 +
 +// 评估一次替换带来的空间节省情况
-+function scoreReplacement(original: string, replacement: string, config: CompressionConfig): Score {
-+  const originalBytes = byteLen(original)
++function scoreReplacement(original: string | number, replacement: string, config: CompressionConfig): Score {
++  const originalBytes = typeof original === "number" ? original : byteLen(original)
++  // 替换标签也占字节，收益必须扣除它，短重复段不能只凭次数被替换。
 +  const replacementBytes = byteLen(replacement)
 +  const savedBytes = originalBytes - replacementBytes
++  // 空输入的收益定义为零，不能产生 NaN 后污染 transcript 统计。
 +  const savingRatio = originalBytes > 0 ? savedBytes / originalBytes : 0
 +
 +  return {
@@ -242,18 +250,20 @@ new file mode 100644
 +    replacementBytes,
 +    savedBytes,
 +    savingRatio,
-+    // 只有当节省量和比例都满足条件时才认为划算
++    // 绝对收益与比例必须同时合格，大日志只省少量字节也不足以支持有损呈现。
 +    profitable: savedBytes >= config.minSavedBytes && savingRatio >= config.minSavingRatio,
 +  }
 +}
 +
 +// 拼接字符串数组
 +function serializeLines(lines: string[]) {
++  // 换行也是原始字节的一部分，块收益不能只累加各行正文长度。
 +  return lines.join("\n")
 +}
 +
 +// 将长单行截断至指定字符数，并在末尾加上省略号
 +function truncateOneLine(text: string, maxChars: number) {
++  // 仅附录做空白归一化；压缩主输出和磁盘原文不能经过这个格式化函数。
 +  const normalized = text.replace(/\s+/g, " ").trimEnd()
 +  if (normalized.length <= maxChars) return normalized
 +  return normalized.slice(0, Math.max(0, maxChars - 1)) + "…"
@@ -261,6 +271,7 @@ new file mode 100644
 +
 +// 引号包裹被压缩的模式字符串，并对其进行转义处理（主要为了呈现给 LLM 看时更清晰）
 +function quotePattern(pattern: string, maxChars = 40) {
++  // 标签中的引号和控制字符必须转义，避免被误读为日志的真实边界。
 +  let text = pattern
 +    .replaceAll("\\", "\\\\")
 +    .replaceAll("\t", "\\t")
@@ -268,11 +279,13 @@ new file mode 100644
 +    .replaceAll('"', '\\"')
 +
 +  if (text.length > maxChars) text = text.slice(0, maxChars - 1) + "…"
++  // 只缩短标签中的模式示例，重复次数仍描述完整被替换区间。
 +  return `"${text}"`
 +}
 +
 +// 判断行是否为空或仅含空白符
 +function isBlankLine(line: string) {
++  // 空白通常携带排版结构，不能为了省 token 把整段空白当作重复日志折叠。
 +  return line.trim().length === 0
 +}
 +
@@ -287,6 +300,7 @@ new file mode 100644
 + * 上面四行的基础周期是 2(x,y)，因此其 block 宽度应判定为 2，而不是直接当成一个宽度为 4 的无规律块。
 + */
 +function hasSmallerLinePeriod(block: string[]) {
++  // 最小周期让块摘要稳定，避免同一循环被报告为不同宽度的重复块。
 +  for (let width = 1; width <= Math.floor(block.length / 2); width++) {
 +    // 只能整除的情况才可能是完整的周期
 +    if (block.length % width !== 0) continue
@@ -295,20 +309,13 @@ new file mode 100644
 +    for (let i = width; i < block.length; i++) {
 +      if (block[i] !== block[i % width]) {
 +        ok = false
++        // 任一偏移不同就否定这个周期，不能用前缀相似替代精确相等。
 +        break
 +      }
 +    }
 +    if (ok) return true
 +  }
 +  return false
-+}
-+
-+// 检查原数组中偏移为 a 和 b、宽度为 width 的两块内容是否完全相等
-+function sameBlock(lines: string[], a: number, b: number, width: number) {
-+  for (let i = 0; i < width; i++) {
-+    if (lines[a + i] !== lines[b + i]) return false
-+  }
-+  return true
 +}
 +
 +/**
@@ -324,15 +331,19 @@ new file mode 100644
 +  let groups = 0
 +  let changed = false
 +
++  // LF 分隔不同逻辑行，CR 只在各行内部折叠，不能越过错误输出边界。
 +  const next = lines.map((line) => {
 +    if (!line.includes("\r")) return line
 +
 +    // 以 \r 为分隔符拆分每一帧，忽略空帧
 +    const frames = line.split("\r").filter((frame) => frame.length > 0)
++    // CRLF 尾部的空帧不代表一次有内容的更新，不能抬高折叠次数。
 +    // 帧数不够阈值就不折叠
 +    if (frames.length < config.minCarriageReturnFrames) return line
 +
++    // 最后一帧是终态，折叠时保留它而非最早的进度百分比。
 +    const last = frames[frames.length - 1] ?? ""
++    // 原始输出另行保留，模型在需要中间帧时必须能读取完整日志。
 +    // 插入一条说明，告诉 LLM 这里折叠了多少帧
 +    const replacement = `... [carriage-return progress updates collapsed: ${frames.length - 1} frames]\n${last}`
 +    
@@ -342,6 +353,7 @@ new file mode 100644
 +
 +    groups++
 +    changed = true
++    // 只有真正采用收益合格的替换才统计命中，扫描到 CR 不等于压缩成功。
 +    return replacement
 +  })
 +
@@ -350,11 +362,11 @@ new file mode 100644
 +}
 +
 +// 在给定的起始索引处寻找最划算的连续重复多行块
-+function findRepeatedBlockAt(lines: string[], start: number, config: CompressionConfig): BlockCandidate | undefined {
++function findRepeatedBlockAt(lines: string[], start: number, config: CompressionConfig, bytes: number[], matches: Map<number, Uint32Array>): BlockCandidate | undefined {
 +  const remaining = lines.length - start
 +  let best: BlockCandidate | undefined
 +
-+  // 最大尝试的块宽度为配置的上限，或剩余行能容纳最小重复次数的最大宽度
++  // 块宽受扫描成本和剩余行能容纳的最小重复次数约束，避免越界；它不限制原始日志保留长度。
 +  const maxWidth = Math.min(config.maxBlockLines, Math.floor(remaining / config.minBlockRepeats))
 +  
 +  // 逐一尝试不同的块宽度
@@ -362,24 +374,26 @@ new file mode 100644
 +    const block = lines.slice(start, start + width)
 +    // 忽略全空行的块
 +    if (block.every(isBlankLine)) continue
-+    // 忽略全是同一行内容的块（这应该交给相同单行压缩来做，而不是块压缩）
++    // 同一行组成的块交给单行策略，其次数与标签语义不同，块策略不能先抢走输入。
 +    if (new Set(block).size <= 1) continue
 +    // 忽略本身具有更小重复周期的块
 +    if (hasSmallerLinePeriod(block)) continue
 +
-+    let repeats = 1
-+    let cursor = start + width
-+
-+    // 向下探查看这个块重复了多少次
-+    while (cursor + width <= lines.length && sameBlock(lines, start, cursor, width)) {
-+      repeats++
-+      cursor += width
++    // 同宽逐行相等的后缀长度只计算一次，收益被拒绝也不重扫整段日志。
++    const equal = matches.get(width) ?? new Uint32Array(lines.length + 1)
++    if (!matches.has(width)) {
++      for (let i = lines.length - width - 1; i >= 0; i--)
++        equal[i] = lines[i] === lines[i + width] ? equal[i + 1] + 1 : 0
++      matches.set(width, equal)
 +    }
++    // 每满 width 个相等位置才是一整块；余下半块不能算作重复。
++    const repeats = 1 + Math.floor(equal[start] / width)
 +
-+    // 重复次数不达标
++    // 未达到重复证据要求时保持原样，不拼接残缺的块说明。
 +    if (repeats < config.minBlockRepeats) continue
 +
-+    const originalLines = lines.slice(start, start + width * repeats)
++    // 最后一次重复也计入原始范围，否则收益会漏算被删除的字节。
++    const originalBytes = bytes[start + width * repeats] - bytes[start] - 1
 +    // 替换内容：只留第一遍块，然后加上总结语
 +    const replacementLines = [
 +      ...block,
@@ -387,7 +401,7 @@ new file mode 100644
 +    ]
 +
 +    // 评估是否划算
-+    const score = scoreReplacement(serializeLines(originalLines), serializeLines(replacementLines), config)
++    const score = scoreReplacement(originalBytes, serializeLines(replacementLines), config)
 +    if (!score.profitable) continue
 +
 +    const candidate: BlockCandidate = {
@@ -400,6 +414,7 @@ new file mode 100644
 +
 +    // 贪婪选择：找出能节省最多绝对字节数的方案
 +    if (!best || candidate.score.savedBytes > best.score.savedBytes) {
++      // 平收益保留先找到的窄块，使输出稳定并减少标签解释成本。
 +      best = candidate
 +    }
 +  }
@@ -410,13 +425,19 @@ new file mode 100644
 +// 从上到下扫描所有行，应用多行块压缩
 +function compressRepeatedBlocks(lines: string[], config: CompressionConfig): { lines: string[]; groups: number } {
 +  const out: string[] = []
++  // 前缀计入每行 UTF-8 字节和 LF，候选区间减去末尾一个 LF 与 join 完全一致。
++  const bytes = [0]
++  for (const line of lines) bytes.push(bytes[bytes.length - 1] + byteLen(line) + 1)
++  // 缓存仅属于本次输入和实际检查的块宽，不跨命令持有日志或改变候选顺序。
++  const matches = new Map<number, Uint32Array>()
 +  let groups = 0
 +  let i = 0
 +
 +  while (i < lines.length) {
 +    // 尝试在当前 i 位置找到一个可折叠的多行块
-+    const candidate = findRepeatedBlockAt(lines, i, config)
++    const candidate = findRepeatedBlockAt(lines, i, config, bytes, matches)
 +    if (!candidate) {
++      // 没有合格候选只消费一行，后面的起点仍有机会发现真正重复。
 +      out.push(lines[i])
 +      i++
 +      continue
@@ -425,6 +446,7 @@ new file mode 100644
 +    // 找到了，塞入替换行并跳过已经消耗的行数
 +    out.push(...candidate.replacementLines)
 +    groups++
++    // 已替换区间不会二次扫描，避免摘要标签成为后续块匹配的输入。
 +    i += candidate.consumedLines
 +  }
 +
@@ -441,7 +463,7 @@ new file mode 100644
 +    const line = lines[i]
 +    let j = i + 1
 +
-+    // 一直向后寻找完全一样的行
++    // 只扫描相邻且完全相等的运行，分散重复不能跨过中间状态变化。
 +    while (j < lines.length && lines[j] === line) j++
 +
 +    const count = j - i
@@ -453,6 +475,7 @@ new file mode 100644
 +
 +      // 只有省下了足够字节才应用
 +      if (score.profitable) {
++        // 记录次数前先验证标签净收益，重复很多短行也可能不值得压缩。
 +        out.push(...replacementLines)
 +        groups++
 +        i = j
@@ -460,8 +483,8 @@ new file mode 100644
 +      }
 +    }
 +
-+    out.push(line)
-+    i++
++    // 已扫描运行逐行消费一次，拒绝收益也不重扫后缀；保留原序和副本数并避免大运行 spread 超过参数上限。
++    while (i < j) out.push(lines[i++])
 +  }
 +
 +  return { lines: out, groups }
@@ -483,7 +506,7 @@ new file mode 100644
 +function compressInlineLine(line: string, config: CompressionConfig): { line: string; applied: boolean } {
 +  // 如果行本身太短，没必要跑正则扫描
 +  if (line.length < config.minInlineRunBytes) return { line, applied: false }
-+  // 如果行超长，为避免性能问题直接跳过
++  // 超长行原样通过以约束嵌套扫描 CPU 成本，不能切段压缩绕过单行上限。
 +  if (line.length > config.maxInlineLineLength) return { line, applied: false }
 +  // 不处理带有 ANSI 转义序列的行（通常含有颜色代码，强行切割会破坏终端样式）
 +  if (ANSI_RE.test(line)) return { line, applied: false }
@@ -493,12 +516,13 @@ new file mode 100644
 +  const maxPattern = Math.min(config.maxInlinePatternLength, Math.floor(line.length / config.minInlineRepeatCount))
 +
 +  for (let start = 0; start < line.length; start++) {
++    // 候选只匹配同一行的相邻模式，不能跨换行改变命令输出结构。
 +    for (let width = 1; width <= maxPattern; width++) {
 +      // 提早退出：如果剩下的长度都不足以放下最小重复次数
 +      if (start + width * config.minInlineRepeatCount > line.length) break
 +
 +      const pattern = line.slice(start, start + width)
-+      // 不压缩只包含空格的模式
++      // 空白模式可能携带对齐结构，没有足够正文重复证据时不做有损摘要。
 +      if (!pattern.trim()) continue
 +
 +      let repeats = 1
@@ -513,6 +537,7 @@ new file mode 100644
 +      if (repeats < config.minInlineRepeatCount) continue
 +
 +      const original = line.slice(start, start + width * repeats)
++      // 收益只评估被替换区间，前后未修改的内容不会虚增压缩比例。
 +      // 如果总被替换的这段字符长度本身就不够阈值，跳过
 +      if (byteLen(original) < config.minInlineRunBytes) continue
 +
@@ -533,6 +558,7 @@ new file mode 100644
 +    }
 +  }
 +
++  // 每行最多应用一个最划算区间，避免新标签被当作真实日志再次压缩。
 +  if (!best) return { line, applied: false }
 +
 +  // 拼接：替换前半段 + 替换标签 + 替换后半段
@@ -548,6 +574,7 @@ new file mode 100644
 +  const next = lines.map((line) => {
 +    const result = compressInlineLine(line, config)
 +    if (result.applied) groups++
++    // 未命中的行保留原位置，行内策略不会重新排序块压缩后的日志。
 +    return result.line
 +  })
 +
@@ -556,6 +583,7 @@ new file mode 100644
 +
 +// 粗略判断这段文本是否值得送进压缩流程，避免对很小的输出浪费 CPU
 +export function shouldCompressOutput(text: string) {
++  // 预筛只省扫描成本，真正收益仍由每个策略按替换标签逐次验证。
 +  if (!text) return false
 +  if (byteLen(text) < 200) return false
 +
@@ -581,6 +609,7 @@ new file mode 100644
 +  const originalBytes = byteLen(text)
 +
 +  const emptyStats: CompressionStats = {
++    // 绕过时仍报告窗口原始大小，调用者无需为禁用路径另建统计算法。
 +    originalBytes,
 +    compressedBytes: originalBytes,
 +    savedBytes: 0,
@@ -597,11 +626,11 @@ new file mode 100644
 +    return { text, stats: emptyStats }
 +  }
 +
-+  // 第一步：清理和折叠回车符刷新
++  // 先折叠进度重绘，避免块匹配把旧帧当作稳定多行日志。
 +  const cr = collapseCarriageReturns(text, config)
 +  let lines = cr.text.split("\n")
 +
-+  // 第二步：压缩大块多行重复
++  // 多行块先于单行摘要，保留完整循环样例以表达事件顺序。
 +  const blocks = compressRepeatedBlocks(lines, config)
 +  lines = blocks.lines
 +
@@ -609,12 +638,13 @@ new file mode 100644
 +  const same = compressSameLines(lines, config)
 +  lines = same.lines
 +
-+  // 第四步：压缩行内重复字符
++  // 行内摘要最后运行，避免先改正文导致原本完全相同的块不再匹配。
 +  const inline = compressInlinePatterns(lines, config)
 +  lines = inline.lines
 +
 +  const compressed = lines.join("\n")
 +  const compressedBytes = byteLen(compressed)
++  // 最终重新按编码字节计量，不能把多个局部收益简单相加作为总比例。
 +  const savedBytes = originalBytes - compressedBytes
 +  const savingRatio = originalBytes > 0 ? savedBytes / originalBytes : 0
 +
@@ -635,6 +665,7 @@ new file mode 100644
 +
 +  return {
 +    text: stats.applied ? compressed : text,
++    // 若最终没有净收益则连文本一起回到原样，不能报告未交给模型的命中。
 +    stats: stats.applied ? stats : emptyStats,
 +  }
 +}
@@ -655,6 +686,7 @@ new file mode 100644
 +  }
 +
 +  values() {
++    // 返回副本防止上下文合并排序修改采集器的历史顺序。
 +    return [...this.items]
 +  }
 +
@@ -672,13 +704,14 @@ new file mode 100644
 +
 +// 判定是否是类似报错行
 +function isErrorLike(line: string) {
-+  // 如果是 "0 errors" 等不视为报错
++  // 零错误计数只抑制普通错误词，同帧 traceback、panic 等强信号仍须保留。
 +  if (ZERO_PROBLEM_RE.test(line) && !FATAL_LIKE_RE.test(line)) return false
 +  return ERROR_LIKE_RE.test(line)
 +}
 +
 +// 判定是否是类似警告行
 +function isWarningLike(line: string) {
++  // 健康计数行可以带 warning 字样，不能因此制造虚假诊断频率。
 +  if (ZERO_PROBLEM_RE.test(line) && !FATAL_LIKE_RE.test(line)) return false
 +  return WARNING_LIKE_RE.test(line)
 +}
@@ -700,6 +733,10 @@ new file mode 100644
 + */
 +export class BashDiagnosticCollector {
 +  private pending = ""        // 分片读取拼接用的残余文本缓冲
++  private discardedChars = 0
++  private truncatedFrames = 0
++  private frameDiscarded = 0
++  private afterCR = false
 +  private lineNo = 0          // 绝对行号计数器
 +  private prev: Ring<LineRecord>  // 保存最近遍历过的上文（比如当前行的前 3 行）
 +  private contexts: Ring<DiagnosticContext> // 保存提取好的独立上下文块
@@ -723,25 +760,28 @@ new file mode 100644
 +  push(chunk: string) {
 +    if (!chunk) return
 +
-+    this.pending += chunk
-+
-+    while (true) {
-+      const idx = this.pending.indexOf("\n")
-+      if (idx < 0) break // 没遇到换行则等下一次 chunk 再拼
-+
-+      // 提取完整的一行并削去 \r
-+      const line = this.pending.slice(0, idx).replace(/\r$/, "")
-+      this.pending = this.pending.slice(idx + 1)
-+      this.observeLine(line)
++    // 逐字符扫描真实 chunk，不把整块追加到 pending 后才尝试截断。
++    for (let i = 0; i < chunk.length; i++) {
++      const char = chunk[i]
++      // 跨 chunk 的 CRLF 仍是一个分隔符；单独 CR 则结束一次进度重绘帧。
++      if (char === "\n" && this.afterCR) {
++        this.afterCR = false
++        continue
++      }
++      this.afterCR = char === "\r"
++      if (char === "\r" || char === "\n") {
++        this.flushFrame()
++        continue
++      }
++      // 超长帧只采样前缀，后续字节由原始日志保留；遗漏必须显式报告。
++      if (this.pending.length < MAX_DIAGNOSTIC_FRAME_CHARS) this.pending += char
++      else this.frameDiscarded++
 +    }
 +  }
 +
 +  // 命令结束时收尾，把残余缓冲里的最后半行消化掉
 +  end() {
-+    if (this.pending.length > 0) {
-+      this.observeLine(this.pending.replace(/\r$/, ""))
-+      this.pending = ""
-+    }
++    if (this.pending.length > 0 || this.frameDiscarded > 0) this.flushFrame()
 +
 +    // 强行关闭所有还处于 active 等待后文状态的上下文
 +    for (const ctx of this.active) this.finalizeContext(ctx)
@@ -755,12 +795,25 @@ new file mode 100644
 +      errorLikeLines: this.errorCount,
 +      warningLikeLines: this.warningCount,
 +      fatalLikeLines: this.fatalCount,
++      discardedChars: this.discardedChars,
++      truncatedFrames: this.truncatedFrames,
 +      // 合并可能有重叠行号的上下文，然后取最后的 N 个
 +      contexts: this.mergeContexts(this.contexts.values()).slice(-this.config.maxDiagnosticContexts),
 +    }
 +  }
 +
 +  // 核心处理单行的逻辑
++  private flushFrame() {
++    if (this.frameDiscarded > 0) {
++      this.discardedChars += this.frameDiscarded
++      this.truncatedFrames++
++    }
++    // 截断标记属于诊断样例，不写回原文，也不把遗漏段伪装成完整诊断。
++    this.observeLine(this.pending + (this.frameDiscarded > 0 ? " [diagnostic frame sampled]" : ""))
++    this.pending = ""
++    this.frameDiscarded = 0
++  }
++
 +  private observeLine(text: string) {
 +    const record: LineRecord = { no: this.lineNo + 1, text }
 +
@@ -778,6 +831,7 @@ new file mode 100644
 +      // 否则继续放入 active 中等下一行
 +      else stillActive.push(ctx)
 +    }
++    // 每帧推进所有邻域，连续错误的活跃数量受半径约束，不随日志总量增长。
 +    this.active = stillActive
 +
 +    // 统计各种警示关键词出现的频率
@@ -790,7 +844,7 @@ new file mode 100644
 +      // 当前行是一个报错，新建一个等待捕获后文的活跃上下文
 +      const ctx: ActiveContext = {
 +        centerLine: record.no,
-+        // 把环形队列里保留的上文全部带进来，再加上当前这一行
++        // 上文和当前帧均已在分帧阶段有界，邻域副本不能藏入未截断长行。
 +        lines: [...this.prev.values(), record],
 +        // 设置还需要收集多少个后文行
 +        remainingAfter: this.config.diagnosticContextRadius,
@@ -804,7 +858,7 @@ new file mode 100644
 +      this.fatalCount++
 +    }
 +
-+    // 把当前行压入“前文环形缓冲区”，为未来的报错作铺垫
++    // 普通帧只留在前文环中供后续错误定位，完整恢复由调用方原始日志存储承担。
 +    this.prev.push(record)
 +    this.lineNo++
 +  }
@@ -821,6 +875,7 @@ new file mode 100644
 +  // 它们就会交织在一起。这个方法把它们无缝拼成一个 7~15 的大块。
 +  private mergeContexts(contexts: DiagnosticContext[]) {
 +    if (contexts.length <= 1) return contexts
++    // 合并仅处理有限结果环的副本，不能把所有历史错误累积到结束时再去重。
 +
 +    // 按照行号升序排列
 +    const sorted = [...contexts].sort((a, b) => {
@@ -844,6 +899,7 @@ new file mode 100644
 +
 +      // 如果它们存在交集或是正好紧挨着，进行合并
 +      if (thisStart <= lastEnd + 1) {
++        // 以帧号去重而非正文去重，相同错误在不同时间出现仍是不同事件。
 +        const byNo = new Map<number, LineRecord>()
 +        for (const line of last.lines) byNo.set(line.no, line)
 +        for (const line of ctx.lines) byNo.set(line.no, line)
@@ -873,6 +929,7 @@ new file mode 100644
 +  const visibleNorm = normalizeVisibleText(visibleOutput)
 +  const rawNorm = normalizeVisibleText(rawCenter)
 +  const truncatedNorm = normalizeVisibleText(truncatedCenter)
++  // 只看中心帧能避免整块空白或公共前文造成错误已可见的误判。
 +  if (!rawNorm && !truncatedNorm) return false
 +
 +  // 原文匹配优先，归一化匹配兜底，避免 ANSI、空白折叠或诊断行截断造成重复附录。
@@ -895,6 +952,7 @@ new file mode 100644
 +    const last = ctx.lines[ctx.lines.length - 1]?.no ?? ctx.centerLine
 +    out.push("")
 +    out.push(`[L${first}-L${last}]`) // 打印行号区间，比如 [L500-L506]
++    // L 表示诊断帧序号；含 CR 的原始文件不能据此当作 LF 行范围直接定位。
 +
 +    for (const line of ctx.lines) {
 +      // 对于命中的那一核心行，使用 > 进行强调
@@ -916,6 +974,7 @@ new file mode 100644
 +
 +  // 判断命令执行的时间和退出状态是否值得附带高价值摘录
 +  const longEnough = options.durationMs >= config.diagnosticMinRuntimeMs
++  // null 表示未正常结束，长命令被中断时仍可呈现已采到的错误线索。
 +  const abnormalExit = options.exitCode !== 0
 +  const hasStrongSignal = snapshot.fatalLikeLines > 0 || snapshot.errorLikeLines > 0
 +
@@ -927,6 +986,9 @@ new file mode 100644
 +    : []
 +
 +  const parts: string[] = []
++  // 采样遗漏不受运行时长或退出码隐藏，否则成功的长行会被误报为完整观察。
++  if (snapshot.discardedChars > 0)
++    parts.push(`[diagnostic sampling omitted ${snapshot.discardedChars} characters across ${snapshot.truncatedFrames} frames; inspect the retained raw output for complete diagnostics; L labels are frame ordinals]`)
 +
 +  // 拼接筛选后有效的报错上下文
 +  if (hiddenContexts.length > 0) {
@@ -940,6 +1002,7 @@ new file mode 100644
 + * 组装压缩相关的数据统计用于返回在最终命令的工具元数据内
 + */
 +export function bashCompressionMetadata(stats: CompressionStats) {
++  // 只输出可序列化标量，V1 metadata 与 Core structured transcript 共用同一含义。
 +  return {
 +    compressed: stats.applied,
 +    compressionOriginalBytes: stats.originalBytes,
@@ -961,11 +1024,11 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { Shell } from "@opencode-ai/core/shell"
  import { ShellID } from "./shell/id"
-+import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
  
  import * as Truncate from "./truncate"
  import { Plugin } from "@/plugin"
-@@ -524,6 +525,7 @@
+@@ -438,6 +439,7 @@
          cwd: string
          env: NodeJS.ProcessEnv
          timeout: number
@@ -973,90 +1036,101 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
        },
        ctx: Tool.Context,
      ) {
-@@ -564,6 +566,10 @@
+@@ -478,6 +480,10 @@
          ).pipe(Effect.catch(() => Effect.void))
        })
  
-+      // 压缩诊断收集器：收集流式输出用于诊断分析
++      // 诊断观察完整流，不能只观察已经丢弃旧块的内存窗口。
 +      const diag = new BashDiagnosticCollector()
 +      const started = Date.now()
 +
        yield* ctx.metadata({
          metadata: {
            output: "",
-@@ -579,6 +585,8 @@
+@@ -493,6 +499,8 @@
              Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
                const size = Buffer.byteLength(chunk, "utf-8")
                list.push({ text: chunk, size })
-+              // 收集诊断信息用于压缩后的附录生成
++              // 采样容量独立于 capture 限额，无换行输出也不能无限积累。
 +              diag.push(chunk)
                used += size
                while (used > keep && list.length > 1) {
                  const item = list.shift()
-@@ -658,9 +666,12 @@
+@@ -572,16 +580,22 @@
        }
        if (aborted) meta.push("User aborted the command")
        const raw = list.map((item) => item.text).join("")
 -      const end = tail(raw, limits.maxLines, limits.maxBytes)
-+      // 压缩可见输出：启用时移除冗余行，保留关键诊断信息
++      // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
 +      const compressed = compressVisibleOutput(raw, { enabled: input.compressOutput })
 +      diag.end()
++      const diagnostic = diag.snapshot()
 +      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
        if (end.cut) cut = true
 -      if (!file && end.cut) {
-+      if (!file && (end.cut || compressed.stats.applied)) {
++      // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
++      if (!file && (end.cut || compressed.stats.applied || diagnostic.discardedChars > 0)) {
          file = yield* trunc.write(raw)
        }
  
-@@ -671,6 +682,9 @@
-         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
+       let output = end.text
+       if (!output) output = "(no output)"
+ 
+-      if (cut && file) {
+-        output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
++      // 路径必须进入模型文本，metadata.outputPath 不会自动投影给模型。
++      if (file && (cut || compressed.stats.applied || diagnostic.discardedChars > 0)) {
++        output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
        }
  
-+      // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
-+      const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+@@ -588,6 +602,9 @@
++      // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
++      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
 +      if (appendix) output += "\n\n" + appendix
        if (meta.length > 0) {
          output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
        }
-@@ -681,6 +695,12 @@
+       return {
+         title: input.command,
+         metadata: {
+@@ -595,6 +612,13 @@
            exit: code,
            truncated: cut,
 -          ...(cut && file ? { outputPath: file } : {}),
-+          ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
-+          // 包含压缩统计信息：applied、removedLines 等
++          ...((cut || compressed.stats.applied || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
++          // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
 +          ...bashCompressionMetadata(compressed.stats),
-+          // 诊断元数据：暴露执行时长和错误/警告行数
 +          durationMs: Date.now() - started,
-+          diagnosticErrorLikeLines: diag.snapshot().errorLikeLines,
-+          diagnosticWarningLikeLines: diag.snapshot().warningLikeLines,
++          // 错误频率与采样遗漏独立持久化，未观察的长行中段不能被计为无错误。
++          diagnosticErrorLikeLines: diagnostic.errorLikeLines,
++          diagnosticWarningLikeLines: diagnostic.warningLikeLines,
++          diagnosticDiscardedChars: diagnostic.discardedChars,
          },
          output,
        }
-@@ -693,10 +709,13 @@
-         const name = Shell.name(shell)
+@@ -608,8 +632,11 @@
          const limits = yield* trunc.limits()
          const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
-+        // 压缩指引：仅在启用时告知模型可以使用 compress_output: false
++        // 使用既有 per-shell renderer 的正文，不恢复第二套 shell 语法说明。
 +        const compressionEnabled = cfg.tool_output?.bash_compression ?? true
 +        const compressionGuidance = compressionEnabled ? "Bash output compression is enabled by default. Use `compress_output: false` for commands where exact raw formatting matters, such as snapshot tests, binary/text fixture generation, or commands whose spacing is the result of careful formatting." : ""
-         // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
-         const shellGuidanceText = shellGuidance(name)
-         const listCmd = listCommand(name)
--        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
-+        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + (compressionGuidance ? "\n\n" + compressionGuidance : "") + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
          yield* Effect.logInfo("shell tool using shell", { shell })
  
          return {
-@@ -713,6 +732,8 @@
+-          description: prompt.description,
++          description: prompt.description + (compressionGuidance ? "\n\n" + compressionGuidance : ""),
+           parameters: prompt.parameters,
+           execute: (params: Parameters, ctx: Tool.Context) =>
+@@ -623,6 +650,8 @@
                }
                const timeout = params.timeout ?? defaultTimeoutMs
                const ps = Shell.ps(shell)
-+              // 从配置和参数决定是否启用输出压缩，默认启用
++              // 全局 false 优先于单次 true；精确排版可由单次 false 独立关闭。
 +              const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
                yield* Effect.scoped(
                  Effect.gen(function* () {
                    const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
-@@ -734,6 +755,7 @@
+@@ -644,6 +673,7 @@
                    cwd,
                    env: yield* shellEnv(ctx, cwd),
                    timeout,
@@ -1069,14 +1143,14 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
 --- a/packages/opencode/src/tool/shell/prompt.ts
 +++ b/packages/opencode/src/tool/shell/prompt.ts
-@@ -18,6 +18,10 @@
+@@ -23,6 +23,10 @@
      timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
      workdir: Schema.optional(Schema.String).annotate({
        description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
 +    }),
-+    // 启用输出压缩以减少 token 用量
++    // false 只关闭有损呈现，不绕过权限、执行限额或原文保留。
 +    compress_output: Schema.optional(Schema.Boolean).annotate({
-+      description: "Enable output compression to reduce token usage",
++      description: "Whether this Bash call may compress repetitive output before returning it. Defaults to the user's Bash output compression setting. Set false when exact raw formatting is important.",
      }),
    })
  }
@@ -1085,14 +1159,14 @@ diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/
 diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -138,6 +138,10 @@
+@@ -141,6 +141,10 @@
        max_bytes: Schema.optional(PositiveInt).annotate({
          description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
        }),
-+      // 启用 Bash 输出压缩，减少 token 用量
-+      bash_compression: Schema.optional(Schema.Boolean).annotate({
-+        description: "Enable Bash output compression to reduce token usage",
-+      }),
++      // V1 迁移透传此字段；公开 OpenAPI 会剥离 optional 外壳，说明须绑定保留的 Boolean 分支。
++      bash_compression: Schema.optional(Schema.Boolean.annotate({
++        description: "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
++      })),
      }),
    ).annotate({
      description:
@@ -1101,22 +1175,26 @@ diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config
 diff --git a/packages/core/src/config/tool-output.ts b/packages/core/src/config/tool-output.ts
 --- a/packages/core/src/config/tool-output.ts
 +++ b/packages/core/src/config/tool-output.ts
-@@ -6,4 +6,5 @@
+@@ -6,4 +6,8 @@
  export class Info extends Schema.Class<Info>("ConfigV2.ToolOutput")({
    max_lines: PositiveInt.pipe(Schema.optional),
    max_bytes: PositiveInt.pipe(Schema.optional),
-+  bash_compression: Schema.Boolean.pipe(Schema.optional),
++  // 可选而非默认填充，分层合并时缺省值不能遮蔽较低层的显式 false。
++  bash_compression: Schema.Boolean.pipe(Schema.optional).annotate({
++    description: "Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.",
++  }),
  }) {}
 
 
 diff --git a/packages/core/src/github-copilot/responses/openai-responses-language-model.ts b/packages/core/src/github-copilot/responses/openai-responses-language-model.ts
 --- a/packages/core/src/github-copilot/responses/openai-responses-language-model.ts
 +++ b/packages/core/src/github-copilot/responses/openai-responses-language-model.ts
-@@ -280,7 +280,7 @@
+@@ -280,7 +280,8 @@
        // provider options:
        max_tool_calls: openaiOptions?.maxToolCalls,
        metadata: openaiOptions?.metadata,
 -      parallel_tool_calls: openaiOptions?.parallelToolCalls,
++      // nullish 默认值保留用户显式 false，不能用逻辑或强制开启并行。
 +      parallel_tool_calls: openaiOptions?.parallelToolCalls ?? true,
        previous_response_id: openaiOptions?.previousResponseId,
        store: openaiOptions?.store,
@@ -1126,10 +1204,13 @@ diff --git a/packages/core/src/github-copilot/responses/openai-responses-languag
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/types.gen.ts
-@@ -2005,6 +2005,7 @@
+@@ -2082,6 +2082,10 @@
    tool_output?: {
      max_lines?: number
      max_bytes?: number
++    /**
++     * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.
++     */
 +    bash_compression?: boolean
    }
    compaction?: {
@@ -1139,11 +1220,11 @@ diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/ge
 diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 --- a/packages/tui/src/app.tsx
 +++ b/packages/tui/src/app.tsx
-@@ -378,6 +378,13 @@
+@@ -380,6 +380,13 @@
    const themeState = useTheme()
    const { theme, mode, setMode, locked, lock, unlock } = themeState
    const sync = useSync()
-+  // Bash 输出压缩覆盖信号，允许用户通过命令切换
++  // 本地覆盖仅用于请求期间的反馈，bootstrap 后仍以服务器配置为准。
 +  const [bashCompressionOverride, setBashCompressionOverride] = createSignal<boolean | undefined>(undefined)
 +  createEffect(() => {
 +    const configVal = sync.data.config?.tool_output?.bash_compression ?? true
@@ -1153,7 +1234,7 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
    const project = useProject()
    const exit = useExit()
    const promptRef = usePromptRef()
-@@ -568,6 +575,26 @@
+@@ -570,6 +577,28 @@
          },
        },
        {
@@ -1166,7 +1247,9 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 +        const next = !bashCompressionEnabled()
 +        const workspace = project.workspace.current()
 +        setBashCompressionOverride(next)
++        // 工作区路由与配置持久化沿用同一 SDK，不在 TUI 创建另一份执行开关。
 +        const result = await sdk.client.config.update({ workspace, config: { tool_output: { bash_compression: next } } }, { throwOnError: false })
++        // 更新失败必须回滚显示值，否则命令标题会声称未持久化的设置已生效。
 +        if (result.error) {
 +          setBashCompressionOverride(!next)
 +          toast.show({ message: "Failed to toggle bash compression", variant: "error" })
@@ -1185,7 +1268,7 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -25,7 +25,15 @@
+@@ -24,7 +24,15 @@
  import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
  import { Spinner } from "../../component/spinner"
  import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
@@ -1197,16 +1280,16 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  TextAttributes,
 +  RGBA,
 +  MouseButton,
-+  type MouseEvent as TuiMouseEvent,
++  type MouseEvent,
 +} from "@opentui/core"
  import { Prompt, type PromptRef } from "../../component/prompt"
  import type {
    AssistantMessage,
-@@ -1988,13 +1996,23 @@
+@@ -1995,13 +2003,23 @@
    title?: string
    children: JSX.Element
    onClick?: () => void
-+  // 右键切换上下文视图：显示返回给模型的输出
++  // 右键是独立动作，不能复用左键折叠导致完成态无法切换模型视图。
 +  onRightClick?: () => void
    part?: ToolPart
    spinner?: boolean
@@ -1217,7 +1300,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const renderer = useRenderer()
    const [hover, setHover] = createSignal(false)
    const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
-+  // 上下文视图时使用 diffContextBg 背景色
++  // 上下文状态优先于 hover，鼠标移入不能抹掉当前视图的颜色提示。
 +  const background = createMemo(() => {
 +    if (props.contextView) return theme.diffContextBg
 +    if (hover()) return theme.backgroundMenu
@@ -1226,7 +1309,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    return (
      <box
        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-@@ -2004,13 +2022,21 @@
+@@ -2011,13 +2029,21 @@
        paddingLeft={2}
        marginTop={1}
        gap={1}
@@ -1239,9 +1322,9 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +      onMouseOver={() => (props.onClick || props.onRightClick) && setHover(true)}
        onMouseOut={() => setHover(false)}
 -      onMouseUp={() => {
-+      onMouseUp={(evt?: TuiMouseEvent) => {
++      onMouseUp={(evt?: MouseEvent) => {
++        // 文本选择优先于视图动作，右键不会在复制日志时意外切换内容。
          if (renderer.getSelection()?.getSelectedText()) return
-+        // 右键触发上下文视图切换
 +        if (evt?.button === MouseButton.RIGHT) {
 +          if (!props.onRightClick) return
 +          evt.preventDefault()
@@ -1252,7 +1335,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          props.onClick?.()
        }}
      >
-@@ -2021,6 +2047,7 @@
+@@ -2028,6 +2054,7 @@
              fallback={
                <text paddingLeft={3} fg={theme.textMuted}>
                  {title()}
@@ -1260,13 +1343,13 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
                </text>
              }
            >
-@@ -2041,7 +2068,13 @@
+@@ -2048,7 +2075,13 @@
    const pathFormatter = usePathFormatter()
    const ctx = use()
    const isRunning = createMemo(() => props.part.state.status === "running")
 -  const output = createMemo(() => stripAnsi(stringValue(props.metadata.output)?.trim() ?? ""))
-+  // 上下文输出信号：右键切换显示返回给模型的内容
 +  const [showContextOutput, setShowContextOutput] = createSignal(false)
++  // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
 +  const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
 +  const output = createMemo(() => {
 +    const text = showContextOutput() && contextOutputAvailable() ? props.output : stringValue(props.metadata.output)
@@ -1275,11 +1358,11 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const [expanded, setExpanded] = createSignal(false)
    const maxLines = 10
    const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
-@@ -2065,6 +2098,13 @@
+@@ -2072,6 +2105,13 @@
      return `# Running in ${wd}`
    })
  
-+  // 切换上下文输出显示
++  // 切换时展开完整窗口，避免压缩前后行数变化被旧的折叠状态隐藏。
 +  const toggleContextOutput = () => {
 +    if (!contextOutputAvailable()) return
 +    setExpanded(true)
@@ -1289,7 +1372,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    return (
      <Switch>
        <Match when={stringValue(props.metadata.output) !== undefined}>
-@@ -2072,9 +2112,15 @@
+@@ -2079,9 +2119,16 @@
            title={title()}
            part={props.part}
            onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
@@ -1299,10 +1382,887 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          >
            <box gap={1}>
              <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
-+            <Show when={showContextOutput()}>
-+              <text fg={theme.info}>Model context output</text>
-+            </Show>
                <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
              </Show>
++            {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
++            <Show when={showContextOutput() && contextOutputAvailable()}>
++              <text fg={theme.info}>Model context output</text>
++            </Show>
              <Show when={output()}>
 
+diff --git a/packages/core/src/process.ts b/packages/core/src/process.ts
+--- a/packages/core/src/process.ts
++++ b/packages/core/src/process.ts
+@@ -25,6 +25,9 @@
+   readonly maxErrorBytes?: number
+   readonly signal?: AbortSignal
+   readonly timeout?: Duration.Input
++  // 在 capture 截断之前观察合并字节流；回调不能改变内存前缀的既有限额。
++  // 等待回调完成再取下一块，背压与 typed error 都由同一次收集传播。
++  readonly onOutput?: (chunk: Uint8Array) => Effect.Effect<void, AppProcessError>
+   readonly stdin?: string | Uint8Array | Stream.Stream<Uint8Array, PlatformError>
+ }
+ 
+@@ -121,6 +124,7 @@
+-export const collectStream = (stream: Stream.Stream<Uint8Array, PlatformError>, maxOutputBytes: number | undefined) =>
++// 收集器保留输入流的错误通道，不能把观察回调的预期失败收窄成无错误或 defect。
++export const collectStream = <E>(stream: Stream.Stream<Uint8Array, E>, maxOutputBytes: number | undefined) =>
+   Stream.runFold(
+     stream,
+     () => ({ chunks: [] as Uint8Array[], bytes: 0, truncated: false }),
+     (acc, chunk) => {
+       if (maxOutputBytes === undefined) {
+@@ -148,7 +152,8 @@
+           const handle = yield* spawner.spawn(command)
+           if (options?.combineOutput) {
+             const [output, exitCode] = yield* Effect.all(
+-              [collectStream(handle.all, options.maxOutputBytes), handle.exitCode],
++              // 同一 handle.all 只消费一次，磁盘保留和诊断看到相同的 stdout/stderr 顺序。
++              [collectStream(options.onOutput ? handle.all.pipe(Stream.tap(options.onOutput)) : handle.all, options.maxOutputBytes), handle.exitCode],
+               { concurrency: "unbounded" },
+             )
+             return {
+
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -42,6 +42,12 @@
+ export interface Interface {
+   readonly limits: () => Effect.Effect<{ readonly maxLines: number; readonly maxBytes: number }>
+   readonly bound: (input: BoundInput) => Effect.Effect<BoundResult, Error>
++  // capture 不暴露路径给 leaf；只有 registry 的 bound 才能发布托管恢复引用。
++  readonly capture: <A, E>(
++    input: Pick<BoundInput, "sessionID" | "toolCallID">,
++    body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
++  ) => Effect.Effect<A, E | Error>
++  readonly discard: (input: Pick<BoundInput, "sessionID" | "toolCallID">) => Effect.Effect<void>
+   readonly cleanup: () => Effect.Effect<void>
+ }
+ 
+@@ -115,6 +121,10 @@
+     const fs = yield* FSUtil.Service
+     const global = yield* Global.Service
+     const config = yield* Effect.serviceOption(Config.Service)
++    // 暂存引用只属于本次 settlement，成功、失败与中断都由 registry 收尾。
++    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error> }>()
++    // Session 与 call 联合定位，避免不同 Session 的同名 call 串用原文。
++    const captureKey = (input: Pick<BoundInput, "sessionID" | "toolCallID">) => JSON.stringify([input.sessionID, input.toolCallID])
+     const directory = path.join(global.data, MANAGED_DIRECTORY)
+     const limits = Effect.fn("ToolOutputStore.limits")(function* () {
+       if (Option.isNone(config)) return { maxLines: MAX_LINES, maxBytes: MAX_BYTES }
+@@ -135,6 +145,56 @@
+       return file
+     })
+ 
++    const discard = Effect.fn("ToolOutputStore.discard")(function* (input: Pick<BoundInput, "sessionID" | "toolCallID">) {
++      const key = captureKey(input)
++      const captured = captures.get(key)
++      captures.delete(key)
++      // 已发布路径已在 bound 中移出暂存表，不能在返回后误删可恢复的日志。
++      if (captured?.path) yield* fs.remove(captured.path).pipe(Effect.orDie)
++    })
++    const capture = <A, E>(
++      input: Pick<BoundInput, "sessionID" | "toolCallID">,
++      body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
++    ) => Effect.gen(function* () {
++      // 小输出先在固定字节窗口中保存，不因托管目录不可写而阻止普通命令。
++      const chunks: Uint8Array[] = []
++      let bytes = 0
++      const captured = { path: "", retain: false, flush: (): Effect.Effect<string, Error> => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
++        // 只屏蔽排他创建与路径登记；wx 失败没有所有权，不能删除碰撞文件。
++        if (!captured.path) captured.path = yield* write("")
++        // 路径已归本次 capture 所有，append 恢复可中断并保留失败 cause，ensuring 才能按所有权清理。
++        yield* restore(Effect.forEach(chunks, (chunk) => fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause }))), { discard: true }))
++        // 后续 flush 不能重放已写前缀，失败时直接终止本次 capture。
++        chunks.length = 0
++        bytes = 0
++        return captured.path
++      })) }
++      let completed = false
++      return yield* Effect.gen(function* () {
++        const result = yield* body((chunk) => Effect.gen(function* () {
++          if (!chunk.byteLength) return
++          // 固定 MAX_BYTES 限制采集内存，不随用户模型预算放大或关闭。
++          if (!captured.path && bytes + chunk.byteLength <= MAX_BYTES) {
++            // 复制观察窗口，不能持有进程可能复用的缓冲；空 chunk 不增加对象数。
++            chunks.push(Uint8Array.from(chunk))
++            bytes += chunk.byteLength
++            return
++          }
++          // 跨过限额前先写已有窗口，当前大块直接追加，不扩大内存副本。
++          yield* captured.flush()
++          // 直接追加原始字节保留跨块 UTF-8；ENOSPC 等映射为同类存储失败并保留 cause，不升级为会话 defect。
++          yield* fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
++        }))
++        captured.retain = result.retain
++        // 压缩或诊断损失要求原文时必须成功落盘；失败不能伪装成普通内存路径。
++        if (result.retain) yield* captured.flush()
++        // 未落盘窗口留到 bound 决定最终投影是否超限，退出状态也可能触发保留。
++        captures.set(captureKey(input), captured)
++        completed = true
++        return result.value
++      }).pipe(Effect.ensuring(Effect.suspend(() => completed || !captured.path ? Effect.void : fs.remove(captured.path).pipe(Effect.orDie))))
++    })
++
+     const bound = Effect.fn("ToolOutputStore.bound")(function* (input: BoundInput) {
+       const outputLimits = yield* limits()
+       const media = input.output.content.filter((item) => item.type === "file")
+@@ -146,25 +206,33 @@
+               catch: (cause) => new StorageError({ operation: "encode", cause }),
+             })
+           : text.map((item) => item.text).join("")
+-      if (
+-        lineCount(contextual) <= outputLimits.maxLines &&
+-        Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
+-      )
++      const captured = captures.get(captureKey(input))
++      const fits = lineCount(contextual) <= outputLimits.maxLines && Buffer.byteLength(contextual, "utf-8") <= outputLimits.maxBytes
++      // 压缩未截断也需要恢复标记；不能只靠 outputPaths 向模型广告原文。
++      if (fits && !captured?.retain)
+         return {
+           output: input.output,
+           outputPaths: [],
+         }
+ 
+-      const outputPath = yield* write(contextual)
+-      const marker = `... output truncated; full content saved to ${outputPath} ...`
++      // 有流式原文时复用同一个托管文件，不能把压缩后的文本另存成所谓完整原文。
++      const outputPath = captured ? yield* captured.flush() : yield* write(contextual)
++      const marker = captured
++        ? `... output ${fits ? "presentation changed" : "truncated"}; captured raw output saved to ${outputPath} ...`
++        : `... output truncated; full content saved to ${outputPath} ...`
++      captures.delete(captureKey(input))
++      // 通用预算仍只在这里执行；恢复标记本身也占用字节与行数预算。
++      const withMarker = `${contextual}\n\n${marker}`
++      // 若总预算允许就保留原 content 分段，退出状态与媒体位置不能因增加路径而变化。
++      const preserveParts = lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
+ 
+       return {
+         output: {
+           structured: input.output.structured,
+-          content: [
++          content: preserveParts ? [...input.output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
+             {
+               type: "text" as const,
+               text: boundedPreview(contextual, marker, outputLimits.maxLines, outputLimits.maxBytes),
+             },
+             ...media,
+           ],
+@@ -188,7 +256,7 @@
+       }
+     })
+ 
+-    return Service.of({ limits, bound, cleanup })
++    return Service.of({ limits, bound, capture, discard, cleanup })
+   }),
+ )
+ 
+diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registry.ts
+--- a/packages/core/src/tool/registry.ts
++++ b/packages/core/src/tool/registry.ts
+@@ -50,6 +50,8 @@
+     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
++      // 把暂存原文的清理绑定整个 settlement，而不是仅绑定成功返回路径。
++      return yield* Effect.gen(function* () {
+       const registration =
+         local.get(input.call.name)?.at(-1)?.registration ?? applications.entries().get(input.call.name)
+       if (!registration)
+         return {
+           result: {
+@@ -79,7 +81,8 @@
+       return bounded.outputPaths.length > 0
+         ? { result, output: bounded.output, outputPaths: bounded.outputPaths }
+         : { result, output: bounded.output }
++      }).pipe(Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })))
+     })
+ 
+     return Service.of({
+       register: Effect.fn("ToolRegistry.register")(function* (tools) {
+
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -5,1 +5,1 @@
+-import { Duration, Effect, Layer, Schema } from "effect"
++import { Clock, Duration, Effect, Layer, Schema } from "effect"
+@@ -17,6 +17,8 @@
+ import { SystemContext } from "../system-context/index"
+ import { SystemContextRegistry } from "../system-context/registry"
+ import { Shell } from "../shell"
++import { ToolOutputStore } from "../tool-output-store"
++import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
+ 
+ export const name = "bash"
+ export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
+@@ -37,12 +39,32 @@
+     .annotate({
+       description: `Timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS} and may not exceed ${MAX_TIMEOUT_MS}.`,
+     }),
++  // 只控制模型呈现，false 不能改变进程 capture 限额或绕过完整原文保留。
++  compress_output: Schema.Boolean.pipe(Schema.optional).annotate({
++    description: "Whether repetitive output may be compressed. Defaults to the user's bash_compression setting. Set false for exact raw formatting.",
++  }),
+ })
+ 
+ const StructuredOutput = Schema.Struct({
+   exit: Schema.Number.pipe(Schema.optional),
+   truncated: Schema.Boolean,
+   timeout: Schema.Boolean.pipe(Schema.optional),
++  // 统计属于 typed transcript，不能把内存窗口的收益误称为磁盘全日志的收益。
++  compression: Schema.Struct({
++    compressed: Schema.Boolean,
++    compressionOriginalBytes: Schema.Number,
++    compressionCompressedBytes: Schema.Number,
++    compressionSavedBytes: Schema.Number,
++    compressionSavingRatio: Schema.Number,
++    compressionCarriageReturnGroups: Schema.Number,
++    compressionRepeatedBlockGroups: Schema.Number,
++    compressionRepeatedLineGroups: Schema.Number,
++    compressionInlinePatternGroups: Schema.Number,
++  }).pipe(Schema.optional),
++  durationMs: Schema.Number.pipe(Schema.optional),
++  diagnosticErrorLikeLines: Schema.Number.pipe(Schema.optional),
++  diagnosticWarningLikeLines: Schema.Number.pipe(Schema.optional),
++  diagnosticDiscardedChars: Schema.Number.pipe(Schema.optional),
+ })
+ 
+ const Output = Schema.Struct({
+@@ -49,5 +71,7 @@
+   ...StructuredOutput.fields,
+   output: Schema.String,
++  // 原文与模型窗口保持分离，路径和最终限额仍由 registry/store 持有。
++  contextOutput: Schema.String,
+   warnings: Schema.Array(Schema.String).pipe(Schema.optional),
+ })
+ 
+@@ -84,5 +108,4 @@
+ // TODO: Add HTTP background-job observation only after durable status, restart recovery, and authorization are defined.
+ // TODO: Revisit process-group cleanup and platform coverage with shell-specific tests if current AppProcess semantics do not fully cover it.
+ // TODO: Revisit binary output handling if stdout/stderr decoding is text-only.
+-// TODO: Stream full shell output into managed storage while retaining only a bounded in-memory preview.
+ 
+@@ -111,6 +134,7 @@
+     const fs = yield* FSUtil.Service
+     const appProcess = yield* AppProcess.Service
+     const config = yield* Config.Service
++    const outputStore = yield* ToolOutputStore.Service
+     const permission = yield* PermissionV2.Service
+     const registry = yield* SystemContextRegistry.Service
+     // Shell source 随实际执行配置刷新；持久快照比较和更新仍由 Session Context Epoch 处理。
+@@ -131,5 +155,5 @@
+     yield* tools
+       .register({
+         [name]: Tool.make({
+           // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
+@@ -136,14 +160,19 @@
+           input: Input,
+           output: Output,
+           structured: StructuredOutput,
+           toStructuredOutput: ({ output }) => ({
+             truncated: output.truncated,
+             ...(output.exit === undefined ? {} : { exit: output.exit }),
+             ...(output.timeout === undefined ? {} : { timeout: output.timeout }),
++            ...(output.compression === undefined ? {} : { compression: output.compression }),
++            ...(output.durationMs === undefined ? {} : { durationMs: output.durationMs }),
++            ...(output.diagnosticErrorLikeLines === undefined ? {} : { diagnosticErrorLikeLines: output.diagnosticErrorLikeLines }),
++            ...(output.diagnosticWarningLikeLines === undefined ? {} : { diagnosticWarningLikeLines: output.diagnosticWarningLikeLines }),
++            ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
+           }),
+           toModelOutput: ({ output }) => [
+-            { type: "text", text: output.output },
++            { type: "text", text: output.contextOutput },
+             { type: "text", text: modelOutput(output) },
+           ],
+           execute: (input, context) =>
+             Effect.gen(function* () {
+@@ -184,6 +213,13 @@
+                 return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
+ 
++              // leaf 消费同一配置快照中的单次覆盖，全局 false 优先于单次 true，通用 store 不读取 Bash 开关。
++              const configured = Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info.tool_output ?? {}] : []))
++              const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
++              const diag = new BashDiagnosticCollector()
++              const decoder = new TextDecoder()
++              const started = yield* Clock.currentTimeMillis
++              const limits = yield* outputStore.limits()
+               // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
+               const command = ChildProcess.make(input.command, [], {
+                 cwd: target.canonical,
+                 shell,
+@@ -192,36 +228,71 @@
+                 forceKillAfter: Duration.seconds(3),
+               })
+               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
+-              const result = yield* appProcess
++              // 原文由现有 ToolOutputStore capture 保留，leaf 只产出模型窗口，不发布托管路径或自行做通用截断。
++              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => Effect.gen(function* () {
++              const result = yield* appProcess
+                 .run(command, {
+                   combineOutput: true,
+                   timeout: Duration.millis(timeout),
+                   maxOutputBytes: MAX_CAPTURE_BYTES,
++                  // 写盘失败适配既有 AppProcessError 并保留 StorageError cause；解码仍跨字节块续接。
++                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => diag.push(decoder.decode(chunk, { stream: true }))))),
+                 })
+                 .pipe(
+                   Effect.catchTag("AppProcessError", (error) =>
+                     isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
+                   ),
+                 )
++              diag.push(decoder.decode())
++              diag.end()
++              const diagnostic = diag.snapshot()
++              const durationMs = (yield* Clock.currentTimeMillis) - started
+               if (!result) {
++                // 超时保留已经观察到的原始流，不声称终止后尚未输出的字节也存在。
+                 return {
++                  retain: true,
++                  value: {
+                   output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
+                   truncated: false,
+                   timeout: true,
+                   ...(warnings.length ? { warnings } : {}),
++                  durationMs,
++                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, visibleOutput: "" }) ].filter(Boolean).join("\n\n"),
++                  diagnosticErrorLikeLines: diagnostic.errorLikeLines,
++                  diagnosticWarningLikeLines: diagnostic.warningLikeLines,
++                  diagnosticDiscardedChars: diagnostic.discardedChars,
++                  },
+                 }
+               }
+ 
+               const output = result.output?.toString("utf8") || "(no output)"
++              const compressed = compressVisibleOutput(output, { enabled })
++              // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
++              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: "" })
++              const projected = [compressed.text, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ exit: result.exitCode, truncated: result.outputTruncated === true, output, contextOutput: "", warnings })
++              // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
++              const visible = !compressed.stats.applied && !result.outputTruncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
++              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: visible })
+               const notice = result.outputTruncated
+                 ? "[output capture truncated at the in-memory safety limit]"
+                 : undefined
+               return {
++                // 采样损失即使未压缩也保留原文；压缩不能被混记成进程 capture 截断。
++                retain: compressed.stats.applied || result.outputTruncated === true || diagnostic.discardedChars > 0,
++                value: {
+                 exit: result.exitCode,
+                 output: notice ? `${output}\n\n${notice}` : output,
++                contextOutput: [compressed.text, notice, appendix].filter(Boolean).join("\n\n"),
+                   // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
+                 truncated: result.outputTruncated === true,
++                compression: bashCompressionMetadata(compressed.stats),
++                durationMs,
++                diagnosticErrorLikeLines: diagnostic.errorLikeLines,
++                diagnosticWarningLikeLines: diagnostic.warningLikeLines,
++                diagnosticDiscardedChars: diagnostic.discardedChars,
+                 ...(warnings.length ? { warnings } : {}),
++                },
+               }
++              }))
+               // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
+-            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
++            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }))),
+@@ -234,5 +305,5 @@
+ export const node = makeLocationNode({
+   name: "tool/bash",
+   layer,
+-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node, SystemContextRegistry.node],
++  deps: [ToolRegistry.node, ToolOutputStore.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node, SystemContextRegistry.node],
+ })
+
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -3,6 +3,6 @@
+ import path from "path"
+ import { describe, expect, test } from "bun:test"
+-import { Effect, Layer } from "effect"
++import { Clock, Effect, Layer, PlatformError } from "effect"
+ import { ChildProcess } from "effect/unstable/process"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { Config } from "@opencode-ai/core/config"
+@@ -17,6 +17,9 @@
+ import { BashTool } from "@opencode-ai/core/tool/bash"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+ import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
++import { ConfigToolOutput } from "@opencode-ai/core/config/tool-output"
++import { BashDiagnosticCollector, compressVisibleOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
++import { Global } from "@opencode-ai/core/global"
+ import { SystemContext } from "@opencode-ai/core/system-context"
+ import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
+ import { location } from "./fixture/location"
+@@ -70,7 +73,11 @@
+       Effect.suspend(() => {
+         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
+         runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
+-        return runFailure ? Effect.fail(runFailure) : Effect.succeed(result)
++        // 原有 process 替身必须履行新的观察回调契约，不能让 settlement 测试得到空原文。
++        return runFailure ? Effect.fail(runFailure) :
++          (options?.onOutput ? options.onOutput(result.output ?? result.stdout) : Effect.void).pipe(
++            Effect.andThen(Effect.succeed(result)),
++          )
+       }),
+   } as unknown as AppProcess.Interface),
+ )
+@@ -103,7 +110,9 @@
+   directory: string,
+   body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>,
+   processLayer: Layer.Layer<AppProcess.Service> = appProcess,
+   shell?: string,
++  compression?: boolean,
++  filesystem: Layer.Layer<FSUtil.Service> = LayerNode.compile(FSUtil.node),
+ ) => {
+   const activeLocation = Layer.succeed(
+     Location.Service,
+@@ -120,10 +129,16 @@
+           [Location.node, activeLocation],
+           [PermissionV2.node, permission],
+           [AppProcess.node, processLayer],
+           // 显式 Config 文档驱动真实 selectedShell，不改测试进程的 SHELL 或 platform。
+-          [Config.node, shell === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
+-            entries: () => Effect.succeed([new Config.Document({ type: "document", info: new Config.Info({ shell }) })]),
+-          }))],
++          [Config.node, shell === undefined && compression === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
++            entries: () => Effect.succeed([new Config.Document({ type: "document", info: new Config.Info({
++              shell,
++              tool_output: compression === undefined ? undefined : new ConfigToolOutput.Info({ bash_compression: compression }),
++            }) })]),
++          }))],
++          // 托管日志放在本测试的临时目录，验证恢复后由 fixture 清理，不污染用户数据。
++          [Global.node, Global.layerWith({ data: directory })],
++          [FSUtil.node, filesystem],
+           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+         ],
+       ),
+@@ -169,7 +184,13 @@
+               output: {
+                 structured: {
+                   exit: 0,
+                   truncated: false,
++                  // 保留原有精确 settlement 断言，同时验证新增统计真的进入 transcript。
++                  compression: expect.objectContaining({ compressed: false }),
++                  durationMs: expect.any(Number),
++                  diagnosticErrorLikeLines: 0,
++                  diagnosticWarningLikeLines: 0,
++                  diagnosticDiscardedChars: 0,
+                 },
+                 content: [
+                   { type: "text", text: "hello\n" },
+@@ -487,4 +508,201 @@
+   )
++
++  it.live("retains raw Bash output through canonical settlement and bounds diagnostic frames", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => Effect.gen(function* () {
++        // 同一测试观察真实 chunk、CRLF 跨块和末帧收尾，不用复制分帧算法当 oracle。
++        const diag = new BashDiagnosticCollector()
++        for (let i = 0; i < 100; i++) diag.push("x".repeat(8192))
++        diag.push("\r")
++        diag.push("\nerror: split")
++        diag.push(" diagnostic\rprogress\rfinal")
++        diag.end()
++        const snapshot = diag.snapshot()
++        expect(snapshot.totalLines).toBe(4)
++        expect(snapshot.errorLikeLines).toBe(1)
++        expect(snapshot.discardedChars).toBe(819200 - 4096)
++        expect(snapshot.truncatedFrames).toBe(1)
++        expect(snapshot.contexts.flatMap((context) => context.lines).every((line) => line.text.length < 4200)).toBe(true)
++        expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toContain("diagnostic sampling omitted")
++        // 收益针对原始窗口，false 与不合算候选都必须原样通过，不能误报节省。
++        const raw = "repeat payload with meaningful width\n".repeat(400)
++        const compressed = compressVisibleOutput(raw, { enabled: true })
++        expect(compressed.stats.applied).toBe(true)
++        expect(compressed.stats.savingRatio).toBe(compressed.stats.savedBytes / Buffer.byteLength(raw))
++        expect(compressVisibleOutput(raw, { enabled: false }).text).toBe(raw)
++        expect(compressVisibleOutput(raw, { enabled: true, minSavedBytes: Buffer.byteLength(raw) }).text).toBe(raw)
++        // 长空白与低收益运行都须完整通过；规模足以暴露逐后缀重扫的平方退化。
++        const compressionStarted = performance.now()
++        for (const text of ["\n".repeat(100000), "repeat payload with meaningful width\n".repeat(20000)]) {
++          const unchanged = compressVisibleOutput(text, { enabled: true, ...(text.trim() ? { minSavedBytes: Buffer.byteLength(text) } : {}) })
++          expect(unchanged.text).toBe(text)
++          expect(unchanged.stats).toMatchObject({ applied: false, originalBytes: Buffer.byteLength(text), compressedBytes: Buffer.byteLength(text), savedBytes: 0, savingRatio: 0, repeatedLineGroups: 0 })
++          expect(compressVisibleOutput(text, { enabled: false }).text).toBe(text)
++        }
++        // 绝对收益和比例拒绝都须覆盖，不能只在全日志低于门槛时短路。
++        const alternating = "alpha\nbeta\n".repeat(20000)
++        for (const config of [{ minSavedBytes: 300000 }, { minSavingRatio: 1 }]) {
++          const unchanged = compressVisibleOutput(alternating, { enabled: true, ...config })
++          expect(unchanged.text).toBe(alternating)
++          expect(unchanged.stats).toMatchObject({ applied: false, repeatedBlockGroups: 0, savedBytes: 0, savingRatio: 0 })
++        }
++        expect(compressVisibleOutput(alternating, { enabled: false }).text).toBe(alternating)
++        // 拒绝前段后仍须逐起点找后段，不能消费整个未盈利周期而跳过新的候选。
++        const lateBlock = "甲".repeat(100) + "\n" + "乙".repeat(100) + "\n"
++        const mixed = alternating + "boundary\n" + lateBlock.repeat(1000)
++        const late = compressVisibleOutput(mixed, { enabled: true, minSavedBytes: 300000 })
++        expect(late.text).toBe(alternating + "boundary\n" + lateBlock.trimEnd() + "\n... [previous 2 lines repeated 999 more times]\n")
++        expect(late.stats).toMatchObject({ applied: true, repeatedBlockGroups: 1, repeatedLineGroups: 0 })
++        // UTF-8 与区间末尾 LF 的计量必须和实际输出吻合，不借字符数近似收益。
++        expect(late.stats.originalBytes).toBe(Buffer.byteLength(mixed))
++        expect(late.stats.compressedBytes).toBe(Buffer.byteLength(late.text))
++        expect(late.stats.savedBytes).toBe(Buffer.byteLength(mixed) - Buffer.byteLength(late.text))
++        expect(compressVisibleOutput(mixed, { enabled: false }).text).toBe(mixed)
++        // 宽松五秒预算只筛灾难性回退，不比较机器速度或要求毫秒级基准成绩。
++        expect(performance.now() - compressionStarted).toBeLessThan(5000)
++
++        // 四种策略共享同一收益门槛；CR 的最终帧、块样例与 ANSI 边界都应保留。
++        expect(compressVisibleOutput(("progress payload with enough width".repeat(3) + "\r").repeat(10)).stats.carriageReturnGroups).toBe(1)
++        const block = "alpha".repeat(20) + "\n" + "beta".repeat(20) + "\n"
++        expect(compressVisibleOutput(block.repeat(10)).stats.repeatedBlockGroups).toBeGreaterThan(0)
++        expect(compressVisibleOutput("xy".repeat(500)).stats.inlinePatternGroups).toBe(1)
++        const ansi = "\x1b[31m" + "a".repeat(400) + "\x1b[0m"
++        expect(compressVisibleOutput(ansi).text).toBe(ansi)
++        // 短成功命令不追加错误邻域，但采样遗漏仍可见；已可见的中心帧也不重复附录。
++        expect(renderDiagnosticAppendix(snapshot, { durationMs: 1, exitCode: 0, visibleOutput: "" })).not.toContain("bash_high_signal_excerpt")
++        expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "error: split diagnostic" })).not.toContain("bash_high_signal_excerpt")
++        expect(compressed.stats.repeatedLineGroups).toBe(1)
++        expect(compressed.stats.compressedBytes).toBe(Buffer.byteLength(compressed.text))
++        // 三种覆盖都经过 Core Bash、AppProcess 和 registry/store，不能只测试纯转换器。
++        for (const mode of ["default", "parameter", "config"] as const) {
++          reset()
++          const command = `"${process.execPath}" -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(400))"`
++          yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++            const settled = yield* settleTool(registry, call({ command, ...(mode === "parameter" ? { compress_output: false } : {}) }))
++            expect(settled.output?.structured).toMatchObject({ compression: { compressed: mode === "default" }, truncated: false })
++            const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++            if (mode === "default") {
++              // 压缩成功但未截断仍向模型提供恢复路径，原文文件必须逐字节相同。
++              expect(settled.outputPaths).toHaveLength(1)
++              expect(text).toContain("raw output saved")
++              const retained = settled.outputPaths?.[0]
++              if (!retained) throw new Error("expected retained raw output")
++              expect(text).toContain(retained)
++              expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(raw)
++            } else {
++              expect(settled.outputPaths).toBeUndefined()
++              expect(text).toContain(raw)
++            }
++          }), LayerNode.compile(AppProcess.node), undefined, mode === "config" ? false : undefined)
++        }
++        // 无 LF 的尾部超过 capture 上限，诊断仍看全流，磁盘原文不能只保存内存前缀。
++        reset()
++        const command = `"${process.execPath}" -e "process.stdout.write('x'.repeat(${BashTool.MAX_CAPTURE_BYTES + 8192})+'RAW-END')"`
++        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++          const settled = yield* settleTool(registry, call({ command, compress_output: false }))
++          expect(settled.output?.structured).toMatchObject({ truncated: true, diagnosticDiscardedChars: BashTool.MAX_CAPTURE_BYTES + 8192 + 7 - 4096 })
++          expect(settled.outputPaths).toHaveLength(1)
++          const retained = settled.outputPaths?.[0]
++          if (!retained) throw new Error("expected retained capture")
++          const saved = yield* Effect.promise(() => fs.readFile(retained, "utf8"))
++          expect(saved.length).toBe(BashTool.MAX_CAPTURE_BYTES + 8192 + 7)
++          expect(saved.endsWith("RAW-END")).toBe(true)
++          const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++          expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
++          expect(text).toContain("diagnostic sampling omitted")
++        }), LayerNode.compile(AppProcess.node))
++        // 正文恰好占满字节预算，中间错误会被最终状态与恢复标记挤出 head/tail。
++        reset()
++        const rows = Array.from({ length: 600 }, (_, i) => `${i}: ${i === 300 ? "error: UNIQUE-MIDDLE-FAILURE" : "ordinary output"}`.padEnd(84, ".") + "\n").join("")
++        const exact = rows + "z".repeat(ToolOutputStore.MAX_BYTES - Buffer.byteLength(rows))
++        result = { ...result, exitCode: 1, output: Buffer.from(exact) }
++        const clock = yield* Clock.Clock
++        let now = 0
++        // 只控制领域耗时，真实 capture/registry/store 仍执行，不睡眠两秒。
++        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++          const settled = yield* settleTool(registry, call({ command: "diagnostic-budget", compress_output: false }))
++          const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++          expect(text).toContain("error: UNIQUE-MIDDLE-FAILURE")
++          expect(text).toContain("bash_high_signal_excerpt")
++          expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
++          expect(text.split("\n").length).toBeLessThanOrEqual(ToolOutputStore.MAX_LINES)
++          expect(settled.output?.structured).toMatchObject({ diagnosticErrorLikeLines: 1, durationMs: 3000 })
++          expect(runs).toHaveLength(1)
++          const retained = settled.outputPaths?.[0]
++          if (!retained) throw new Error("expected retained exact-budget output")
++          expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(exact)
++        })).pipe(Effect.provideService(Clock.Clock, {
++          // ClockImpl 的方法在原型上，不能靠 spread 提供 tracer/计时器需要的完整接口。
++          currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
++          currentTimeMillis: Effect.sync(() => { now += 3000; return now }),
++          // span 时间和 sleep 委托原实例，领域耗时覆盖不改变 runtime 的计时语义。
++          currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
++          currentTimeNanos: clock.currentTimeNanos,
++          sleep: (duration) => clock.sleep(duration),
++        }))
++        // 后续失败路径继续使用独立真实进程，不复用上述可控输出。
++        reset()
++        // 真实进程首次 append 失败必须结束为模型工具错误，不能重跑命令或升级为会话 defect。
++        const failure = PlatformError.systemError({ _tag: "Unknown", module: "FileSystem", method: "writeFile", description: "ENOSPC: quota exhausted" })
++        let appends = 0
++        const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
++          const native = yield* FSUtil.Service
++          return FSUtil.Service.of({ ...native, writeFile: () => Effect.sync(() => appends++).pipe(Effect.andThen(Effect.fail(failure))) })
++        })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
++        const observed: AppProcess.AppProcessError[] = []
++        // 只观察既有 run 的 typed failure，底层进程与输出流仍由同一次 AppProcess.run 创建。
++        const processLayer = Layer.effect(AppProcess.Service, Effect.gen(function* () {
++          const appProcess = yield* AppProcess.Service
++          return AppProcess.Service.of({ ...appProcess, run: (command, options) => appProcess.run(command, options).pipe(
++            Effect.tapError((error) => Effect.sync(() => observed.push(error))),
++          ) })
++        })).pipe(Layer.provide(LayerNode.compile(AppProcess.node)))
++        const failedCommand = `"${process.execPath}" -e "process.stdout.write('x'.repeat(${ToolOutputStore.MAX_BYTES + 1}))"`
++        // 前面已发布的日志仍属于恢复数据，失败收尾只删除本次未发布文件。
++        const directory = path.join(tmp.path, ToolOutputStore.MANAGED_DIRECTORY)
++        const retainedBefore = yield* Effect.promise(() => fs.readdir(directory))
++        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++          const settled = yield* settleTool(registry, call({ command: failedCommand }, "call-append-failure"))
++          expect(settled).toEqual({ result: { type: "error", value: `Unable to execute command: ${failedCommand}` } })
++          expect(appends).toBe(1)
++          expect(observed).toHaveLength(1)
++          const storage = observed[0]?.cause
++          if (!(storage instanceof ToolOutputStore.StorageError)) throw new Error("expected typed storage cause")
++          expect(storage.operation).toBe("write")
++          expect(storage.cause).toBe(failure)
++          expect((yield* Effect.promise(() => fs.readdir(directory))).toSorted()).toEqual(retainedBefore.toSorted())
++        }), processLayer, undefined, undefined, filesystem)
++        // 托管目录被普通文件占用：不需要原文的小命令仍必须执行一次并成功。
++        yield* Effect.acquireUseRelease(Effect.promise(() => tmpdir()), (blocked) => Effect.gen(function* () {
++          yield* Effect.promise(() => fs.writeFile(path.join(blocked.path, ToolOutputStore.MANAGED_DIRECTORY), "not a directory"))
++          reset()
++          result = { ...result, output: Buffer.from("ok\n") }
++          yield* withTool(blocked.path, (registry) => Effect.gen(function* () {
++            const settled = yield* settleTool(registry, call({ command: "echo ok", compress_output: false }))
++            expect(settled.result.type).toBe("content")
++            expect(settled.outputPaths).toBeUndefined()
++            expect(settled.output?.content[0]).toEqual({ type: "text", text: "ok\n" })
++            expect(runs).toHaveLength(1)
++          }))
++          // 同一坏目录下压缩与超阈值确实要求保留，必须显式失败而非内存兜底。
++          for (const output of ["repeat payload with meaningful width\n".repeat(400), "x".repeat(ToolOutputStore.MAX_BYTES + 1)]) {
++            reset()
++            result = { ...result, output: Buffer.from(output) }
++            yield* withTool(blocked.path, (registry) => Effect.gen(function* () {
++              const settled = yield* settleTool(registry, call({ command: "retention-required" }))
++              expect(settled.result.type).toBe("error")
++              expect(runs).toHaveLength(1)
++              expect(settled.outputPaths).toBeUndefined()
++            }))
++          }
++          // 原有占位文件属于外部状态，capture 清理不能删除或替换它。
++          expect(yield* Effect.promise(() => fs.readFile(path.join(blocked.path, ToolOutputStore.MANAGED_DIRECTORY), "utf8"))).toBe("not a directory")
++        }), (blocked) => Effect.promise(() => blocked[Symbol.asyncDispose]()))
++      }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
+ })
+ 
+ test("keeps locked deferred parity TODOs visible", async () => {
+
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -1188,6 +1188,12 @@
+           command: fill("bytes", byteCount),
+         })
+         mustTruncate(result)
++        // 无换行日志必须报告诊断采样损失；producer 的原始文件仍保持完整字节数。
++        expect(result.metadata.diagnosticDiscardedChars).toBeGreaterThan(0)
++        const retained = result.metadata.outputPath
++        if (typeof retained !== "string") throw new Error("expected retained raw output")
++        const fs = yield* FSUtil.Service
++        expect(yield* fs.readFileString(retained)).toBe("a".repeat(byteCount))
+         expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
+         expect(result.output).toMatch(/Full output saved to:\s+\S+/)
+       }),
+@@ -1203,6 +1209,15 @@
+         })
+         expect((result.metadata as { truncated?: boolean }).truncated).toBe(false)
+         expect(result.output).toContain("1")
++        // 小于截断限额的行内重复也要向模型广告原文路径，不能只藏在 metadata。
++        const compacted = yield* run({ command: fill("bytes", 1000), compress_output: true })
++        expect(compacted.metadata.compressed).toBe(true)
++        expect(compacted.metadata.truncated).toBe(false)
++        const retained = compacted.metadata.outputPath
++        if (typeof retained !== "string") throw new Error("expected compacted raw output")
++        expect(compacted.output).toContain(retained)
++        const fs = yield* FSUtil.Service
++        expect(yield* fs.readFileString(retained)).toBe("a".repeat(1000))
+       }),
+     ),
+   )
+
+diff --git a/packages/core/test/session-runner-tool-registry.test.ts b/packages/core/test/session-runner-tool-registry.test.ts
+--- a/packages/core/test/session-runner-tool-registry.test.ts
++++ b/packages/core/test/session-runner-tool-registry.test.ts
+@@ -17,6 +17,8 @@
+ const outputStore = Layer.mock(ToolOutputStore.Service, {
++  // 本 fixture 的工具不采集原始流，无暂存文件时 discard 与真实 store 一样无操作。
++  discard: () => Effect.void,
+   bound: (input) => {
+     if (input.toolCallID === "call-retention-failure") return Effect.fail(retentionFailure)
+     return Effect.sync(() => bounds.push(input)).pipe(
+       Effect.as(
+         input.toolCallID === "call-bounded"
+
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect } from "bun:test"
+ import path from "path"
+-import { Cause, Effect, Exit, Fiber, Layer, Option } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, PlatformError } from "effect"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -17,6 +17,7 @@
+ const withStore = <A, E, R>(
+   body: (input: { root: string; store: ToolOutputStore.Interface; fs: FSUtil.Interface }) => Effect.Effect<A, E, R>,
+   config?: Config.Info,
++  filesystem: Layer.Layer<FSUtil.Service> = LayerNode.compile(FSUtil.node),
+ ) =>
+   Effect.acquireUseRelease(
+     Effect.promise(() => tmpdir()),
+@@ -34,6 +35,7 @@
+       const store = AppNodeBuilder.build(LayerNode.group([ToolOutputStore.node, FSUtil.node]), [
+         [Global.node, global],
+         [Config.node, configured],
++        [FSUtil.node, filesystem],
+       ])
+       return Effect.gen(function* () {
+         return yield* body({ root: tmp.path, store: yield* ToolOutputStore.Service, fs: yield* FSUtil.Service })
+@@ -135,11 +137,33 @@
+-    withStore(({ store }) =>
++    withStore(({ root, store, fs }) =>
+       Effect.gen(function* () {
++        // 非 capture 调用的最终清理不能创建目录或影响其它托管文件。
++        const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
++        yield* store.discard({ sessionID, toolCallID: "call-duplicated" })
++        expect(yield* fs.exists(directory)).toBe(false)
+         const text = "x".repeat(30_000)
+         const output = { structured: { output: text }, content: [{ type: "text" as const, text }] }
+         expect(yield* store.bound({ sessionID, toolCallID: "call-duplicated", output })).toEqual({
+           output,
+           outputPaths: [],
+         })
++        // 小输出只存在有界内存中，bound/discard 均不能为它创建目录。
++        const input = { sessionID, toolCallID: "call-captured", output }
++        yield* store.capture(input, (write) => write(Buffer.from(text)).pipe(Effect.as({ value: output, retain: false })))
++        expect(yield* fs.exists(directory)).toBe(false)
++        expect(yield* store.bound(input)).toEqual({ output, outputPaths: [] })
++        yield* store.discard(input)
++        expect(yield* fs.exists(directory)).toBe(false)
++        yield* store.discard(input)
++        expect(yield* fs.exists(directory)).toBe(false)
++        // bound 已发布的原文脱离暂存表，最终清理不能删除模型仍需要恢复的内容。
++        yield* store.capture(input, (write) => write(Buffer.from(text)).pipe(Effect.as({ value: output, retain: true })))
++        const published = yield* store.bound(input)
++        expect(published.outputPaths).toHaveLength(1)
++        yield* store.discard(input)
++        const saved = published.outputPaths[0]
++        if (!saved) throw new Error("expected published raw output")
++        expect(yield* fs.readFileString(saved)).toBe(text)
++        expect(yield* fs.readDirectory(directory)).toHaveLength(1)
+       }),
+     ),
+   )
+@@ -147,17 +171,100 @@
+-  it.live("fails oversized settlement when complete retention cannot be written", () =>
+-    withStore(({ root, store, fs }) =>
++  it.live("fails oversized settlement when complete retention cannot be written", () => {
++    // 故障只注入 append 的字节写入，初始文件创建与清理继续使用真实文件系统。
++    const failure = PlatformError.systemError({ _tag: "Unknown", module: "FileSystem", method: "writeFile", description: "ENOSPC: quota exhausted" })
++    const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
++      const fs = yield* FSUtil.Service
++      return FSUtil.Service.of({ ...fs, writeFile: () => Effect.fail(failure) })
++    })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
++    return withStore(({ root, store, fs }) =>
+       Effect.gen(function* () {
+         yield* fs.writeFileString(path.join(root, "tool-output"), "not a directory")
+         const exit = yield* store
+           .bound({
+             sessionID,
+             toolCallID: "call-lossy",
+             output: { structured: {}, content: [{ type: "text", text: "x".repeat(ToolOutputStore.MAX_BYTES + 1) }] },
+           })
+           .pipe(Effect.exit)
+         expect(Exit.isFailure(exit)).toBe(true)
+         if (Exit.isFailure(exit))
+           expect(Option.getOrUndefined(Cause.findErrorOption(exit.cause))?._tag).toBe("ToolOutputStore.StorageError")
+       }),
+-    ),
++    ).pipe(Effect.andThen(withStore(({ root, store, fs }) => Effect.gen(function* () {
++      const input = { sessionID, toolCallID: "call-append-failure" }
++      const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
++      const exit = yield* store.capture(input, (write) => Effect.gen(function* () {
++        // 跨阈值触发真实创建后 append 失败，不能以初始 write 失败替代回归。
++        expect(yield* fs.exists(directory)).toBe(false)
++        yield* write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1))
++        return { value: undefined, retain: true }
++      })).pipe(Effect.exit)
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) {
++        const error = Option.getOrUndefined(Cause.findErrorOption(exit.cause))
++        // 错误保持原始 cause 身份，不能通过包装成 defect 或丢失配额原因来通过断言。
++        if (!(error instanceof ToolOutputStore.StorageError)) throw new Error("expected typed append failure")
++        expect(error.operation).toBe("write")
++        expect(error.cause).toBe(failure)
++      }
++      yield* store.discard(input)
++      expect(yield* fs.readDirectory(directory)).toEqual([])
++    }), undefined, filesystem)), Effect.andThen(Effect.gen(function* () {
++      const created = yield* Deferred.make<void>()
++      const release = yield* Deferred.make<void>()
++      let bodies = 0
++      let writes = 0
++      // 初始 wx 已创建文件但尚未返回，取消请求必须在挂接清理后才被交付。
++      const delayed = Layer.effect(FSUtil.Service, Effect.gen(function* () {
++        const native = yield* FSUtil.Service
++        return FSUtil.Service.of({ ...native, writeFileString: (file, text, options) => native.writeFileString(file, text, options).pipe(
++          Effect.andThen(Effect.sync(() => writes++)),
++          Effect.andThen(Deferred.succeed(created, undefined)),
++          Effect.andThen(Deferred.await(release)),
++        ) })
++      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
++      yield* withStore(({ root, store, fs }) => Effect.gen(function* () {
++        const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
++        const foreign = path.join(directory, "foreign-output")
++        yield* fs.ensureDir(directory)
++        yield* fs.writeFile(foreign, Buffer.from("owned by another call"))
++        const input = { sessionID, toolCallID: "call-initial-cancel" }
++        // 正文必须保持可中断，挂起的创建阶段结束后不能执行用户副作用。
++        const fiber = yield* store.capture(input, (write) => write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1)).pipe(Effect.andThen(Effect.sync(() => { bodies++; return { value: undefined, retain: true } })))).pipe(Effect.forkChild)
++        yield* Deferred.await(created)
++        expect(yield* fs.readDirectory(directory)).toHaveLength(2)
++        // 中断等待者另起 fiber，主测试仍能释放被保护的短 acquisition。
++        const interrupting = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild)
++        yield* Effect.yieldNow
++        yield* Deferred.succeed(release, undefined)
++        yield* Fiber.join(interrupting)
++        yield* store.discard(input)
++        expect(bodies).toBe(0)
++        expect(writes).toBe(1)
++        // 清理只删除本次取得的路径，不以清空目录替代所有权判断。
++        expect(yield* fs.readDirectory(directory)).toEqual(["foreign-output"])
++        expect(yield* fs.readFileString(foreign)).toBe("owned by another call")
++      }), undefined, delayed)
++      // 真实 wx 碰撞不授予所有权，失败 cause 必须保留且既有文件不能被删除。
++      let collision: FSUtil.Error | undefined
++      const colliding = Layer.effect(FSUtil.Service, Effect.gen(function* () {
++        const native = yield* FSUtil.Service
++        return FSUtil.Service.of({ ...native, writeFileString: (file, text, options) => native.writeFileString(file, "collision owner").pipe(
++          Effect.andThen(native.writeFileString(file, text, options)),
++          Effect.tapError((cause) => Effect.sync(() => { collision = cause })),
++        ) })
++      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
++      yield* withStore(({ root, store, fs }) => Effect.gen(function* () {
++        const exit = yield* store.capture({ sessionID, toolCallID: "call-collision" }, (write) => write(Buffer.alloc(ToolOutputStore.MAX_BYTES + 1)).pipe(Effect.andThen(Effect.die("collision must not continue body")))).pipe(Effect.exit)
++        if (!Exit.isFailure(exit)) throw new Error("expected exclusive creation failure")
++        const error = Option.getOrUndefined(Cause.findErrorOption(exit.cause))
++        if (!(error instanceof ToolOutputStore.StorageError)) throw new Error("expected typed collision failure")
++        expect(error.cause).toBe(collision)
++        const directory = path.join(root, ToolOutputStore.MANAGED_DIRECTORY)
++        const files = yield* fs.readDirectory(directory)
++        expect(files).toHaveLength(1)
++        // 文件内容和原始失败身份共同证明 wx 没有覆盖或删除别人的输出。
++        expect(yield* fs.readFileString(path.join(directory, files[0]))).toBe("collision owner")
++      }), undefined, colliding)
++    })))
++  },
+   )

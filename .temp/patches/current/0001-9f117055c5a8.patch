@@ -5,7 +5,7 @@ diff --git a/packages/opencode/src/effect/runtime-flags.ts b/packages/opencode/s
    disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),
    disableEmbeddedWebUi: bool("OPENCODE_DISABLE_EMBEDDED_WEB_UI"),
    disableExternalSkills: bool("OPENCODE_DISABLE_EXTERNAL_SKILLS"),
-+  // 关闭 system prompt 中的详细 git 上下文注入，仅保留是否为 git 仓库的信息
++  // 关闭详细上下文仍保留仓库识别，避免模型误判可用的版本控制能力。
 +  disableGit: bool("OPENCODE_DISABLE_GIT"),
    disableLspDownload: bool("OPENCODE_DISABLE_LSP_DOWNLOAD"),
    disableClaudeCodePrompt: Config.all({
@@ -22,7 +22,7 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
 +import { Git } from "@/git"
 +import { RuntimeFlags } from "@/effect/runtime-flags"
  
-+// 将 git 状态上下文限制在固定长度，避免提示词膨胀。
++// 只限制状态字段，保留分支和最近提交，避免大型工作树挤占模型上下文。
 +const MAX_STATUS_CHARS = 2000
 +
  export function provider(model: Provider.Model) {
@@ -31,68 +31,70 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
      return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]
    }
    if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-@@ -64,10 +69,77 @@
+@@ -64,10 +69,79 @@
      const skill = yield* Skill.Service
      const mcp = yield* MCP.Service
      const locations = yield* LocationServiceMap.Service
 +    const git = yield* Git.Service
 +    const flags = yield* RuntimeFlags.Service
  
-+    // 该缓存是会话级快照，按 cwd 作为键。
-+    // 为保持“快照语义”，会话内不主动失效。
++    // 沿用源补丁的目录级缓存，工具改变工作树后仍返回首次采集的状态。
 +    const gitContextCache = new Map<string, string>()
 +
-+    // 采集 git 上下文（分支、状态、最近提交等），按 cwd 缓存，会话内不主动失效
 +    const getGitContext = Effect.fn("SystemPrompt.gitContext")(function* () {
 +      const ctx = yield* InstanceState.context
 +      const cwd = ctx.directory
 +      const cached = gitContextCache.get(cwd)
 +      if (cached) return cached
 +
-+      // 允许关闭详细 git 上下文，但仍保留是否为 git 仓库的信息。
++      // 禁用分支先于所有 Git 调用，确保关闭选项不会泄露用户名或工作树状态。
 +      if (flags.disableGit) {
 +        const result = `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
 +        gitContextCache.set(cwd, result)
 +        return result
 +      }
-+      // 检查是否为 git 仓库，非 git 仓库只返回基本信息
++      // 非仓库无需探测父目录，保持 Instance 已解析的项目归属。
 +      if (ctx.project.vcs !== "git") {
 +        const result = "Is directory a git repo: no"
 +        gitContextCache.set(cwd, result)
 +        return result
 +      }
 +
-+      // 并行采集 git 字段，降低组装 system prompt 的延迟。
++      // 五个字段互相独立，保留源补丁并行采集以避免串行进程启动延迟。
 +      const [branch, defaultBranch, userName, status, log] = yield* Effect.all([
 +        git.branch(cwd),
 +        git.defaultBranch(cwd),
++        // 用户配置可能不存在；沿用源补丁的空字段退化，不阻断模型执行。
 +        git.run(["config", "user.name"], { cwd }).pipe(
 +          Effect.map((r) => r.text().trim()),
 +          Effect.orElseSucceed(() => ""),
 +        ),
 +        git.status(cwd).pipe(
++          // 保留 Git 服务的双列状态码，不能 trim 掉暂存区与工作树的区别。
 +          Effect.map((items) => items.map((item) => `${item.code} ${item.file}`).join("\n")),
 +          Effect.orElseSucceed(() => ""),
 +        ),
 +        git.run(["log", "--oneline", "-n", "5"], { cwd }).pipe(
++          // 无提交的仓库仍是仓库；日志为空不应改变 repository yes/no。
 +          Effect.map((r) => r.text().trim()),
 +          Effect.orElseSucceed(() => ""),
 +        ),
 +      ], { concurrency: 5 })
 +
-+      // git status 超过 2k 字符时截断，避免 system prompt 膨胀
++      // 截断发生在格式化后，提示模型按需读取完整状态而非假装状态完整。
 +      const truncatedStatus =
 +        status.length > MAX_STATUS_CHARS
 +          ? status.substring(0, MAX_STATUS_CHARS) +
 +            "\n... (truncated because it exceeds 2k characters. If you need more information, run \"git status\" using BashTool)"
 +          : status
 +
-+      // 组装 git 上下文多行文本，按字段逐行排列
 +      const lines = [
 +        `Is directory a git repo: yes`,
 +        `This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.`,
 +        `Current branch: ${branch ?? "(detached)"}`,
++        // detached 与未知默认分支是不同事实，保留各自的源补丁标记。
 +        `Main branch (you will usually use this for PRs): ${defaultBranch?.name ?? "unknown"}`,
++        // 未配置用户名时省略整行，不把缺失信息伪装成有效 Git 身份。
 +        ...(userName ? [`Git user: ${userName}`] : []),
 +        `Status:\n${truncatedStatus || "(clean)"}`,
 +        `Recent commits:\n${log || "(no commits)"}`,
@@ -105,28 +107,313 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
      return Service.of({
        environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
          const ctx = yield* InstanceState.context
-+        const gitContext = yield* getGitContext
++        const gitContext = yield* getGitContext()
          const references = yield* Effect.gen(function* () {
            return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
          }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-@@ -78,7 +150,8 @@
+@@ -78,7 +152,8 @@
              `<env>`,
              `  Working directory: ${ctx.directory}`,
              `  Workspace root folder: ${ctx.worktree}`,
 -            `  Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`,
-+            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
++            // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
 +            ...gitContext.split("\n").map((line) => `  ${line}`),
              `  Platform: ${process.platform}`,
              `  Today's date: ${new Date().toDateString()}`,
              `</env>`,
-@@ -148,7 +220,8 @@
+@@ -148,7 +223,8 @@
  export const node = LayerNode.make({
    service: Service,
    layer: layer,
 -  deps: [Skill.node, MCP.node, locationServiceMapNode],
-+  // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关
++  // Git 与开关沿用既有依赖图，不引入会话事件订阅。
 +  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
  })
  
  export * as SystemPrompt from "./system"
+
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -1,7 +1,9 @@
+ export * as SystemContextBuiltIns from "./builtins"
+ 
+ import { makeLocationNode } from "../effect/app-node"
+-import { DateTime, Effect, Layer, Schema } from "effect"
++import { Config, DateTime, Effect, Layer, Schema } from "effect"
++import { ChildProcess } from "effect/unstable/process"
++import { AppProcess } from "../process"
+ import { Location } from "../location"
+ import { SystemContext } from "./index"
+ import { InstructionContext } from "../instruction-context"
+@@ -13,6 +15,65 @@
+   Effect.gen(function* () {
+     const location = yield* Location.Service
+     const registry = yield* SystemContextRegistry.Service
++    const proc = yield* AppProcess.Service
++    // 使用 Core 的配置边界，避免 Core 运行时反向依赖 legacy RuntimeFlags。
++    const disableGit = yield* Effect.gen(function* () {
++      return yield* Config.boolean("OPENCODE_DISABLE_GIT").pipe(Config.withDefault(false))
++    }).pipe(Effect.orDie)
++    // 所有命令固定在当前 Location；只读查询不应触发 Git 的可选索引写锁。
++    const run = (args: string[]) => proc.run(ChildProcess.make("git", ["--no-optional-locks", "-c", "core.quotepath=false", ...args], {
++      cwd: location.directory, extendEnv: true, stdin: "ignore",
++    })).pipe(
++      // 保留源补丁的字段级错误退化，同时忽略非零退出的错误输出。
++      Effect.map((result) => result.exitCode === 0 ? result.stdout.toString("utf8") : ""),
++      Effect.catch(() => Effect.succeed("")),
++    )
++    const gitContext = Effect.fn("SystemContextBuiltIns.git")(function* () {
++      // 默认分支沿用源 Git 服务的本地判定顺序，不通过网络查询或改写 remote。
++      const defaultBranch = Effect.gen(function* () {
++        const remotes = (yield* run(["remote"])).trim().split(/\r?\n/).filter(Boolean)
++        // 多 remote 时保留 origin / 单 remote / upstream / 首个 remote 的源优先级。
++        const remote = remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : remotes.includes("upstream") ? "upstream" : remotes[0]
++        if (remote) {
++          const head = (yield* run(["symbolic-ref", `refs/remotes/${remote}/HEAD`])).trim()
++          if (head.startsWith(`refs/remotes/${remote}/`)) return head.slice(`refs/remotes/${remote}/`.length)
++        }
++        // 没有 remote HEAD 的本地仓库仍可能有明确默认分支，不能一律降为 unknown。
++        const branches = (yield* run(["for-each-ref", "--format=%(refname:short)", "refs/heads"])).trim().split(/\r?\n/).filter(Boolean)
++        const configured = (yield* run(["config", "init.defaultBranch"])).trim()
++        if (configured && branches.includes(configured)) return configured
++        return branches.includes("main") ? "main" : branches.includes("master") ? "master" : "unknown"
++      })
++      // 五个独立字段并行观察，使用同一 Location 的工作目录。
++      const [branch, main, user, status, log] = yield* Effect.all([
++        run(["symbolic-ref", "--quiet", "--short", "HEAD"]).pipe(Effect.map((text) => text.trim())),
++        defaultBranch,
++        run(["config", "user.name"]).pipe(Effect.map((text) => text.trim())),
++        // NUL 格式保留含空格文件名与双列状态；关闭 rename 保持源补丁 Item 语义。
++        run(["status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z", "--", "."]).pipe(
++          Effect.map((text) => text.split("\0").filter(Boolean).join("\n")),
++        ),
++        // 限制日志条数而不是整块字符数，避免状态截断误伤最近提交。
++        run(["log", "--oneline", "-n", "5"]).pipe(Effect.map((text) => text.trim())),
++      ], { concurrency: 5 })
++      // 与 V1 相同的 2000 字符边界，截断提示指出后续读取的是实时状态。
++      const truncated = status.length > 2000 ? status.slice(0, 2000) + '\n... (truncated because it exceeds 2k characters. If you need more information, run "git status" using the bash tool)' : status
++      return [
++        "<git>",
++        // Git 是首次 Context 观察的快照，不能宣称已经在 Session 创建时执行命令。
++        "  This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.",
++        `  Current branch: ${branch || "(detached)"}`,
++        `  Main branch (you will usually use this for PRs): ${main}`,
++        // 无用户名省略整行，避免将空值解释成当前提交者身份。
++        ...(user ? [`  Git user: ${user}`] : []),
++        // 每行缩进，不让多行状态或日志脱离 Git 上下文块。
++        ...`Status:\n${truncated || "(clean)"}`.split("\n").map((line) => `  ${line}`),
++        ...`Recent commits:\n${log || "(no commits)"}`.split("\n").map((line) => `  ${line}`),
++        "</git>",
++      ].join("\n")
++    })
++    // 目录级首次采样与源补丁一致；缓存仅随既有 Location 层存活，不扩展通用 Source 协议。
++    const snapshot = yield* Effect.cached(gitContext())
+     const environment = [
+       "<env>",
+       `  Working directory: ${location.directory}`,
+@@ -30,6 +91,16 @@
+           ["Here is some useful information about the environment you are running in:", environment].join("\n"),
+         update: (_previous, environment) => ["The environment you are running in is now:", environment].join("\n"),
+       }),
++      // 独立 key 让已有 core/environment 快照的 Session 也能接纳新增 Git source。
++      // 禁用或非仓库时不注册详细 producer，environment 的 yes/no 仍完整保留。
++      ...(disableGit || location.vcs?.type !== "git" ? [] : [SystemContext.make({
++        key: SystemContext.Key.make("core/git"),
++        codec: Schema.toCodecJson(Schema.String),
++        // cached 返回延迟执行的 Effect，禁用或非仓库分支不会触发 Git。
++        load: snapshot,
++        baseline: (text) => text,
++        update: (_previous, text) => text,
++      })]),
+       SystemContext.make({
+         key: SystemContext.Key.make("core/date"),
+         codec: Schema.toCodecJson(Schema.String),
+@@ -46,5 +117,6 @@
+ export const node = makeLocationNode({
+   name: "system-context-builtins",
+   layer: builtIns,
+-  deps: [Location.node, SystemContextRegistry.node, InstructionContext.node, FSUtil.node, Global.node],
++  // 进程能力由既有 Core 服务提供，producer 仍保持 Location-scoped 注册和释放。
++  deps: [Location.node, SystemContextRegistry.node, InstructionContext.node, FSUtil.node, Global.node, AppProcess.node],
+ })
+
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect } from "bun:test"
+-import { Effect, Layer } from "effect"
++import { ConfigProvider, Effect, Layer, Schema } from "effect"
++import { AppProcess } from "@opencode-ai/core/process"
+ import * as TestClock from "effect/testing/TestClock"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -30,9 +31,14 @@
+ const builtInsNode = LayerNode.group([SystemContextBuiltIns.node, SystemContextRegistry.node])
++// 原有环境/日期断言使用禁用选项，禁止测试机的真实 Git 配置影响精确文本。
++const disabled = ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_DISABLE_GIT: true }))
++// 禁用与非仓库短路必须根本不启动 Git，而不是启动后丢弃结果。
++const noGit = Layer.mock(AppProcess.Service, { run: () => Effect.die("Git must not run") })
+ const it = testEffect(
+   AppNodeBuilder.build(builtInsNode, [
+     [Location.node, locationLayer],
+     [Global.node, Global.layerWith({ config: "/global" })],
++    [AppProcess.node, noGit],
+-  ]),
++  ]).pipe(Layer.provide(disabled)),
+ )
+ const instructionFS = Layer.effect(
+   FSUtil.Service,
+@@ -49,10 +55,103 @@
+ const itWithInstructions = testEffect(
+   AppNodeBuilder.build(builtInsNode, [
+     [Location.node, locationLayer],
+     [FSUtil.node, instructionFS],
+     [Global.node, Global.layerWith({ config: "/global" })],
++    [AppProcess.node, noGit],
+-  ]),
++  ]).pipe(Layer.provide(disabled)),
+ )
+ 
++// 仅替换进程边界；文本、Source codec 和 registry 均执行真实实现。
++const gitProcess = Layer.unwrap(Effect.sync(() => {
++  let observations = 0
++  return Layer.mock(AppProcess.Service, { run: (command) => Effect.sync(() => {
++    // 复合 shell 命令会掩盖 Location 绑定，测试只接受显式 Git argv。
++    if (command._tag !== "StandardCommand") throw new Error("Expected Git argv")
++    expect(command.command).toBe("git")
++    expect(command.options.cwd).toBe(directory)
++    const text = command.args.includes("status") ? ` M file with spaces-${++observations}\0${"?? long-file\0".repeat(200)}`
++      : command.args.includes("log") ? "abc123 root commit\n"
++      : command.args.includes("user.name") ? "Test User\n"
++      : command.args.includes("remote") ? "origin\n"
++      : command.args.includes("refs/remotes/origin/HEAD") ? "refs/remotes/origin/dev\n"
++      : "topic\n"
++    return { command: "git", exitCode: 0, stdout: Buffer.from(text), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false }
++  }) })
++}))
++const gitIt = testEffect(AppNodeBuilder.build(builtInsNode, [
++  [Location.node, locationLayer], [AppProcess.node, gitProcess],
++  [Global.node, Global.layerWith({ config: "/global" })],
++]).pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_DISABLE_GIT: false })))))
++const plainIt = testEffect(AppNodeBuilder.build(builtInsNode, [
++  // 非仓库由 Location 决定，不能通过探测测试机父目录偷偷变成 Git 仓库。
++  [Location.node, Layer.succeed(Location.Service, location({ directory }))],
++  [AppProcess.node, noGit], [Global.node, Global.layerWith({ config: "/global" })],
++]).pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_DISABLE_GIT: false })))))
++
++gitIt.effect("retains the Location Git snapshot through refresh and replacement", () => Effect.gen(function* () {
++  yield* TestClock.setTime(timestamp)
++  const registry = yield* SystemContextRegistry.Service
++  const first = yield* SystemContext.initialize(yield* registry.load())
++  // 完整字段必须到达 registry 的 baseline，不能只测试孤立的 formatter。
++  expect(first.baseline).toContain("Current branch: topic")
++  expect(first.baseline).toContain("Main branch (you will usually use this for PRs): dev")
++  expect(first.baseline).toContain("Git user: Test User")
++  // 工作树列前导空格和含空格文件名必须同时保留。
++  expect(first.baseline).toContain(" M file with spaces-1")
++  expect(first.baseline).toContain("Recent commits:\n  abc123 root commit")
++  // 超限状态必须有显式提示，不能静默伪装成完整状态。
++  expect(first.baseline).toContain("truncated because it exceeds 2k characters")
++  const second = yield* SystemContext.initialize(yield* registry.load())
++  // 同目录重复初始化沿用源补丁的缓存，不增加跨会话身份管理。
++  expect(second.baseline).toBe(first.baseline)
++  // JSON 往返模拟 epoch 的持久化，避免测试依赖某个内存对象引用。
++  const persisted = Schema.decodeUnknownSync(SystemContext.Snapshot)(JSON.parse(JSON.stringify(first.snapshot)))
++  expect(yield* SystemContext.reconcile(yield* registry.load(), persisted)).toEqual({ _tag: "Unchanged" })
++  // Context replacement 复用同一采样，不改变其余 Source 的上游重载规则。
++  expect(yield* SystemContext.replace(yield* registry.load(), persisted)).toMatchObject({
++    _tag: "ReplacementReady", generation: { baseline: first.baseline },
++  })
++  const third = yield* SystemContext.initialize(yield* registry.load())
++  // 重复观察不启动新的 Git 采样，其他动态上下文仍由各自 Source 管理。
++  expect(third.baseline).toBe(first.baseline)
++}))
++plainIt.effect("keeps non-repository context without invoking Git", () => Effect.gen(function* () {
++  const registry = yield* SystemContextRegistry.Service
++  const first = yield* SystemContext.initialize(yield* registry.load())
++  expect(first.baseline).toContain("Is directory a git repo: no")
++  expect(first.snapshot["core/git"]).toBeUndefined()
++}))
++it.effect("disabled Git retains repository identity without private fields", () => Effect.gen(function* () {
++  const registry = yield* SystemContextRegistry.Service
++  const first = yield* SystemContext.initialize(yield* registry.load())
++  expect(first.baseline).toContain("Is directory a git repo: yes")
++  // 关闭开关不能仅隐去状态，却继续暴露用户名、分支或提交。
++  expect(first.baseline).not.toContain("Current branch:")
++  expect(first.baseline).not.toContain("Git user:")
++  expect(first.baseline).not.toContain("Recent commits:")
++}))
++// 非零退出与启动失败属于不同进程边界，都必须保留源补丁的非阻断退化。
++for (const failure of [
++  { name: "nonzero exit", result: Effect.succeed({ command: "git", exitCode: 1, stdout: Buffer.from("invalid stdout"), stderr: Buffer.from("fatal"), stdoutTruncated: false, stderrTruncated: false }) },
++  { name: "spawn failure", result: Effect.fail(new AppProcess.AppProcessError({ command: "git", stderr: "missing executable" })) },
++]) {
++  testEffect(AppNodeBuilder.build(builtInsNode, [
++    [Location.node, locationLayer], [AppProcess.node, Layer.mock(AppProcess.Service, { run: () => failure.result })],
++    [Global.node, Global.layerWith({ config: "/global" })],
++  ]).pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_DISABLE_GIT: false }))))).effect(`keeps Git context on ${failure.name}`, () => Effect.gen(function* () {
++    const registry = yield* SystemContextRegistry.Service
++    const baseline = (yield* SystemContext.initialize(yield* registry.load())).baseline
++    // 命令失败不改变 Location 的仓库归属，错误输出也不能被当成有效字段。
++    expect(baseline).toContain("Is directory a git repo: yes")
++    expect(baseline).not.toContain("invalid stdout")
++    expect(baseline).not.toContain("Git user:")
++    // detached、未知默认分支和无提交分别保留各自标记，不能合成一个含糊的错误段。
++    expect(baseline).toContain("Current branch: (detached)")
++    expect(baseline).toContain("Main branch (you will usually use this for PRs): unknown")
++    expect(baseline).toContain("Status:\n  (clean)")
++    expect(baseline).toContain("Recent commits:\n  (no commits)")
++  }))
++}
++
+ describe("SystemContextBuiltIns", () => {
+   it.effect("loads location-scoped environment and host-local date context", () =>
+
+diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
+--- a/packages/opencode/test/session/system.test.ts
++++ b/packages/opencode/test/session/system.test.ts
+@@ -8,6 +8,9 @@
+ import type { Provider } from "../../src/provider/provider"
+ import { SystemPrompt } from "../../src/session/system"
+ import { MCP } from "../../src/mcp"
++import { Git } from "../../src/git"
++import { RuntimeFlags } from "../../src/effect/runtime-flags"
++import { InstanceState } from "../../src/effect/instance-state"
+ import { testEffect } from "../lib/effect"
+ 
+ const skills: Skill.Info[] = [
+@@ -46,5 +49,6 @@
+ const it = testEffect(
+-  LayerNode.compile(SystemPrompt.node, [
++  LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node]), [
++    [RuntimeFlags.node, RuntimeFlags.layer({ disableGit: false })],
+     [
+       MCP.node,
+       Layer.mock(MCP.Service, {
+@@ -86,4 +90,23 @@
+ describe("session.system", () => {
++  it.instance("retains the directory Git snapshot after the worktree changes", () => Effect.gen(function* () {
++    const prompt = yield* SystemPrompt.Service
++    const git = yield* Git.Service
++    const ctx = yield* InstanceState.context
++    const model = { providerID: "test", api: { id: "test" } } as Provider.Model
++    const initial = yield* prompt.environment(model)
++    const changed = yield* git.run(["checkout", "-b", "snapshot-next"], { cwd: ctx.directory })
++    expect(changed.exitCode).toBe(0)
++    // 使用真实 Git 改变工作树，再验证源补丁的目录缓存而非新的 Session 生命周期。
++    expect((yield* git.branch(ctx.directory))).toBe("snapshot-next")
++    expect(yield* prompt.environment(model)).toEqual(initial)
++  }), { git: true })
++  it.instance("does not inject private Git fields into non-repository environments", () => Effect.gen(function* () {
++    const prompt = yield* SystemPrompt.Service
++    const text = (yield* prompt.environment({ providerID: "test", api: { id: "test" } } as Provider.Model)).join("\n")
++    expect(text).toContain("Is directory a git repo: no")
++    expect(text).not.toContain("Git user:")
++    expect(text).not.toContain("Recent commits:")
++  }))
+   test("selects the Meta prompt for Muse Spark model IDs", () => {
+     for (const id of ["meta/muse-spark-preview", "muse-spark-1.1", "muse-spark-1.2"]) {
+       const prompt = SystemPrompt.provider({ api: { id } } as Provider.Model)[0]
 

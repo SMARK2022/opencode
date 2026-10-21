@@ -2,8 +2,8 @@ diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/tok
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/util/token-estimate.ts
-@@ -0,0 +1,212 @@
-+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+@@ -0,0 +1,186 @@
++import type { AssistantMessage, Message, Part, Provider, SessionRequestUsage } from "@opencode-ai/sdk/v2"
 +import { estimate } from "@opencode-ai/core/util/token"
 +
 +export type UsageInfo = {
@@ -15,41 +15,35 @@ new file mode 100644
 +  cost: string | undefined
 +}
 +
-+// 系统提示词的 token 开销估算常量
-+// 服务端组装的系统提示包含模型身份、工作目录、git 上下文、平台信息、技能和用户指令，
-+// 典型长度 1500-4000 字符；取 800 token 作为下界估算，避免低估引导上下文
++// 服务端系统提示包含模型身份、目录、git、平台、技能和用户指令；800 仅粗估未知开销，provider 确认后不作为真实输入下限。
 +export const SYSTEM_PROMPT_OVERHEAD = 800
 +
-+// 工具定义的 token 开销估算常量
-+// 每个工具包含名称、描述和 JSON Schema；15-25 个活跃工具可达 3000-8000+ 字符，
-+// 取 2000 token 作为合理上界，确保引导估算覆盖工具定义占用
++// 工具名称、描述和 JSON Schema 在 15-25 个活跃工具下可达 3000-8000+ 字符；2000 沿用源典型开销，不是精确上界。
 +export const TOOL_DEFINITION_OVERHEAD = 2000
 +
-+// 估算 data URL（base64 编码的图片/PDF）的输入 token 数
-+// 图片按每 750 字符约 1 token 估算（Anthropic 视觉编码），上限 1600 token
-+// PDF 按每 1100 字符约 1 token 估算；其他类型回退到通用文本估算
 +export function estimateDataUrlInputTokens(url: string, mime: string) {
 +  if (!url.startsWith("data:")) return 0
 +  const comma = url.indexOf(",")
 +  if (comma < 0) return 0
 +  const payloadLength = url.length - comma - 1
 +  if (payloadLength <= 0) return 0
-+  // 图片 token 随分辨率增长，但 Anthropic 对单图有 1600 token 上限
++  // 图片沿用每 750 字符约 1 token、1600 封顶的视觉启发式，不把 base64 当等长文本；实际用量以 provider 确认为准。
 +  if (mime.startsWith("image/")) return Math.max(1, Math.min(1600, Math.round(payloadLength / 750)))
-+  // PDF 按 base64 负载密度估算，每 1100 字符约 1 token
++  // PDF 沿用每 1100 字符约 1 token 且不套图片封顶，多页文档负载增长仍参与估算。
 +  if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
++  // 其他 MIME 没有视觉估算规则，负载回到通用文本估算。
 +  return Math.max(1, estimate(url.slice(comma + 1)))
 +}
 +
-+// 估算用户输入部件列表的 token 数
-+// 遍历 text/file/agent/subtask 四种部件类型，分别按其内容特征估算
-+// synthetic 和 ignored 的 text 部件跳过，因为它们不发送到 API
-+export function estimateUserInputTokens(parts: ReadonlyArray<{ type: string; [key: string]: any }>) {
++export function estimateUserInputTokens(parts: ReadonlyArray<Part>) {
 +  return parts.reduce((sum, part) => {
-+    if (part.type === "text" && !part.synthetic && !part.ignored) {
++    // synthetic 文件、编辑器和 MCP 正文也发送给模型，只有 ignored 文本不计入。
++    if (part.type === "text" && !part.ignored) {
 +      return sum + estimate(part.text ?? "")
 +    }
 +    if (part.type === "file") {
++      // text/plain 和目录已展开成 synthetic 正文，模型投影跳过原附件，不能重复计数。
++      if (part.mime === "text/plain" || part.mime === "application/x-directory") return sum
 +      return sum + estimateDataUrlInputTokens(part.url ?? "", part.mime ?? "")
 +    }
 +    if (part.type === "agent") {
@@ -62,26 +56,24 @@ new file mode 100644
 +  }, 0)
 +}
 +
-+// 估算单次请求的系统开销：系统提示词 + 工具定义
-+// 此值用于引导估算——当尚无助手回复时，用户输入加上此开销即为预估上下文
 +export function estimateRequestOverhead(): number {
++  // 首轮无助手确认时用系统提示和工具定义粗估引导上下文。
 +  return SYSTEM_PROMPT_OVERHEAD + TOOL_DEFINITION_OVERHEAD
 +}
 +
-+// 累加指定助手消息列表中所有 step-finish 部件的已确认 token
-+// step-finish 是 API 返回的每轮确认点，包含真实的 input/output/cache token
-+// input 包含 cache.read + cache.write，因为缓存 token 也计入上下文窗口
 +export function sumConfirmed(
 +  items: AssistantMessage[],
-+  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
++  getParts: (id: string) => ReadonlyArray<Part>,
 +) {
 +  return items.reduce(
 +    (acc, a) => {
 +      const parts = getParts(a.id)
 +      const { input, output } = parts.reduce(
 +        (t, p) => {
++          // 只有 API 每轮确认点参与累计，流式部件仍未确认。
 +          if (p.type !== "step-finish") return t
 +          return {
++            // 缓存读写仍占上下文窗口，必须与普通 input 一起累计。
 +            input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
 +            output: t.output + p.tokens.output + p.tokens.reasoning,
 +          }
@@ -94,14 +86,12 @@ new file mode 100644
 +  )
 +}
 +
-+// 获取指定助手消息的上下文大小
-+// 从部件列表末尾向前查找最后一个 step-finish，返回其全部 token 总和
-+// 末尾查找是因为上下文大小以最新一轮确认为准，早期 step-finish 的值已过时
 +export function getContextSize(
 +  item: AssistantMessage,
-+  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
++  getParts: (id: string) => ReadonlyArray<Part>,
 +): number {
 +  const parts = getParts(item.id)
++  // 上下文以最新一轮确认为准，倒序只取最后 step-finish，早期确认不再代表当前大小。
 +  for (let i = parts.length - 1; i >= 0; i--) {
 +    const p = parts[i]
 +    if (p.type === "step-finish") {
@@ -117,85 +107,70 @@ new file mode 100644
 +  return 0
 +}
 +
-+// 引导估算：在助手回复前预估用户输入的上下文 token
-+// 策略：如果存在上一轮助手消息，用其上下文大小 + 当前用户输入；
-+// 否则用用户输入 + 系统开销（系统提示词 + 工具定义）。
-+// previousAssistant 通过 parentID 不匹配最后用户消息来排除当前请求的助手
 +export function getBootstrapInputTokens(
-+  users: UserMessage[],
-+  assistants: AssistantMessage[],
-+  getParts: (id: string) => ReadonlyArray<{ type: string; [key: string]: any }>,
++  messages: ReadonlyArray<Message>,
++  request: SessionRequestUsage | undefined,
++  getParts: (id: string) => ReadonlyArray<Part>,
 +): number {
-+  const lastUser = users.at(-1)
-+  const lastUserParts = lastUser ? getParts(lastUser.id) : []
-+  const estimatedPromptInputTokens = estimateUserInputTokens(lastUserParts)
-+  // 查找属于上一轮请求的助手消息（parentID 不匹配当前最后用户消息）
-+  const previousAssistant = lastUser ? assistants.findLast((item) => item.parentID !== lastUser.id) : assistants.at(-1)
-+
-+  const requestOverhead = estimateRequestOverhead()
++  // 请求身份来自持久化投影，显示窗口最后一个用户可能属于其他请求。
++  const user = messages.find((item) => item.id === request?.messageID && item.role === "user")
++  // 用户被窗口淘汰时零表示缺少可估正文，不能借用旧用户内容。
++  if (!user) return 0
++  const estimatedPromptInputTokens = estimateUserInputTokens(getParts(user.id))
++  // 只借用用户之前的助手上下文，防止排队或混合入口中的较新回复混入本次估算。
++  const previousAssistant = messages.findLast(
++    (item): item is AssistantMessage => item.role === "assistant" && item.parentID !== user.id && item.time.created < user.time.created,
++  )
 +  const previousContextSize = previousAssistant ? getContextSize(previousAssistant, getParts) : 0
-+
-+  // 有历史上下文时累加用户输入；否则用用户输入 + 系统开销
++  // 历史上下文取最后一步，不取全部请求累计；固定开销只用于没有可见历史确认的引导。
 +  return previousContextSize > 0
 +    ? previousContextSize + estimatedPromptInputTokens
-+    : estimatedPromptInputTokens + requestOverhead
++    : estimatedPromptInputTokens + estimateRequestOverhead()
 +}
 +
-+// 计算最终 token：当前 step 确认值 + 流式估算 + 引导 token
-+// 流式估算从最后一个 step-finish 之后的部分部件提取，按字符数 / 4 近似 token
-+// hasInFlightTail 判断尾部是否有未完成工具调用，有则当前 step 尚未确认
-+// bootstrapInputTokens 在 requestConfirmed.input 为 0 时作为 totalInput 的补充
 +export function computeFinalTokens(
-+  lastAssistant: AssistantMessage,
-+  lastParts: ReadonlyArray<{ type: string; [key: string]: any }>,
-+  requestConfirmed: { input: number; output: number },
++  lastAssistant: AssistantMessage | undefined,
++  lastParts: ReadonlyArray<Part>,
++  request: SessionRequestUsage,
 +  bootstrapInputTokens: number,
 +) {
 +  const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-+  // 流式输出估算：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
-+  const streamingOut = lastAssistant.time.completed
++  const streamingOut = !lastAssistant || lastAssistant.time.completed !== undefined
 +    ? 0
 +    : lastParts.reduce((sum, p, i) => {
 +        if (i <= lastSFIdx) return sum
-+        if (p.type === "text" && !p.ignored) return sum + (p.text?.length ?? 0)
-+        if (p.type === "reasoning") return sum + (p.text?.length ?? 0)
-+        if (p.type === "tool" && p.state?.status === "pending") return sum + (p.state.raw?.length ?? 0)
-+        if (p.type === "tool" && p.state?.status !== "pending") return sum + JSON.stringify(p.state.input ?? {}).length
++        if (p.type === "text" && !p.ignored) return sum + p.text.length
++        if (p.type === "reasoning") return sum + p.text.length
++        // pending 工具尚无完整参数，只能读取 raw，解析后的 input 不能替代流式片段。
++        if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
++        if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
 +        return sum
 +      }, 0)
-+  // 流式输入估算：最后一个 step-finish 之后的 completed 工具输出
-+  // 这些输出将在下一轮 API 调用中计入 input_tokens
-+  const pendingIn = lastAssistant.time.completed
++  // 最后 step-finish 之后的 completed 工具输出将在下一轮 API 调用中计入输入。
++  const pendingIn = !lastAssistant || lastAssistant.time.completed !== undefined
 +    ? 0
 +    : lastParts.reduce((sum, p, i) => {
 +        if (i <= lastSFIdx) return sum
-+        if (p.type === "tool" && p.state?.status === "completed") return sum + (p.state.output?.length ?? 0)
++        if (p.type === "tool" && p.state.status === "completed") return sum + p.state.output.length
 +        return sum
 +      }, 0)
 +
 +  // 字符数 / 4 是通用 token 估算比率，适用于英文为主的代码和文本
 +  const pendingInputTokens = Math.round(pendingIn / 4)
 +  const pendingOutputTokens = Math.round(streamingOut / 4)
-+  // 尾部有进行中的工具调用时当前 step 尚未确认，currentStep 显示 0
-+  const hasInFlightTail = !lastAssistant.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-+  const lastStepFinish =
-+    lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
-+  const currentStepInputConfirmed =
-+    !hasInFlightTail && lastStepFinish
-+      ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-+      : 0
-+  const currentStepOutputConfirmed =
-+    !hasInFlightTail && lastStepFinish
-+      ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-+      : 0
-+  // requestConfirmed.input 为 0 时（首轮请求），用引导 token 补充 totalInput
-+  const promptInputEstimate = requestConfirmed.input === 0 ? bootstrapInputTokens : 0
-+  // currentInput 取 currentStepInputConfirmed 和 bootstrapInputTokens 的较大值，
-+  // 确保显示不低于引导估算，避免首轮显示 0 后跳变的用户体验问题
-+  const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
-+  const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
-+  const totalInput = requestConfirmed.input + pendingInputTokens + promptInputEstimate
-+  const totalOutput = requestConfirmed.output + pendingOutputTokens
++  // 可见尾部可能先于 Session 快照到达；立即遮掉旧 step，保留请求历史累计。
++  const hasInFlightTail = !!lastAssistant && lastAssistant.time.completed === undefined && lastParts.some((_, i) => i > lastSFIdx)
++  // input 为零不足以判定未确认，还须检查 output、step-finish 与完成时间；assistantID 存在而缓存缺失时相信投影。
++  const unconfirmed = request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
++    && lastSFIdx < 0 && (!request.assistantID || (!!lastAssistant && lastAssistant.time.completed === undefined))
++  // bootstrap 只属于首轮尚未确认的请求，确认零也必须退出引导估算。
++  const promptInputEstimate = unconfirmed ? bootstrapInputTokens : 0
++  // step 确认来自完整投影，native 无 V1 parts 或助手被淘汰仍保留真实值，不以粗略系统开销抬高它。
++  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + promptInputEstimate
++  const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + pendingOutputTokens
++  // step 与 request 两种范围各加一次尾部；请求累计永远不由有限 transcript 求和。
++  const totalInput = request.input + pendingInputTokens + promptInputEstimate
++  const totalOutput = request.output + pendingOutputTokens
 +
 +  return {
 +    input: currentInput,
@@ -205,13 +180,12 @@ new file mode 100644
 +  }
 +}
 +
-+// 获取上下文窗口大小限制
-+// 用于计算 context 百分比，在引导估算和实时估算中均被调用
 +export function getContextLimit(
-+  provider: ReadonlyArray<{ id: string; models: Record<string, { limit: { context: number; input?: number; output: number } }> }>,
++  provider: ReadonlyArray<Provider>,
 +  providerID: string | undefined,
 +  modelID: string | undefined,
 +): number | undefined {
++  // 模型缺省时没有可算上限，保留 undefined，不能拿系统开销代替上下文窗口。
 +  if (!providerID || !modelID) return undefined
 +  return provider.find((item) => item.id === providerID)?.models[modelID]?.limit.context
 +}
@@ -224,94 +198,48 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
  import { Locale } from "../../util/locale"
  import { errorMessage } from "../../util/error"
  import { formatDuration } from "../../util/format"
-+import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
  import { createColors, createFrames } from "../../ui/spinner"
  import { useDialog } from "../../ui/dialog"
  import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
-@@ -281,95 +282,51 @@
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
--    if (assistants.length === 0) {
--      if (!isRunning) return
--      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
--    }
--
--    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
--    const sumConfirmed = (items: AssistantMessage[]) =>
--      items.reduce(
--        (acc, a) => {
--          const parts = sync.data.part[a.id] ?? []
--          const { input, output } = parts.reduce(
--            (t, p) => {
--              if (p.type !== "step-finish") return t
--              return {
--                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--                output: t.output + p.tokens.output + p.tokens.reasoning,
--              }
--            },
--            { input: 0, output: 0 },
--          )
--          return { input: acc.input + input, output: acc.output + output }
--        },
--        { input: 0, output: 0 },
--      )
-+    // 引导估算：在助手回复前预估用户输入的上下文 token
+@@ -286,49 +287,22 @@
+     // 身份和已确认请求累计来自完整投影；缓存中用户缺失不等于请求缺失。
+     // 这里只读取最后助手的流式尾部，不从 100 条显示页计算已确认总量。
+     const request = session?.request
+-    // 空回复由持久化 assistantID 判断，不能由缓存筛选长度判断。
+-    // 新请求尚无回复时清零请求与 step，旧请求的费用和尾部均不得借用。
+-    if (!request?.assistantID) {
++    // 引导只读取匹配持久化身份的正文；缓存后来的用户不应覆盖当前请求。
 +    const getParts = (id: string) => sync.data.part[id] ?? []
- 
-     // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-     const lastUser = users.at(-1)
-+    // 查找当前请求对应的模型，用于计算 context 百分比
-+    const requestModel =
-+      lastUser &&
-+      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
--    // 本次请求尚无助手回复时显示零值
-+    // 引导 token：用户输入 + 系统开销 或 上一轮上下文 + 用户输入
-+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-+
-+    // 本次请求尚无助手回复时显示引导估算值
-     if (requestAssistants.length === 0) {
++    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
++    // 空闲无回复仍隐藏；运行中无回复进入共享估算，不借用旧请求的确认值。
++    if (!request || (!request.assistantID && !isRunning)) {
        if (!isRunning) return
--      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
-+      const tokens = bootstrapInputTokens
-+      // 计算引导 token 占上下文窗口的百分比
-+      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
-+      return {
-+        input: tokens,
-+        output: 0,
-+        totalInput: tokens,
-+        totalOutput: 0,
-+        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
-+        cost: undefined,
-+      }
+       return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
      }
+-    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+     // #14 主值改为当前 step，括号改为当前请求累计，全局 tokens 不被改写。
  
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
--    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
- 
--    // 从最后一条消息添加流式估算
-+    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-     const last = requestAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
+-    // 已确认边界之前的内容已进入服务端投影，不能再次进入字符近似。
++    // 当前助手缺失时仍显示 native 或已分页淘汰的确认投影，不恢复窗口累计。
+     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
+-    // 流式字符仅来自当前助手未确认尾部，不能把 step-finish 之前内容再计入。
 -    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
--    // 流式输出：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
--    // pending 工具的 state.raw 由 processor.ts 的 tool-input-delta handler 累积
--    const streamingOut = last.time.completed
+-    const streamingOut = !last || last.time.completed
 -      ? 0
 -      : lastParts.reduce((sum, p, i) => {
 -          if (i <= lastSFIdx) return sum
 -          if (p.type === "text" && !p.ignored) return sum + p.text.length
 -          if (p.type === "reasoning") return sum + p.text.length
+-          // pending 尚无解析后的 input；必须读取 processor 累积的 raw 参数片段。
 -          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
 -          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
 -          return sum
 -        }, 0)
--    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
--    // 这些输出将在下一轮 API 调用中计入 input_tokens
--    const pendingIn = last.time.completed
+-    // 工具输出属于下一轮输入；仍只近似未确认尾部，不新增历史文本估算器。
+-    const pendingIn = !last || last.time.completed
 -      ? 0
 -      : lastParts.reduce((sum, p, i) => {
 -          if (i <= lastSFIdx) return sum
@@ -319,170 +247,90 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
 -          return sum
 -        }, 0)
 -
--    // 拆分为当前 step 和请求累计的输入输出
--    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
--    const pendingInputTokens = Math.round(pendingIn / 4)
--    const pendingOutputTokens = Math.round(streamingOut / 4)
--    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
--    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
--    // 使用 lastSFIdx 直接索引，避免 reverse() 遍历
--    const lastStepFinish =
--      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
--    const currentStepInputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
--        : 0
--    const currentStepOutputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
--        : 0
--    // currentInput/Output 来自当前 step 的已确认 token + 流式估算
--    const currentInput = currentStepInputConfirmed + pendingInputTokens
--    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
--    // totalInput/Output 来自本次请求的累计 token + 流式估算
--    const totalInput = requestConfirmed.input + pendingInputTokens
--    const totalOutput = requestConfirmed.output + pendingOutputTokens
--    // requestTokens 用于 context 百分比，totalTokens 用于括号显示
-+    const {
-+      input: currentInput,
-+      output: currentOutput,
-+      totalInput,
-+      totalOutput,
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
-+    // requestTokens 用于 context 百分比和显示
+-    // part 的流式事件可先于请求快照到达，当前可见尾部立即遮掉旧 step 确认值。
+-    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+-    // 当前 step 确认值随完整投影读出，native 无 V1 parts 也有真实确认用量。
+-    const currentInput = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
+-    const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
+-    // 括号是请求所有轮次累计，不能用最后一步或 Session.tokens 替代。
+-    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
+-    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
++    // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
++    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
      const requestTokens = currentInput + currentOutput
-+    const actualTotalTokens = currentInput + currentOutput
      const totalTokens = totalInput + totalOutput
- 
      if (requestTokens <= 0 && totalTokens <= 0) {
-@@ -378,7 +335,11 @@
-     }
+@@ -338,7 +312,9 @@
  
-     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
--    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
-+    // 使用 actualTotalTokens 计算百分比，与显示值一致
-+    const pct =
-+      actualTotalTokens > 0 && model?.limit.context
-+        ? `${Math.round((actualTotalTokens / model.limit.context) * 100)}%`
-+        : undefined
-     const cost = session?.cost ?? 0
-     return {
-       // 返回数值而非格式化字符串，由 JSX 配合 usageFlow 信号控制显示
-@@ -386,7 +347,7 @@
-       output: currentOutput,
-       totalInput,
-       totalOutput,
--      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
-+      context: actualTotalTokens > 0 ? (pct ? `${Locale.number(actualTotalTokens)} (${pct})` : Locale.number(actualTotalTokens)) : undefined,
-       cost: cost > 0 ? money.format(cost) : undefined,
-     }
-   })
+     // 模型随完整请求投影提供，窗口淘汰助手后仍不丢真实上下文上限。
+-    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
++    // 首次等待的模型来自同一用户，确认后继续优先使用请求投影中的实际模型。
++    const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
++    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
+     const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
+     // 恢复源提交的请求费用范围；服务端来源并不使 Session.cost 等同请求 cost。
+     // 确认价格继续由原生产者计算，此处只消费完整请求的助手费用求和。
+     const cost = request.cost
 
 
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -3,6 +3,7 @@
+@@ -1,8 +1,9 @@
+-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
++import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
  import type { BuiltinTuiPlugin } from "../builtins"
  import { createEffect, createMemo, createSignal } from "solid-js"
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
-+import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
  
  const id = "internal:sidebar-context"
  
 @@ -16,6 +17,8 @@
    const msg = createMemo(() => props.api.state.session.messages(props.session_id))
    const session = createMemo(() => props.api.state.session.get(props.session_id))
-   const cost = createMemo(() => session()?.cost ?? 0)
-+  // 会话运行中（非 idle）时显示引导估算
+ 
++  // retry 也属于等待；首次引导不能在重试间隙闪回空闲零值。
 +  const isRunning = createMemo(() => (props.api.state.session.status(props.session_id)?.type ?? "idle") !== "idle")
- 
-   // 主值展示"本次请求"累计；括号内显示会话总累计
-   type StateValue = {
-@@ -34,91 +37,49 @@
-     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = messages.filter((item): item is UserMessage => item.role === "user")
- 
--    if (assistants.length === 0) {
--      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
--    }
-+    // 引导估算：在助手回复前预估用户输入的上下文 token
+   // sidebar 保持直接可读对象，新增括号累计也随同一节流快照发布。
+   // 主值属于请求，total 字段属于全局，不能复用一个变量伪装两种范围。
+   // 费用随 token 同一快照发布，不能继续读取独立的会话 cost memo。
+@@ -34,47 +37,23 @@
+     // plugin 的 session.get 已直通同步 Session，不能另建 sidebar 私有请求账本。
+     const request = session()?.request
+-    // 没有持久化助手才是新请求无回复；用户和早期助手被窗口淘汰不触发此分支。
+-    if (!request?.assistantID) {
++    // 侧栏和 Prompt 共用引导 owner，synthetic 文件正文也参与首轮输入估算。
 +    const getParts = (id: string) => props.api.state.part(id)
- 
--    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
--    const sumConfirmed = (items: AssistantMessage[]) =>
--      items.reduce(
--        (acc, a) => {
--          const parts = props.api.state.part(a.id)
--          const { input, output } = parts.reduce(
--            (t, p) => {
--              if (p.type !== "step-finish") return t
--              return {
--                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--                output: t.output + p.tokens.output + p.tokens.reasoning,
--              }
--            },
--            { input: 0, output: 0 },
--          )
--          return { input: acc.input + input, output: acc.output + output }
--        },
--        { input: 0, output: 0 },
--      )
--
--    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-+    // 无助手消息时显示引导估算值（运行中）或零值（空闲）
-     const lastUser = users.at(-1)
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
-+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
- 
--    // 本次请求尚无助手回复时返回零值，避免 at(-1)! 解引用 undefined
-     if (requestAssistants.length === 0) {
--      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
-+      if (!isRunning()) {
-+        return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
-+      }
-+      // 引导估算：显示预估的输入 token 和百分比
-+      const requestModel =
-+        lastUser &&
-+        props.api.state.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-+      const percent =
-+        bootstrapInputTokens > 0 && requestModel?.limit.context
-+          ? Math.round((bootstrapInputTokens / requestModel.limit.context) * 100)
-+          : null
-+      return {
-+        tokens: bootstrapInputTokens,
-+        totalTokens: bootstrapInputTokens,
-+        input: bootstrapInputTokens,
-+        output: 0,
-+        totalInput: bootstrapInputTokens,
-+        totalOutput: 0,
-+        percent,
-+      }
++    const bootstrapInputTokens = getBootstrapInputTokens(messages, request, getParts)
++    // 空闲无回复保持全字段零值，避免新 Session 留下上一请求的费用或百分比。
++    if (!request || (!request.assistantID && !isRunning())) {
+       return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
      }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
--    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+-    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+     // 当前 step 确认值由完整请求投影提供，窗口只保留流式字符近似的职责。
  
 -    // 从最后一条消息添加流式估算
-+    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-     const last = requestAssistants.at(-1)!
-     const lastParts = props.api.state.part(last.id)
++    // 参数只含当前助手尾部，不能把其他请求的缓存 parts 传给共享计算。
+     const lastParts = last ? props.api.state.part(last.id) : []
 -    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
 -    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
--    // pending 工具的 state.raw 由 processor.ts 累积流式 delta
--    const streamingOut = last.time.completed
+-    const streamingOut = !last || last.time.completed
 -      ? 0
 -      : lastParts.reduce((sum, p, i) => {
 -          if (i <= lastSFIdx) return sum
 -          if (p.type === "text" && !p.ignored) return sum + p.text.length
 -          if (p.type === "reasoning") return sum + p.text.length
+-          // pending 工具的 state.raw 由 processor.ts 累积流式 delta。
 -          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
 -          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
 -          return sum
 -        }, 0)
 -    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
--    const pendingIn = last.time.completed
+-    const pendingIn = !last || last.time.completed
 -      ? 0
 -      : lastParts.reduce((sum, p, i) => {
 -          if (i <= lastSFIdx) return sum
@@ -490,39 +338,23 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 -          return sum
 -        }, 0)
 -
--    // 拆分为当前 step 和请求累计的输入输出
--    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
--    const pendingInputTokens = Math.round(pendingIn / 4)
--    const pendingOutputTokens = Math.round(streamingOut / 4)
--    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
--    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
--    // 使用 lastSFIdx 直接索引，避免 reverse() 遍历
--    const lastStepFinish =
--      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
--    const currentStepInputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
--        : 0
--    const currentStepOutputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
--        : 0
--    // input/output 来自当前 step 的已确认 token + 流式估算
--    const input = currentStepInputConfirmed + pendingInputTokens
--    const output = currentStepOutputConfirmed + pendingOutputTokens
--    // totalInput/Output 来自本次请求的累计 token + 流式估算
--    const totalInput = requestConfirmed.input + pendingInputTokens
--    const totalOutput = requestConfirmed.output + pendingOutputTokens
--    // tokens 用于百分比，totalTokens 用于括号显示
-+    const {
-+      input,
-+      output,
-+      totalInput,
-+      totalOutput,
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
+-    // 缺少模型 context limit 时保留 token 实数，不能捏造百分比上限。
+-    // 两个范围各加入一次当前尾部，stepInput 已排除尚未确认的 V1 尾部。
+-    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+-    const input = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
+-    const output = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
+-    // 括号保留全部请求轮次，用投影而非缓存 sumConfirmed 保证长请求完整。
+-    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
+-    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
++    // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
++    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
      const tokens = input + output
      const totalTokens = totalInput + totalOutput
-     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
+-    const model = request?.model ? props.api.state.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
++    // 未确认请求可用其用户模型；已确认 native 请求不依赖用户仍在显示窗口。
++    const modelRef = request.model ?? messages.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
++    const model = modelRef ? props.api.state.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
+     return {
 
 
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
@@ -530,96 +362,49 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
 @@ -5,6 +5,7 @@
  import { SplitBorder } from "../../ui/border"
- import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
++import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
  import { Locale } from "../../util/locale"
-+import { sumConfirmed as sharedSumConfirmed, getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
++import { getBootstrapInputTokens, computeFinalTokens } from "../../util/token-estimate"
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
  import { useTerminalDimensions } from "@opentui/solid"
  import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
-@@ -56,94 +57,48 @@
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
--    if (assistants.length === 0) {
--      if (!isRunning) return
--      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
--    }
-+    // 引导估算：在助手回复前预估用户输入的上下文 token
+@@ -59,46 +60,21 @@
+     // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
+     const request = session()?.request
+-    // 子代理也按自己的持久化回复身份判空，不能用父请求或有限缓存补偿。
+-    if (!request?.assistantID) {
++    // 子代理只估算自己的用户正文，不能从父 Session 借入工具上下文或用量。
 +    const getParts = (id: string) => sync.data.part[id] ?? []
- 
--    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
--    const sumConfirmed = (items: AssistantMessage[]) =>
--      items.reduce(
--        (acc, a) => {
--          const parts = sync.data.part[a.id] ?? []
--          const { input, output } = parts.reduce(
--            (t, p) => {
--              if (p.type !== "step-finish") return t
--              return {
--                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--                output: t.output + p.tokens.output + p.tokens.reasoning,
--              }
--            },
--            { input: 0, output: 0 },
--          )
--          return { input: acc.input + input, output: acc.output + output }
--        },
--        { input: 0, output: 0 },
--      )
--
-     // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-     const lastUser = users.at(-1)
-+    // 查找当前请求对应的模型，用于计算 context 百分比
-+    const requestModel =
-+      lastUser &&
-+      sync.data.provider.find((item) => item.id === lastUser.model.providerID)?.models[lastUser.model.modelID]
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
--    // 本次请求尚无助手回复时显示零值
-+    // 引导 token：用户输入 + 系统开销 或 上一轮上下文 + 用户输入
-+    const bootstrapInputTokens = getBootstrapInputTokens(users, assistants, getParts)
-+
-+    // 本次请求尚无助手回复时显示引导估算值
-     if (requestAssistants.length === 0) {
++    const bootstrapInputTokens = getBootstrapInputTokens(msg, request, getParts)
++    // 无回复且空闲保持隐藏；运行中使用引导，确认后仍读自己的完整投影。
++    if (!request || (!request.assistantID && !isRunning)) {
        if (!isRunning) return
--      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
-+      const tokens = bootstrapInputTokens
-+      // 计算引导 token 占上下文窗口的百分比
-+      const pct = tokens > 0 && requestModel?.limit.context ? `${Math.round((tokens / requestModel.limit.context) * 100)}%` : undefined
-+      return {
-+        input: tokens,
-+        output: 0,
-+        totalInput: tokens,
-+        totalOutput: 0,
-+        context: tokens > 0 ? (pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens)) : undefined,
-+        cost: undefined,
-+      }
+       return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
      }
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
--    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
+-    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+     // 主值属于当前 step；括号与费用都属于该子代理的完整当前请求。
  
 -    // 从最后一条消息添加流式估算
-+    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-     const last = requestAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
++    // footer 的缓存只供未确认尾部，助手淘汰后不能丢掉已确认请求累计。
+     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
 -    const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
 -    // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
--    // pending 工具的 state.raw 由 processor.ts 累积流式 delta
--    const streamingOut = last.time.completed
+-    const streamingOut = !last || last.time.completed
 -      ? 0
 -      : lastParts.reduce((sum, p, i) => {
 -          if (i <= lastSFIdx) return sum
 -          if (p.type === "text" && !p.ignored) return sum + p.text.length
 -          if (p.type === "reasoning") return sum + p.text.length
+-          // pending 工具的 state.raw 由 processor.ts 累积流式 delta。
 -          if (p.type === "tool" && p.state.status === "pending") return sum + p.state.raw.length
 -          if (p.type === "tool" && p.state.status !== "pending") return sum + JSON.stringify(p.state.input).length
 -          return sum
 -        }, 0)
--    // 流式输入：最后一个 step-finish 之后的 completed 工具输出
--    // 这些输出将在下一轮 API 调用中计入 input_tokens
--    const pendingIn = last.time.completed
+-    // 最后一个 step-finish 后的 completed 工具输出将在下一轮 API 调用中计入输入，当前仅作流式估算。
+-    const pendingIn = !last || last.time.completed
 -      ? 0
 -      : lastParts.reduce((sum, p, i) => {
 -          if (i <= lastSFIdx) return sum
@@ -627,37 +412,92 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 -          return sum
 -        }, 0)
 -
--    // 拆分为当前 step 和请求累计的输入输出
--    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
--    const pendingInputTokens = Math.round(pendingIn / 4)
--    const pendingOutputTokens = Math.round(streamingOut / 4)
--    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
--    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
--    // 使用 lastSFIdx 直接索引，避免 reverse() 遍历
--    const lastStepFinish =
--      lastSFIdx >= 0 && lastParts[lastSFIdx]?.type === "step-finish" ? lastParts[lastSFIdx] : undefined
--    const currentStepInputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
--        : 0
--    const currentStepOutputConfirmed =
--      !hasInFlightTail && lastStepFinish
--        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
--        : 0
--    // currentInput/Output 来自当前 step 的已确认 token + 流式估算
--    const currentInput = currentStepInputConfirmed + pendingInputTokens
--    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
--    // totalInput/Output 来自本次请求的累计 token + 流式估算
--    const totalInput = requestConfirmed.input + pendingInputTokens
--    const totalOutput = requestConfirmed.output + pendingOutputTokens
--    // requestTokens 用于 context 百分比，totalTokens 用于括号显示
-+    const {
-+      input: currentInput,
-+      output: currentOutput,
-+      totalInput,
-+      totalOutput,
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, bootstrapInputTokens)
+-    // native 每步确认值也在投影中，不能因没有 V1 parts 而退回零历史累计。
+-    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
+-    const currentInput = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
+-    const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
+-    // 请求累计与 step 确认值独立，流式尾部在各自范围只计一次。
+-    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
+-    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
++    // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
++    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request, bootstrapInputTokens)
      const requestTokens = currentInput + currentOutput
      const totalTokens = totalInput + totalOutput
  
+@@ -109,7 +85,9 @@
+ 
+     // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
+-    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
++    // 用户模型仅用于首次等待；确认模型仍由子代理请求投影提供。
++    const modelRef = request.model ?? msg.find((item): item is UserMessage => item.role === "user" && item.id === request.messageID)?.model
++    const model = modelRef ? sync.data.provider.find((item) => item.id === modelRef.providerID)?.models[modelRef.modelID] : undefined
+     const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
+     // 恢复 footer 的请求费用 hunk，不把子代理 Session.cost 当作请求费用。
+     // 仍使用共享费用生产策略和现有 money 格式化，费用不参与箭头增长判断。
+     const cost = request.cost
+
+diff --git a/packages/tui/test/util/token-estimate.test.ts b/packages/tui/test/util/token-estimate.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/util/token-estimate.test.ts
+@@ -0,0 +1,59 @@
++import { expect, test } from "bun:test"
++import type { AssistantMessage, Part, SessionRequestUsage, StepFinishPart, UserMessage } from "@opencode-ai/sdk/v2"
++import { computeFinalTokens, estimateUserInputTokens, getBootstrapInputTokens } from "../../src/util/token-estimate"
++
++test("bootstrap yields to confirmed usage and preserves projected request totals", () => {
++  const user: UserMessage = { id: "u", sessionID: "s", role: "user", time: { created: 1 }, agent: "build", model: { providerID: "p", modelID: "m" } }
++  const assistant: AssistantMessage = {
++    id: "a", sessionID: "s", role: "assistant", parentID: "u", time: { created: 2 }, agent: "build",
++    providerID: "p", modelID: "m", mode: "build", path: { cwd: "/", root: "/" }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const request: SessionRequestUsage = { messageID: "u", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 }
++  const identity = { sessionID: "s", messageID: "u" }
++  // 三种 synthetic producer 都送出正文；ignored 再长也不应改变输入估算。
++  const parts: Part[] = [
++    { ...identity, id: "file", type: "file", mime: "text/plain", url: "file:///context.txt" },
++    { ...identity, id: "data-text", type: "file", mime: "text/plain", url: `data:text/plain;base64,${"x".repeat(800)}` },
++    { ...identity, id: "file-text", type: "text", synthetic: true, text: "f".repeat(800) },
++    { ...identity, id: "editor", type: "text", synthetic: true, text: "e".repeat(800) },
++    { ...identity, id: "mcp", type: "text", synthetic: true, text: "m".repeat(800) },
++    { ...identity, id: "ignored", type: "text", synthetic: true, ignored: true, text: "i".repeat(4000) },
++    { ...identity, id: "plain", type: "text", text: "test" },
++  ]
++  expect(estimateUserInputTokens(parts)).toBe(601)
++  expect(getBootstrapInputTokens([user], request, () => parts)).toBe(3401)
++  // 缓存缺失不能借用另一个用户，也不能凭空创建 2800 的系统开销输入。
++  expect(getBootstrapInputTokens([{ ...user, id: "other" }], request, () => parts)).toBe(0)
++  const active = { ...request, assistantID: "a" }
++  const text: Part = { id: "tail", sessionID: "s", messageID: "a", type: "text", text: "abcdefgh" }
++  expect(computeFinalTokens(undefined, [], request, 2800)).toEqual({ input: 2800, output: 0, totalInput: 2800, totalOutput: 0 })
++  expect(computeFinalTokens(assistant, [text], active, 2800)).toEqual({ input: 2800, output: 2, totalInput: 2800, totalOutput: 2 })
++  const finish: StepFinishPart = {
++    id: "finish", sessionID: "s", messageID: "a", type: "step-finish", reason: "stop", cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  // 零确认不能被 truthiness 当成尚未确认；completed=0 也属于合法终态。
++  expect(computeFinalTokens(assistant, [finish], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens({ ...assistant, time: { created: 2, completed: 0 } }, [text], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  const settled = { ...active, input: 4000, output: 30, stepInput: 1000, stepOutput: 10 }
++  const completed = { ...assistant, time: { created: 2, completed: 3 } }
++  // 请求累计刻意大于末 step，能发现退回缓存求和或把两种范围合并的问题。
++  expect(computeFinalTokens(completed, [], settled, 2800)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(undefined, [], settled, 2800)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(undefined, [], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  const confirmedFinish = { ...finish, tokens: { ...finish.tokens, input: 1000, output: 10 } }
++  const confirmed = { ...active, input: 1000, output: 10, stepInput: 1000, stepOutput: 10 }
++  // 下一请求引导以末步上下文为基数，不能把全部请求累计或固定开销再叠加。
++  const previous = { ...completed, id: "previous", parentID: "prior", time: { created: 0, completed: 0 } }
++  expect(getBootstrapInputTokens([previous, user, assistant], request, (id) => id === "previous" ? [confirmedFinish] : parts)).toBe(1611)
++  expect(computeFinalTokens(assistant, [confirmedFinish], confirmed, 2800)).toEqual({ input: 1000, output: 10, totalInput: 1000, totalOutput: 10 })
++  // 新尾部先于快照到达时遮掉旧 step，只在请求累计上加一次流式字符。
++  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed, 2800)).toEqual({ input: 0, output: 2, totalInput: 1000, totalOutput: 12 })
++  const tool: Part = {
++    id: "tool", sessionID: "s", messageID: "a", type: "tool", callID: "call", tool: "read",
++    state: { status: "completed", input: {}, output: "abcdefgh", title: "read", metadata: {}, time: { start: 2, end: 3 } },
++  }
++  // 工具结果只补下一轮输入，已确认零的旧 step 不应触发新的 bootstrap。
++  expect(computeFinalTokens(assistant, [finish, tool], active, 2800)).toEqual({ input: 2, output: 1, totalInput: 2, totalOutput: 1 })
++})
 

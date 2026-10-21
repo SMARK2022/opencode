@@ -1,77 +1,576 @@
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -67,7 +67,7 @@
+@@ -38,7 +38,7 @@
    return createHash("sha256").update(input, "utf8").digest("hex").slice(0, 3)
  }
  
--// 构建计费头块，包含版本、入口和 cch 占位符
-+// 构建计费头块：cch 保持 00000，避免完整 body hash 污染最早 system 前缀
+-// 校验前必须保留五位零占位符；缩短占位符会改变请求体长度与签名字节。
++// cch 固定为五位零；完整 body hash 不能改写最早的计费 system 前缀。
  export function buildBillingHeaderBlock(fp: string) {
    return {
      type: "text" as const,
-@@ -362,9 +362,8 @@
-       ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
+@@ -90,144 +90,6 @@
+   }
+ }
+ 
+-// 保留源纯 TS 实现替换前项的 Bun 内置哈希，seed=0 的 CCH 字节契约保持一致。
+-const MASK_64 = 0xffff_ffff_ffff_ffffn
+-// 五个质数属于 xxHash64 规范，换成 xxHash32 常量会改变全部签名字节。
+-const PRIME64_1 = 0x9e37_79b1_85eb_ca87n
+-const PRIME64_2 = 0xc2b2_ae3d_27d4_eb4fn
+-const PRIME64_3 = 0x1656_67b1_9e37_79f9n
+-const PRIME64_4 = 0x85eb_ca77_c2b2_ae63n
+-const PRIME64_5 = 0x27d4_eb2f_1656_67c5n
+-
+-// BigInt 不会溢出，必须显式按模 2^64 截断才能复现无符号机器运算。
+-const add64 = (a: bigint, b: bigint) => (a + b) & MASK_64
+-const mul64 = (a: bigint, b: bigint) => (a * b) & MASK_64
+-// 输入均已截断为非负值，右移才等价于规范的无符号循环移位。
+-const rotl64 = (x: bigint, bits: number) => {
+-  const r = BigInt(bits)
+-  return ((x << r) | (x >> (64n - r))) & MASK_64
+-}
+-
+-// 小端高字节可能置位符号位；转 BigInt 前用 >>> 0 保留无符号 32 位值。
+-const readU32LE = (bytes: Uint8Array, offset: number) => {
+-  const b0 = bytes[offset] ?? 0
+-  const b1 = bytes[offset + 1] ?? 0
+-  const b2 = bytes[offset + 2] ?? 0
+-  const b3 = bytes[offset + 3] ?? 0
+-  return BigInt((b0 + b1 * 0x100 + b2 * 0x10000 + b3 * 0x1000000) >>> 0)
+-}
+-
+-// 高低两段分别转 BigInt 后拼接，避免 Number 丢失 64 位整数精度。
+-const readU64LE = (bytes: Uint8Array, offset: number) => readU32LE(bytes, offset) | (readU32LE(bytes, offset + 4) << 32n)
+-
+-// lane 先乘 PRIME64_2 再旋转，不能与尾部八字节的 hash 旋转步骤互换。
+-const round64 = (acc: bigint, lane: bigint) => mul64(rotl64(add64(acc, mul64(lane, PRIME64_2)), 31), PRIME64_1)
+-
+-// 合并使用零种子的 round；直接异或累加器会遗漏规范要求的二次混合。
+-const mergeRound64 = (acc: bigint, lane: bigint) => {
+-  const merged = (acc ^ round64(0n, lane)) & MASK_64
+-  return add64(mul64(merged, PRIME64_1), PRIME64_4)
+-}
+-
+-// 雪崩的三次右移与两次乘法顺序固定，中间结果也必须保持 64 位。
+-const avalanche64 = (value: bigint) => {
+-  let hash = value
+-  hash = (hash ^ (hash >> 33n)) & MASK_64
+-  hash = mul64(hash, PRIME64_2)
+-  hash = (hash ^ (hash >> 29n)) & MASK_64
+-  hash = mul64(hash, PRIME64_3)
+-  hash = (hash ^ (hash >> 32n)) & MASK_64
+-  return hash
+-}
+-
+-// 接收已经编码的请求字节，字符串字符数不能替代 UTF-8 字节长度。
+-export function xxh64(bodyBytes: Uint8Array, seed = 0n) {
+-  let offset = 0
+-  const len = bodyBytes.length
+-  let hash: bigint
+-
+-  if (len >= 32) {
+-    // 加法与负 PRIME64_1 都按模 2^64 归一化，负种子和超宽种子同样回绕。
+-    let v1 = add64(add64(seed, PRIME64_1), PRIME64_2)
+-    let v2 = add64(seed, PRIME64_2)
+-    let v3 = seed & MASK_64
+-    let v4 = add64(seed, -PRIME64_1)
+-
+-    // 包含 offset == limit，恰好 32 字节及最后完整块都必须进入四 lane 分支。
+-    const limit = len - 32
+-    while (offset <= limit) {
+-      v1 = round64(v1, readU64LE(bodyBytes, offset))
+-      v2 = round64(v2, readU64LE(bodyBytes, offset + 8))
+-      v3 = round64(v3, readU64LE(bodyBytes, offset + 16))
+-      v4 = round64(v4, readU64LE(bodyBytes, offset + 24))
+-      offset += 32
+-    }
+-
+-    // 四 lane 的旋转权重不同，合并顺序保持 v1 到 v4，不能按数值排序。
+-    hash = add64(add64(rotl64(v1, 1), rotl64(v2, 7)), add64(rotl64(v3, 12), rotl64(v4, 18)))
+-    hash = mergeRound64(hash, v1)
+-    hash = mergeRound64(hash, v2)
+-    hash = mergeRound64(hash, v3)
+-    hash = mergeRound64(hash, v4)
+-  } else {
+-    // 短输入没有四 lane 合并阶段，直接使用 seed + PRIME64_5 初始化。
+-    hash = add64(seed, PRIME64_5)
+-  }
+-
+-  // 总字节长度在尾部混合前加入，不能改成剩余字节数。
+-  hash = add64(hash, BigInt(len))
+-
+-  // 尾部按 8、4、1 字节顺序消费；调换顺序会对同一字节流产生不同哈希。
+-  while (offset + 8 <= len) {
+-    const lane = readU64LE(bodyBytes, offset)
+-    hash = (hash ^ round64(0n, lane)) & MASK_64
+-    hash = add64(mul64(rotl64(hash, 27), PRIME64_1), PRIME64_4)
+-    offset += 8
+-  }
+-
+-  // 四字节尾块最多一次；等号保证恰好剩四字节时不会误走单字节分支。
+-  if (offset + 4 <= len) {
+-    hash = (hash ^ mul64(readU32LE(bodyBytes, offset), PRIME64_1)) & MASK_64
+-    hash = add64(mul64(rotl64(hash, 23), PRIME64_2), PRIME64_3)
+-    offset += 4
+-  }
+-
+-  // 最后不足四字节逐字节混合，字节大于 127 也保持无符号值。
+-  while (offset < len) {
+-    hash = (hash ^ mul64(BigInt(bodyBytes[offset]), PRIME64_5)) & MASK_64
+-    hash = mul64(rotl64(hash, 11), PRIME64_1)
+-    offset += 1
+-  }
+-
+-  // 所有尾字节消费后才雪崩，空输入也执行同一终结阶段。
+-  return avalanche64(hash)
+-}
+-
+-export function computeCch(bodyBytes: Uint8Array): string {
+-  // 低 20 位对应五个小写 hex nibble；保留前导零以维持定长 CCH wire 格式。
+-  const low20 = xxh64(bodyBytes) & 0xfffffn
+-  return low20.toString(16).padStart(5, "0")
+-}
+-
+-// 替换保持五位定长，不重新解析 JSON，避免字段顺序和序列化形式被二次改写。
+-export function patchCch(bodyStr: string): string {
+-  // 自有 billing 固定在首字段首块；MCP URL/token 和用户文字不参与定位，也不重新解析 JSON。
+-  const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=${VERSION}.`
+-  const suffix = "; cc_entrypoint=cli; cch="
+-  const idx = prefix.length + 3 + suffix.length
+-
+-  if (!bodyStr.startsWith(prefix) || bodyStr.slice(prefix.length + 3, idx + 6) !== `${suffix}00000;`) {
+-    console.warn("[claudecode] owned billing layout not found in body, skipping patch")
+-    return bodyStr
+-  }
+-
+-  const bodyBytes = new TextEncoder().encode(bodyStr)
+-  const cch = computeCch(bodyBytes)
+-
+-  // offset 直接指向自有五位值，MCP 与其余字段的字节和字段顺序完全保留。
+-  return bodyStr.slice(0, idx) + cch + bodyStr.slice(idx + 5)
+-}
+-
+ // --- Fetch 拦截与重写包装器 ---
+ export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
+   const { session, token, authMode } = opts
+@@ -319,7 +181,7 @@
      }
  
--    // 6. 占位符替换机制
--    const bodyWithPlaceholder = JSON.stringify(patchedBody)
--    const finalBodyStr = patchCch(bodyWithPlaceholder)
-+    // 6. 保留 cch=00000 占位，避免每轮重写最早 system 前缀
+-    // 所有 metadata/thinking/tools 合并完毕后修补最终字节，继续复用源保留的 patchCch。
+-    const finalBodyStr = patchCch(JSON.stringify(patchedBody))
++    // 合并 metadata/thinking/tools 后直接编码，固定零值不随本轮内容变化。
 +    const finalBodyStr = JSON.stringify(patchedBody)
  
-     // 7. 处理请求头与鉴权
+     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
      const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
 
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -225,22 +225,7 @@
+@@ -181,8 +181,8 @@
+         const references = yield* Effect.gen(function* () {
            return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
          }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-         return [
+-        return [
 -          [
--            `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
--            `Here is some useful information about the environment you are running in:`,
--            `<env>`,
--            `  Working directory: ${ctx.directory}`,
--            `  Workspace root folder: ${ctx.worktree}`,
--            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
--            ...gitContext.split("\n").map((line: string) => `  ${line}`),
--            ...shellNotes.map((line) => `  ${line}`),
--            `  OS Version: ${osVersion}`,
--            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
--            `  Platform: ${process.platform}`,
--            `  Today's date: ${new Date().toDateString()}`,
--            ...(isWorktree ? [`This is a git worktree — run ALL commands from this directory.`, `Do NOT cd to the original repository root.`] : []),
--            `</env>`,
++        // 环境整体放到稳定指引之后，不改写 Session 起始 Git 快照或 shell 来源。
++        const environment = [
+             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
+             `Here is some useful information about the environment you are running in:`,
+             `<env>`,
+@@ -200,8 +200,9 @@
+             // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
+             ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
+             `</env>`,
 -          ].join("\n"),
-+          
++          ].join("\n")
++        return [
            references.length === 0
              ? undefined
              : [
-@@ -268,6 +253,23 @@
-         `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, state that plainly and explain the blocker.`,
-         `# Context continuity\n\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
-           `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
-+          [
-+          // 环境信息块移到末尾：避免 env 内容影响 system prompt 前缀
-+                      `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
-+            `Here is some useful information about the environment you are running in:`,
-+            `<env>`,
-+            `  Working directory: ${ctx.directory}`,
-+            `  Workspace root folder: ${ctx.worktree}`,
-+            // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
-+            ...gitContext.split("\n").map((line: string) => `  ${line}`),
-+            ...shellNotes.map((line) => `  ${line}`),
-+            `  OS Version: ${osVersion}`,
-+            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-+            `  Platform: ${process.platform}`,
-+            `  Today's date: ${new Date().toDateString()}`,
-+            ...(isWorktree ? [`This is a git worktree — run ALL commands from this directory.`, `Do NOT cd to the original repository root.`] : []),
-+            `</env>`,
-+          ].join("\n"),
+                 "Project references provide additional directories that can be accessed when relevant.",
+@@ -221,6 +222,7 @@
+               ].join("\n"),
+           SystemContextBuiltIns.ACTION_GUIDANCE,
+           SystemContextBuiltIns.OUTPUT_GUIDANCE,
++          environment,
          ].filter((part): part is string => part !== undefined)
        }),
  
 
+diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
+--- a/packages/opencode/src/session/llm/request.ts
++++ b/packages/opencode/src/session/llm/request.ts
+@@ -62,9 +62,10 @@
+   const toolGuidance = SystemContextBuiltIns.toolUsage(Object.keys(tools))
+   const system = [
+     [
++      // 当前权限过滤后的工具指引先于静态提示和环境，两个运行时共用此 producer。
++      ...(toolGuidance ? [toolGuidance] : []),
+       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+       ...input.system,
+-      ...(toolGuidance ? [toolGuidance] : []),
+       ...(input.user.system ? [input.user.system] : []),
+     ]
+       .filter((x) => x)
+
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -272,7 +272,7 @@
+         // 自定义 agent system 替代模型族默认提示；公共 Context 与工具指引继续存在。
+         // 每轮按实际模型及权限过滤后的工具广告生成，不污染稳定 Context Epoch。
+-        system: [agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
+-          toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline, toolGuidance,
++        system: [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
++          toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
+           `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
+           .filter((part): part is string => part !== undefined && part.length > 0)
+           .map(SystemPart.make),
+
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -258,6 +258,15 @@
+     const context = SystemContext.combine([
++      // 新 generation 的稳定指引先于环境；既有 key/codec 与持久化 baseline 不重写。
++      SystemContext.make({
++        key: SystemContext.Key.make("core/action-guidance"),
++        codec: Schema.toCodecJson(Schema.String),
++        load: Effect.succeed([ACTION_GUIDANCE, OUTPUT_GUIDANCE].join("\n\n")),
++        baseline: (text) => text,
++        update: (_previous, text) => text,
++      }),
++      // 环境、Git、日期仍是独立 source，后续变化沿用原有 reconcile 与历史更新。
+       SystemContext.make({
+         key: SystemContext.Key.make("core/environment"),
+         codec: Schema.toCodecJson(Schema.String),
+         load: Effect.succeed(environment),
+         baseline: (environment) =>
+@@ -281,17 +290,7 @@
+         baseline: (date) => `Today's date: ${date}`,
+         update: (_previous, date) => `Today's date is now: ${date}`,
+       }),
+-      // 独立 source 接纳稳定指引，已有 environment/Git 快照无需被整体替换或重采样。
+-      SystemContext.make({
+-        key: SystemContext.Key.make("core/action-guidance"),
+-        // 字符串 codec 让提示版本变化可被既有 reconcile 精确比较，而非覆盖默认 agent。
+-        codec: Schema.toCodecJson(Schema.String),
+-        // 两个完整 literal 一起接纳；没有重复注册 environment 或重新采集 Git 的捷径。
+-        load: Effect.succeed([ACTION_GUIDANCE, OUTPUT_GUIDANCE].join("\n\n")),
+-        baseline: (text) => text,
+-        update: (_previous, text) => text,
+-      }),
+     ])
+ 
+     yield* registry.register({ key: SystemContext.Key.make("core/builtins"), load: Effect.succeed(context) })
+   }),
+
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -1,5 +1,4 @@
+ import { Effect, Schema } from "effect"
+ import { createHash, randomUUID } from "node:crypto"
+-import { HttpTransport } from "../route/transport"
+ import { Route } from "../route/client"
+ import { Auth } from "../route/auth"
+@@ -925,7 +924,6 @@
+-// 复用现有 HTTP 执行/取消路径，只在最终 overlay 编码之后修补自有五位 CCH。
+-const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
++// 固定零值不需要专用签名 transport；标准路径保留 overlay、鉴权和取消契约。
+ export const route = Route.make({
+   id: ADAPTER,
+   provider: "anthropic",
+   protocol,
+   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
+@@ -932,20 +930,7 @@
+   auth: Auth.none,
+-  transport: {
+-    ...transport,
+-    prepare: (input) => Effect.gen(function* () {
+-      if (input.request.model.provider !== "claudecode") return yield* transport.prepare(input)
+-      const parts = yield* HttpTransport.jsonRequestParts(input)
+-      // Schema/return 保证自有 ASCII 首块；URL、MCP 和用户 UTF-8 内容不影响定位。
+-      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
+-      if (!parts.bodyText.startsWith(`${prefix}00000;`)) return yield* invalid("ClaudeCode billing layout changed before transport")
+-      // xxHash64 零种子低 20 位只覆盖占位值，不重新解析或编码已合并的请求。
+-      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
+-      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
+-      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
+-    }),
+-  },
++  framing: Framing.sse,
+   // 请求头在 protocol route 的既有构造点产生，运输层仍拥有取消和 stream 生命周期。
+   headers: ({ request }) => {
+     // 使用已合并的配置/variant beta；仅在协议 owner 去重，不生成另一条 HTTP 覆盖路径。
+     const betas = anthropicOptions(request)?.betas
+     return {
+diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
+--- a/packages/llm/test/provider/anthropic-messages.test.ts
++++ b/packages/llm/test/provider/anthropic-messages.test.ts
+@@ -931,3 +931,3 @@
+-  it.effect("preserves raw ClaudeCode system and signs final wire bytes", () =>
++  it.effect("preserves raw ClaudeCode system and fixed zero CCH on the wire", () =>
+     Effect.gen(function* () {
+       const route = AnthropicMessages.route.with({ provider: "claudecode" })
+@@ -967,10 +967,6 @@
+           const fp = createHash("sha256").update("59cf53e54c78ehu2.1.117").digest("hex").slice(0, 3)
+           const prefix = `{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=`
+-          expect(text.startsWith(prefix)).toBe(true)
+-          const offset = prefix.length
+-          // 只还原自有五位占位，独立校验最终 overlay/metadata/thinking 的完整 UTF-8 字节。
+-          const zeroed = text.slice(0, offset) + "00000" + text.slice(offset + 5)
+-          const cch = (Bun.hash.xxHash64(new TextEncoder().encode(zeroed)) & 0xfffffn).toString(16).padStart(5, "0")
+-          expect(text.slice(offset, offset + 5)).toBe(cch)
++          // 断言真实发包前缀固定五位零；raw/cache/metadata 的既有矩阵继续执行。
++          expect(text.startsWith(`${prefix}00000;`)).toBe(true)
+           expect(text).toContain("中文 cch=00000;")
+           expect(text).not.toContain("You are Claude Code")
+
+diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
+--- a/packages/opencode/test/session/system.test.ts
++++ b/packages/opencode/test/session/system.test.ts
+@@ -108,4 +108,7 @@
+     const text = (yield* prompt.environment({ providerID: "test", api: { id: "test" } } as Provider.Model)).join("\n")
++    // 检查真实 environment producer，稳定指引先于包含模型身份的环境尾块。
++    expect(text.indexOf("# Doing tasks")).toBeGreaterThanOrEqual(0)
++    expect(text.indexOf("You are powered by")).toBeGreaterThan(text.indexOf("# Doing tasks"))
+     expect(text).toContain("Is directory a git repo: no")
+     expect(text).not.toContain("Git user:")
+     expect(text).not.toContain("Recent commits:")
+
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -1255,7 +1255,7 @@
+           model: resolved,
+           agent,
+           permission: [{ permission: "question", pattern: "*", action: "allow" }],
+-          system: ["You are a helpful assistant."],
++          system: ["You are a helpful assistant.", "<env>request environment</env>"],
+           messages: [{ role: "user", content: "Hello" }],
+           tools: {
+             question: tool({
+@@ -1269,6 +1269,13 @@
+         const capture = yield* Effect.promise(() => request)
+         const tools = capture.body.tools as Array<{ function?: { name?: string } }> | undefined
+         expect(tools?.some((item) => item.function?.name === "question")).toBe(true)
++        // 真实 HTTP 捕获验证最终 system，而非单独调用 toolUsage 复制生产逻辑。
++        const messages = capture.body.messages as Array<{ role: string; content: string }>
++        const system = messages.filter((message) => message.role === "system").map((message) => message.content).join("\n")
++        expect(system.indexOf("# Using your tools")).toBeGreaterThanOrEqual(0)
++        expect(system.indexOf("You are a helpful assistant.")).toBeGreaterThan(system.indexOf("# Using your tools"))
++        expect(system.indexOf("<env>")).toBeGreaterThan(system.indexOf("You are a helpful assistant."))
++        expect(system).not.toContain("To read files use the read tool")
+       }),
+     {
+       config: () => ({
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -872,10 +872,11 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
+       yield* session.resume(sessionID)
+ 
++      // 工具指引前置不改变持久 baseline；生产者变化仍只追加到 chronological messages。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
+       ])
+       // echo/defect 的真实请求不广告 bash，完整 system 不能从宿主默认 shell 泄漏 Git 政策。
+       expect(requests[0]?.system.map((part) => part.text).join("\n")).not.toContain("# Git repository state changes")
+       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
+@@ -914,8 +915,8 @@
+       response = fragmentFixture("text", "text-build", ["Done"]).completeEvents
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+-      // false 必须进入实际 provider turn；自定义 system 仍是第一块且没有族提示重复。
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Build agent instructions", "Initial context", expectedModelIdentity])
++      // false 仍进入实际 turn；自定义 agent 紧随工具指引，不被默认族提示重复或替换。
+       expect(requests.at(-1)?.providerOptions?.openai?.parallelToolCalls).toBe(false)
+     }),
+   )
+@@ -944,7 +945,13 @@
+         // 稳定 baseline 仍仅出现一次；族提示与真实模型身份都不进入持久 source。
+         expect(parts.filter((part) => part === "Initial context")).toHaveLength(1)
+         expect(parts).toHaveLength(marker === undefined ? 3 : 4)
+-        if (marker !== undefined) expect(parts[0]).toContain(marker)
++        // 完整数组同时约束能力前缀、族提示位置、唯一 baseline 与当前模型尾块。
++        expect(parts).toEqual([
++          expectedToolGuidance,
++          ...(marker === undefined ? [] : [expect.stringContaining(marker)]),
++          "Initial context",
++          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`,
++        ])
+         // 当前 fixture 只注册 echo/defect，不能从源模板发明文档、计划或子任务工具。
+         expect(parts.join("\n")).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
+       }))
+@@ -973,7 +980,7 @@
+       response = fragmentFixture("text", "text-reviewer", ["Done"]).completeEvents
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Reviewer instructions", "Initial context", expectedModelIdentity])
+       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
+     }),
+   )
+@@ -1002,7 +1009,7 @@
+       response = fragmentFixture("text", "text-selected", ["Done"]).completeEvents
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Reviewer instructions", "Initial context", expectedModelIdentity])
+       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
+     }),
+   )
+@@ -1029,9 +1036,9 @@
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, "Initial context\n\nBuild skills", expectedModelIdentity],
++        [expectedToolGuidance, "Initial context\n\nBuild skills", expectedModelIdentity],
+       ])
+       expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
+     }),
+   )
+@@ -1063,7 +1070,7 @@
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, "Initial context\n\nBuild skills", expectedModelIdentity],
+       ])
+     }),
+   )
+@@ -1181,7 +1188,7 @@
+       yield* session.resume(sessionID)
+       expect(requests.map((request) => request.model)).toEqual([model])
+       // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
+-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context", expectedToolGuidance, expectedModelIdentity]])
++      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[expectedToolGuidance, "Initial context", expectedModelIdentity]])
+     }),
+   )
+ 
+@@ -1231,10 +1238,10 @@
+ 
+       // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
+       ])
+       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
+       expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
+       expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual([
+@@ -1277,9 +1284,9 @@
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
++        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
+       ])
+     }),
+   )
+@@ -1315,10 +1322,10 @@
+ 
+       // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Replacement context", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, "Replacement context", expectedModelIdentity],
+       ])
+       yield* replaySessionProjection(sessionID)
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+       yield* session.resume(sessionID)
+     }),
+@@ -1718,7 +1725,7 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context", expectedToolGuidance, expectedModelIdentity])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Initial context", expectedModelIdentity])
+       expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
+     }),
+   )
+@@ -1917,10 +1924,10 @@
+ 
+       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [expectedToolGuidance, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
+       ])
+       expect(systemTexts(requests[1]!)).toContain("Replacement context")
+     }),
+   )
+ 
+
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -224,8 +224,11 @@
+       const context = yield* SystemContextRegistry.Service
+       const initialized = yield* SystemContext.initialize(yield* context.load())
+ 
++      // 全文比较固定 general 在环境/日期前，独立 source 的持久值仍在下面逐项校验。
+       expect(initialized.baseline).toBe(
+         [
++          expectedGuidance,
++          "",
+           "Here is some useful information about the environment you are running in:",
+           "<env>",
+           `  Working directory: ${directory}`,
+@@ -237,9 +240,7 @@
+           "</env>",
+           "",
+           `Today's date: ${localDate(timestamp)}`,
+-          "",
+-          expectedGuidance,
+         ].join("\n"),
+       )
+       // 禁用 Git 的固定 fixture 只有三个 source；不能因新增指引泄露 Git 或工具 Shell 注册。
+       expect(Object.keys(initialized.snapshot).sort()).toEqual(["core/action-guidance", "core/date", "core/environment"])
+@@ -286,10 +287,12 @@
+       yield* TestClock.setTime(timestamp)
+       const context = yield* SystemContextRegistry.Service
+ 
+-      // ambient instructions 仍须位于稳定指引之后；完整比较防止二者被重新排序或吞并。
++      // ambient 仍在完整 builtins baseline 之后；前置 general 不能吞掉环境或项目指令。
+       expect((yield* SystemContext.initialize(yield* context.load())).baseline).toBe(
+         [
++          expectedGuidance,
++          "",
+           "Here is some useful information about the environment you are running in:",
+           "<env>",
+           `  Working directory: ${directory}`,
+           `  Workspace root folder: ${projectDirectory}`,
+@@ -301,10 +304,8 @@
+           "",
+           `Today's date: ${localDate(timestamp)}`,
+           "",
+-          expectedGuidance,
+-          "",
+           `Instructions from: ${instructionFile}\nBe precise.`,
+         ].join("\n"),
+       )
+     }),
+   )
+ })

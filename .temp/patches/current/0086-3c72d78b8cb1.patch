@@ -80,23 +80,23 @@ index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc42424559273
        <Match when={props.metadata.diagnostics !== undefined}>
          <BlockTool
            title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
-@@ -2555,6 +2611,8 @@
-           {/* 使用 maxHeight 限制初始显示高度，展开时移除限制 */}
-           <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
+@@ -2598,6 +2657,8 @@
+           {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
+           <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
              <diff
 +              // 同步滚动：diff 视图与代码视图同步滚动，提升编辑体验
 +              syncScroll={true}
                diff={diffContent()}
                view={view()}
                filetype={ft()}
-@@ -2652,6 +2710,7 @@
-                 {/* 内联 diff 组件：移除独立 Diff 函数，直接使用 maxHeight 控制折叠 */}
-                     <box paddingLeft={1} maxHeight={patchExpanded() ? undefined : 15}>
-                       <diff
-+                        syncScroll={true}
-                         diff={file.patch || ""}
-                         view={view()}
-                         filetype={filetype(file.filePath)}
+@@ -2696,6 +2757,7 @@
+                 {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
+                 <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
+                   <diff
++                    syncScroll={true}
+                     diff={file.patch || ""}
+                     view={view()}
+                     filetype={filetype(file.filePath)}
 
 
 diff --git a/packages/tui/src/routes/session/permission.tsx b/packages/tui/src/routes/session/permission.tsx

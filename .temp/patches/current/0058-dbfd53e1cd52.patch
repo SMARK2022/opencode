@@ -8,11 +8,11 @@ diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 -          try: () =>
 -            createCliRenderer({
 +          try: async () => {
-+            // macOS 上编译的 Bun 二进制可能使用 wcwidth 模式，对 CJK 字符渲染异常
++            // macOS 编译 Bun 的 native locale 可能让系统 wcwidth 对 CJK 返回 -1，改用内置宽度表。
 +            if (process.platform === "darwin") {
 +              process.env.OPENTUI_FORCE_UNICODE = "1"
 +            }
-+            // 转为 async block body 以支持环境变量设置后再创建渲染器
++            // 宽度模式由实际渲染器创建时读取，不能延到主题等待或挂载之后再设置。
 +            return createCliRenderer({
                externalOutputMode: "passthrough",
                targetFps: 60,

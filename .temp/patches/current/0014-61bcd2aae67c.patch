@@ -1,190 +1,277 @@
+diff --git a/packages/schema/src/session.ts b/packages/schema/src/session.ts
+--- a/packages/schema/src/session.ts
++++ b/packages/schema/src/session.ts
+@@ -26,2 +26,6 @@
+   assistantID: Schema.String.pipe(optional),
++  // #14 才引入当前 step；请求累计 input/output 的范围保持不变。
++  // 这两项来自最后一步确认值，不是从请求累计或会话累计反推。
++  stepInput: Schema.Finite,
++  stepOutput: Schema.Finite,
+   model: Schema.Struct({
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -68,4 +68,17 @@
+     ), last_assistant AS (
+       -- 最后助手与模型随请求读出，用户被窗口淘汰后仍能锁定同一请求尾部。
+       SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
++    ), last_step AS (
++      -- V1 parts 按 ID 排序，最后 step-finish 不等于最后一个任意 part。
++      SELECT p.id, p.data FROM part p JOIN last_assistant a ON a.kind = 'v1' AND a.id = p.message_id
++      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
++      ORDER BY p.id DESC LIMIT 1
++    ), step AS (
++      -- native 每个助手就是一轮；V1 未完成且还有尾部时不能沿用旧 step 确认值。
++      SELECT CASE WHEN a.kind = 'native' THEN a.data
++        WHEN json_extract(a.data, '$.time.completed') IS NULL AND EXISTS (
++          SELECT 1 FROM part p WHERE p.message_id = a.id AND p.session_id = "session"."id"
++            AND p.id > coalesce((SELECT id FROM last_step), '')
++        ) THEN '{}' ELSE coalesce((SELECT data FROM last_step), '{}') END AS data
++      FROM last_assistant a
+     )
+@@ -77,1 +90,1 @@
+-      -- 请求费用忠实取助手 cost，不拿全局 cost 或 token 价格反推替代。
++      -- 费用仍取完整请求的助手 cost，当前 step 的展示变化不缩窄费用范围或反推价格。
+@@ -79,2 +92,8 @@
+       'assistantID', (SELECT id FROM last_assistant),
++      'stepInput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.input'), 0)
++        + coalesce(json_extract(data, '$.tokens.cache.read'), 0)
++        + coalesce(json_extract(data, '$.tokens.cache.write'), 0) FROM step), 0),
++      'stepOutput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.output'), 0)
++        + coalesce(json_extract(data, '$.tokens.reasoning'), 0) FROM step), 0),
++      -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
+       'model', json((SELECT json_object(
+@@ -92,2 +111,3 @@
+       assistantID: Schema.NullOr(Schema.String),
++      stepInput: Schema.Finite, stepOutput: Schema.Finite,
+       model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -310,14 +310,17 @@
-     const lastUser = users.at(-1)
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
--    // input/output 默认展示"本次请求"累计；括号内显示会话总累计
-+    // 本次请求尚无助手回复时显示零值
-+    if (requestAssistants.length === 0) {
+@@ -286,12 +286,14 @@
+     // 身份和已确认请求累计来自完整投影；缓存中用户缺失不等于请求缺失。
+     // 这里只读取最后助手的流式尾部，不从 100 条显示页计算已确认总量。
+     const request = session?.request
++    // 空回复由持久化 assistantID 判断，不能由缓存筛选长度判断。
++    // 新请求尚无回复时清零请求与 step，旧请求的费用和尾部均不得借用。
++    if (!request?.assistantID) {
 +      if (!isRunning) return
 +      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
 +    }
-+
-+    // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-     const requestConfirmed = sumConfirmed(requestAssistants)
--    const globalConfirmed = sumConfirmed(assistants)
+     const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+-    // #12 保留请求/全局两种累计，当前 step 的主值演进只属于 #14。
+-    const agg = {
+-      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
+-      output: confirmed.output + confirmed.reasoning,
+-    }
++    // #14 主值改为当前 step，括号改为当前请求累计，全局 tokens 不被改写。
  
--    // 从最后一条（可能正在进行中的）消息添加流式估算
--    // 优先取本次请求的最后一条，无则回退到全局最后一条
--    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
--    const last = activeAssistants.at(-1)!
-+    // 从最后一条消息添加流式估算
-+    const last = requestAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
+@@ -299,1 +301,2 @@
++    // 流式字符仅来自当前助手未确认尾部，不能把 step-finish 之前内容再计入。
      const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-     // 流式输出：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
-@@ -342,16 +345,27 @@
-           return sum
-         }, 0)
- 
--    // 拆分为本次请求和会话总累计的输入输出
-+    // 拆分为当前 step 和请求累计的输入输出
-     // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
-     const pendingInputTokens = Math.round(pendingIn / 4)
-     const pendingOutputTokens = Math.round(streamingOut / 4)
--    // currentInput/Output 来自本次请求的已确认 token + 流式估算
--    const currentInput = requestConfirmed.input + pendingInputTokens
--    const currentOutput = requestConfirmed.output + pendingOutputTokens
--    // totalInput/Output 来自全部助手消息的已确认 token + 流式估算
--    const totalInput = globalConfirmed.input + pendingInputTokens
--    const totalOutput = globalConfirmed.output + pendingOutputTokens
-+    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
-+    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-+    const lastStepFinish = [...lastParts].reverse().find((p) => p.type === "step-finish")
-+    const currentStepInputConfirmed =
-+      !hasInFlightTail && lastStepFinish
-+        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-+        : 0
-+    const currentStepOutputConfirmed =
-+      !hasInFlightTail && lastStepFinish
-+        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-+        : 0
-+    // currentInput/Output 来自当前 step 的已确认 token + 流式估算
-+    const currentInput = currentStepInputConfirmed + pendingInputTokens
-+    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
-+    // totalInput/Output 来自本次请求的累计 token + 流式估算
-+    const totalInput = requestConfirmed.input + pendingInputTokens
-+    const totalOutput = requestConfirmed.output + pendingOutputTokens
-     // requestTokens 用于 context 百分比，totalTokens 用于括号显示
+@@ -321,7 +324,10 @@
+-    const totalInput = agg.input + Math.round(pendingIn / 4)
+-    const totalOutput = agg.output + Math.round(streamingOut / 4)
+-    // 流式估算只属于已证实的当前请求助手，同一尾部各加入一次。
+-    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
+-    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
++    // part 的流式事件可先于请求快照到达，当前可见尾部立即遮掉旧 step 确认值。
++    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
++    // 当前 step 确认值随完整投影读出，native 无 V1 parts 也有真实确认用量。
++    const currentInput = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
++    const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
++    // 括号是请求所有轮次累计，不能用最后一步或 Session.tokens 替代。
++    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
++    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
      const requestTokens = currentInput + currentOutput
      const totalTokens = totalInput + totalOutput
-
-
+@@ -336,2 +342,4 @@
+-    const cost = session?.cost ?? 0
++    // 恢复源提交的请求费用范围；服务端来源并不使 Session.cost 等同请求 cost。
++    // 确认价格继续由原生产者计算，此处只消费完整请求的助手费用求和。
++    const cost = request.cost
+     return {
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -62,15 +62,16 @@
-     const lastUser = users.at(-1)
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
+@@ -17,3 +17,2 @@
+   const session = createMemo(() => props.api.state.session.get(props.session_id))
+-  const cost = createMemo(() => session()?.cost ?? 0)
  
--    // 侧边栏主值显示"本次请求"，括号里显示会话总累计
-+    // 本次请求尚无助手回复时返回零值，避免 at(-1)! 解引用 undefined
-+    if (requestAssistants.length === 0) {
-+      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
+@@ -22,2 +21,4 @@
+-  type StateValue = { tokens: number; totalTokens: number; input: number; output: number; totalInput: number; totalOutput: number; percent: number | null }
++  // 费用随 token 同一快照发布，不能继续读取独立的会话 cost memo。
++  // 零值状态也必须含 cost，避免新请求等待时保留上一请求费用。
++  type StateValue = { tokens: number; totalTokens: number; input: number; output: number; totalInput: number; totalOutput: number; percent: number | null; cost: number }
+ 
+@@ -30,2 +31,2 @@
+-      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
++      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
+     }
+@@ -33,10 +34,10 @@
+     // plugin 的 session.get 已直通同步 Session，不能另建 sidebar 私有请求账本。
+     const request = session()?.request
++    // 没有持久化助手才是新请求无回复；用户和早期助手被窗口淘汰不触发此分支。
++    if (!request?.assistantID) {
++      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }
 +    }
-+
-+    // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-     const requestConfirmed = sumConfirmed(requestAssistants)
--    const globalConfirmed = sumConfirmed(assistants)
- 
-     // 从最后一条消息添加流式估算
--    // 优先取本次请求的最后一条，无则回退到全局最后一条
--    // 回退场景：流式中尚未收到 step-finish，requestAssistants 为空
--    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
--    const last = activeAssistants.at(-1)!
-+    const last = requestAssistants.at(-1)!
-     const lastParts = props.api.state.part(last.id)
-     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-     // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
-@@ -94,16 +95,27 @@
-           return sum
-         }, 0)
- 
--    // 拆分为本次请求和会话总累计的输入输出
-+    // 拆分为当前 step 和请求累计的输入输出
-     // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
-     const pendingInputTokens = Math.round(pendingIn / 4)
-     const pendingOutputTokens = Math.round(streamingOut / 4)
--    // input/output 来自本次请求的已确认 token + 流式估算
--    const input = requestConfirmed.input + pendingInputTokens
--    const output = requestConfirmed.output + pendingOutputTokens
--    // totalInput/Output 来自全部助手消息的已确认 token + 流式估算
--    const totalInput = globalConfirmed.input + pendingInputTokens
--    const totalOutput = globalConfirmed.output + pendingOutputTokens
-+    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
-+    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-+    const lastStepFinish = [...lastParts].reverse().find((p) => p.type === "step-finish")
-+    const currentStepInputConfirmed =
-+      !hasInFlightTail && lastStepFinish
-+        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-+        : 0
-+    const currentStepOutputConfirmed =
-+      !hasInFlightTail && lastStepFinish
-+        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-+        : 0
-+    // input/output 来自当前 step 的已确认 token + 流式估算
-+    const input = currentStepInputConfirmed + pendingInputTokens
-+    const output = currentStepOutputConfirmed + pendingOutputTokens
-+    // totalInput/Output 来自本次请求的累计 token + 流式估算
-+    const totalInput = requestConfirmed.input + pendingInputTokens
-+    const totalOutput = requestConfirmed.output + pendingOutputTokens
-     // tokens 用于百分比，totalTokens 用于括号显示
+     const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+-    // 已确认全局累计仍取原有五项 tokens；显示窗口只提供当前流式尾部。
+-    const agg = {
+-      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
+-      output: confirmed.output + confirmed.reasoning,
+-    }
++    // 当前 step 确认值由完整请求投影提供，窗口只保留流式字符近似的职责。
+@@ -69,7 +70,9 @@
+-    const totalInput = agg.input + Math.round(pendingIn / 4)
+-    const totalOutput = agg.output + Math.round(streamingOut / 4)
+-    // 两个累计共享同一尾部估算，不把历史结算从缓存再次求和。
+-    const input = requestConfirmed.input + Math.round(pendingIn / 4)
+-    const output = requestConfirmed.output + Math.round(streamingOut / 4)
++    // 两个范围各加入一次当前尾部，stepInput 已排除尚未确认的 V1 尾部。
++    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
++    const input = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
++    const output = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
++    // 括号保留全部请求轮次，用投影而非缓存 sumConfirmed 保证长请求完整。
++    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
++    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
      const tokens = input + output
      const totalTokens = totalInput + totalOutput
-
-
+@@ -83,2 +86,5 @@
+       totalOutput,
+-      percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
++      // 没有当前 step 的上下文或模型上限时，保留缺省百分比而不捏造测量值。
++      percent: tokens > 0 && model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
++      // 请求费用是所有助手 cost 的完整求和，不是最后 step 的费用。
++      cost: request.cost,
+@@ -91,2 +97,3 @@
+-  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }, 50)
++  // 保留既有节流与脉冲生命周期，只把请求费用并入同一初始快照。
++  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null, cost: 0 }, 50)
+   createEffect(() => setStateThrottled(stateRaw()))
+@@ -105,3 +112,3 @@
+-      <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
+-      <text fg={theme().textMuted}>{money.format(cost())} spent</text>
++      <text fg={theme().textMuted}>{state().percent != null ? `${state().percent}% of ctx limit` : "—"}</text>
++      <text fg={theme().textMuted}>{money.format(state().cost)} spent</text>
+     </box>
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -85,14 +85,17 @@
-     const lastUser = users.at(-1)
-     const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
- 
--    // input/output 展示"本次请求"；括号为会话累计总量
-+    // 本次请求尚无助手回复时显示零值
-+    if (requestAssistants.length === 0) {
+@@ -59,10 +59,11 @@
+     // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
+     const request = session()?.request
++    // 子代理也按自己的持久化回复身份判空，不能用父请求或有限缓存补偿。
++    if (!request?.assistantID) {
 +      if (!isRunning) return
 +      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
 +    }
-+
-+    // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-     const requestConfirmed = sumConfirmed(requestAssistants)
--    const globalConfirmed = sumConfirmed(assistants)
- 
-     // 从最后一条消息添加流式估算
--    // 优先取本次请求的最后一条，无则回退到全局最后一条
--    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
--    const last = activeAssistants.at(-1)!
-+    const last = requestAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
-     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-     // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
-@@ -117,16 +120,27 @@
-           return sum
-         }, 0)
- 
--    // 拆分为本次请求和会话总累计的输入输出
-+    // 拆分为当前 step 和请求累计的输入输出
-     // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
-     const pendingInputTokens = Math.round(pendingIn / 4)
-     const pendingOutputTokens = Math.round(streamingOut / 4)
--    // currentInput/Output 来自本次请求的已确认 token + 流式估算
--    const currentInput = requestConfirmed.input + pendingInputTokens
--    const currentOutput = requestConfirmed.output + pendingOutputTokens
--    // totalInput/Output 来自全部助手消息的已确认 token + 流式估算
--    const totalInput = globalConfirmed.input + pendingInputTokens
--    const totalOutput = globalConfirmed.output + pendingOutputTokens
-+    // 当前 step：如果尾部有进行中的工具调用，则当前 step 尚未确认，显示 0
-+    const hasInFlightTail = !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-+    const lastStepFinish = [...lastParts].reverse().find((p) => p.type === "step-finish")
-+    const currentStepInputConfirmed =
-+      !hasInFlightTail && lastStepFinish
-+        ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
-+        : 0
-+    const currentStepOutputConfirmed =
-+      !hasInFlightTail && lastStepFinish
-+        ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-+        : 0
-+    // currentInput/Output 来自当前 step 的已确认 token + 流式估算
-+    const currentInput = currentStepInputConfirmed + pendingInputTokens
-+    const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
-+    // totalInput/Output 来自本次请求的累计 token + 流式估算
-+    const totalInput = requestConfirmed.input + pendingInputTokens
-+    const totalOutput = requestConfirmed.output + pendingOutputTokens
-     // requestTokens 用于 context 百分比，totalTokens 用于括号显示
+     const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+-    // requestConfirmed 与 confirmed 分属两个范围，不重新累计显示页的 parts。
+-    const agg = {
+-      input: confirmed.input + confirmed.cache.read + confirmed.cache.write,
+-      output: confirmed.output + confirmed.reasoning,
+-    }
++    // 主值属于当前 step；括号与费用都属于该子代理的完整当前请求。
+@@ -95,7 +96,9 @@
+-    const totalInput = agg.input + Math.round(pendingIn / 4)
+-    const totalOutput = agg.output + Math.round(streamingOut / 4)
+-    // 只把当前请求尾部加入请求累计；全局累计仍来自服务端 tokens。
+-    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
+-    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
++    // native 每步确认值也在投影中，不能因没有 V1 parts 而退回零历史累计。
++    const hasInFlightTail = !!last && !last.time.completed && lastParts.some((_, i) => i > lastSFIdx)
++    const currentInput = (hasInFlightTail ? 0 : request.stepInput) + Math.round(pendingIn / 4)
++    const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + Math.round(streamingOut / 4)
++    // 请求累计与 step 确认值独立，流式尾部在各自范围只计一次。
++    const totalInput = requestConfirmed.input + Math.round(pendingIn / 4)
++    const totalOutput = requestConfirmed.output + Math.round(streamingOut / 4)
      const requestTokens = currentInput + currentOutput
      const totalTokens = totalInput + totalOutput
-
-
+@@ -113,2 +116,4 @@
+-    const cost = session()?.cost ?? 0
++    // 恢复 footer 的请求费用 hunk，不把子代理 Session.cost 当作请求费用。
++    // 仍使用共享费用生产策略和现有 money 格式化，费用不参与箭头增长判断。
++    const cost = request.cost
+     return {
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -91,1 +91,4 @@
+         assistantID: "msg_native_usage_2", model: { providerID: "provider", modelID: "model" },
++        // 最后 native step 与两轮请求累计不同，验证 #14 没把请求总量显示成 step。
++        stepInput: 28, stepOutput: 8,
++        // 此确认值不依赖任何 V1 step-finish，也不依赖 TUI 消息窗口。
+@@ -138,1 +141,4 @@
+         messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
++        // 新 admission 没有回复时 step 也必须为零，不能沿用最后一次旧结算。
++        stepInput: 0, stepOutput: 0,
++        // 保留 assistantID 缺省，避免把“无回复”与“已有未结算回复”混为一类。
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -2232,3 +2232,5 @@
+       expect((yield* session.get(sessionID)).request).toMatchObject({
+         messageID: queued.id, assistantID: messages.findLast((message) => message.type === "assistant")?.id, input: 10, output: 4, cost: 0,
++        // 混合入口最后提升的 queue 同时拥有 step 和请求累计，V1 noReply 不能使 step 归零。
++        stepInput: 10, stepOutput: 4,
+       })
+@@ -2243,3 +2245,5 @@
+       expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: waiting.id, input: 0, output: 0, cost: 0 })
++      // 再接纳等待请求后 step 也清零，不能借用刚完成的 native step。
++      expect((yield* session.get(sessionID)).request).toMatchObject({ stepInput: 0, stepOutput: 0 })
+       expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
+       expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
+diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/test/session/session.test.ts
+--- a/packages/opencode/test/session/session.test.ts
++++ b/packages/opencode/test/session/session.test.ts
+@@ -193,1 +193,4 @@
+       expect(snapshots.at(-1)?.request?.input).toBe(1428)
++      // 请求跨窗口累计 102 步，主值却只显示最后助手的一步，而非整个请求。
++      expect((yield* session.get(created.id)).request).toMatchObject({ stepInput: 14, stepOutput: 4 })
++      // 费用仍属于请求所有助手，新增 step 字段不能缩窄原有请求费用口径。
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -3046,6 +3046,8 @@
+   output: number
+   cost: number
+   assistantID?: string
++  stepInput: number
++  stepOutput: number
+   model?: {
+     providerID: string
+     modelID: string
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -245,5 +245,7 @@
+       readonly output: number
+       readonly cost: number
+       readonly assistantID?: string
++      readonly stepInput: number
++      readonly stepOutput: number
+       readonly model?: { readonly providerID: string; readonly modelID: string }
+     }
+@@ -315,5 +317,7 @@
+       readonly output: number
+       readonly cost: number
+       readonly assistantID?: string
++      readonly stepInput: number
++      readonly stepOutput: number
+       readonly model?: { readonly providerID: string; readonly modelID: string }
+     }
+@@ -361,5 +365,7 @@
+       readonly output: number
+       readonly cost: number
+       readonly assistantID?: string
++      readonly stepInput: number
++      readonly stepOutput: number
+       readonly model?: { readonly providerID: string; readonly modelID: string }
+     }

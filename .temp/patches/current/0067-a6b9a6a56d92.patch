@@ -6,10 +6,14 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E7=88=B6=E4=BB=A3?=
  =?UTF-8?q?=EF=BC=8C=E4=BB=A5=E5=A2=9E=E5=BC=BA=E4=BB=BB=E5=8A=A1=E4=BC=9A?=
 
 diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/opencode/src/agent/subagent-permissions.ts
-index b1b99b484e..36ab2d4a75 100644
 --- a/packages/opencode/src/agent/subagent-permissions.ts
 +++ b/packages/opencode/src/agent/subagent-permissions.ts
-@@ -11,13 +11,21 @@ import type { Agent } from "./agent"
+@@ -8,18 +8,24 @@ import type { Agent } from "./agent"
+  * 1. The parent session's deny rules and external_directory rules.
+- *    Parent agent restrictions only govern that agent; the subagent's own
+- *    permissions determine its capabilities.
++ *    Ordered parent-agent non-allow restrictions also bound delegation;
++ *    matching parent asks and denies take precedence over session grants.
   * 2. Default `todowrite` and `task` denies if the subagent's own ruleset
   *    doesn't already permit them.
   */
@@ -22,31 +26,137 @@ index b1b99b484e..36ab2d4a75 100644
 +    parentSessionPermission: PermissionV1.Ruleset
 +    subagent: Agent.Info
 +  },
-+  // 父代理非 allow 规则：下放到 task 子会话，防止子代理静默放宽
++  // 父 allow 不扩张子能力；空默认只供没有父代理限制的独立 helper 调用。
 +  parentAgentPermission: PermissionV1.Ruleset = [],
 +): PermissionV1.Ruleset {
    const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
    const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
-+  // #67：parent-agent non-allow 在前，session external_directory/deny 在后
-+  // findLast 后写胜出：会话级 external_directory allow 不被 agent 默认 "* ask" 覆盖
-+  const parentDenyRules = parentAgentPermission.filter((rule) => rule.action !== "allow")
    return [
-+    ...parentDenyRules,
      ...input.parentSessionPermission.filter(
        (rule) => rule.permission === "external_directory" || rule.action === "deny",
      ),
++    // source 后写父 non-allow：ask/deny 均覆盖会话 grant，原序保留最后匹配语义。
++    ...parentAgentPermission.filter((rule) => rule.action !== "allow"),
+     ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+     ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
+diff --git a/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts b/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
+--- a/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
++++ b/packages/opencode/test/agent/plan-mode-subagent-bypass.test.ts
+@@ -29,1 +29,1 @@
+-it.instance("subagent permissions take precedence over parent agent restrictions", () =>
++it.instance("subagent inherits the executing parent agent's edit restriction", () =>
+@@ -43,4 +43,2 @@
+-    const subagentSessionPermission = deriveSubagentSessionPermission({
+-      parentSessionPermission,
+-      subagent: generalAgent!,
+-    })
++    // 传真实父权限，固定期望才会检查 Task 的继承分支而非空默认。
++    const subagentSessionPermission = deriveSubagentSessionPermission({ parentSessionPermission, subagent: generalAgent! }, planAgent!.permission)
+@@ -52,2 +50,2 @@
+-    expect(Permission.evaluate("edit", "/some/file.ts", effective).action).not.toBe("deny")
+-    expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set())
++    expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("deny")
++    expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set(["edit", "write", "apply_patch"]))
+@@ -74,1 +72,1 @@
+-  "custom subagent can explicitly enable edits denied to its parent agent",
++  "custom subagent cannot enable edits denied to its executing parent agent",
+@@ -83,4 +81,2 @@
+-      const subagentSessionPermission = deriveSubagentSessionPermission({
+-        parentSessionPermission,
+-        subagent: my!,
+-      })
++      // 自定义子代理同样承接执行代理限制，不以子代理身份绕过 source 顺序。
++      const subagentSessionPermission = deriveSubagentSessionPermission({ parentSessionPermission, subagent: my! }, planAgent!.permission)
+@@ -90,2 +86,2 @@
+-      expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("allow")
+-      expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set())
++      expect(Permission.evaluate("edit", "/some/file.ts", effective).action).toBe("deny")
++      expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set(["edit", "write", "apply_patch"]))
+@@ -160,1 +156,20 @@
+ )
++
++it.effect("directory grants retain source parent non-allow precedence", () =>
++  Effect.sync(() => {
++    const executor = testAgent({ name: "executor", mode: "subagent", permission: { external_directory: "allow" } })
++    const grant = Permission.fromConfig({ external_directory: { "/tmp/allowed/*": "allow" } })
++    // 六行固定 oracle 同时约束父 ask、deny、原序与无父限制的 grant，不能由 helper 反算期望。
++    for (const [parent, expected] of [
++      [[], "allow"],
++      [Permission.fromConfig({ external_directory: "ask" }), "ask"],
++      [Permission.fromConfig({ external_directory: "deny" }), "deny"],
++      [Permission.fromConfig({ external_directory: { "*": "deny", "/tmp/allowed/*": "ask" } }), "ask"],
++      [Permission.fromConfig({ external_directory: { "*": "ask", "/tmp/allowed/*": "deny" } }), "deny"],
++      [Permission.fromConfig({ external_directory: "allow" }), "allow"],
++    ] as const) {
++      const rules = deriveSubagentSessionPermission({ parentSessionPermission: grant, subagent: executor }, parent)
++      expect(Permission.evaluate("external_directory", "/tmp/allowed/file", executor.permission, rules).action).toBe(expected)
++    }
++  }),
++)
+diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
+--- a/packages/opencode/test/tool/task.test.ts
++++ b/packages/opencode/test/tool/task.test.ts
+@@ -8,1 +8,2 @@
+ import { BackgroundJob } from "@/background/job"
++import { Permission } from "../../src/permission"
+@@ -252,1 +253,3 @@
+-      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
++      // 恢复复用已保存权限；不能把当前调用代理的限制回写成旧会话的新策略。
++      const permission = [{ permission: "external_directory", pattern: "/saved/*", action: "allow" }] as const
++      const child = yield* sessions.create({ parentID: chat.id, title: "Existing child", permission })
+@@ -279,1 +282,3 @@
+       expect(kids[0]?.id).toBe(child.id)
++      // 从 Session owner 重新读取，避免只比较恢复前内存对象而漏掉 durable 回写。
++      expect((yield* sessions.get(child.id)).permission).toEqual([...permission])
+@@ -291,3 +296,6 @@
+       const { chat, assistant } = yield* seed()
++      // 真实 Task 中的父默认 ask 也须覆盖旧会话 grant，保留 source 的更强审批。
++      yield* sessions.setAgentModel({ sessionID: chat.id, agent: "build", model: { id: ref.modelID, providerID: ref.providerID }, time: Date.now() })
++      yield* sessions.setPermission({ sessionID: chat.id, permission: [{ permission: "external_directory", pattern: "/tmp/allowed/*", action: "allow" }] })
+       const tool = yield* TaskTool
+       const def = yield* tool.init()
+@@ -305,1 +313,2 @@
+-            agent: "build",
++            // 父 Session 固定 build、目标为 general；plan 独立证明 ctx 才是委派权限源。
++            agent: "plan",
+@@ -322,1 +331,5 @@
+       expect(child).toBeDefined()
++      // 不调用 derive 计算期望：真实 Task 创建出的子会话必须包含固定的 plan 编辑禁令。
++      expect(child?.permission).toEqual(expect.arrayContaining([{ permission: "edit", pattern: "*", action: "deny" }]))
++      expect(Permission.evaluate("edit", "/some/file.ts", child?.permission ?? []).action).toBe("deny")
++      expect(Permission.evaluate("external_directory", "/tmp/allowed/file", child?.permission ?? []).action).toBe("ask")
+@@ -619,2 +632,10 @@
++        // source 过滤父 allow 后仍保留默认禁令；完整顺序比较同时守住继承边界与末尾工具 deny。
+         expect(child.permission).toEqual([
++          { permission: "doom_loop", pattern: "*", action: "ask" },
++          { permission: "external_directory", pattern: "*", action: "ask" },
++          { permission: "question", pattern: "*", action: "deny" },
++          { permission: "plan_enter", pattern: "*", action: "deny" },
++          { permission: "plan_exit", pattern: "*", action: "deny" },
++          { permission: "read", pattern: "*.env", action: "ask" },
++          { permission: "read", pattern: "*.env.*", action: "ask" },
+           {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1165,1 +1165,1 @@
+-it.instance("subtask child inherits parent session external_directory allow", () =>
++it.instance("subtask child inherits directory grant beneath executing parent ask", () =>
+@@ -1187,1 +1187,2 @@
+-    expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("allow")
++    // source 过滤父 allow 后仍保留默认 ask；继承 grant 的存在不能替代最终优先级检查。
++    expect(Permission.evaluate("external_directory", "/tmp/allowed/file", rules).action).toBe("ask")
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
-index b0a866c90e..55bec3289f 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -136,6 +136,11 @@
+@@ -137,9 +137,14 @@
          ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
          : undefined
 -      const childPermission = deriveSubagentSessionPermission({
 -        parentSessionPermission: parent.permission ?? [],
 -        subagent: next,
 -      })
-+      // 以当前执行代理 ctx.agent 为父权限源（非仅持久化 parent.agent）
++      // 执行代理可能不同于持久化 parent.agent；用 ctx.agent 防止切换代理后继承旧权限。
 +      const parentAgent = yield* agent.get(ctx.agent)
 +      const childPermission = deriveSubagentSessionPermission(
 +        {

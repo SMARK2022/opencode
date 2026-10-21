@@ -1,24 +1,247 @@
+diff --git a/packages/schema/src/session.ts b/packages/schema/src/session.ts
+--- a/packages/schema/src/session.ts
++++ b/packages/schema/src/session.ts
+@@ -28,6 +28,8 @@ export const RequestUsage = Schema.Struct({
+   // 这两项来自最后一步确认值，不是从请求累计或会话累计反推。
+   stepInput: Schema.Finite,
+   stepOutput: Schema.Finite,
++  // 未确认下一轮的上下文基数；缺省表示无在途估算，零表示已确认的零基数。
++  pendingInput: Schema.Finite.pipe(optional),
+   model: Schema.Struct({
+     providerID: Schema.String,
+     modelID: Schema.String,
+
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -61,9 +61,14 @@ export const selection = {
+     ), settled AS (
+       -- V1 所有 step-finish 与 native 每步助手结算互斥，避免重复累计。
+-      SELECT p.data FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
++      SELECT p.id, p.data, a.position, a.id AS assistant_id FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
+       WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
+       UNION ALL
+-      SELECT data FROM assistants WHERE kind = 'native'
++      SELECT id, data, position, id FROM assistants
++      WHERE kind = 'native' AND json_extract(data, '$.tokens') IS NOT NULL
++    ), last_usage AS (
++      -- 请求已按 parentID 或 promotion 划界；只取末次确认上下文，未结算 native 行不能覆盖它。
++      SELECT data FROM settled
++      ORDER BY position DESC, assistant_id DESC, id DESC LIMIT 1
+     ), last_assistant AS (
+       -- 最后助手与模型随请求读出，用户被窗口淘汰后仍能锁定同一请求尾部。
+       SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
+@@ -96,6 +101,14 @@ export const selection = {
+       'stepOutput', coalesce((SELECT coalesce(json_extract(data, '$.tokens.output'), 0)
+         + coalesce(json_extract(data, '$.tokens.reasoning'), 0) FROM step), 0),
++      -- 未确认条件复用当前 step 投影；完成或零确认后不得补入上一轮上下文。
++      'pendingInput', (SELECT coalesce(json_extract(u.data, '$.tokens.input'), 0)
++        + coalesce(json_extract(u.data, '$.tokens.cache.read'), 0)
++        + coalesce(json_extract(u.data, '$.tokens.cache.write'), 0)
++        + coalesce(json_extract(u.data, '$.tokens.output'), 0) + coalesce(json_extract(u.data, '$.tokens.reasoning'), 0)
++        FROM last_usage u, last_assistant a, step s
++        WHERE json_extract(a.data, '$.time.completed') IS NULL
++          AND json_extract(s.data, '$.tokens') IS NULL),
+       -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
+       'model', json((SELECT json_object(
+         'providerID', coalesce(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')),
+         'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id'))
+@@ -110,9 +123,11 @@ export const selection = {
+       messageID: Schema.String, input: Schema.Finite, output: Schema.Finite, cost: Schema.Finite,
+       assistantID: Schema.NullOr(Schema.String),
+       stepInput: Schema.Finite, stepOutput: Schema.Finite,
++      pendingInput: Schema.NullOr(Schema.Finite),
+       model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
+     }))(parsed)
+     return Session.RequestUsage.make({
+       ...fields,
+       assistantID: fields.assistantID ?? undefined,
++      pendingInput: fields.pendingInput ?? undefined,
+       model: fields.model ?? undefined,
+
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -166,6 +166,9 @@ describe("SessionProjector", () => {
+         yield* events.publish(SessionEvent.Step.Started, {
+           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
+         })
++        // 第二个原生助手没有 tokens；首轮 14 输入和 4 输出仍是本请求的在途基数。
++        expect((yield* sessions.get(sessionID)).request).toMatchObject({ assistantID: assistantMessageID, stepInput: 0, stepOutput: 0 })
++        expect((yield* sessions.get(sessionID)).request?.pendingInput).toBe(factor === 1 ? undefined : 18)
+         const ended = yield* events.publish(SessionEvent.Step.Ended, {
+           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor + 1), finish: "stop", cost: factor / 4,
+           tokens: { input: factor * 2, output: factor * 3, reasoning: factor, cache: { read: factor * 5, write: factor * 7 } },
+@@ -186,8 +189,9 @@ describe("SessionProjector", () => {
+       expect((yield* sessions.get(sessionID)).request).toMatchObject({
+         messageID: "msg_native_request", input: 42, output: 12, cost: 0.75,
+         assistantID: "msg_native_usage_2", model: { providerID: "provider", modelID: "model" },
+         // 最后 native step 与两轮请求累计不同，验证 #14 没把请求总量显示成 step。
+         stepInput: 28, stepOutput: 8,
+         // 此确认值不依赖任何 V1 step-finish，也不依赖 TUI 消息窗口。
+       })
++      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+       // 这里检查公开 get 的投影，不在断言里重复实现事件到请求的归属计算。
+@@ -254,6 +258,48 @@ describe("SessionProjector", () => {
+       // get/list 同用一个 SQL owner，等待请求没有模型，也没有可借用的助手。
+       expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+       expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
+       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
++      // 真实 V1 turn 更换助手；旧 native 的确认不得混入新 V1 请求的上下文。
++      const userID = SessionV1.MessageID.ascending()
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
++        id: userID, sessionID, role: "user", time: { created: 8 }, agent: "build",
++        model: { providerID: model.providerID, modelID: model.id },
++      } })
++      const legacy: SessionV1.Assistant = { id: SessionV1.MessageID.ascending(), sessionID, role: "assistant", parentID: userID,
++        agent: "build", mode: "build", modelID: model.id, providerID: model.providerID,
++        path: { cwd: "/project", root: "/project" }, cost: 0,
++        tokens: { input: 2, output: 3, reasoning: 1, cache: { read: 5, write: 7 } }, time: { created: 9, completed: 10 } }
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: legacy })
++      const finish: SessionV1.StepFinishPart = { id: SessionV1.PartID.ascending(), sessionID, messageID: legacy.id,
++        type: "step-finish", reason: "stop", cost: 0, tokens: legacy.tokens }
++      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: finish,
++        time: 10 })
++      // 第二次确认改变上下文基数，下一轮不能使用请求累计 54 或最早一轮 18。
++      const prior = { ...legacy, id: SessionV1.MessageID.ascending(), tokens: { input: 4, output: 6, reasoning: 2, cache: { read: 10, write: 14 } }, time: { created: 10, completed: 11 } }
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: prior })
++      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: { ...finish, id: SessionV1.PartID.ascending(), messageID: prior.id, tokens: prior.tokens },
++        time: 11 })
++      const next = { ...legacy, id: SessionV1.MessageID.ascending(), tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 12 } }
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: next })
++      // 新助手无 parts 时也必须得到上一轮 36，不能借用其他请求或全部轮次。
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({
++        messageID: userID, assistantID: next.id, input: 42, output: 12, stepInput: 0, stepOutput: 0, pendingInput: 36,
++      })
++      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
++      // 零 step-finish 是确认边界，不得因为累计仍非零就保留上一轮估算。
++      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, part: { ...finish, id: SessionV1.PartID.ascending(), messageID: next.id, tokens: next.tokens },
++        time: 12 })
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, stepInput: 0, stepOutput: 0 })
++      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
++      // completed=0 同样是终态；展示输入不能恢复到先前非零上下文。
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...next, time: { created: 12, completed: 0 } } })
++      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
++      // 新用户立即换请求范围，上一请求的确认不得成为它的在途基数。
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
++        id: SessionV1.MessageID.ascending(), sessionID, role: "user", time: { created: 13 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
++      } })
++      expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 0, output: 0, stepInput: 0, stepOutput: 0 })
++      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
+     }).pipe(Effect.provide(sessionsLayer)),
+   )
+
 diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
 --- a/packages/tui/src/util/token-estimate.ts
 +++ b/packages/tui/src/util/token-estimate.ts
-@@ -183,13 +183,14 @@
-     !hasInFlightTail && lastStepFinish
-       ? lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
-       : 0
--  // requestConfirmed.input 为 0 时（首轮请求），用引导 token 补充 totalInput
--  const promptInputEstimate = requestConfirmed.input === 0 ? bootstrapInputTokens : 0
--  // currentInput 取 currentStepInputConfirmed 和 bootstrapInputTokens 的较大值，
--  // 确保显示不低于引导估算，避免首轮显示 0 后跳变的用户体验问题
-+  // 修复：currentInput 应该反映当前步骤的真实输入（包括 bootstrap 或确认值）
-   const currentInput = Math.max(currentStepInputConfirmed, bootstrapInputTokens) + pendingInputTokens
-   const currentOutput = currentStepOutputConfirmed + pendingOutputTokens
--  const totalInput = requestConfirmed.input + pendingInputTokens + promptInputEstimate
-+
-+  // 修复：totalInput 应该始终包含当前步骤的完整上下文
-+  // 如果当前步骤已确认（有 step-finish），使用确认值；否则使用 bootstrap 估算
-+  const currentStepTotalInput = currentStepInputConfirmed > 0 ? currentStepInputConfirmed : bootstrapInputTokens
-+  const totalInput = requestConfirmed.input + currentStepTotalInput + pendingInputTokens
-   const totalOutput = requestConfirmed.output + pendingOutputTokens
+@@ -159,11 +159,18 @@ export function computeFinalTokens(
+-  const unconfirmed = request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
++  const unconfirmed = request.pendingInput === undefined && request.input === 0 && request.output === 0 && request.stepInput === 0 && request.stepOutput === 0
+     && lastSFIdx < 0 && (!request.assistantID || (!!lastAssistant && lastAssistant.time.completed === undefined))
+-  // bootstrap 只属于首轮尚未确认的请求，确认零也必须退出引导估算。
+-  const promptInputEstimate = unconfirmed ? bootstrapInputTokens : 0
+-  // step 确认来自完整投影，native 无 V1 parts 或助手被淘汰仍保留真实值，不以粗略系统开销抬高它。
+-  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + promptInputEstimate
++  const lastStepFinish = lastParts[lastSFIdx]
++  // 最新助手可以没有 parts，投影仍提供末步基数；可见零确认或完成先到时立即遮掉旧估算。
++  const projectedPendingInput = !lastAssistant || (lastAssistant.time.completed === undefined && (lastSFIdx < 0 || hasInFlightTail))
++    ? request.pendingInput : undefined
++  // 下一步继承末步完整上下文，输出、reasoning 和缓存输入均进入历史，不能用全部请求累计替代。
++  const pendingStepInput = hasInFlightTail && lastStepFinish?.type === "step-finish"
++    ? lastStepFinish.tokens.input + lastStepFinish.tokens.cache.read + lastStepFinish.tokens.cache.write
++      + lastStepFinish.tokens.output + lastStepFinish.tokens.reasoning
++    : projectedPendingInput ?? (unconfirmed ? bootstrapInputTokens : 0)
++  // 完成态确认值包括零均有权威性，不用 bootstrap 作下限或重新补一轮输入。
++  const currentInput = (hasInFlightTail ? 0 : request.stepInput) + pendingInputTokens + pendingStepInput
+   const currentOutput = (hasInFlightTail ? 0 : request.stepOutput) + pendingOutputTokens
+-  // step 与 request 两种范围各加一次尾部；请求累计永远不由有限 transcript 求和。
+-  const totalInput = request.input + pendingInputTokens + promptInputEstimate
++  // durable 累计已含末步确认，只能再加尚未结算的下一步估算，避免 100 变 200。
++  const totalInput = request.input + pendingInputTokens + pendingStepInput
+   const totalOutput = request.output + pendingOutputTokens
  
-   return {
 
+diff --git a/packages/tui/test/util/token-estimate.test.ts b/packages/tui/test/util/token-estimate.test.ts
+--- a/packages/tui/test/util/token-estimate.test.ts
++++ b/packages/tui/test/util/token-estimate.test.ts
+@@ -39,21 +39,36 @@ test("bootstrap yields to confirmed usage and preserves projected request totals", () => {
+   const settled = { ...active, input: 4000, output: 30, stepInput: 1000, stepOutput: 10 }
+   const completed = { ...assistant, time: { created: 2, completed: 3 } }
++  // 单步完成的 100 已进入请求累计，不能再加末步 100 或 2800 的引导。
++  expect(computeFinalTokens(completed, [], { ...active, input: 100, output: 10, stepInput: 100, stepOutput: 10 }, 2800)).toEqual({ input: 100, output: 10, totalInput: 100, totalOutput: 10 })
+   // 请求累计刻意大于末 step，能发现退回缓存求和或把两种范围合并的问题。
+   expect(computeFinalTokens(completed, [], settled, 2800)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
+   expect(computeFinalTokens(undefined, [], settled, 2800)).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30 })
+   expect(computeFinalTokens(undefined, [], active, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
+-  const confirmedFinish = { ...finish, tokens: { ...finish.tokens, input: 1000, output: 10 } }
++  const confirmedFinish = { ...finish, tokens: { input: 700, output: 8, reasoning: 2, cache: { read: 100, write: 200 } } }
+   const confirmed = { ...active, input: 1000, output: 10, stepInput: 1000, stepOutput: 10 }
+   // 下一请求引导以末步上下文为基数，不能把全部请求累计或固定开销再叠加。
+   const previous = { ...completed, id: "previous", parentID: "prior", time: { created: 0, completed: 0 } }
+   expect(getBootstrapInputTokens([previous, user, assistant], request, (id) => id === "previous" ? [confirmedFinish] : parts)).toBe(1611)
+   expect(computeFinalTokens(assistant, [confirmedFinish], confirmed, 2800)).toEqual({ input: 1000, output: 10, totalInput: 1000, totalOutput: 10 })
+-  // 新尾部先于快照到达时遮掉旧 step，只在请求累计上加一次流式字符。
+-  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed, 2800)).toEqual({ input: 0, output: 2, totalInput: 1000, totalOutput: 12 })
++  // 1000 输入和 10 输出成为下一步上下文；完成前的新增估算只进入累计一次。
++  expect(computeFinalTokens(assistant, [confirmedFinish, text], confirmed, 2800)).toEqual({ input: 1010, output: 2, totalInput: 2010, totalOutput: 12 })
+   const tool: Part = {
+     id: "tool", sessionID: "s", messageID: "a", type: "tool", callID: "call", tool: "read",
+     state: { status: "completed", input: {}, output: "abcdefgh", title: "read", metadata: {}, time: { start: 2, end: 3 } },
+   }
++  // 工具的 8 字符补 2 输入；多步累计 4000 不替代末步上下文 1010。
++  expect(computeFinalTokens(assistant, [confirmedFinish, tool], confirmed, 2800)).toEqual({ input: 1012, output: 1, totalInput: 2012, totalOutput: 11 })
++  expect(computeFinalTokens(assistant, [confirmedFinish, tool], { ...settled, stepInput: 0, stepOutput: 0 }, 2800)).toEqual({ input: 1012, output: 1, totalInput: 5012, totalOutput: 31 })
++  // 真实下一轮换助手且不传旧 parts，投影的 1010 保留完整末步上下文而非累计 4000。
++  const nextAssistant = { ...assistant, id: "next" }
++  const nextRequest = { ...settled, assistantID: "next", stepInput: 0, stepOutput: 0, pendingInput: 1010 }
++  expect(computeFinalTokens(nextAssistant, [], nextRequest, 2800)).toEqual({ input: 1010, output: 0, totalInput: 5010, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], nextRequest, 2800)).toEqual({ input: 1010, output: 2, totalInput: 5010, totalOutput: 32 })
++  expect(computeFinalTokens(undefined, [], nextRequest, 2800)).toEqual({ input: 1010, output: 0, totalInput: 5010, totalOutput: 30 })
++  // 零基数不触发 bootstrap；确认事件先于 Session 快照到达也必须停止旧估算。
++  expect(computeFinalTokens(nextAssistant, [], { ...nextRequest, input: 0, output: 0, pendingInput: 0 }, 2800)).toEqual({ input: 0, output: 0, totalInput: 0, totalOutput: 0 })
++  expect(computeFinalTokens({ ...nextAssistant, time: { created: 2, completed: 0 } }, [], nextRequest, 2800)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  expect(computeFinalTokens(nextAssistant, [{ ...finish, messageID: "next" }], nextRequest, 2800)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
+   // 工具结果只补下一轮输入，已确认零的旧 step 不应触发新的 bootstrap。
+   expect(computeFinalTokens(assistant, [finish, tool], active, 2800)).toEqual({ input: 2, output: 1, totalInput: 2, totalOutput: 1 })
+ })
+
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -3126,6 +3126,7 @@ export type SessionRequestUsage = {
+   assistantID?: string
+   stepInput: number
+   stepOutput: number
++  pendingInput?: number
+   model?: {
+     providerID: string
+     modelID: string
+
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -247,6 +247,7 @@ export type SessionsListOutput = {
+       readonly assistantID?: string
+       readonly stepInput: number
+       readonly stepOutput: number
++      readonly pendingInput?: number
+       readonly model?: { readonly providerID: string; readonly modelID: string }
+     }
+     readonly tokens: {
+@@ -319,6 +320,7 @@ export type SessionsCreateOutput = {
+       readonly assistantID?: string
+       readonly stepInput: number
+       readonly stepOutput: number
++      readonly pendingInput?: number
+       readonly model?: { readonly providerID: string; readonly modelID: string }
+     }
+     readonly tokens: {
+@@ -367,6 +369,7 @@ export type SessionsGetOutput = {
+       readonly assistantID?: string
+       readonly stepInput: number
+       readonly stepOutput: number
++      readonly pendingInput?: number
+       readonly model?: { readonly providerID: string; readonly modelID: string }
+     }
+     readonly tokens: {

@@ -1,138 +1,153 @@
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -49,6 +49,14 @@
+@@ -48,7 +48,14 @@
+   pollMs: number
    waitMs: number
  }
  
-+// 守护进程启动超时：插件预热可能 ~30s，与 waitMs 生产默认对齐
++// 冷插件预热使用完整 60 秒健康等待，选举竞争者另有获锁等待预算。
 +export const DAEMON_START_TIMEOUT_MS = 60_000
-+// 选举租约必须长于启动等待，否则并发 TUI 会在预热窗口内重入选举双开 daemon
++// 75 秒只限制 contender 等待 acquire；持锁期限由 heartbeat 和 release 管理。
 +export const SERVER_ELECTION_TIMEOUT_MS = DAEMON_START_TIMEOUT_MS + 15_000
 +export const SERVER_ELECTION_STALE_MS = 5_000
-+// 健康轮询间隔：响应与 CPU 折中
 +export const SERVER_POLL_INTERVAL_MS = 200
 +
- // 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
- // #49 收紧选举/陈旧/轮询默认值（10s/5s/200ms）
+ // 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
+ // 只缩短 contender 等待和探测频率，完整启动 deadline 仍由独立 waitMs 约束。
  const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
-@@ -63,17 +71,17 @@
-   // 选举租约 30s：与 SMARK 原值一致（#49 再收紧）
-   // 选举超时收紧到 10s
+@@ -71,16 +78,16 @@
+-  // 选举等待只限制 contender，不缩短成功持锁者启动健康服务的完整预算。
++  // contender 可等待冷启动 winner 完成交付；超时只拒绝此次获锁请求，不驱逐持锁者。
+   // acquire 超时必须显式失败，不能在未获得租约时私自拉起另一个同身份服务。
  
 -  electionTimeoutMs: 10_000,
-+  electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS, // 75s：必须 > DAEMON_START
-   // 陈旧租约 10s（#49 再收紧到 5s）
-   // 陈旧租约收紧到 5s
++  electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS,
+   // staleMs 交给已有 Flock heartbeat 维护，不能凭 HTTP 超时自行打破活租约。
+   // Flock 持有期间仍按 staleMs 更新 heartbeat，长启动不等于 lease 已失效。
  
 -  electionStaleMs: 5_000,
 +  electionStaleMs: SERVER_ELECTION_STALE_MS,
-   // 轮询间隔 100ms（#49 再收紧到 200ms）
-   // 轮询间隔 200ms
+   // 启动轮询等待 owner 写锁，不能把尚未发布端口的进程当作可复用服务。
+-  // 增大间隔减少未发布 owner 的无效读取；就绪验证仍检查同一子 PID 和受保护 health。
++  // Windows 启动器不是锁 owner；轮询仍验证存活、认证、身份和 token 复读。
  
 -  pollMs: 200,
--  // 多插件冷编译可能各 ~30s；并行预热后以最慢者为墙钟，生产等待 60s 覆盖
+-  // 冷插件在监听前并行预热；完整健康等待给 60 秒，不改变 contender 的选举预算。
 -  waitMs: 60_000,
 +  pollMs: SERVER_POLL_INTERVAL_MS,
-+  // 与 DAEMON_START_TIMEOUT_MS 同源，避免字面量漂移
++  // 与超时文案共用常量，完整启动 deadline 仍在避让早期探测的 sleep 后开始。
 +  waitMs: DAEMON_START_TIMEOUT_MS,
  })
  
- // 单服务器发现主路径：快速复用存活守护进程，或在选举锁下拉起新 daemon
-@@ -169,10 +177,11 @@
-       // 启动后等待 1s 再轮询，避免过早健康检查失败
-       // #49 启动后先 sleep 1s 再进入健康轮询
-       await deps.sleep(1000)
--      // 轮询锁文件直到 pid 匹配且健康检查通过
-+      // 轮询锁文件直到守护进程存活且健康检查通过（不校验 spawn PID）
-       while (Date.now() < deadline) {
-         const daemonLock = await deps.read()
--        if (daemonLock && daemonLock.pid === proc.pid && deps.alive(daemonLock.pid)) {
-+        // Windows 启动器与真实 daemon PID 可能不同，仅要求锁内 PID 存活
-+        if (daemonLock && deps.alive(daemonLock.pid)) {
-           if (external) {
-             if (daemonLock.externalUrl) {
-               existingUrl = daemonLock.externalUrl
-@@ -191,9 +200,10 @@
+@@ -171,8 +178,7 @@
+           // exited 的拒绝先安装 observer；read/unref 的同步异常仍由两层 finally 清理。
+           void proc.exited.catch(() => undefined)
+           proc.unref()
+-          fwdPid = proc.pid
  
-       if (!existingUrl) {
-         // 超时失败：杀死半拉起的进程并向上抛错
--        UI.error("opencode daemon failed to start within 60 seconds")
-+        UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-         proc.kill()
--        throw new Error("opencode daemon failed to start within 60 seconds")
-+        // 超时文案与常量同源，避免 60 字面量与 waitMs 再次漂移
-+        throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
-       }
-     }
-   }
+           // 等待放在 proc 与 lease 的 finally 内，sleep 拒绝也不能泄漏选举所有权。
+           // 完整启动预算从 sleep 后开始，不能用避让早期探测的延迟吃掉健康等待时间。
+           await deps.sleep(1000)
+@@ -180,11 +186,15 @@
+-          // 端口即使被其他健康服务占用，也不能替代本次子进程 PID 的发现锁。
++          // 启动器 PID 可不同；健康锁仍必须通过 reuse 的身份与稳定 owner 校验。
+           while (Date.now() < deadline) {
+             const daemonLock = await deps.read(lockPath)
+-            if (daemonLock && daemonLock.pid === proc.pid && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
++            if (daemonLock && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
+-              // 只交付本次子进程已发布且通过认证的锁，未知 owner 不进入本次清理范围。
++              // 交付身份、认证与 token 复读均通过的 daemon owner，启动器 PID 不代替锁身份。
+               existingUrl = await reuse(daemonLock)
+-              if (existingUrl) break
++              // 重载信号的目标是已验证 daemon，而不是可能已经退出的启动器。
++              if (existingUrl) {
++                fwdPid = daemonLock.pid
++                break
++              }
+             }
+             await deps.sleep(deps.pollMs)
+           }
+ 
+@@ -191,7 +201,7 @@
+           if (!existingUrl) {
+             // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
+             // 超时仍向上失败；杀本次 proc 与释放 lease 继续由原有两层 finally 执行。
+-            UI.error("opencode daemon failed to start within 60 seconds")
+-            throw new Error("opencode daemon failed to start within 60 seconds")
++            UI.error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
++            throw new Error(`opencode daemon failed to start within ${DAEMON_START_TIMEOUT_MS / 1000} seconds`)
+           }
+         } finally {
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -4,7 +4,13 @@
+@@ -4,9 +4,11 @@
  import path from "path"
  import yargs from "yargs"
  import { tmpdir } from "../../fixture/fixture"
 -import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
-+import {
-+  TuiThreadCommand,
-+  resolveThreadDirectory,
-+  discoverOrSpawnDaemon,
-+  DAEMON_START_TIMEOUT_MS,
-+  SERVER_ELECTION_TIMEOUT_MS,
-+} from "../../../src/cli/cmd/tui"
++import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
++  DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS } from "../../../src/cli/cmd/tui"
  import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
+ import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
+ import { EventClients } from "@opencode-ai/server/event-clients"
++import { Global } from "@opencode-ai/core/global"
  import { cliIt } from "../../lib/cli-process"
  
-@@ -246,4 +252,51 @@
-       expect(result.stderr).toContain("--port cannot be used with --mini")
-     }),
-   )
-+
-+
-+  describe("daemon timeout constants", () => {
-+    // 选举租约必须严格长于 daemon 启动等待，覆盖插件预热窗口
-+    test("SERVER_ELECTION_TIMEOUT_MS exceeds DAEMON_START_TIMEOUT_MS", () => {
-+      expect(SERVER_ELECTION_TIMEOUT_MS).toBeGreaterThan(DAEMON_START_TIMEOUT_MS)
+@@ -211,18 +213,52 @@
+-    test("no existing server: daemon is spawned then URL returned", async () => {
++    test("accepts the real daemon owner after spawning a Windows launcher", async () => {
++      const launcherPid = 99998
+       let daemonSpawnCount = 0
+       let readCount = 0
+       const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
+         read: async () => {
+           readCount++
+           if (readCount <= 2) return undefined
+-          return fakeLock
++          // 快速读取和持锁复读均为空；只有实际 mock spawn 后才发布 daemon owner。
++          return daemonSpawnCount === 1 ? fakeLock : undefined
+         },
+         spawn: ((_cmd, _opts) => {
+           daemonSpawnCount++
+-          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: launcherPid, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
+         }) as DiscoverDaemonDeps["spawn"],
++        alive: (pid) => pid === FAKE_DAEMON_PID,
++        sleep: async (ms) => { if (ms === 0) throw new Error("healthy daemon was not accepted") },
+       }))
+       expect(daemonSpawnCount).toBe(1)
+       expect(result.url).toBe("http://127.0.0.1:9999")
++      expect(readCount).toBeGreaterThanOrEqual(4)
++      // 独立断言重载目标的语义，URL 正确不代表返回了锁 owner 的 PID。
++      expect(result.fwdPid).toBe(FAKE_DAEMON_PID)
+     })
+ 
++    test("uses a 75-second contender deadline without changing heartbeat staleness", async () => {
++      expect(DAEMON_START_TIMEOUT_MS).toBe(60_000)
++      expect(SERVER_ELECTION_TIMEOUT_MS).toBe(75_000)
 +      expect(SERVER_ELECTION_TIMEOUT_MS).toBe(DAEMON_START_TIMEOUT_MS + 15_000)
-+    })
-+  })
-+
-+  describe("discoverOrSpawnDaemon windows launcher pid", () => {
-+    // Windows 启动器 PID 与锁内 daemon PID 不同时仍应接受健康锁
-+    test("accepts lock pid different from spawn pid when alive", async () => {
-+      const SPAWN_PID = 11111
-+      const LOCK_PID = 22222
-+      const localNet = { port: 0, hostname: "127.0.0.1", mdns: false, cors: [] as string[] }
-+      let reads = 0
-+      const lock = {
-+        pid: LOCK_PID,
-+        port: 4099,
-+        token: "test-token",
-+        dbPath: "/tmp/test.db",
-+        channel: "local" as const,
-+        startedAt: new Date().toISOString(),
-+        externalUrl: undefined as string | undefined,
-+      }
-+      const result = await discoverOrSpawnDaemon(localNet as never, {
-+        read: async () => {
-+          reads++
-+          if (reads === 1) return undefined
-+          return lock
-+        },
-+        alive: (pid) => pid === LOCK_PID,
-+        ping: async () => true,
-+        clear: async () => {},
-+        acquire: async () => ({ release: async () => {} }) as never,
-+        spawn: () => ({ pid: SPAWN_PID, unref() {}, kill() {} }) as ReturnType<typeof Bun.spawn>,
-+        sleep: async () => {},
-+        resolveDaemonFile: async () => "/tmp/daemon.ts",
++      expect(SERVER_ELECTION_STALE_MS).toBe(5_000)
++      expect(SERVER_POLL_INTERVAL_MS).toBe(200)
++      const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
++      expect(source).toContain("electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS")
++      expect(source).toContain("electionStaleMs: SERVER_ELECTION_STALE_MS")
++      expect(source).toContain("pollMs: SERVER_POLL_INTERVAL_MS")
++      expect(source).toContain("waitMs: DAEMON_START_TIMEOUT_MS")
++      let acquisitions = 0
++      await expect(discoverOrSpawnDaemon(localNet as never, baseDeps({
++        read: async () => undefined,
 +        electionTimeoutMs: SERVER_ELECTION_TIMEOUT_MS,
-+        electionStaleMs: 5_000,
-+        pollMs: 1,
-+        waitMs: 5_000,
-+      })
-+      expect(result.url).toContain("4099")
++        acquire: async (key, opts) => {
++          acquisitions++
++          // 核对完整获锁请求，不能把注入的 75 秒误用为 staleMs 或只断言常量大小。
++          expect(key).toBe("opencode.server:default")
++          expect(opts).toEqual({ dir: path.join(Global.Path.state, "locks"), timeoutMs: 75_000, staleMs: 5_000 })
++          throw new Error("contender deadline")
++        },
++        spawn: () => { throw new Error("spawn without election lease") },
++      }))).rejects.toThrow("contender deadline")
++      expect(acquisitions).toBe(1)
 +    })
-+  })
- })
++

@@ -1,11 +1,10 @@
 diff --git a/packages/core/src/v1/config/provider.ts b/packages/core/src/v1/config/provider.ts
 --- a/packages/core/src/v1/config/provider.ts
 +++ b/packages/core/src/v1/config/provider.ts
-@@ -79,6 +79,10 @@
+@@ -85,6 +85,9 @@
    env: Schema.optional(Schema.mutable(Schema.Array(Schema.String))),
    id: Schema.optional(Schema.String),
    npm: Schema.optional(Schema.String),
-+  // 继承现有提供者类型的模型和默认值
 +  extends: Schema.optional(Schema.String).annotate({
 +    description: "Inherit models and defaults from an existing provider type",
 +  }),
@@ -17,28 +16,31 @@ diff --git a/packages/core/src/v1/config/provider.ts b/packages/core/src/v1/conf
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -93,12 +93,13 @@
- // 构建请求头，包含 Anthropic 版本、beta 特性和 Bearer 认证
- // 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
+@@ -71,7 +71,8 @@
  export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
--  // beta 特性列表，移除 redact-thinking，按模型动态添加 context-1m
-+  // beta 特性列表，重新启用 redact-thinking 隐藏思考内容，按模型动态添加 context-1m
+-  // 15 撤销 redact-thinking，按当前要求排除已弃用 interleaved；功能 beta 由后面的 SDK 合并保留。
++  // 23 恢复 redact beta；不改 15 的 disabled/adaptive 策略，也不恢复已弃用 interleaved。
    const betas = [
      "claude-code-20250219",
      "prompt-caching-scope-2026-01-05",
-     "interleaved-thinking-2025-05-14",
 -    "context-management-2025-06-27"
 +    "context-management-2025-06-27",
 +    "redact-thinking-2026-02-12"
    ]
- 
-   // opus-4-7/opus-4-6/sonnet-4-6 启用 1M context window
+@@ -326,5 +327,4 @@
+-      // SDK 的 MCP/task-budget/thinking-binding beta 与实际 body 配套，必须同源 beta 一起发送。
+-      // 仅撤销源明确移除和当前弃用的 beta，其余去重保留，不能丢掉对应 body 的功能开关。
++      // SDK beta 与实际 body 配套，合并时去重并仅排除弃用 interleaved，恢复的 redact 也必须发出。
+       requestHeaders.set(key, key === "anthropic-beta"
+-        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(",")
++        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(",")
+         : value)
 
 
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -198,7 +198,7 @@
+@@ -204,7 +204,7 @@
          autoload: false,
          options: {
            headers: {
@@ -47,7 +49,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
            },
          },
        }),
-@@ -1480,27 +1502,35 @@
+@@ -1506,27 +1506,35 @@
  
          // extend database from config
          for (const [providerID, provider] of configProviders) {
@@ -87,7 +89,7 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
                // claudecode 模型路由到 @ai-sdk/anthropic 而非默认的 openai-compatible
                (providerID === "claudecode" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible")
              const name = iife(() => {
-@@ -1512,7 +1542,7 @@
+@@ -1539,7 +1547,7 @@
                api: {
                  id: apiID,
                  npm: apiNpm,
@@ -97,3 +99,613 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
                status: model.status ?? existingModel?.status ?? "active",
                name,
 
+diff --git a/packages/core/src/config/provider.ts b/packages/core/src/config/provider.ts
+--- a/packages/core/src/config/provider.ts
++++ b/packages/core/src/config/provider.ts
+@@ -42,4 +42,10 @@
+   Schema.Struct({
+-    id: ModelV2.ID,
++    // 模型 URL/settings 可独立覆盖基础协议，别名 ID 也不是必填。
++    id: ModelV2.ID.pipe(Schema.optional),
++    // 禁止部分表示接纳无效协议标签，避免完整 SDK 配置被静默降级。
++    type: Schema.Never.pipe(Schema.optional),
++    package: Schema.Never.pipe(Schema.optional),
++    url: Schema.String.pipe(Schema.optional),
++    settings: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+   }),
+ ])
+@@ -47,4 +53,10 @@
+ class Model extends Schema.Class<Model>("ConfigV2.Model")({
+   family: ModelV2.Family.pipe(Schema.optional),
+   name: Schema.String.pipe(Schema.optional),
++  // 仅承接 V1 迁移未决的 SDK options，不作为 provider wire body 发出。
++  v1: Schema.Struct({
++    options: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
++    // variant 同模型等待实际基础 SDK，不能在 npm 缺省时提前按 raw 转换。
++    variants: Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Unknown)).pipe(Schema.optional),
++  }).pipe(Schema.optional),
+   api: ModelApi.pipe(Schema.optional),
+@@ -65,6 +77,19 @@
+ export class Info extends Schema.Class<Info>("ConfigV2.Provider")({
++  // V2 文档和迁移后的 V1 文档共享直接继承入口，不回调旧运行时。
++  extends: ProviderV2.ID.pipe(Schema.optional),
++  // provider 与模型统一保留 npm 未决的原始输入，等有效 API 确定后再转换。
++  v1: Schema.Struct({
++    options: Schema.Record(Schema.String, Schema.Unknown),
++  }).pipe(Schema.optional),
+   name: Schema.String.pipe(Schema.optional),
+   env: Schema.String.pipe(Schema.Array, Schema.optional),
+-  api: ProviderV2.Api.pipe(Schema.optional),
++  // 只有 URL/settings 的覆盖不能被误编码成 native，从而丢掉基础 SDK。
++  api: Schema.Union([ProviderV2.Api, Schema.Struct({
++    // 部分覆盖不得吞掉无效的显式 type/package，完整协议仍由原 union 校验。
++    type: Schema.Never.pipe(Schema.optional),
++    package: Schema.Never.pipe(Schema.optional),
++    url: Schema.String.pipe(Schema.optional),
++    settings: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
++  })]).pipe(Schema.optional),
+   request: Request.pipe(Schema.optional),
+   models: Schema.Record(Schema.String, Model).pipe(Schema.optional),
+
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -170,8 +170,13 @@
+ function migrateProvider(info: ConfigProviderV1.Info) {
+-  const lowerer = ConfigProviderOptionsV1.get(info.npm)
++  // 只有显式 npm 才立即转换；缺省时不按 provider 名或文档内 extends 猜 SDK。
++  const lowerer = ConfigProviderOptionsV1.get(info.npm)
+-  const options = lowerer.provider(info.options ?? {})
+-  const url = info.api ?? options.url
++  const options = info.npm === undefined ? undefined : lowerer.provider(info.options ?? {})
++  const url = info.api ?? options?.url
+   return {
++    // 迁移必须保留继承键，不能让 V2 schema 收到一个无基础模型的空提供者。
++    extends: info.extends,
++    // 与 model.v1 同一输入所有权：跨文档继承的 package 只在 catalog 内确定。
++    v1: info.npm === undefined && info.options !== undefined ? { options: info.options } : undefined,
+     name: info.name,
+     env: info.env,
+     api: info.npm
+@@ -181,7 +186,10 @@
+           ...(url === undefined ? {} : { url }),
+-          settings: options.settings ?? {},
++          settings: options?.settings ?? {},
+         }
+-      : undefined,
++      // api/baseURL 与 SDK settings 可独立覆盖，基础协议在 catalog 中确定。
++      : info.extends || url !== undefined
++        ? { ...(url === undefined ? {} : { url }), settings: options?.settings ?? {} }
++        : undefined,
+-    request: info.options && { headers: options.headers, body: options.body },
++    request: info.options && options && { headers: options.headers, body: options.body },
+     models:
+       info.models &&
+@@ -188,11 +196,13 @@
+       Object.fromEntries(Object.entries(info.models).map(([name, model]) => [name, migrateModel(model, info.npm)])),
+   }
+ }
+ 
+ function migrateModel(info: typeof ConfigProviderV1.Model.Type, packageName?: string) {
+   const packageID = info.provider?.npm ?? packageName
+   const lowerer = ConfigProviderOptionsV1.get(packageID)
+-  const request = info.options && lowerer.request(info.options)
++  // 每条 npm 未决输入都等待有效 API；native/未知 SDK 的 raw 契约由同一 lowerer 保留。
++  const deferred = packageID === undefined && (info.options !== undefined || info.variants !== undefined)
++  const request = deferred ? undefined : info.options && lowerer.request(info.options)
+   const costs = info.cost && [
+     {
+       input: info.cost.input,
+@@ -217,4 +227,6 @@
+   return {
++    // 迁移标记只包含尚未 lowering 的输入，显式 npm 的原路径保持不变。
++    v1: deferred ? { options: info.options, variants: info.variants } : undefined,
+     family: info.family,
+     name: info.name,
+     api: info.provider?.npm
+@@ -226,6 +238,10 @@
+           settings: {},
+         }
+-      : info.id === undefined
+-        ? undefined
+-        : { id: info.id },
++      // 原始 model.provider.api 独立于 npm；迁移不得吞掉仅 URL 的模型覆盖。
++      : info.id !== undefined || info.provider?.api !== undefined
++        ? {
++            ...(info.id === undefined ? {} : { id: info.id }),
++            ...(info.provider?.api === undefined ? {} : { url: info.provider.api }),
++          }
++        : undefined,
+     capabilities,
+@@ -236,6 +252,6 @@
+     variants:
+-      info.variants &&
++      deferred ? undefined : info.variants &&
+       Object.entries(info.variants).map(([id, options]) => ({
+         id,
+         body: lowerer.request(options),
+       })),
+
+diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/config/plugin/provider.ts
+--- a/packages/core/src/config/plugin/provider.ts
++++ b/packages/core/src/config/plugin/provider.ts
+@@ -4,4 +4,8 @@
+ import { Effect } from "effect"
++import { mergeJsonRecords } from "@opencode-ai/llm"
+ import { Config } from "../../config"
++import { ConfigProvider } from "../provider"
++import { Integration } from "../../integration"
++import { ConfigProviderOptionsV1 } from "../../v1/config/provider-options"
+ import { ModelV2 } from "../../model"
+ import { ProviderV2 } from "../../provider"
+@@ -12,4 +16,7 @@
+     const config = yield* Config.Service
++    const registry = yield* Integration.Service
+     yield* ctx.integration.transform(
+       Effect.fn(function* (integrations) {
++        // 上游 owner 的记录不可删除，保存凭据另由 registry 查询，不复制基础账号。
++        const initial = new Set(integrations.list().map((integration) => integration.id))
+         const files = (yield* config.entries()).filter((entry): entry is Config.Document => entry.type === "document")
+@@ -22,3 +29,5 @@
+         )
++        // 环境和名称保留先前显式层，切换基础只替换没有显式覆盖的默认值。
++        const configured = new Map<string, ConfigProvider.Info>()
+         for (const file of files) {
+           for (const [id, item] of Object.entries(file.info.providers ?? {})) {
+@@ -25,12 +34,28 @@
+             const integrationID = id
+-            if (!configuredIntegrations.has(id) && !integrations.get(integrationID)) continue
++            const previous = configured.get(id)
++            const provider = { ...item, extends: item.extends ?? previous?.extends, env: item.env ?? previous?.env, name: item.name ?? previous?.name }
++            configured.set(id, provider)
++            // 只继承环境方法，不能借用基础账号的已保存连接或 OAuth 身份。
++            const env = provider.env ?? (provider.extends === undefined ? undefined :
++              integrations.method.list(provider.extends).find((method) => method.type === "env")?.names ?? [])
++            if (env === undefined && !configuredIntegrations.has(id) && !integrations.get(integrationID)) continue
++            // 无鉴权基础不制造空 Integration；只清除本 owner 自动创建且无自有认证的记录。
++            if (provider.env === undefined && env?.length === 0) {
++              const method = integrations.method.list(integrationID).find((method) => method.type === "env")
++              if (method) integrations.method.remove(integrationID, method)
++              if (!initial.has(id) && integrations.method.list(id).length === 0 &&
++                (yield* registry.connection.active(Integration.ID.make(id)))?.type !== "credential") integrations.remove(id)
++              continue
++            }
+             integrations.update(integrationID, (integration) => {
+-              integration.name = item.name ?? integration.name
++              // 派生名称默认取新 ID，不能泄露基础提供者的显示名。
++              integration.name = provider.name ?? (provider.extends === undefined ? integration.name : id)
+             })
+-            if (item.env !== undefined) {
++            if (env !== undefined) {
+               integrations.method.update({
+                 integrationID,
+-                method: { type: "env", names: [...item.env] },
++                // 空数组也是显式覆盖，不能通过 truthy 判断恢复基础环境变量。
++                method: { type: "env", names: [...env] },
+               })
+             }
+           }
+@@ -50,15 +75,87 @@
++        // 累积原始配置层而非继承结果，每次都从当前直接基础重建再重放显式覆盖。
++        const configured = new Map<string, ConfigProvider.Info[]>()
+         for (const file of files) {
+           for (const [id, item] of Object.entries(file.info.providers ?? {})) {
+             const providerID = id
++            const overrides = [...(configured.get(id) ?? []), item]
++            configured.set(id, overrides)
++            const baseType = overrides.findLast((layer) => layer.extends !== undefined)?.extends
++            const base = baseType === undefined ? undefined : catalog.provider.get(baseType)
++            // 删除派生记录前复制基础以支持 self extends；Draft.get 不投影，空 native 占位接纳基础 API，request 保持模型原值。
++            const copy = base && baseType !== undefined ? { provider: structuredClone(base.provider), models: [...base.models.values()].map((model) => ({
++              ...structuredClone(model), api: structuredClone(model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 ? { ...base.provider.api, id: model.api.id } : model.api),
++            })) } : undefined
++            if (baseType !== undefined) catalog.provider.remove(providerID)
++            if (copy) {
++              // 删除旧模型集合后只克隆当前基础；A 独有模型不会在切到 B 后继续暴露。
++              catalog.provider.update(providerID, (provider) => {
++                Object.assign(provider, copy.provider, { id: providerID, name: item.name ?? id, integrationID: copy.provider.integrationID === undefined ? undefined : id })
++              })
++              for (const model of copy.models) {
++                // Catalog.update 统一重绑 ID；api.id 仍是基础的实际服务端模型名。
++                catalog.model.update(providerID, model.id, (draft) => Object.assign(draft, model))
++              }
++            }
++            const layers = baseType === undefined ? [item] : overrides
++            // 先应用所有 provider 层，再重放模型层，模型 URL/npm 始终高于 provider。
++            for (const item of layers) {
+-            catalog.provider.update(providerID, (provider) => {
+-              if (item.name !== undefined) provider.name = item.name
+-              // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
+-              if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
+-                provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
+-              if (item.api !== undefined) provider.api = { ...item.api }
+-              if (item.request !== undefined) {
+-                Object.assign(provider.request.headers, item.request.headers)
+-                Object.assign(provider.request.body, item.request.body)
+-              }
+-            })
+-            for (const [id, config] of Object.entries(item.models ?? {})) {
++              catalog.provider.update(providerID, (provider) => {
++                if (item.name !== undefined) provider.name = item.name
++                // 只为未指定 API 的 ClaudeCode 配置默认协议，显式模型 API 仍由模型配置拥有。
++                if (id === "claudecode" && item.api === undefined && provider.api.type === "native")
++                  provider.api = { type: "aisdk", package: "@ai-sdk/anthropic", url: provider.api.url }
++                // 继承与部分 API 覆盖保留基础 settings；完整非继承配置仍保持上游替换语义。
++                if (item.api !== undefined) {
++                  const api = item.api.type === undefined ? provider.api : item.api
++                  provider.api = baseType !== undefined || item.api.type === undefined
++                    ? { ...api, url: item.api.url ?? provider.api.url, settings: mergeJsonRecords(provider.api.settings, item.api.settings) ?? {} }
++                    : { ...api }
++                }
++              })
++              if (baseType !== undefined && item.api !== undefined) {
++                // provider npm/URL 覆盖也必须到达继承模型，不能被旧模型 API 抢回。
++                for (const model of catalog.provider.get(providerID)?.models.values() ?? []) {
++                  catalog.model.update(providerID, model.id, (draft) => {
++                    // 显式协议替换整份表示，不把旧 native/SDK 的判别字段混入新 API。
++                    const api = item.api?.type === undefined ? draft.api : { ...item.api, id: draft.api.id }
++                    draft.api = { ...api, url: item.api?.url ?? draft.api.url, settings: mergeJsonRecords(draft.api.settings, item.api?.settings) ?? {} }
++                  })
++                }
++              }
++            }
++            // API 先完整定型，再按 host 层顺序转换 provider 输入，避免早期 package 烘焙进请求。
++            for (const item of layers) {
++              catalog.provider.update(providerID, (provider) => {
++                const legacy = item.v1 && ConfigProviderOptionsV1.get(provider.api.type === "aisdk" ? provider.api.package : undefined).provider({
++                  ...item.v1.options,
++                  // 同层显式 api URL 高于 options.baseURL，raw 域也沿现有 normalizeApi 处理。
++                  ...(item.api?.url === undefined ? {} : { baseURL: item.api.url }),
++                })
++                const url = item.api?.url ?? legacy?.url ?? (typeof legacy?.body?.baseURL === "string" ? legacy.body.baseURL : undefined)
++                if (url !== undefined) provider.api.url = url
++                if (legacy?.settings !== undefined || item.api?.settings !== undefined)
++                  provider.api.settings = mergeJsonRecords(provider.api.settings, legacy?.settings, item.api?.settings) ?? {}
++                Object.assign(provider.request.headers, legacy?.headers, item.request?.headers)
++                // 只有继承合并基础默认值；普通配置继续按上游规则浅覆盖嵌套对象。
++                Object.assign(provider.request.body, baseType === undefined ? { ...legacy?.body, ...item.request?.body } : mergeJsonRecords(provider.request.body, legacy?.body, item.request?.body))
++                if (baseType !== undefined && legacy !== undefined) {
++                  for (const model of catalog.provider.get(providerID)?.models.values() ?? []) {
++                    catalog.model.update(providerID, model.id, (draft) => {
++                      if (url !== undefined) draft.api.url = url
++                      if (legacy.settings !== undefined)
++                        draft.api.settings = mergeJsonRecords(draft.api.settings, legacy.settings, item.api?.settings) ?? {}
++                    })
++                  }
++                }
++              })
++            }
++            // 模型层保留原顺序；未决转换读取最后显式 model API，否则使用已经定型的默认 API。
++            const models = layers.flatMap((layer) => Object.entries(layer.models ?? {}))
++            for (const [id, config] of models) {
++              // 新别名从指定 api.id 的基础模型接纳默认值，再执行上游逐字段覆盖。
++              const existing = baseType !== undefined && config.api?.id !== undefined
++                ? catalog.model.get(providerID, config.api.id) : undefined
++              if (existing && !catalog.model.get(providerID, id)) {
++                // 独立副本保留 variant/cost/capabilities，不共享基础模型的可变数组。
++                catalog.model.update(providerID, id, (model) => Object.assign(model, structuredClone(existing)))
++              }
+@@ -67,6 +164,13 @@
+                 if (config.name !== undefined) model.name = config.name
+-                if (config.api !== undefined) model.api = { ...model.api, ...config.api }
++                if (config.api !== undefined) {
++                  // 新模型的空 native 是占位；部分 URL 先接纳真实 provider API，再保留其 id/settings。
++                  const providerApi = catalog.provider.get(providerID)?.provider.api
++                  const api = model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 && providerApi ? { ...providerApi, id: model.api.id } : model.api
++                  model.api = config.api.type === undefined
++                    ? { ...api, id: config.api.id ?? api.id, url: config.api.url ?? api.url, settings: mergeJsonRecords(api.settings, config.api.settings) ?? {} }
++                    : { ...model.api, ...config.api }
++                }
+                 // 仅有模型 ID/URL 的配置仍需继承 ClaudeCode 默认协议；显式 type/package 完整保留。
+                 if (providerID === "claudecode" && item.api === undefined &&
+-                  (config.api === undefined || !("type" in config.api)) && model.api.type === "native")
++                  (config.api === undefined || config.api.type === undefined) && model.api.type === "native")
+                   model.api = { type: "aisdk", package: "@ai-sdk/anthropic", id: model.api.id, url: model.api.url, settings: model.api.settings }
+@@ -80,7 +184,25 @@
++                const v1 = config.v1
++                // 仅复用纯 SDK lowerer；不猜 provider 名称，也不调用 V1 provider/session 执行器。
++                const legacy = v1 === undefined ? undefined : (() => {
++                  const providerApi = catalog.provider.get(providerID)?.provider.api
++                  const configuredApi = models.findLast(([modelID, model]) => modelID === id && model.api?.type !== undefined)?.[1].api
++                  const api = configuredApi ?? (model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 ? providerApi : model.api)
++                  // native 与未注册 SDK 的 raw 行为属于既有契约，执行支持性仍由 resolver 判断。
++                  const lowerer = ConfigProviderOptionsV1.get(api?.type === "aisdk" ? api.package : undefined)
++                  return {
++                    body: v1.options && lowerer.request(v1.options),
++                    variants: Object.entries(v1.variants ?? {}).map(([id, options]) => ({ id: ModelV2.VariantID.make(id), headers: undefined, body: lowerer.request(options) })),
++                  }
++                })()
++                // 默认值先于迁移输入，随后原生 request 覆盖；兼容标记不进入 Catalog.Info。
++                if (legacy?.body !== undefined) Object.assign(model.request.body, baseType === undefined ? legacy.body : mergeJsonRecords(model.request.body, legacy.body))
+                 if (config.request !== undefined) {
+                   Object.assign(model.request.headers, config.request.headers)
+-                  Object.assign(model.request.body, config.request.body)
++                  // 非继承模型保持上游浅覆盖；继承模型才合并基础 options，variant 仍独立。
++                  Object.assign(model.request.body, baseType === undefined ? config.request.body : mergeJsonRecords(model.request.body, config.request.body))
+                   if (config.request.variant !== undefined) model.request.variant = config.request.variant
+                 }
+-                if (config.variants !== undefined) {
+-                  for (const variant of config.variants) {
++                // 两种配置沿同一 variant 更新循环合并，保持原生显式变体的后层优先。
++                const variants = [...(legacy?.variants ?? []), ...(config.variants ?? [])]
++                if (variants.length > 0) {
++                  for (const variant of variants) {
+
+diff --git a/packages/core/src/plugin/provider/anthropic.ts b/packages/core/src/plugin/provider/anthropic.ts
+--- a/packages/core/src/plugin/provider/anthropic.ts
++++ b/packages/core/src/plugin/provider/anthropic.ts
+@@ -12,4 +12,5 @@
+           evt.provider.update(item.provider.id, (provider) => {
++            // 原生 catalog 也恢复源 beta；不在这里强改模型 thinking 配置。
+             provider.request.headers["anthropic-beta"] =
+-              "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
++              "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12"
+           })
+
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -915,5 +915,5 @@
+-          // 1M 只随源三型号添加；配置 beta 同样排除 interleaved/redact，其余功能需求保留。
+-          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27" +
++          // 23 原生恢复 redact；1M 仍只随 15 的三个型号添加，不改变 disabled/adaptive。
++          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27,redact-thinking-2026-02-12" +
+             (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((id) => String(request.model.id).includes(id)) ? ",context-1m-2025-08-07" : ""),
+           ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
+-        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(","),
++        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && beta !== "interleaved-thinking-2025-05-14"))].join(","),
+
+diff --git a/packages/core/test/plugin/provider-anthropic.test.ts b/packages/core/test/plugin/provider-anthropic.test.ts
+--- a/packages/core/test/plugin/provider-anthropic.test.ts
++++ b/packages/core/test/plugin/provider-anthropic.test.ts
+@@ -43,3 +43,3 @@
+       expect(required(yield* catalog.provider.get(ProviderV2.ID.anthropic)).request.headers["anthropic-beta"]).toBe(
+-        "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
++        "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
+       )
+
+diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/config/provider.test.ts
+--- a/packages/core/test/config/provider.test.ts
++++ b/packages/core/test/config/provider.test.ts
+@@ -1,4 +1,4 @@
+ import { describe, expect } from "bun:test"
+-import { Effect, Schema } from "effect"
++import { DateTime, Effect, Layer, Schema } from "effect"
+ import { Catalog } from "@opencode-ai/core/catalog"
+ import { Config } from "@opencode-ai/core/config"
+@@ -10,3 +10,13 @@
+ import { ProviderV2 } from "@opencode-ai/core/provider"
++import { LLM, LLMClient, ModelID } from "@opencode-ai/llm"
++import { RequestExecutor } from "@opencode-ai/llm/route"
++import { AnthropicMessages } from "@opencode-ai/llm/protocols/anthropic-messages"
++import { HttpClientRequest } from "effect/unstable/http"
++import { ProjectV2 } from "@opencode-ai/core/project"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
++import { ConfigMigrateV1 } from "@opencode-ai/core/v1/config/migrate"
++import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
+ import { testEffect } from "../lib/effect"
+ import { PluginTestLayer } from "../plugin/fixture"
+@@ -180,3 +190,4 @@
+                           cost: { input: 1, output: 2 },
+-                          request: request({ first: "first", shared: "first" }, "retained"),
++                          // 基础模型的嵌套 metadata 和数组分别检验深合并与整体替换。
++                          request: { ...request({ first: "first", shared: "first" }, "retained"), body: { metadata: { base: "keep", shared: "base" }, items: ["base"] } },
+                           variants: [
+@@ -190,4 +201,21 @@
+                     },
++                    plain: { request: { body: { nested: { first: true } } }, models: { chat: { request: { body: { metadata: { first: true } } } } } },
++                    // B 与 A 的模型集合不重叠，切换后必须删除 A 的自动继承模型。
++                    "base-b": { name: "Base B", api: { type: "aisdk", package: "@ai-sdk/openai-compatible", url: "https://base-b.test" }, models: { beta: { name: "Beta" } } },
++                    // 首次即无鉴权的派生不能创建空授权记录，须可被 Location resolver 使用。
++                    guest: { extends: "base-b" },
++                    "anthropic-base": { api: { type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic.test/v1" }, models: { claude: { api: { id: "claude-sonnet-4-5" } } } },
++                    // 无显式 env 的派生先继承 A 的可用密钥，后层切到无 env 的 B 必须清除。
++                    auto: { extends: "custom" },
++                    switched: {
++                      extends: "custom", name: "Switched", env: ["CUSTOM_API_KEY"],
++                      // 显式模型、API、名称和 variant 是配置层，换基础后仍然有效。
++                      models: { kept: {
++                        name: "Kept", api: { id: "remote-kept", type: "aisdk", package: "kept-sdk", url: "https://kept.test" },
++                        limit: { context: 500, output: 100 },
++                        variants: [{ id: "retained", headers: { first: "yes" }, body: { first: true } }],
++                      } },
++                    },
+                   },
+                 }),
+               }),
+@@ -220,6 +247,33 @@
+                           ],
+                         },
+                       },
+                     },
++                    // 真实 V1 解码和迁移后再过 V2 schema，不能直接伪造 extends 的输出。
++                    ...ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++                      mirror: { extends: "custom", npm: "@ai-sdk/openai-compatible", api: "https://mirror.test", options: { headers: { mirror: "yes" } }, models: {
++                        // 模型专用 npm/URL 在后层 provider URL 更新后仍优先。
++                        chat: { provider: { npm: "@ai-sdk/anthropic", api: "https://model-only.test" }, options: { metadata: { child: "add", shared: "child" }, items: ["child"] }, variants: { fast: { model_flag: true } } },
++                        // 无 npm 的 URL-only 覆盖分别接纳新模型默认协议与已有模型别名。
++                        urlonly: { provider: { api: "https://url-only.test" } },
++                        alias: { id: "default", provider: { api: "https://alias-only.test" } },
++                      } },
++                    } })).providers,
++                    // provider/model 均不指定 npm，让迁移输入真正等到基础 Anthropic API 已知。
++                    ...ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++                      "anthropic-copy": { extends: "anthropic-base", options: { authToken: "old-token", baseURL: "https://anthropic-low.test/v1", region: "low", headers: { "x-layer": "low" }, body: { extension: { base: "keep", shared: "low" }, items: ["low"] } }, models: { claude: {
++                        options: { metadata: { base: "keep", userId: "model-user" } },
++                        variants: { high: { metadata: { userId: "variant-user" } } },
++                      } } },
++                    } })).providers,
++                    // 未使用的普通 native V1 配置必须保留 raw options/variants，不能阻断整个 catalog。
++                    ...ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++                      "ordinary-native": { models: {
++                        empty: { options: {} },
++                        raw: { options: { metadata: { userId: "ordinary-user" } }, variants: { high: { metadata: { userId: "ordinary-variant" } } } },
++                      } },
++                      "native-copy": { extends: "ordinary-native", models: { raw: {
++                        options: { metadata: { userId: "native-user" } }, variants: { high: { metadata: { userId: "native-variant" } } },
++                      } } },
++                    } })).providers,
+                   },
+                 }),
+@@ -230,4 +284,20 @@
++                  model: "switched/kept",
+                   providers: {
+                     custom: { name: "Renamed" },
++                    plain: { request: { body: { nested: { last: true } } }, models: { chat: { request: { body: { metadata: { last: true } } } } } },
++                    // 后层名称覆盖不应重置之前继承的模型与环境方法。
++                    mirror: { name: "Mirror", api: { url: "https://mirror-later.test" }, models: { urlonly: { api: { settings: { region: "override" } } } } },
++                    // 后层切到 B，并更新 provider URL；旧显式 API 与分层 variant 仍须保留。
++                    switched: { extends: "base-b", api: { url: "https://base-b-later.test" }, models: {
++                      kept: { variants: [{ id: "retained", headers: { last: "yes" }, body: { last: true } }] },
++                    } },
++                    auto: { extends: "base-b" },
++                    // 高层 V1 不重复 extends/npm，provider/model/variant 仍按有效 Anthropic API 转换。
++                    ...ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++                      "anthropic-copy": { options: { authToken: "new-token", baseURL: "https://anthropic-high.test/v1", region: "high", headers: { "x-layer": "high" }, body: { extension: { child: "add", shared: "high" }, items: ["high"] } }, models: { claude: {
++                        options: { metadata: { userId: "later-model-user" } },
++                        variants: { high: { metadata: { userId: "later-variant-user" } } },
++                      } } },
++                    } })).providers,
+                   },
+                 }),
+@@ -242,3 +311,3 @@
+-        expect((yield* catalog.model.default())?.id).toBe(ModelV2.ID.make("default"))
++        expect((yield* catalog.model.default())?.id).toBe(ModelV2.ID.make("kept"))
+         expect(provider.name).toBe("Renamed")
+         expect((yield* integrations.get(Integration.ID.make("custom")))?.methods).toContainEqual({
+@@ -265,4 +334,109 @@
+         expect(model.variants[1]?.headers).toEqual({ slow: "slow" })
++        const mirror = required(yield* catalog.model.get(ProviderV2.ID.make("mirror"), modelID))
++        // 独立预期同时覆盖重绑、实际 API ID、npm/URL 和保留的基础 variant。
++        expect(mirror.providerID).toBe(ProviderV2.ID.make("mirror"))
++        expect(mirror.api).toMatchObject({ id: "api-chat", type: "aisdk", package: "@ai-sdk/anthropic", url: "https://model-only.test" })
++        expect(mirror.variants.map((variant) => variant.id)).toEqual([ModelV2.VariantID.make("fast"), ModelV2.VariantID.make("slow")])
++        expect((yield* catalog.provider.get(ProviderV2.ID.make("mirror")))?.name).toBe("Mirror")
++        expect((yield* integrations.get(Integration.ID.make("mirror")))?.methods).toContainEqual({ type: "env", names: ["CUSTOM_API_KEY"] })
++        // 基础对象仍是 custom-sdk；派生 API 覆盖不能污染原模型或默认模型选择。
++        expect(model.api).toMatchObject({ type: "aisdk", package: "custom-sdk", url: "https://example.test" })
++        expect(mirror.request.headers).toEqual({ first: "first", shared: "last", last: "last", mirror: "yes" })
++        expect(mirror.enabled).toBe(false)
++        expect(mirror.variants[0]?.body).toEqual({ model_flag: true })
++        // 未指定模型 API 的继承模型仍领取最终 provider 覆盖，基础模型保持不变。
++        expect((yield* catalog.model.get(ProviderV2.ID.make("mirror"), ModelV2.ID.make("default")))?.api).toMatchObject({ package: "@ai-sdk/openai-compatible", url: "https://mirror-later.test" })
++        const switched = ProviderV2.ID.make("switched")
++        expect((yield* catalog.model.all()).filter((model) => model.providerID === switched).map((model) => model.id).sort()).toEqual([ModelV2.ID.make("beta"), ModelV2.ID.make("kept")])
++        expect(yield* catalog.model.get(switched, modelID)).toBeUndefined()
++        expect(yield* catalog.model.get(switched, ModelV2.ID.make("default"))).toBeUndefined()
++        const kept = required(yield* catalog.model.get(switched, ModelV2.ID.make("kept")))
++        // 删除仅针对自动继承集合；显式配置的默认模型继续被 Catalog.default 选中。
++        expect(kept.api).toMatchObject({ id: "remote-kept", type: "aisdk", package: "kept-sdk", url: "https://kept.test" })
++        expect(kept.name).toBe("Kept")
++        expect(kept.limit).toEqual({ context: 500, output: 100 })
++        expect(kept.variants).toEqual([{ id: ModelV2.VariantID.make("retained"), headers: { first: "yes", last: "yes" }, body: { first: true, last: true } }])
++        expect((yield* catalog.model.default())?.providerID).toBe(switched)
++        expect((yield* catalog.model.get(switched, ModelV2.ID.make("beta")))?.api).toMatchObject({ package: "@ai-sdk/openai-compatible", url: "https://base-b-later.test" })
++        expect((yield* catalog.provider.get(switched))?.name).toBe("Switched")
++        // 显式环境属于派生身份，基础 B 的名称/URL/环境方法不被子配置污染。
++        expect((yield* integrations.get(Integration.ID.make("switched")))?.methods).toContainEqual({ type: "env", names: ["CUSTOM_API_KEY"] })
++        expect((yield* catalog.provider.get(ProviderV2.ID.make("base-b")))?.api).toMatchObject({ package: "@ai-sdk/openai-compatible", url: "https://base-b.test" })
++        expect(yield* integrations.get(Integration.ID.make("base-b"))).toBeUndefined()
++        // A 的密钥仍实际可解析，切到 B 的 auto 却没有旧 env 方法或可解析连接。
++        const baseConnection = required(yield* integrations.connection.active(Integration.ID.make("custom")))
++        expect(yield* integrations.connection.resolve(baseConnection)).toMatchObject({ type: "key", key: "secret" })
++        expect(yield* integrations.get(Integration.ID.make("auto"))).toBeUndefined()
++        expect(yield* integrations.connection.active(Integration.ID.make("auto"))).toBeUndefined()
++        expect((yield* catalog.model.get(ProviderV2.ID.make("auto"), ModelV2.ID.make("beta")))?.api).toMatchObject({ package: "@ai-sdk/openai-compatible", url: "https://base-b.test" })
++        // 独立列出合并结果与基础结果，覆盖后层覆盖、数组替换和基础隔离。
++        expect(mirror.request.body).toEqual({ metadata: { base: "keep", child: "add", shared: "child" }, items: ["child"] })
++        expect(model.request.body).toEqual({ metadata: { base: "keep", shared: "base" }, items: ["base"] })
++        // 普通配置不保留被后层替换的嵌套键，与上游浅合并一致。
++        expect((yield* catalog.model.get(ProviderV2.ID.make("plain"), ModelV2.ID.make("chat")))?.request.body).toEqual({ nested: { last: true }, metadata: { last: true } })
++        // 独立预期覆盖真实选中 SDK 与 endpoint，不能只检查迁移中间对象。
++        for (const expected of [{ model: "urlonly", api: "urlonly", url: "https://url-only.test" }, { model: "alias", api: "default", url: "https://alias-only.test" }]) {
++          const configured = required(yield* catalog.model.get(ProviderV2.ID.make("mirror"), ModelV2.ID.make(expected.model)))
++          expect(configured.api).toMatchObject({ id: expected.api, type: "aisdk", package: "@ai-sdk/openai-compatible", url: expected.url })
++          expect(configured.providerID).toBe(ProviderV2.ID.make("mirror"))
++          const selected = yield* SessionRunnerModel.fromCatalogModel(configured)
++          expect(selected.id).toBe(ModelID.make(expected.api))
++          expect(selected.route.id).toBe("openai-compatible-chat")
++          expect(selected.route.endpoint.baseURL).toBe(expected.url)
++        }
++        // 后层仅 settings 的覆盖保留前层模型 URL，与 provider URL 相互独立。
++        expect((yield* catalog.model.get(ProviderV2.ID.make("mirror"), ModelV2.ID.make("urlonly")))?.api.settings).toMatchObject({ region: "override" })
++        const guest = ProviderV2.ID.make("guest")
++        // 两种 native 域保持 raw 字段；可用 guest 与后续 Anthropic wire 仍继续被真实服务验证。
++        const ordinary = required(yield* catalog.model.get(ProviderV2.ID.make("ordinary-native"), ModelV2.ID.make("raw")))
++        expect((yield* catalog.model.get(ProviderV2.ID.make("ordinary-native"), ModelV2.ID.make("empty")))?.request.body).toEqual({})
++        expect(ordinary.api.type).toBe("native")
++        expect(ordinary.request.body).toEqual({ metadata: { userId: "ordinary-user" } })
++        expect(ordinary.variants[0]?.body).toEqual({ metadata: { userId: "ordinary-variant" } })
++        const native = required(yield* catalog.model.get(ProviderV2.ID.make("native-copy"), ModelV2.ID.make("raw")))
++        expect(native.api.type).toBe("native")
++        expect(native.request.body).toEqual({ metadata: { userId: "native-user" } })
++        expect(native.variants[0]?.body).toEqual({ metadata: { userId: "native-variant" } })
++        // available/default/Location resolve 全部走真实服务，不能用 catalog.get 绕过授权过滤。
++        expect(yield* integrations.get(Integration.ID.make("guest"))).toBeUndefined()
++        expect((yield* catalog.provider.available()).map((provider) => provider.id)).toContain(guest)
++        expect((yield* catalog.model.available()).filter((model) => model.providerID === guest).map((model) => model.id)).toEqual([ModelV2.ID.make("beta")])
++        yield* catalog.transform((draft) => draft.model.default.set(guest, ModelV2.ID.make("beta")))
++        expect((yield* catalog.model.default())?.providerID).toBe(guest)
++        const session = SessionSchema.Info.make({ id: SessionSchema.ID.make("ses_config_inherit"), projectID: ProjectV2.ID.global, title: "test", cost: 0,
++          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
++        })
++        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
++        const unauth = yield* resolver.resolve(session)
++        expect(unauth.id).toBe(ModelID.make("beta"))
++        expect(unauth.route.endpoint.baseURL).toBe("https://base-b.test")
++        const anthropic = required(yield* catalog.model.get(ProviderV2.ID.make("anthropic-copy"), ModelV2.ID.make("claude")))
++        // 同一个已有 SDK lowerer 应同时转换模型与变体；中间配置和实际 wire 都无 camel userId。
++        expect(anthropic.request.body).toEqual({ extension: { base: "keep", child: "add", shared: "high" }, items: ["high"], metadata: { base: "keep", user_id: "later-model-user" } })
++        expect(anthropic.variants[0]?.body).toEqual({ metadata: { user_id: "later-variant-user" } })
++        // authToken 不能困在 settings/body；基础不变，高层 URL/settings/headers 均独立覆盖。
++        expect(anthropic.api).toMatchObject({ type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic-high.test/v1", settings: { region: "high" } })
++        expect(anthropic.api.settings).not.toHaveProperty("authToken")
++        expect(anthropic.request.headers).toMatchObject({ Authorization: "Bearer new-token", "x-layer": "high" })
++        expect((yield* catalog.provider.get(ProviderV2.ID.make("anthropic-base")))?.api.url).toBe("https://anthropic.test/v1")
++        const llmLayer = LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))
++        for (const variant of [undefined, ModelV2.VariantID.make("high")]) {
++          const selected = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: anthropic.providerID, id: anthropic.id, variant } }), anthropic)
++          expect(selected.route.endpoint.baseURL).toBe("https://anthropic-high.test/v1")
++          const input = LLM.request({ model: selected, prompt: "hello", cache: "none", http: { ...selected.route.defaults.http, headers: selected.route.defaults.headers } })
++          const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input).pipe(Effect.provide(llmLayer))
++          // preview body 不携带 endpoint，typed transport 必须接续 resolver 已选定的 endpoint/auth。
++          const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
++          const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
++          const text = yield* Effect.promise(() => web.text())
++          expect(web.headers.get("authorization")).toBe("Bearer new-token")
++          expect(web.url).toBe("https://anthropic-high.test/v1/messages")
++          expect(text).toContain(variant === undefined ? '"user_id":"later-model-user"' : '"user_id":"later-variant-user"')
++          expect(text).not.toContain('"userId"')
++          expect(text).not.toContain('"authToken"')
++          expect(text).not.toContain("old-token")
++        }
+       }),
+     ),
+   )
+
+diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
+--- a/packages/llm/test/provider/anthropic-messages.test.ts
++++ b/packages/llm/test/provider/anthropic-messages.test.ts
+@@ -905,3 +905,7 @@
+       // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
+       expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })
++      // 原生请求头也必须真正发出 redact；保持同一 prepare 输入和 disabled/adaptive 验证。
++      const wire = yield* AnthropicMessages.route.prepareTransport(claude.body, LLM.updateRequest(input, { model: claude.model }))
++      const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
++      expect(web.headers.get("anthropic-beta")).toContain("redact-thinking-2026-02-12")
+       expect(prepared.body).toHaveProperty("thinking", undefined)
+
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -1807,6 +1807,7 @@
+   env?: Array<string>
+   id?: string
+   npm?: string
++  extends?: string
+   whitelist?: Array<string>
+   blacklist?: Array<string>
+   options?: {
