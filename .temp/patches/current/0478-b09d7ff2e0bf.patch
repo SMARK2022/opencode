@@ -91,14 +91,22 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 +  // 与 schema 包 Revert.State.revertedPaths 对应，旧数据缺省时整目录恢复。
 +  revertedPaths: optional(Schema.Array(Schema.String)),
  })
-diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
---- a/packages/opencode/src/session/session.ts
-+++ b/packages/opencode/src/session/session.ts
-@@ -72,2 +72,4 @@
+diff --git a/packages/core/src/v1/session.ts b/packages/core/src/v1/session.ts
+--- a/packages/core/src/v1/session.ts
++++ b/packages/core/src/v1/session.ts
+@@ -73,2 +73,4 @@
          diff: row.revert.diff,
-+        // schema 侧为 readonly 数组，session struct 期望可变数组——展开拷贝断开引用
++        // HTTP与事件共用此映射；复制路径数组保留精确恢复范围，且不暴露存储引用。
 +        revertedPaths: row.revert.revertedPaths ? [...row.revert.revertedPaths] : undefined,
        }
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -581,2 +581,4 @@
+   diff: optional(Schema.String),
++  // V1事件解码也需保留精确恢复路径，不能在共享mapper之后再丢失该字段。
++  revertedPaths: optional(Schema.Array(Schema.String)),
+ })
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
@@ -290,3 +298,140 @@ diff --git a/packages/opencode/test/snapshot/snapshot.test.ts b/packages/opencod
 +    expect(diff).not.toContain("packages/b")
 +  }),
 +)
+diff --git a/packages/opencode/test/session/schema-decoding.test.ts b/packages/opencode/test/session/schema-decoding.test.ts
+--- a/packages/opencode/test/session/schema-decoding.test.ts
++++ b/packages/opencode/test/session/schema-decoding.test.ts
+@@ -12,1 +12,2 @@
+ import { WorkspaceV2 } from "@opencode-ai/core/workspace"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
+@@ -74,7 +75,10 @@
+         diff: "diff-1",
++        revertedPaths: ["/tmp/proj/a.ts"],
+       },
+     }
+     expect(decode(input)).toEqual(input)
++    // Session.Info与session.updated的canonical V1契约都必须保留恢复范围。
++    expect(Schema.decodeUnknownSync(SessionV1.SessionInfo)(input)).toEqual(input)
+   })
+ 
+   test("accepts migrated summary diffs without file details", () => {
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -229,6 +229,7 @@ export type Session = {
+     partID?: string
+     snapshot?: string
+     diff?: string
++    revertedPaths?: Array<string>
+   }
+ }
+ 
+@@ -2553,6 +2554,7 @@ export type GlobalSession = {
+     partID?: string
+     snapshot?: string
+     diff?: string
++    revertedPaths?: Array<string>
+   }
+   project: ProjectSummary | null
+ }
+@@ -3537,6 +3539,7 @@ export type RevertState = {
+   snapshot?: string
+   diff?: string
+   files?: Array<FileDiff>
++  revertedPaths?: Array<string>
+ }
+ 
+ export type PermissionV2Source = {
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -305,6 +305,7 @@ export type SessionsListOutput = {
+         readonly deletions: number
+         readonly patch: string
+       }>
++      readonly revertedPaths?: ReadonlyArray<string>
+     }
+   }>
+   readonly cursor: { readonly previous?: string | null; readonly next?: string | null }
+@@ -411,6 +412,7 @@ export type SessionsCreateOutput = {
+         readonly deletions: number
+         readonly patch: string
+       }>
++      readonly revertedPaths?: ReadonlyArray<string>
+     }
+   }
+ }["data"]
+@@ -493,6 +495,7 @@ export type SessionsGetOutput = {
+         readonly deletions: number
+         readonly patch: string
+       }>
++      readonly revertedPaths?: ReadonlyArray<string>
+     }
+   }
+ }["data"]
+@@ -641,6 +644,7 @@ export type SessionsStageOutput = {
+       readonly deletions: number
+       readonly patch: string
+     }>
++    readonly revertedPaths?: ReadonlyArray<string>
+   }
+ }["data"]
+ 
+@@ -1418,6 +1422,7 @@ export type SessionsHistoryOutput = {
+               readonly deletions: number
+               readonly patch: string
+             }>
++            readonly revertedPaths?: ReadonlyArray<string>
+           }
+         }
+       }
+@@ -2017,6 +2022,7 @@ export type SessionsEventsOutput =
+             readonly deletions: number
+             readonly patch: string
+           }>
++          readonly revertedPaths?: ReadonlyArray<string>
+         }
+       }
+     }
+diff --git a/packages/sdk/openapi.json b/packages/sdk/openapi.json
+--- a/packages/sdk/openapi.json
++++ b/packages/sdk/openapi.json
+@@ -17857,6 +17857,12 @@
+               },
+               "diff": {
+                 "type": "string"
++              },
++              "revertedPaths": {
++                "type": "array",
++                "items": {
++                  "type": "string"
++                }
+               }
+             },
+             "required": ["messageID"],
+@@ -25377,6 +25383,12 @@
+               },
+               "diff": {
+                 "type": "string"
++              },
++              "revertedPaths": {
++                "type": "array",
++                "items": {
++                  "type": "string"
++                }
+               }
+             },
+             "required": ["messageID"],
+@@ -28506,6 +28518,12 @@
+             "items": {
+               "$ref": "#/components/schemas/FileDiff"
+             }
++          },
++          "revertedPaths": {
++            "type": "array",
++            "items": {
++              "type": "string"
++            }
+           }
+         },
+         "required": ["messageID"],

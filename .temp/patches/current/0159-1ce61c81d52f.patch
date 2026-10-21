@@ -12,13 +12,265 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -131,8 +131,15 @@
+       })
+ 
+       // 注册归属现有 transform 的作用域，卸载或重载不留下第二份代理状态。
+-      for (const id of ["interactive", "review"]) {
++      for (const id of ["interactive", "decide"]) {
+         draft.update(AgentV2.ID.make(id), (item) => {
++          // runner 同时禁用工具表，避免配置覆盖改变 decide 的无工具语义。
++          if (id === "decide") {
++            item.description = "Decide mode. Produces a decisive plan with bounded recent context and no tools."
++            item.mode = "primary"
++            item.permissions.push({ action: "*", resource: "*", effect: "deny" })
++            return
++          }
+           item.description = "The default agent. Executes tools based on configured permissions."
+           // 使用 build 的基础系统提示；保留更早注册者提供的提示。
+           item.system ??= BUILD_SYSTEM
+@@ -147,10 +154,6 @@
+               // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
+               ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
+-              // V2 的 edit/write/apply_patch 共用 edit 动作，不能只按工具名设审批。
+-              ...(id === "review" ? [{ action: "edit", resource: "*", effect: "ask" as const }] : []),
+-              // 笔记本桥接使用独立动作名，沿用 review 的编辑审批，且保留后续用户覆盖。
+-              ...(id === "review" ? ["vscode_notebook_run", "vscode_notebook_edit", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
+             ]),
+           )
+         })
+       }
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -9,3 +9,5 @@
+ } from "@opencode-ai/llm"
+ import { SessionMessage } from "../message"
+ import type { FileAttachment } from "../prompt"
++import { Token } from "../../util/token"
++import { SessionOverflowV1 } from "../../v1/session/overflow"
+@@ -204,3 +206,39 @@
+     return toLLMMessage({ ...message, content }, model)
+   })
+ }
++
++export const DECIDE_PROMPT = `Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
++Use the available conversation context to produce a decisive recommendation or implementation plan.
++Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.`
++
++export const toDecideMessages = (context: readonly SessionMessage.Message[], model: Model, system: string, reserved?: number) => {
++  // 只复制交付投影，工具原始状态、推理正文和事件仍留在持久历史中。
++  const sanitized = context.map((message) => message.type !== "assistant" ? message : {
++    ...message,
++    content: message.content.map((part): SessionMessage.AssistantContent => {
++      if (part.type === "text") return part
++      if (part.type === "reasoning") return { ...part, text: part.text.length <= 400 ? part.text : `${part.text.slice(0, 200)}...${part.text.slice(-200)}` }
++      const body = part.state.status === "completed"
++        ? part.state.content.map((item) => item.type === "text" ? item.text : `[Attached ${item.mime}]`).join("\n") || JSON.stringify(part.state.structured)
++        : part.state.status === "error" ? part.state.error.message : part.state.status
++      return { type: "text", id: part.id, text: `<tool-context tool="${part.name}" status="${part.state.status}">\ninput: ${typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)}\n${body}\n</tool-context>` }
++    }),
++  })
++  const limits = model.route.defaults.limits
++  // 复用源补丁的输入预算规则，显式零预留和独立 input 上限均保持有效。
++  const limit = SessionOverflowV1.usable({ context: limits?.context ?? 0, input: limits?.input, output: limits?.output ?? 0, reserved })
++  if (limit <= 0) return toLLMMessages(sanitized, model)
++  const starts = sanitized.flatMap((message, index) => message.type === "user" ? [index] : []).toReversed()
++  let fallback: ReturnType<typeof toLLMMessages> | undefined
++  for (const [position, start] of starts.entries()) {
++    const candidate = toLLMMessages(sanitized.slice(start), model)
++    const ratio = Token.estimate([system, JSON.stringify(candidate)].join("\n")) / limit
++    // 超满时回到最近可容纳的完整用户轮，而不是截断工具输入或输出。
++    if (ratio >= 1) return fallback ?? candidate
++    fallback = candidate
++    if (position === 0 && ratio >= 0.6) return candidate
++    if (position === 0 && ratio < 0.5) continue
++    if (ratio >= 0.7) return candidate
++  }
++  return fallback ?? toLLMMessages(sanitized, model)
++}
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -44,2 +44,2 @@
+-import { toLLMMessages } from "./to-llm-message"
++import { DECIDE_PROMPT, toDecideMessages, toLLMMessages } from "./to-llm-message"
+ import { MAX_STEPS_PROMPT } from "./max-steps"
+@@ -116,3 +116,4 @@
+     const db = (yield* Database.Service).db
+-    const compaction = SessionCompaction.make({ events, llm, db, config: yield* config.entries() })
++    const configuration = yield* config.entries()
++    const compaction = SessionCompaction.make({ events, llm, db, config: configuration })
+     const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
+@@ -176,4 +177,5 @@
+     const loadSystemContext = (agent: AgentV2.Selection) =>
+-      Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
++      // 既有 Context Epoch 仍归原 owner 管理；decide 本轮不新增技能指令。
++      Effect.all([systemContext.load(), agent.id === "decide" ? Effect.succeed(SystemContext.empty) : skillGuidance.load(agent), referenceGuidance.load()], {
+         concurrency: "unbounded",
+       }).pipe(Effect.map(SystemContext.combine))
+@@ -254,2 +256,4 @@
+       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
+-      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
++      const decide = agent.id === "decide"
++      // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
++      const toolMaterialization = isLastStep || decide ? undefined : yield* tools.materialize(agent.info?.permissions)
+@@ -259,4 +263,10 @@
+       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
+       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
++      const systemParts = [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
++        toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
++        ...(decide ? [DECIDE_PROMPT] : []),
++        `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
++        .filter((part): part is string => part !== undefined && part.length > 0)
++        .map(SystemPart.make)
+       const request = LLM.request({
+         model,
+@@ -277,13 +287,9 @@
+-        system: [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
+-          toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
+-          `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
+-          .filter((part): part is string => part !== undefined && part.length > 0)
+-          .map(SystemPart.make),
+-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
++        system: systemParts,
++        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+         tools: toolMaterialization?.definitions ?? [],
+-        toolChoice: isLastStep ? "none" : undefined,
++        toolChoice: isLastStep || decide ? "none" : undefined,
+       })
+       // 压缩复用本 turn 已采样的模型选择；不从稍后可能切换的 Session 重读 variant。
+       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
+         return yield* Effect.die(continueAfterCompaction(currentStep))
+       const startSnapshot = yield* snapshots.capture()
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -121,21 +121,25 @@
+       expect(agents.map((item) => String(item.id)).sort()).toEqual([
+         "build",
+         "compaction",
++        "decide",
+         "explore",
+         "general",
+         "interactive",
+         "plan",
+-        "review",
+         "summary",
+         "title",
+       ])
++      const decide = yield* agent.resolve("decide")
++      expect(decide).toMatchObject({ id: "decide", mode: "primary", hidden: false })
++      for (const action of ["read", "bash", "edit", "task", "skill"])
++        expect(PermissionV2.evaluate(action, "*", decide?.permissions ?? []).effect).toBe("deny")
+       // 新增审批代理是唯一例外，既有内置代理仍沿用原来的 bash 策略。
+       for (const item of agents) {
+-        if (item.id === "interactive" || item.id === "review") continue
++        if (item.id === "interactive") continue
+         expect(item.permissions.some((rule) => rule.action === "bash" && rule.effect !== "deny")).toBe(false)
+       }
+       // 从实际注册表 resolve 后求值，缺失注册或错误动作会直接使断言失败。
+-      for (const id of ["interactive", "review"]) {
++      for (const id of ["interactive"]) {
+         const item = yield* agent.resolve(id)
+         if (!item) throw new Error(`expected registered ${id} agent`)
+         expect(item).toMatchObject({ id, mode: "primary", hidden: false })
+@@ -143,8 +147,6 @@
+         expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe("ask")
+         // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
+-        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(
+-          id === "review" ? "ask" : "allow",
+-        )
++        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe("allow")
+         expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
+         expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
+         // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
+@@ -155,10 +157,10 @@
+       const override = yield* agent.transform((draft) =>
+-        draft.update(AgentV2.ID.make("review"), (item) => {
++        draft.update(AgentV2.ID.make("interactive"), (item) => {
+           item.permissions.push({ action: "edit", resource: "*", effect: "deny" })
+           item.permissions.push({ action: "edit", resource: "src/*", effect: "allow" })
+         }),
+       )
+-      const review = yield* agent.resolve("review")
+-      if (!review) throw new Error("expected configured review agent")
++      const review = yield* agent.resolve("interactive")
++      if (!review) throw new Error("expected configured interactive agent")
+       expect(PermissionV2.evaluate("edit", "src/index.ts", review.permissions).effect).toBe("allow")
+       expect(PermissionV2.evaluate("edit", "README.md", review.permissions).effect).toBe("deny")
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1094,1 +1094,59 @@
++  it.effect("decide bounds recent context and preserves durable tool history", () =>
++    Effect.gen(function* () {
++      yield* setup
++      const session = yield* SessionV2.Service
++      const events = yield* EventV2.Service
++      const agents = yield* AgentV2.Service
++      yield* agents.transform((draft) => draft.update(AgentV2.ID.make("decide"), (agent) => { agent.mode = "primary" }))
++      // 先用实际 runner 生成历史，再切换决定模式；不向投影表伪造工具结果。
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "old-marker " + "x".repeat(80_000) }), resume: false })
++      yield* session.resume(sessionID)
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "recent-marker" }), resume: false })
++      const reasoning = "prefix-" + "a".repeat(193) + "-middle-" + "z".repeat(193) + "-suffix"
++      response = [
++        LLMEvent.stepStart({ index: 0 }),
++        LLMEvent.reasoningStart({ id: "decide-reasoning" }),
++        LLMEvent.reasoningDelta({ id: "decide-reasoning", text: reasoning }),
++        LLMEvent.reasoningEnd({ id: "decide-reasoning" }),
++        LLMEvent.toolCall({ id: "decide-history", name: "echo", input: { text: "history" }, providerExecuted: true }),
++        LLMEvent.toolResult({ id: "decide-history", name: "echo", result: { type: "content", value: [{ type: "text", text: "tail output" }] }, providerExecuted: true }),
++        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
++        LLMEvent.finish({ reason: "stop" }),
++      ]
++      yield* session.resume(sessionID)
++      yield* events.publish(SessionEvent.AgentSwitched, {
++        sessionID, messageID: SessionMessage.ID.create(), timestamp: DateTime.makeUnsafe(1), agent: "decide",
++      })
++      skillBaselines.set(AgentV2.ID.make("decide"), "Must not load decide skills")
++      currentModel = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 20_000, input: 10_000, output: 1_000 } }) })
++      response = fragmentFixture("text", "decide-answer", ["Decision"]).completeEvents
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "decide now" }), resume: false })
++      requests.length = 0
++      executions.length = 0
++      yield* session.resume(sessionID)
++      expect(requests).toHaveLength(1)
++      const request = requests[0]
++      if (!request) throw new Error("expected decide request")
++      expect(request.tools).toEqual([])
++      expect(request.toolChoice).toMatchObject({ type: "none" })
++      expect(request.system.map((part) => part.text).join("\n")).toContain("Decide mode is active")
++      const serialized = JSON.stringify(request.messages)
++      expect(serialized).toContain("recent-marker")
++      expect(serialized).not.toContain("old-marker")
++      expect(serialized).toContain("tail output")
++      expect(serialized).toContain("prefix-")
++      expect(serialized).toContain("-suffix")
++      expect(serialized).not.toContain("-middle-")
++      expect(serialized).not.toContain('"role":"tool"')
++      expect(serialized).not.toContain('"type":"tool-call"')
++      expect(serialized).not.toContain("Must not load decide skills")
++      expect(executions).toEqual([])
++      // 发送窗口的裁剪不能删除历史，也不能让原生投影中的工具变成文本。
++      const history = yield* session.context(sessionID)
++      expect(history.some((message) => message.type === "user" && message.text.startsWith("old-marker"))).toBe(true)
++      expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "tool"))).toBe(true)
++      expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "reasoning" && part.text === reasoning))).toBe(true)
++    }),
++  )
++
+   it.effect("updates selected-agent skill guidance after an agent switch", () =>
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 index ca21fb7159391e00ffa022902bfa5747d1cfd2ad..8b15632c334cc182ffddc62d1ea684ea5140bd33 100644
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -42,5 +42,6 @@ export const migrations = (
-     import("./migration/20260622202450_simplify_session_input"),
-     import("./migration/20260422130633_request_usage_tracking"),
+@@ -44,4 +44,5 @@ export const migrations = (
+     import("./migration/20261009114905_session_request_usage"),
      import("./migration/20260723100000_normalize_global_session_path"),
 +    import("./migration/20260725100000_migrate_review_agent"),
    ])
@@ -248,11 +500,11 @@ diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/
 index 5a1c1332aea35c85b0d0436366379245b621c0c7..f0f4a01534a95cb3df8a504d4883d92d250c3a24 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -176,30 +176,18 @@ const layer = Layer.effect(
+@@ -177,29 +177,18 @@ const layer = Layer.effect(
              mode: "primary",
              native: true,
            },
--          // 审查代理：编辑类工具和 bash 均需确认，适合 code review 场景
+-          // 审查仍允许读取代码；只有命令与文件变更收紧为审批。
 -          review: {
 -            name: "review",
 -            description: "The default agent. Executes tools based on configured permissions.",
@@ -266,23 +518,22 @@ index 5a1c1332aea35c85b0d0436366379245b621c0c7..f0f4a01534a95cb3df8a504d4883d92d
              options: {},
 -            permission: Permission.merge(
 -              defaults,
--              // edit/write/apply_patch 设为 ask：审查模式下文件修改需用户逐次确认
--              // bash 设为 ask：命令执行同样需要确认
 -              Permission.fromConfig({
 -                question: "allow",
 -                plan_enter: "allow",
 -                bash: "ask",
+-                // 保留编辑审批及原始工具规则，覆盖 V1 的文件修改入口。
 -                edit: "ask",
 -                write: "ask",
 -                apply_patch: "ask",
--                // #99：build 对 notebook 变更类工具默认 ask
+-                // review 对笔记本变更沿用编辑审批，用户规则仍最后覆盖。
 -                vscode_notebook_run: "ask",
 -                vscode_notebook_edit: "ask",
 -                vscode_notebook_env: "ask",
 -              }),
+-              // 同名代理的专属配置还会在注册表构建后覆盖这些规则。
 -              user,
 -            ),
--            // 审查代理同样作为内置主代理注册，权限比交互代理更严格
 +            // merge 顺序：defaults + user 先合并，最后 deny 全部，防止用户放宽工具权限
 +            // 与 compaction 全 deny 同构，但 decide 是 primary 可见主代理
 +            permission: Permission.merge(defaults, user, Permission.fromConfig({ "*": "deny" })),
@@ -294,19 +545,13 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8a2db8415 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -60,6 +60,8 @@ import { SessionTools } from "./tools"
+@@ -59,2 +59,5 @@
  import { LLMEvent } from "@opencode-ai/llm"
- // #140：无历史样本时回退 Token.estimate（chars/4）
- import { estimate as tokenEstimate } from "@/util/token"
 +// #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
 +import { usable } from "./overflow"
++import { Token } from "@opencode-ai/core/util/token"
  
- // #140：输入侧 chars/token 样本窗口与夹紧范围
- const INPUT_CHARS_HISTORY_LIMIT = 100_000
-@@ -70,6 +72,80 @@ function clampCharsPerToken(value: number) {
-   return Math.min(MAX_CHARS_PER_TOKEN, Math.max(MIN_CHARS_PER_TOKEN, value))
- }
- 
+@@ -60,0 +64,74 @@
 +// #159：decide 最近轮目标占用区间（相对 usable）
 +// LATEST_MIN：最新一轮已≥60% 则不再向历史扩展
 +// CONTINUE_BELOW：最新一轮<50% 才继续扩
@@ -381,13 +626,7 @@ index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8
 +  }))
 +}
 +
- // @ts-ignore
- globalThis.AI_SDK_LOG_WARNINGS = false
- 
-@@ -1163,6 +1239,48 @@ const layer = Layer.effect(
-       throw new Error("Impossible")
-     })
- 
+@@ -1167,2 +1243,44 @@ const layer = Layer.effect(
 +    // #159：从最近 user 起点向后试窗口；ratio 相对 usable，估量用 tip #140 tokenEstimate
 +    const selectDecideMessages = Effect.fn("SessionPrompt.selectDecideMessages")(function* (input: {
 +      messages: SessionV1.WithParts[]
@@ -413,7 +652,7 @@ index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8
 +        const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
 +        // 不用 estimateInputTokens：tip 已历史校准，decide 窗口统一 Token.estimate
 +        const ratio =
-+          tokenEstimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
++          Token.estimate([input.systemText, JSON.stringify(modelMessages)].join("\n")) / limit
 +        // 超满：退回上一个可容纳窗口
 +        if (ratio >= DECIDE_MAX) return fallback ?? candidate
 +
@@ -432,7 +671,6 @@ index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8
 +
      const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
        function* (sessionID: SessionID) {
-         const ctx = yield* InstanceState.context
 @@ -1303,25 +1421,32 @@ const layer = Layer.effect(
              const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
              const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
@@ -484,7 +722,7 @@ index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8
                tools["StructuredOutput"] = createStructuredOutputTool({
                  schema: lastUser.format.schema,
                  onSuccess(output) {
-@@ -1333,16 +1458,17 @@ const layer = Layer.effect(
+@@ -1346,14 +1464,15 @@ const layer = Layer.effect(
              if (step === 1)
                yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
  
@@ -492,16 +730,12 @@ index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8
 +            // decide 跳过插件 transform，避免外部改写只读上下文
 +            if (!decide) yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
  
--            // 仅用户可配置工具计入 system prompt 的工具使用指引
--            const registeredTools = Object.keys(tools).filter(ToolSelection.isUserConfigurable)
 -            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
 -              sys.skills(agent),
-+            // 仅用户可配置工具计入 system prompt 的工具使用指引；decide 无工具
-+            const registeredTools = decide ? [] : Object.keys(tools).filter(ToolSelection.isUserConfigurable)
 +            // decide 跳过 skills/MCP 指令，只保留 env + instructions
 +            const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
 +              decide ? Effect.succeed(undefined) : sys.skills(agent),
-               sys.environment(model, registeredTools),
+               sys.environment(model),
                instruction.system().pipe(Effect.orDie),
 -              sys.mcp(agent, session.permission),
 -              MessageV2.toModelMessagesEffect(msgs, model),
@@ -509,42 +743,17 @@ index ec1443499bd2e70786a70ca5921ec4465a05d31a..2b80c1185abe1bad159119f4a7d391e8
              ])
              const system = [
                ...env,
-@@ -1352,8 +1478,6 @@ const layer = Layer.effect(
-             ]
-             const format = lastUser.format ?? { type: "text" as const }
+@@ -1365,1 +1484,7 @@
              if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
--            // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
--            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
-             // 基于真实请求体估算 input token，先写入 assistant message；finish-step 会用真实值覆盖。
-             // 从本 session 历史 assistant 的 output text/reasoning 推算真实 chars-per-token 比值，
-             // 按累积字符量停止（≥16000），不按轮数，代替固定 /4
-@@ -1362,6 +1486,13 @@ const layer = Layer.effect(
-               ...system,
-               ...(lastUser.system ? [lastUser.system] : []),
-             ].join("\n")
-+            // decide：消毒+窗口后再 toModelMessages；非 decide 用全量 msgs
++            // 只选择发送窗口，原始历史和 prepared 统计仍由各自 owner 管理。
++            const systemText = [(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)).join("\n"), ...system, lastUser.system ?? ""].join("\n")
 +            const requestMsgs = decide
 +              ? yield* selectDecideMessages({ messages: msgs, model, systemText })
 +              : msgs
 +            const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
-+            // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
-+            const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
-             const messagesText = JSON.stringify(messages)
-             // 合并 agent 与 session 权限，仅估算实际发送的工具定义
-             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
-@@ -1380,10 +1511,10 @@ const layer = Layer.effect(
-               .join("\n")
-             // 三段字符总量近似请求体，除以 chars-per-token 得 token 估算
-             const inputChars = [systemText, messagesText, toolsText].join("\n").length
--            // 输入字符细分：遍历消息部件计算每类字符数，供 TUI 精确分类显示
-+            // 输入字符细分：遍历实际请求消息（requestMsgs）计算每类字符数
-             let msgUserChars = 0, msgAssistantChars = 0, msgReasoningChars = 0
-             let msgToolInputChars = 0, msgToolOutputChars = 0, msgAttachmentChars = 0
--            for (const m of msgs) {
-+            for (const m of requestMsgs) {
-               for (const p of m.parts as any[]) {
-                 if (p.type === "text" && m.info.role === "user") msgUserChars += p.text?.length ?? 0
-                 else if (p.type === "text" && m.info.role === "assistant") msgAssistantChars += p.text?.length ?? 0
+@@ -1385,1 +1510,1 @@
+-              toolChoice: format.type === "json_schema" ? "required" : undefined,
++              toolChoice: !decide && format.type === "json_schema" ? "required" : undefined,
 diff --git a/packages/opencode/src/session/reminders.ts b/packages/opencode/src/session/reminders.ts
 index f5484b8e9ba455edd3808c8b8823ac9298c77f13..63710999598bb9b631bfc5fc0fe9ebf74525d5c8 100644
 --- a/packages/opencode/src/session/reminders.ts

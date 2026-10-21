@@ -14,25 +14,31 @@ diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt
  // 只清理 24 小时以前的崩溃残留；更短窗口可能误删仍在转写或另一个进程刚释放的临时文件。
  const VOICE_RECORDER_STALE_FILE_MS = 24 * 60 * 60 * 1_000
  
-diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
---- a/packages/opencode/src/tool/shell.ts
-+++ b/packages/opencode/src/tool/shell.ts
-@@ -497,8 +497,13 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
-     )
-   }
- 
--  return ChildProcess.make(command, [], {
--    shell,
-+  // [local-smark] 不使用 spawn 的 shell 选项；改为显式传递 shell 路径和 -c 参数。
-+  // Bun macOS 上 shell 选项 + detached 组合存在 stdout 管道未建立的 bug，
-+  // 导致 echo test 退出码 0 但输出为空。显式 -c 在所有平台行为等价且避免该 bug。
-+  // cmd.exe 需保留 /d（禁用 AutoRun 注册表命令）和 /s（规范引号剥离）标志。
-+  const n = Shell.name(shell)
-+  const shellArgs = n === "cmd" ? ["/d", "/s", "/c", command] : ["-c", command]
-+  return ChildProcess.make(shell, shellArgs, {
-     cwd,
-     env,
-     stdin: "ignore",
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -89,3 +89,8 @@
+   test("builds command args per shell family", () => {
++    // 显式启动shell；Windows名称去扩展名依赖真实宿主，只在Windows验证cmd路径。
++    expect(Shell.cmd("/bin/sh", "echo hi", "linux")).toEqual({ command: "/bin/sh", args: ["-c", "echo hi"], shell: false })
++    if (process.platform === "win32") expect(Shell.cmd("cmd.exe", "echo hi", "win32")).toEqual({
++      command: "cmd.exe", args: ["/d", "/s", "/c", '"echo hi"'], shell: false,
++    })
+     expect(Shell.args("/bin/sh", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
+     expect(Shell.args("/usr/bin/fish", "echo hi", "/tmp")).toEqual(["-c", "echo hi"])
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -181,3 +181,8 @@
+ export function cmd(file: string, command: string, platform: string = process.platform) {
+-  if (platform !== "win32" || !ps(file)) return { command, args: [], shell: file }
++  if (platform !== "win32" || !ps(file)) {
++    // 显式shell argv避开Bun/macOS shell+detached丢stdout；cmd保留AutoRun与引号控制。
++    // cmd /s会剥去最外层引号；包装整个脚本才能保留可执行路径与参数原有引号。
++    return { command: file, args: name(file) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command], shell: false }
++  }
++  // Windows PowerShell仍走既有UTF-16传输及UTF-8输出，不重复解释脚本文本。
+   // UTF-16LE base64 只传输脚本文本；Console 与管道生产端使用无 BOM 的 UTF-8。
 diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
@@ -49,10 +55,7 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -226,6 +226,26 @@ describe("tool.shell", () => {
-     ),
-    60_000)
- 
+@@ -300,3 +300,23 @@ describe("tool.shell", () => {
 +  // [local-smark] 回归：cmd() 从 spawn 的 shell 选项改为显式 -c 参数后，
 +  // 必须验证含引号、管道的命令仍被 shell 正确解析。
 +  // 仅在非 Windows 平台运行：tr 和单引号语义是 POSIX shell 专属。
@@ -76,3 +79,49 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
    it.live("falls back from terminal-only configured shell", () =>
      Effect.gen(function* () {
        const tmp = yield* tmpdirScoped({ config: { shell: "fish" } })
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -34,2 +34,3 @@
+   readonly command: string
++  readonly args: ReadonlyArray<string>
+   readonly cwd?: string
+@@ -79,2 +80,2 @@
+-        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell,
++        runs.push({ command: command.command, args: command.args, cwd: command.options.cwd, shell: command.options.shell,
+           env: command.options.env, extendEnv: command.options.extendEnv, options })
+@@ -209,1 +210,6 @@
+-            expect(runs).toMatchObject([{ command: "pwd", cwd: realpathSync(tmp.path) }])
++            // 原脚本仍完整传入argv，spawn不再把脚本误当作可执行文件或再次包装shell。
++            expect(runs).toMatchObject([{
++              command: process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh", cwd: realpathSync(tmp.path), shell: false,
++              args: process.platform === "win32" ? ["/d", "/s", "/c", '"pwd"'] : ["-c", "pwd"],
++            }])
++            expect(runs[0]?.command).not.toBe("pwd")
+@@ -225,1 +231,1 @@
+-            expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
++            expect(initialized.baseline).toContain(`Shell: ${runs[0]?.command}`)
+@@ -325,1 +331,4 @@
+-                  expect(runs).toMatchObject([{ command: cmd ? command : shell, shell: cmd ? shell : false }])
++                  expect(runs).toMatchObject([{ command: shell, shell: false }])
++                  // 配置cmd与PowerShell都保留原脚本；编码传输不得丢失已通过审批的文本。
++                  if (cmd) expect(runs[0]?.args).toEqual(["/d", "/s", "/c", `"${command}"`])
++                  if (!cmd) expect(Buffer.from(runs[0]?.args.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
+@@ -335,1 +344,1 @@
+-              expect(runs).toMatchObject([{ command, shell: "C:\\Program Files\\Git\\bin\\bash.exe" }])
++              expect(runs).toMatchObject([{ command: "C:\\Program Files\\Git\\bin\\bash.exe", args: ["-c", command], shell: false }])
+@@ -905,1 +914,4 @@
+-            expect(runs[0]?.command).toBe(command)
++            // 压缩分类依据原脚本；argv观察必须与实际进程入口分开核对。
++            expect(runs[0]?.args).toEqual(process.platform === "win32" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command])
++            expect(runs[0]?.command).not.toBe(command)
++            expect(runs[0]?.shell).toBe(false)
+diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
+--- a/packages/core/src/cross-spawn-spawner.ts
++++ b/packages/core/src/cross-spawn-spawner.ts
+@@ -378,3 +378,5 @@
+               detached: command.options.detached ?? process.platform !== "win32",
+               shell: command.options.shell,
++              // cmd自行解析/c脚本；Node的反斜杠转义会破坏其中路径和嵌套引号。
++              windowsVerbatimArguments: process.platform === "win32" && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(command.command),
+               windowsHide: process.platform === "win32",

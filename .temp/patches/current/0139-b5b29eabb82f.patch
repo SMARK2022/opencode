@@ -289,7 +289,7 @@ index 171705962f..6eba89b86e 100644
 +++ b/packages/opencode/src/cli/cmd/tui.ts
 @@ -190,6 +190,8 @@ export async function discoverOrSpawnDaemon(
        applyProxyEnv(env)
-       // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
+       // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
        const proc = deps.spawn([process.execPath, daemonFile], {
 +        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon
 +        detached: process.platform !== "win32",
@@ -378,10 +378,8 @@ index f361084936..8588258363 100644
          yield* session.updatePart({
            ...match.part,
            state: {
-@@ -510,7 +520,9 @@ const layer = Layer.effect(
-                 requestID: ctx.assistantMessage.parentID,
-                 assistant: ctx.assistantMessage,
-               }) as any as Effect.Effect<void, never, never>)
+@@ -566,5 +576,7 @@
+             yield* publishAssistant(ctx.assistantMessage, events)
 -            if (ctx.snapshot) {
 +            if (ctx.snapshot && !aborted) {
 +          // #139：中断时跳过慢 git snapshot，优先完成终端态清理
@@ -498,18 +496,177 @@ index aa83a95cb5..fa48cc7ed4 100644
        assistantMessage.finish = "tool-calls"
        assistantMessage.time.completed = Date.now()
        yield* sessions.updateMessage(assistantMessage)
-@@ -472,6 +469,11 @@ const layer = Layer.effect(
+@@ -472,6 +469,16 @@ const layer = Layer.effect(
          } satisfies SessionV1.ToolPart)
        }
  
-+      // #139：先落库终态，再 best-effort after；失败不得回滚
++      // #139：终态提交后记录并吞掉 after 缺陷，中断仍原样传播。
 +      yield* plugin
 +        .trigger("tool.execute.after", { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs }, result)
-+        .pipe(Effect.catch(() => Effect.void))
++        .pipe(
++          Effect.catchCause((cause) => {
++            if (Cause.hasInterrupts(cause)) return Effect.failCause(cause)
++            return Effect.logError("tool.execute.after failed", { cause })
++          }),
++        )
 +
        if (!task.command) return
  
        const summaryUserMsg: SessionV1.User = {
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -1186,3 +1186,150 @@
++// #139：真实 Promise hook 拒绝不能阻断已完成 command 的总结续跑。
++it.instance("subtask after hook defects preserve terminal state and command continuation", () =>
++  Effect.gen(function* () {
++    const { llm } = yield* useServerConfig(providerCfg)
++    const prompt = yield* SessionPrompt.Service
++    const sessions = yield* Session.Service
++    const registry = yield* ToolRegistry.Service
++    const plugin = yield* Plugin.Service
++    const chat = yield* sessions.create({ title: "Pinned" })
++    const task = (yield* registry.named()).task
++    const execute = task.execute
++    task.execute = () =>
++      Effect.succeed({
++        title: "subtask",
++        metadata: { parentSessionId: chat.id, sessionId: SessionID.make("ses_after_hook"), model: ref },
++        output: "subtask done",
++      })
++    yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = execute)))
++    const calls: string[] = []
++    const hook = {
++      "tool.execute.after": async (input: { tool: string; sessionID: string }) => {
++        if (input.tool !== "task" || input.sessionID !== chat.id) return
++        calls.push(input.tool)
++        throw new Error("after hook defect")
++      },
++    }
++    const hooks = yield* plugin.list()
++    hooks.push(hook)
++    yield* Effect.addFinalizer(() => Effect.sync(() => void hooks.splice(hooks.indexOf(hook), 1)))
++    yield* llm.text("continued")
++    const msg = yield* user(chat.id, "hello")
++    yield* sessions.updatePart({
++      id: PartID.ascending(),
++      messageID: msg.id,
++      sessionID: chat.id,
++      type: "subtask",
++      prompt: "inspect the cache key path",
++      description: "inspect bug",
++      agent: "general",
++      model: ref,
++      command: "inspect",
++    })
++
++    const result = yield* prompt.loop({ sessionID: chat.id })
++    expect(calls).toEqual(["task"])
++    expect(yield* llm.calls).toBe(1)
++    expect(result.parts.some((part) => part.type === "text" && part.text === "continued")).toBe(true)
++    const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
++    const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
++    expect(taskMsg?.info.role).toBe("assistant")
++    if (!taskMsg || taskMsg.info.role !== "assistant") throw new Error("missing subtask assistant")
++    expect(taskMsg.info.finish).toBe("tool-calls")
++    expect(taskMsg.info.time.completed).toBeNumber()
++    expect(completedTool(taskMsg.parts)?.state.output).toBe("subtask done")
++    expect(
++      msgs.some((item) =>
++        item.parts.some(
++          (part) =>
++            part.type === "text" &&
++            part.synthetic &&
++            part.text === "Summarize the task tool output above and continue with your task.",
++        ),
++      ),
++    ).toBe(true)
++  }),
++)
++
++// #139：等待 after hook 时取消仍中断续跑，已提交终态保持完成。
++it.instance(
++  "cancel during subtask after hook preserves terminal state without command continuation",
++  () =>
++    Effect.gen(function* () {
++      const { llm } = yield* useServerConfig(providerCfg)
++      const prompt = yield* SessionPrompt.Service
++      const sessions = yield* Session.Service
++      const status = yield* SessionStatus.Service
++      const registry = yield* ToolRegistry.Service
++      const plugin = yield* Plugin.Service
++      const chat = yield* sessions.create({ title: "Pinned" })
++      const task = (yield* registry.named()).task
++      const execute = task.execute
++      task.execute = () =>
++        Effect.succeed({
++          title: "subtask",
++          metadata: { parentSessionId: chat.id, sessionId: SessionID.make("ses_after_hook"), model: ref },
++          output: "subtask done",
++        })
++      yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = execute)))
++      const ready = defer<void>()
++      const stopped = defer<void>()
++      const hook = {
++        "tool.execute.after": async (input: { tool: string; sessionID: string }) => {
++          if (input.tool !== "task" || input.sessionID !== chat.id) return
++          ready.resolve()
++          await stopped.promise
++        },
++      }
++      const hooks = yield* plugin.list()
++      hooks.push(hook)
++      yield* Effect.addFinalizer(() =>
++        Effect.sync(() => {
++          stopped.resolve()
++          hooks.splice(hooks.indexOf(hook), 1)
++        }),
++      )
++      yield* llm.text("unexpected continuation")
++      const msg = yield* user(chat.id, "hello")
++      yield* sessions.updatePart({
++        id: PartID.ascending(),
++        messageID: msg.id,
++        sessionID: chat.id,
++        type: "subtask",
++        prompt: "inspect the cache key path",
++        description: "inspect bug",
++        agent: "general",
++        model: ref,
++        command: "inspect",
++      })
++
++      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++      yield* awaitWithTimeout(Effect.promise(() => ready.promise), "after hook never started", "10 seconds")
++      yield* prompt.cancel(chat.id)
++      const exit = yield* Fiber.await(fiber)
++      expect(Exit.isSuccess(exit)).toBe(true)
++      expect((yield* status.get(chat.id)).type).toBe("idle")
++      expect(yield* llm.calls).toBe(0)
++      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
++      const taskMsg = msgs.find((item) => item.info.role === "assistant" && item.info.agent === "general")
++      expect(taskMsg?.info.role).toBe("assistant")
++      if (!taskMsg || taskMsg.info.role !== "assistant") throw new Error("missing subtask assistant")
++      expect(taskMsg.info.finish).toBeDefined()
++      expect(taskMsg.info.time.completed).toBeNumber()
++      expect(completedTool(taskMsg.parts)?.state.output).toBe("subtask done")
++      expect(
++        msgs.some((item) =>
++          item.parts.some(
++            (part) =>
++              part.type === "text" &&
++              part.synthetic &&
++              part.text === "Summarize the task tool output above and continue with your task.",
++          ),
++        ),
++      ).toBe(false)
++    }),
++  15_000,
++)
++
+ it.instance("failed subtask preserves metadata on error tool state", () =>
+   Effect.gen(function* () {
+     const { llm } = yield* useServerConfig((url) => ({
 diff --git a/packages/tui/test/context/sdk-reconnect.test.tsx b/packages/tui/test/context/sdk-reconnect.test.tsx
 new file mode 100644
 index 0000000000..59886e80b6

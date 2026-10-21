@@ -15,14 +15,13 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -551,11 +551,34 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+@@ -558,10 +558,32 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
      )
-     // [local-smark] 成功的 active mutation 后 fork prompt loop 使 idle session
-     // 恢复执行；busy 由 RunState 去重，empty session defect 被静默不影响 Goal
+     // active写入后在持久Session目录内恢复执行；busy仍由原RunState去重。
 +    // [local-smark] active mutation 只在已有 user Message 时恢复现有 loop；
 +    // empty Session 保留 active Goal，等待第一条真实 prompt 自然启动执行。
      if (goal.status === "active") {
--      yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+-      yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID })).pipe(
 -        Effect.catchDefect(() => Effect.void),
 -        Effect.forkIn(scope),
 -      )
@@ -36,7 +35,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 +        // prompt_async observability，不能静默吞掉或伪造 mutation 成功后的执行结果。
 +        // startImmediately 让 fork 在 handler scope 内开始，随后仍由 RunState 决定 start/join；
 +        // HTTP 200 只承诺 mutation 已提交，不把后台执行成败混入 response contract。
-+        yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
++        yield* inSessionDirectory(ctx.params.sessionID, promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
 +          Effect.catchCause((cause) =>
 +            Effect.gen(function* () {
 +              yield* Effect.logError("goal resume loop failed").pipe(
@@ -48,8 +47,7 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 +              })
 +            }),
 +          ),
-+          Effect.forkIn(scope, { startImmediately: true }),
-+        )
++        )).pipe(Effect.forkIn(scope, { startImmediately: true }))
 +      }
      }
      return { goal }
@@ -79,10 +77,10 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
        })
        yield* session.updatePart({
          id: PartID.ascending(),
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
 
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
+--- a/packages/core/src/session/goal.ts
++++ b/packages/core/src/session/goal.ts
 @@ -75,7 +75,7 @@ export interface ModelTransitionInput {
  // - updated: 状态已变更；- blocked-pending: blocked 尚未达到三轮，goal 仍 active
  export type ModelTransitionResult =
@@ -100,7 +98,7 @@ diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/sessi
        // objective 校验：仅在传入时触发，空字符串和超长均拒绝
        if (input.objective !== undefined) {
          const trimmed = input.objective.trim()
-@@ -164,119 +163,116 @@ const layer = Layer.effect(
+@@ -174,17 +173,17 @@ const layer = Layer.effect(
        if (input.status === "complete" || input.status === "blocked") {
          const trimmedReason = input.reason?.trim() ?? ""
          if (trimmedReason === "") {
@@ -115,213 +113,13 @@ diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/sessi
          }
        }
  
--      const existing = yield* db
--        .select()
--        .from(SessionGoalTable)
--        .where(eq(SessionGoalTable.session_id, sessionID))
--        .get()
--        .pipe(Effect.orDie)
--
--      if (existing) {
--        // 更新已有 goal：保留 tokens_used / time_used_seconds / id / created_at
--        const updates: Partial<typeof SessionGoalTable.$inferInsert> = {
--          time_updated: now,
--        }
--        if (input.objective !== undefined) {
--          const trimmedObjective = input.objective.trim()
--          // [local-smark] 仅当 trimmed objective 值真正改变时递增 generation 并重置 blocked 审计
--          if (trimmedObjective !== existing.objective) {
--            updates.objective = trimmedObjective
--            updates.generation = existing.generation + 1
--            updates.blocked_reason = null
--            updates.blocked_streak = 0
--            updates.blocked_last_turn_id = null
--            updates.terminal_turn_id = null
--            updates.reason = null
--            // [local-smark] terminal Goal 的 objective-only edit 自动回到 active；
--            // paused 保持 paused，active 保持 active
--            if (input.status === undefined && (existing.status === "complete" || existing.status === "blocked")) {
--              updates.status = "active"
-+      type SetResult =
-+        | { type: "updated"; row: NonNullable<Awaited<ReturnType<typeof readRow>>> }
-+        | { type: "error"; message: string }
-+      const readRow = (tx: typeof db) =>
-+        tx.select().from(SessionGoalTable).where(eq(SessionGoalTable.session_id, sessionID)).get().pipe(Effect.orDie)
-+
-+      // [local-smark] 多 daemon 可能共享数据库；必须先取得写锁再读取 generation，
-+      // 否则两个 writer 可基于同一旧 row 生成相同代际，破坏模型 stale-snapshot CAS。
-+      // 时间戳同样在获锁后生成，避免后提交的 writer 记录更早的 time_updated。
-+      const result = yield* db
-+        .transaction((tx) =>
-+          Effect.gen(function* () {
-+            const now = Date.now()
-+            const existing = yield* readRow(tx as unknown as typeof db)
-+
-+            if (existing) {
-+              // 更新已有 goal：保留 tokens_used / time_used_seconds / id / created_at
-+              const updates: Partial<typeof SessionGoalTable.$inferInsert> = {
-+                time_updated: now,
-+              }
-+              if (input.objective !== undefined) {
-+                const trimmedObjective = input.objective.trim()
-+                // [local-smark] 仅当相对事务内 current row 真正改变 objective 才递增 generation
-+                if (trimmedObjective !== existing.objective) {
-+                  updates.objective = trimmedObjective
-+                  updates.generation = existing.generation + 1
-+                  updates.blocked_reason = null
-+                  updates.blocked_streak = 0
-+                  updates.blocked_last_turn_id = null
-+                  updates.terminal_turn_id = null
-+                  updates.reason = null
-+                  // [local-smark] terminal Goal 的 objective-only edit 自动回到 active；
-+                  // paused 保持 paused，active 保持 active
-+                  if (input.status === undefined && (existing.status === "complete" || existing.status === "blocked")) {
-+                    updates.status = "active"
-+                  }
-+                }
-+              }
-+              if (input.status !== undefined) {
-+                updates.status = input.status
-+                // [local-smark] terminal 写入持久化 reason；active/paused 清除 reason 并重置
-+                // blocked 审计，确保 resume 后 blocked streak 从零开始
-+                if (input.status === "complete" || input.status === "blocked") {
-+                  updates.reason = input.reason!.trim()
-+                  updates.blocked_reason = null
-+                  updates.blocked_streak = 0
-+                  updates.blocked_last_turn_id = null
-+                  // 用户直接写入 terminal 不设置 terminal_turn_id（仅模型 transition 设置）
-+                  updates.terminal_turn_id = null
-+                } else {
-+                  updates.reason = null
-+                  updates.blocked_reason = null
-+                  updates.blocked_streak = 0
-+                  updates.blocked_last_turn_id = null
-+                  updates.terminal_turn_id = null
-+                }
-+              }
-+              if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
-+              // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
-+              if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
-+              yield* tx
-+                .update(SessionGoalTable)
-+                .set(updates)
-+                .where(eq(SessionGoalTable.session_id, sessionID))
-+                .run()
-+                .pipe(Effect.orDie)
-+              return { type: "updated" as const, row: (yield* readRow(tx as unknown as typeof db))! }
-             }
--          }
--        }
--        if (input.status !== undefined) {
--          updates.status = input.status
--          // [local-smark] terminal 写入持久化 reason；active/paused 清除 reason 并重置
--          // blocked 审计，确保 resume 后 blocked streak 从零开始
--          if (input.status === "complete" || input.status === "blocked") {
--            updates.reason = input.reason!.trim()
--            updates.blocked_reason = null
--            updates.blocked_streak = 0
--            updates.blocked_last_turn_id = null
--            // 用户直接写入 terminal 不设置 terminal_turn_id（仅模型 transition 设置）
--            updates.terminal_turn_id = null
--          } else {
--            updates.reason = null
--            updates.blocked_reason = null
--            updates.blocked_streak = 0
--            updates.blocked_last_turn_id = null
--            updates.terminal_turn_id = null
--          }
--        }
--        if (input.tokenBudget !== undefined) updates.token_budget = input.tokenBudget
--        // [local-smark] 仅在显式传入时更新策略，省略时保留现有值
--        if (input.continueOnError !== undefined) updates.continue_on_error = input.continueOnError
--        yield* db
--          .update(SessionGoalTable)
--          .set(updates)
--          .where(eq(SessionGoalTable.session_id, sessionID))
--          .run()
--          .pipe(Effect.orDie)
--        const row = yield* db
--          .select()
--          .from(SessionGoalTable)
--          .where(eq(SessionGoalTable.session_id, sessionID))
--          .get()
--          .pipe(Effect.orDie)
--        const goal = fromRow(row!)
--        yield* events.publish(Event.Updated, { sessionID, goal })
--        return goal
--      }
- 
--      // 新建 goal：objective 必须提供
--      const objective = input.objective
--      if (objective === undefined) {
--        return yield* new GoalError({ message: "cannot update goal for session: no goal exists" })
--      }
--
--      const goalId = ulid()
--      yield* db
--        .insert(SessionGoalTable)
--        .values({
--          session_id: sessionID,
--          id: goalId,
--          objective: objective.trim(),
--          // 新建时 status 缺省为 active，立即进入续跑态
--          status: input.status ?? "active",
--          token_budget: input.tokenBudget ?? null,
--          tokens_used: 0,
--          time_used_seconds: 0,
--          // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
--          continue_on_error: input.continueOnError ?? false,
--          // [local-smark] 新建 generation=1；terminal status 持久化 reason
--          generation: 1,
--          reason: input.status === "complete" || input.status === "blocked" ? input.reason!.trim() : null,
--          time_created: now,
--          time_updated: now,
--        })
--        .run()
--        .pipe(Effect.orDie)
--      const row = yield* db
--        .select()
--        .from(SessionGoalTable)
--        .where(eq(SessionGoalTable.session_id, sessionID))
--        .get()
-+            // 新建 goal：objective 必须提供；错误在事务外恢复为现有 GoalError
-+            const objective = input.objective
-+            if (objective === undefined) {
-+              return { type: "error" as const, message: "cannot update goal for session: no goal exists" }
-+            }
-+            yield* tx
-+              .insert(SessionGoalTable)
-+              .values({
-+                session_id: sessionID,
-+                id: ulid(),
-+                objective: objective.trim(),
-+                // 新建时 status 缺省为 active，立即进入续跑态
-+                status: input.status ?? "active",
-+                token_budget: input.tokenBudget ?? null,
-+                tokens_used: 0,
-+                time_used_seconds: 0,
-+                // [local-smark] 错误后续跑策略默认关闭，保证升级兼容
-+                continue_on_error: input.continueOnError ?? false,
-+                // [local-smark] 新建 generation=1；terminal status 持久化 reason
-+                generation: 1,
-+                reason: input.status === "complete" || input.status === "blocked" ? input.reason!.trim() : null,
-+                time_created: now,
-+                time_updated: now,
-+              })
-+              .run()
-+              .pipe(Effect.orDie)
-+            return { type: "updated" as const, row: (yield* readRow(tx as unknown as typeof db))! }
-+          }).pipe(Effect.orDie),
-+            // [local-smark] immediate 写锁：事务 BEGIN 即取写锁，generation 读取不基于过期快照
-+            { behavior: "immediate" },
-+        )
-         .pipe(Effect.orDie)
--      const goal = fromRow(row!)
-+      if (result.type === "error") return yield* new GoalError({ message: result.message })
-+      const goal = fromRow(result.row)
-       yield* events.publish(Event.Updated, { sessionID, goal })
-       return goal
-     })
+       // generation与objective必须在同一写锁内更新，否则并发编辑会复用代际并穿透读快照。
+       const result = yield* db.transaction((db) => Effect.gen(function* () {
++      // 时间戳在获锁后取值，避免等待提交的writer记录更早的更新时间。
++      const now = Date.now()
+       const existing = yield* db
+         .select()
+         .from(SessionGoalTable)
 @@ -321,15 +315,27 @@ const layer = Layer.effect(
  
        const row = yield* load()
@@ -567,6 +365,51 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
  
            const lastAssistantMsg = msgs.findLast(
              (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+--- a/packages/core/src/tool/goal.ts
++++ b/packages/core/src/tool/goal.ts
+@@ -16,1 +16,1 @@
+-      description: "Read the current goal with no arguments before marking any status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Mark complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Mark blocked with a reason only at a genuine impasse after three consecutive goal turns with the same blocker; the tool tracks the attempts and keeps earlier attempts active. Do not block merely because work is hard, slow, uncertain or incomplete. Mark active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
++      description: "Read the current goal with no arguments before marking any status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Mark complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Mark blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the goal active for further exploration; the second confirms a persistent genuine blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Mark active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
+@@ -37,3 +37,3 @@
+         if (!turn?.read) return yield* Effect.fail(new ToolFailure({
+-          message: "goal tool: must call get (no arguments) before marking a status. Read the current goal first.",
++          message: "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
+         }))
+@@ -62,1 +62,1 @@
+-              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. The goal remains active. Continue working, or call blocked in the next goal turn with the same reason if the blocker persists.`
++              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -741,4 +741,27 @@
+     // 无 step-finish 的 EOF 不能被当作正常完成后再自动续跑。
+     expect(requests).toHaveLength(1)
+     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
++
++    // 沿真实原生runner跨两个eligible turn确认blocker，工具read与mark仍各占provider step。
++    yield* goals.set(sessionID, { objective: "Verify two-turn blocking and later recovery", status: "active" })
++    const callGoal = (id: string, input: Record<string, string>) => [
++      LLMEvent.stepStart({ index: 0 }),
++      LLMEvent.toolCall({ id, name: "goal", input }),
++      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++      LLMEvent.finish({ reason: "tool-calls" }),
++    ]
++    const blocked = { mark: "blocked", reason: "persistent blocker" }
++    responses = [callGoal("read-1", {}), callGoal("block-1", blocked), normal, callGoal("read-2", {}), callGoal("block-2", blocked), normal]
++    requests.length = 0
++    yield* session.resume(sessionID)
++    expect(requests).toHaveLength(6)
++    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "blocked", reason: "persistent blocker" })
++
++    // 后续真实用户才可恢复模型终态；以EOF停止本轮，避免额外自动续跑影响该边界断言。
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Resume this blocked goal" }), resume: false })
++    responses = [callGoal("read-recovery", {}), callGoal("recover", { mark: "active" }), []]
++    requests.length = 0
++    yield* session.resume(sessionID)
++    expect(requests).toHaveLength(3)
++    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "active", reason: null })
+   }),
 diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
 --- a/packages/opencode/src/tool/goal.ts
 +++ b/packages/opencode/src/tool/goal.ts
@@ -657,7 +500,10 @@ diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/openc
  import { resetDatabase } from "../fixture/db"
  import { disposeAllInstances, TestInstance } from "../fixture/fixture"
  import { testEffect } from "../lib/effect"
-@@ -201,6 +202,102 @@ describe("session goal HttpApi", () => {
+@@ -204,1 +207,1 @@
+-        expect(yield* responseJson(rejected)).toEqual({ name: "GoalError", data: { message: "goal complete requires a non-empty reason" } })
++        expect(yield* responseJson(rejected)).toEqual({ name: "GoalError", data: { message: "Marking the goal as complete requires a non-empty reason." } })
+@@ -219,6 +222,102 @@ describe("session goal HttpApi", () => {
      30000,
    )
  
@@ -812,17 +658,6 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
  })
  
  describe("session.compaction.prune", () => {
-@@ -1560,7 +1602,9 @@ describe("session.compaction.process", () => {
-         expect(Exit.isFailure(exit)).toBe(true)
-         if (Exit.isFailure(exit)) {
-           expect(Cause.hasInterrupts(exit.cause)).toBe(true)
--          expect(Date.now() - start).toBeLessThan(250)
-+          // Windows 负载下中断传播实测 400-600ms；语义由 hasInterrupts 保证，
-+          // 时间上限放宽到 1s 只拦截真正的挂起
-+          expect(Date.now() - start).toBeLessThan(1000)
-         }
-       }).pipe(withCompaction({ llm: stub.llmLayer }))
-     },
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
@@ -1138,34 +973,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
    })
    return msg
  })
-@@ -2019,5 +2053,6 @@
-       yield* Fiber.await(fiber)
-     }),
-   { git: true },
--  10_000,
-+  // Windows 冷启动 + SSE bootstrap 在原超时内完不成；与其他测试的 30s 对齐
-+  30_000,
- )
-@@ -2902,7 +2938,8 @@ it.instance(
-       expect(yield* llm.calls).toBe(1)
-     }),
-   { git: true },
--  10_000,
-+    // Windows 负载下 shell+loop 往返超过 10s；与其他测试的 30s 对齐
-+    30_000,
- )
- 
- it.instance(
-@@ -2941,7 +2978,8 @@ it.instance(
-       expect(yield* llm.calls).toBe(1)
-     }),
-   { git: true },
--  10_000,
-+    // Windows 负载下 shell+loop 往返超过 10s；与其他测试的 30s 对齐
-+    30_000,
- )
- 
- unix(
 @@ -3847,4 +3885,172 @@ it.instance(
    30_000,
  )

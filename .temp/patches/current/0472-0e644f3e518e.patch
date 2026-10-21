@@ -8,36 +8,27 @@ Subject: [PATCH] =?UTF-8?q?fix(tui):=20=E4=BF=AE=E5=A4=8D=20DialogGoalMenu?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-适配：owner 迁移至 packages/tui/src/component/dialog-goal.tsx（TUI 独立包，相对导入）；
-锚点行逐字存在，import 行目标含 createSignal 需保留追加；DialogSelect 在 title 与 options
-之间新增 header={goalHeader()}，renderFilter 插入点随之调整。setSize("large") 在目标同时是
-header 截断数学（68=88-8-12）的正确性前置。
-diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
---- a/packages/tui/src/component/dialog-goal.tsx
-+++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -7,3 +7,3 @@
- import { useToast } from "../ui/toast"
--import { createMemo, createSignal } from "solid-js"
-+import { createMemo, createSignal, onMount } from "solid-js"
- import { useTheme } from "../context/theme"
-diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
---- a/packages/tui/src/component/dialog-goal.tsx
-+++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -125,3 +125,8 @@
-   const goal = createMemo(() => sync.data.session_goal[props.sessionID])
-+  // 使用 large 宽度（88 chars），让 goal objective 描述和选项标题有足够显示空间，
-+  // 避免 medium（60 chars）下选项被截断或显得拥挤。与 dialog-session-list / dialog-skill 一致。
-+  // 目标后续 header 截断取 68 chars（88-8-12），同样依赖 large 宽度——本行是其正确性前置。
-+  onMount(() => dialog.setSize("large"))
+适配：真实 DialogGoalMenu 已包含 onMount/setSize(large) 和 renderFilter=false。
+保留当前 header/菜单/权限接线，仅验证实际挂载语句和 filter 归属，不重复实现。
+diff --git a/packages/tui/test/cli/tui/dialog-select.test.tsx b/packages/tui/test/cli/tui/dialog-select.test.tsx
+--- a/packages/tui/test/cli/tui/dialog-select.test.tsx
++++ b/packages/tui/test/cli/tui/dialog-select.test.tsx
+@@ -213,1 +213,18 @@
+ })
 +
- 
-   // [local-smark] 切换 continueOnError：POST 成功后 reconcile 到 sync store，
-diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
---- a/packages/tui/src/component/dialog-goal.tsx
-+++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -169,2 +174,5 @@
-       title="Manage Goal"
-+      // 只有 3-4 个选项，不需要搜索 filter；隐藏 filter 节省 2 行垂直空间，
-+      // 让小终端（≤18 行）也能完整显示所有选项无需滚动
-+      renderFilter={false}
-       header={goalHeader()}
++test("goal menu mounts large without a search filter", async () => {
++  const source = await Bun.file(new URL("../../../src/component/dialog-goal.tsx", import.meta.url)).text()
++  const menu = source.match(/export function DialogGoalMenu\([\s\S]*?\n\}/)?.[0]
++  const mount = menu?.match(/onMount\(\(\) => dialog\.setSize\("large"\)\)/)?.[0]
++  expect(mount).toBeDefined()
++  const sizes: string[] = []
++  // 执行真实挂载语句，不在测试中重写 setSize 决策，也不导入 App/SDK 初始化链。
++  new Function(
++    "onMount",
++    "dialog",
++    mount!,
++  )((run: () => void) => run(), { setSize: (size: string) => sizes.push(size) })
++  expect(sizes).toEqual(["large"])
++  // 菜单自身关闭 filter 才能省行，其他 DialogSelect 用例继续验证真实列表布局。
++  expect(menu).toMatch(/<DialogSelect\s[\s\S]*?renderFilter=\{false\}/)
++})

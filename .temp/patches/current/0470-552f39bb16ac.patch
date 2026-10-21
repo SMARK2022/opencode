@@ -17,6 +17,37 @@ GoalApiError(400)，两个相同状态码导致 Effect OpenAPI 生成器在合�
 严格优于空的 BadRequest) + ApiNotFoundError(404)。其他 28+ 端点仍
 使用 HttpApiError.BadRequest，schema 定义不受影响。
 
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -11702,7 +11702,7 @@
+ export type SessionGoalSetErrors = {
+   /**
+-   * BadRequest | GoalApiError | InvalidRequestError
++   * GoalApiError | InvalidRequestError
+    */
+-  400: EffectHttpApiErrorBadRequest | GoalApiError | InvalidRequestError
++  400: GoalApiError | InvalidRequestError
+   /**
+    * NotFoundError
+diff --git a/packages/sdk/openapi.json b/packages/sdk/openapi.json
+--- a/packages/sdk/openapi.json
++++ b/packages/sdk/openapi.json
+@@ -9553,13 +9553,10 @@
+           "400": {
+-            "description": "BadRequest | GoalApiError | InvalidRequestError",
++            "description": "GoalApiError | InvalidRequestError",
+             "content": {
+               "application/json": {
+                 "schema": {
+                   "anyOf": [
+-                    {
+-                      "$ref": "#/components/schemas/effect_HttpApiError_BadRequest"
+-                    },
+                     {
+                       "$ref": "#/components/schemas/GoalApiError"
+                     },
+                     {
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
 index f0991a15a9a772a43627dec7ef071c6dec51a456..f0334567bf4b8d44568eb22ca6d767e9af154eaf 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts

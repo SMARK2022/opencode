@@ -14,10 +14,10 @@ Content-Transfer-Encoding: 8bit
 - Refactor test utilities to support user messages and improve readability.
 - Ensure that the permission reviewer prompt correctly displays the rationale and decision before the decision tool is invoked.
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index dcb5102a66..b6b3688ffd 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -523,7 +523,10 @@ function cautiousRaw(command: string) {
    const normalized = command.replace(/\s+/g, " ").trim()
    if (
@@ -65,7 +65,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
  export const layer = Layer.effect(
    Service,
    Effect.gen(function* () {
-@@ -73,112 +81,124 @@ export const layer = Layer.effect(
+@@ -73,112 +81,122 @@ export const layer = Layer.effect(
      // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
      const reviewerSessionLocks = new Map<SessionID, Semaphore.Semaphore>()
  
@@ -89,7 +89,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 -        // #206：窗口时可见条目可能 ≤ENTRY_LIMIT，必须与 selectEntries 截短合并披露，否则 reviewer
 -        // #206：会把部分历史当作完整对话评估 user_authorization（修复 page.more 语义丢失）
 -        const transcript = input.sessionID
--          ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
+-          ? yield* MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
 -              // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
 -              Effect.provideService(Database.Service, database),
 -              Effect.map((page) => {
@@ -120,7 +120,8 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +            ? yield* provider.getModel(
 +                Provider.parseModel(autoReview.model).providerID,
 +                Provider.parseModel(autoReview.model).modelID,
-               )
+-              )
++                )
 -          : { entries: [], truncated: false, entryTruncated: false }
 -        const messages = buildMessages({
 -          system: PermissionReviewerPrompt.buildSystemPrompt(tenantPolicy),
@@ -139,7 +140,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 -            })
 -        const language = yield* provider.getLanguage(model)
 -        // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
--        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+-        const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
 -        // #208：标记工具状态为 reviewing——UI 展示确定性 precheck 到模型审查的进度
 -        // #208：markToolReviewing best-effort 标记——过期工具引用不影响有效决策
 -        yield* markToolReviewing(input)
@@ -164,7 +165,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +                )
 +              })
 +          // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
-+          const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
++          const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
 +          // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
 +          yield* markToolReviewing(input, reviewerSession?.id)
 +          const tenantPolicy = yield* loadTenantPolicy(autoReview)
@@ -173,7 +174,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +          // #206：窗口时可见条目可能 ≤ENTRY_LIMIT，必须与 selectEntries 截短合并披露，否则 reviewer
 +          // #206：会把部分历史当作完整对话评估 user_authorization（page.more 语义合并）
 +          const transcript = input.sessionID
-+            ? yield* MessageV2.page({ sessionID: input.sessionID, limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
++            ? yield* MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }).pipe(
 +                // #206：provideService 在调用点消化 Database 需求——review 类型不泄漏 Database.Service
 +                Effect.provideService(Database.Service, database),
 +                Effect.map((page) => {
@@ -264,9 +265,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +                    : "failed",
 +                errorMessage(error),
 +              )
-+              // `fallback: "user"` is deliberately narrow: disabled reviewer already
-+              // means normal user routing, while all other failures become an explicit
-+              // fallback signal for PermissionAuto. Default behavior is fail-closed.
++              // 显式禁用沿用人工路由，其余失败仅按用户配置回退，默认仍拒绝执行。
 +              if (autoReview?.fallback === "user" && !(error instanceof ReviewerDisabled)) {
 +                return yield* new ReviewerFallbackToUser({ reason: errorMessage(error) })
 +              }
@@ -299,7 +298,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
      function recordReviewerRequest(input: { session: Session.Info; model: Provider.Model; text: string }) {
        return Effect.gen(function* () {
          const message = yield* session.updateMessage({
-@@ -222,60 +242,327 @@ export const layer = Layer.effect(
+@@ -222,62 +240,329 @@ export const layer = Layer.effect(
            sessionID: input.session.id,
            messageID: message.id,
            type: "text",
@@ -422,7 +421,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +                    specificationVersion: "v3" as const,
 +                    async transformParams(args) {
 +                      if (args.type === "stream") {
-+                        // #209：Match normal SessionPrompt requests——provider adapters expect opencode's message normalization
++                        // 与普通请求共用消息归一化，避免审查流跳过provider适配。
 +                        // @ts-expect-error AI SDK's internal prompt type is narrower than ModelMessage here.
 +                        args.params.prompt = ProviderTransform.message(args.params.prompt, model, options)
 +                      }
@@ -445,7 +444,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +                  }),
 +                }),
 +              },
-+              // #209：Some OpenAI-compatible providers reject forced tool_choice——absence of the call still fails closed below
++              // 部分兼容provider拒绝强制工具选择，缺失决策调用仍由下方拒绝。
 +              maxRetries: 0,
 +              providerOptions: ProviderTransform.providerOptions(model, options),
 +              maxOutputTokens: ProviderTransform.maxOutputTokens(model),
@@ -656,12 +655,14 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +        }
 +      },
 +    ) {
-+      // #209：无 sessionID 或 tool 绑定时跳过标记——非工具触发的审查无需 UI 进度展示
-       if (!input.sessionID || !input.tool) return Effect.void
++      // 无工具绑定时不写UI标记；捕获绑定以保持异步闭包内的类型收窄。
+       const sessionID = input.sessionID
+       const tool = input.tool
+       if (!sessionID || !tool) return Effect.void
        return Effect.gen(function* () {
          // #208：用 session.messages 替代 MessageV2.get——避免 Database.Service 泄漏到 review 类型
 @@ -286,18 +573,28 @@ export const layer = Layer.effect(
-           (item): item is ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
+           (item): item is ToolPart => item.type === "tool" && item.callID === tool.callID,
          )
          if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
 +        // #209：保留现有 autoReview metadata——reviewing → allowed/denied 渐进更新不覆盖已写入的 reviewID/precheck
@@ -756,16 +757,14 @@ index 2edf42c1e6..6a0c692bd3 100644
              title: output.title,
              time: { start: match.part.state.time.start, end: Date.now() },
              attachments: output.attachments,
-@@ -218,7 +223,11 @@ const layer = Layer.effect(
+@@ -218,7 +223,9 @@ const layer = Layer.effect(
              input: match.part.state.input,
              error: errorMessage(error),
              // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
 -            metadata: match.part.state.metadata,
 +            // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
-+            // #209：error 分支不合并 output.metadata——失败时无工具输出，仅保留 autoReview 注解使 UI 能渲染审查结论与导航链接
-+            metadata: match.part.state.metadata?.autoReview
-+              ? { autoReview: match.part.state.metadata.autoReview }
-+              : match.part.state.metadata,
++            // 保留完整运行态metadata，审查链接与上游子调用进度可同时追溯。
++            metadata: match.part.state.metadata,
              time: { start: match.part.state.time.start, end: Date.now() },
            },
          })
@@ -847,8 +846,8 @@ index f34cae5350..dbc8646ca4 100644
    Plugin.node,
    Config.node,
    ProviderSvc.node,
-@@ -1266,6 +1275,96 @@ it.instance("loop continues when finish is stop but assistant has tool parts"
-   }),
+@@ -1655,6 +1664,96 @@ it.instance("loop continues when finish is stop but assistant has tool parts"
+   15_000,
  )
  
 +// #209：验证 reviewer streaming 持久化真实 reasoning 和 decision tool part
@@ -861,7 +860,7 @@ index f34cae5350..dbc8646ca4 100644
 +      const permissions = yield* Permission.Service
 +      const sessions = yield* Session.Service
 +      const chat = yield* sessions.create({ title: "Reviewer stream" })
-+      const command = String.raw`Get-Content - Path "$env:USERPROFILE\.ssh\id_rsa"`
++      const command = String.raw`Get-Content -Path "$env:USERPROFILE\.ssh\id_rsa"`
 +      // #209：mock LLM 响应先发 reasoning 再调用 decision tool——模拟真实 reviewer 的推理-决策两阶段流
 +      yield* llm.push(
 +        reply()
@@ -1028,7 +1027,7 @@ index 0869a3de22..58ec5022bd 100644
 +      onMouseUp={() => {
 +        // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
 +        if (!props.review.sessionID) return
-+        // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
++        // 拖选审查结论时保留复制行为，不将选择动作当作导航。
 +        if (renderer.getSelection()?.getSelectedText()) return
 +        navigate({ type: "session", sessionID: props.review.sessionID })
 +      }}
@@ -1053,7 +1052,7 @@ index 0869a3de22..58ec5022bd 100644
 +    return typeof value === "string" ? value : ""
 +  })
 +  return (
-+    <BlockTool title={`Permission review decision`} part={props.part} maxLines={0}>
++    <BlockTool title={`Permission review decision`} part={props.part}>
 +      <box flexDirection="column" gap={1}>
 +        {/* #209：结构化决策证据——assistant text 可能辩论替代方案，此 metadata 是审计的最终 reviewer 输出 */}
 +        <box gap={1}>
@@ -1093,37 +1092,39 @@ index 0869a3de22..58ec5022bd 100644
 +  // #209：autoReview 从工具 metadata 提取——reviewing/allowed/denied 状态驱动 UI
 +  // #209：createMemo 缓存提取结果——metadata 仅在 part 更新时变化，避免每帧重复解析
 +  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
-   // 上下文输出信号：右键切换显示返回给模型的内容
    const [showContextOutput, setShowContextOutput] = createSignal(false)
+   // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
    const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
-@@ -2574,8 +2697,8 @@ function Shell(props: ToolProps) {
-           // #144：Shell 折叠预览前 10 行
+@@ -2473,8 +2596,8 @@ function Shell(props: ToolProps) {
+           // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
            preview={
-             shellCanCollapse() && !showContextOutput() ? (
+             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
 -              // #144：Shell 预览带命令前缀
--              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(output(), 10)}`}</text>
+-              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(limited(), 10, maxChars())}`}</text>
 +              // #209：Shell 预览带命令前缀和 auto-review 状态行——折叠时也保留两行审查合约
-+              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
++              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
              ) : undefined
            }
          >
-@@ -2586,6 +2709,8 @@ function Shell(props: ToolProps) {
-             </Show>
+@@ -2481,6 +2604,10 @@ function Shell(props: ToolProps) {
+           <box gap={1}>
++            {/* 命令与审查行相邻，其余输出仍沿用上游段间距。 */}
++            <box>
+             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
                <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
              </Show>
-+            {/* #209：auto-review 状态行——可点击导航到 reviewer 子会话 */}
 +            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
-             <Show when={output()}>
-               <text fg={theme.text}>{limited()}</text>
-             </Show>
-@@ -2596,8 +2721,20 @@ function Shell(props: ToolProps) {
++            </box>
+             {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
+             <Show when={showContextOutput() && contextOutputAvailable()}>
+@@ -2496,8 +2623,21 @@ function Shell(props: ToolProps) {
          </BlockTool>
        </Match>
        <Match when={true}>
 -        <InlineTool icon="$" pending="Writing command…" complete={stringValue(props.input.command)} part={props.part}>
 -          {stringValue(props.input.command)}
-+        {/* #209：InlineTool 支持点击导航到 reviewer 子会话，children 附加 auto-review 状态行 */}
-+        <InlineTool
++        <>
++          <InlineTool
 +          icon="$"
 +          pending="Writing command…"
 +          complete={stringValue(props.input.command)}
@@ -1132,11 +1133,13 @@ index 0869a3de22..58ec5022bd 100644
 +            const sessionID = autoReview()?.sessionID
 +            if (sessionID) navigate({ type: "session", sessionID })
 +          }}
-+        >
-+          {[stringValue(props.input.command), autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
-+            .filter(Boolean)
-+            .join("\n")}
-         </InlineTool>
++          >
++            {stringValue(props.input.command)}
++          </InlineTool>
++          {/* 独立审查行保留导航，命令行仍使用原有错误详情展开。 */}
++          <Show when={autoReview()}>{(review) => <box paddingLeft={5}><AutoReviewLine review={review()} /></box>}</Show>
++        </>
+-        </InlineTool>
        </Match>
      </Switch>
 @@ -3333,6 +3470,7 @@ const toolDisplays = new Set([
@@ -1147,15 +1150,50 @@ index 0869a3de22..58ec5022bd 100644
  ])
  
  export function toolDisplay(tool: string) {
-diff --git a/packages/tui/test/routes/session/auto-review-render.test.ts b/packages/tui/test/routes/session/auto-review-render.test.ts
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
 new file mode 100644
 index 0000000000..acce6c4e55
 --- /dev/null
-+++ b/packages/tui/test/routes/session/auto-review-render.test.ts
-@@ -0,0 +1,104 @@
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -0,0 +1,312 @@
++/** @jsxImportSource @opentui/solid */
 +// #209：auto-review 渲染逻辑单元测试
 +import { describe, expect, test } from "bun:test"
 +import { autoReviewLabel, autoReviewMetadata, toolDisplay } from "../../../src/routes/session"
++import { testRender, useRenderer } from "@opentui/solid"
++import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
++import { onCleanup } from "solid-js"
++import type { AssistantMessage, Part, UserMessage } from "@opencode-ai/sdk/v2"
++import { tmpdir } from "../../fixture/fixture"
++import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
++import { TestTuiContexts } from "../../fixture/tui-environment"
++import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
++import { Session } from "../../../src/routes/session"
++import { ArgsProvider } from "../../../src/context/args"
++import { ClipboardProvider } from "../../../src/context/clipboard"
++import { DataProvider } from "../../../src/context/data"
++import { EditorContextProvider } from "../../../src/context/editor"
++import { EpilogueProvider } from "../../../src/context/epilogue"
++import { ExitProvider } from "../../../src/context/exit"
++import { KVProvider } from "../../../src/context/kv"
++import { LocalProvider } from "../../../src/context/local"
++import { LocationProvider } from "../../../src/context/location"
++import { PermissionProvider } from "../../../src/context/permission"
++import { ProjectProvider } from "../../../src/context/project"
++import { PromptRefProvider } from "../../../src/context/prompt"
++import { RouteProvider, useRoute } from "../../../src/context/route"
++import { SDKProvider } from "../../../src/context/sdk"
++import { SyncProvider } from "../../../src/context/sync"
++import { ThemeProvider } from "../../../src/context/theme"
++import { TuiConfigProvider } from "../../../src/config"
++import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
++import { createPluginRuntime, PluginRuntimeProvider } from "../../../src/plugin/runtime"
++import { FrecencyProvider } from "../../../src/component/prompt/frecency"
++import { PromptHistoryProvider } from "../../../src/component/prompt/history"
++import { PromptStashProvider } from "../../../src/component/prompt/stash"
++import { DialogProvider } from "../../../src/ui/dialog"
++import { ToastProvider } from "../../../src/ui/toast"
++import { wait } from "../../cli/cmd/tui/sync-fixture"
 +
 +describe("auto review rendering (#209)", () => {
 +  test("autoReviewMetadata returns undefined for missing autoReview", () => {
@@ -1257,3 +1295,176 @@ index 0000000000..acce6c4e55
 +    expect(toolDisplay("permission_review_decision")).toBe("permission_review_decision")
 +  })
 +})
++
++const sessionID = "ses_review_render"
++const command = "git push origin main"
++const rationale = "private key read was not explicitly authorized"
++
++// 六种源场景均挂载生产Session组件，纯标签测试不能证明实际卡片仍显示审查结果。
++test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
++  "renders the real review session: %s",
++  async (scenario) => {
++    const review = {
++      reviewID: "review_render",
++      sessionID: "ses_reviewer_child",
++      status: scenario === "running" ? "reviewing" : scenario === "error" ? "denied" : "allowed",
++      precheck: { level: "cautious", reason: "requires review" },
++      result: { risk_level: "high", user_authorization: scenario === "error" ? "unknown" : "high", rationale },
++    }
++    const decision = { outcome: "deny", risk_level: "high", user_authorization: "unknown", rationale }
++    const input = scenario === "decision" || scenario === "transcript" ? decision : { command }
++    const metadata = scenario === "decision" || scenario === "transcript"
++      ? decision
++      : { output: scenario === "collapsed" ? Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n") : "pushed", autoReview: review }
++    const tool: Part = {
++      id: "part_review_tool",
++      sessionID,
++      messageID: "msg_review_answer",
++      type: "tool",
++      tool: scenario === "decision" || scenario === "transcript" ? "permission_review_decision" : "bash",
++      callID: "call_review",
++      state: scenario === "error"
++        ? { status: "error", input, error: "auto reviewer denied", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
++        : scenario === "running"
++          ? { status: "running", input, title: "Review", metadata: { autoReview: review }, time: { start: 1 } }
++          : { status: "completed", input, title: "Review", metadata, output: "", time: { start: 1, end: 2 } },
++    }
++    const assistant: AssistantMessage = {
++      id: "msg_review_answer", sessionID, role: "assistant", parentID: "msg_review_request",
++      time: { created: 2, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++      path: { cwd: directory, root: directory }, cost: 0,
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    }
++    const user: UserMessage = {
++      id: "msg_review_request", sessionID, role: "user", time: { created: 1 },
++      agent: "permission-reviewer", model: { providerID: "provider", modelID: "model" },
++    }
++    // 可见协议请求与助手解释使用不同消息，验证展示顺序而不把请求当作人类授权。
++    const request: Part = {
++      id: "part_review_request", sessionID, messageID: user.id, type: "text",
++      text: ">>> TRANSCRIPT START\nuser: inspect this key\n>>> TRANSCRIPT END\n>>> APPROVAL REQUEST START\n{\"permission\":\"bash\"}\n>>> APPROVAL REQUEST END",
++      metadata: { permissionReviewerRequest: true },
++    }
++    const explanation: Part = {
++      id: "part_review_explanation", sessionID, messageID: assistant.id, type: "text",
++      text: "The requested private key read is not explicitly authorized.",
++    }
++    await withRenderedReview(
++      scenario === "transcript"
++        ? [{ info: user, parts: [request] }, { info: assistant, parts: [explanation, tool] }]
++        : [{ info: assistant, parts: [tool] }],
++      async (app, route) => {
++        const expected = scenario === "running" ? "◌ auto review"
++          : scenario === "error" ? "! auto review"
++          : scenario === "decision" || scenario === "transcript" ? rationale : "✓ auto review"
++        // 等待真实帧达到可观察条件，不用固定sleep冒充组件已完成异步水合。
++        await app.waitForFrame(async (frame) => {
++          if (frame.includes(expected)) return true
++          await Bun.sleep(10)
++          return false
++        }, { maxPasses: 300 })
++        // 行间距在预布局阶段写入，完成后续帧再使用屏幕坐标，避免点击时目标移动。
++        await app.renderOnce()
++        await app.renderOnce()
++        const lines = app.captureCharFrame().split("\n")
++        if (scenario === "decision" || scenario === "transcript") {
++          expect(lines.join("\n")).toContain("Permission review decision")
++          expect(lines.join("\n")).toContain("unknown")
++          expect(lines.join("\n")).not.toContain("! Permission review decision")
++          if (scenario === "transcript") {
++            expect(lines.join("\n")).toContain(">>> TRANSCRIPT START")
++            expect(lines.join("\n")).toContain(">>> APPROVAL REQUEST START")
++            expect(lines.findIndex((line) => line.includes("requested private key"))).toBeLessThan(
++              lines.findIndex((line) => line.includes("Permission review decision")),
++            )
++          }
++          return
++        }
++        const row = lines.findIndex((line) => line.includes(command))
++        expect(row).toBeGreaterThanOrEqual(0)
++        expect(lines[row + 1]).toContain(expected)
++        if (scenario === "collapsed") expect(lines.join("\n")).toContain("Click to expand")
++        // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
++        if (scenario === "error") {
++          const x = lines[row + 1].indexOf("auto review")
++          await app.mockMouse.drag(x, row + 1, x + 6, row + 1)
++          expect(route.data).toMatchObject({ type: "session", sessionID })
++          await app.renderOnce()
++          await app.mockMouse.click(x, row + 1)
++          expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
++        }
++      },
++    )
++  },
++)
++
++async function withRenderedReview(
++  messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
++  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>) => Promise<void>,
++) {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  const info = {
++    id: sessionID, slug: "review-render", projectID: "proj_test", directory,
++    version: "1", title: "Review render", time: { created: 1, updated: 3 },
++  }
++  const events = createEventSource()
++  const calls = createFetch((url) => {
++    if (url.pathname === "/session") return json([info])
++    if (url.pathname === `/session/${sessionID}` || url.pathname === "/session/ses_reviewer_child") return json(info)
++    if (url.pathname === `/session/${sessionID}/message`) return json(messages)
++    if (url.pathname.startsWith("/session/")) return json([])
++  }, events)
++  const observed: { route?: ReturnType<typeof useRoute> } = {}
++  const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} />, {
++    width: 110, height: 56, footerHeight: 0, screenMode: "alternate-screen",
++  })
++  try {
++    await wait(() => Boolean(observed.route))
++    if (!observed.route) throw new Error("review route was not mounted")
++    await run(app, observed.route)
++  } finally {
++    app.renderer.destroy()
++  }
++}
++
++function ReviewHarness(props: {
++  state: string
++  fetch: typeof globalThis.fetch
++  events: ReturnType<typeof createEventSource>["source"]
++  observe: (route: ReturnType<typeof useRoute>) => void
++}) {
++  const renderer = useRenderer()
++  const config = createTuiResolvedConfig()
++  const keymap = createDefaultOpenTuiKeymap(renderer)
++  const runtime = createPluginRuntime()
++  onCleanup(registerOpencodeKeymap(keymap, renderer, config))
++  return (
++    <TestTuiContexts paths={{ state: props.state }}>
++      <OpencodeKeymapProvider keymap={keymap}>
++        <ArgsProvider><ExitProvider exit={() => {}}><EpilogueProvider set={() => {}}>
++          <ClipboardProvider value={{}}><KVProvider><ToastProvider>
++            <RouteProvider initialRoute={{ type: "session", sessionID }}><TuiConfigProvider config={config}>
++              <PluginRuntimeProvider value={runtime}>
++                <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: props.fetch, events: props.events }}>
++                  <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
++                    <ThemeProvider mode="dark"><LocalProvider><PromptStashProvider><DialogProvider>
++                      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider>
++                        <ReviewProbe observe={props.observe} />
++                      </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider>
++                    </DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
++                  </SyncProvider></DataProvider></LocationProvider></PermissionProvider></ProjectProvider>
++                </SDKProvider>
++              </PluginRuntimeProvider>
++            </TuiConfigProvider></RouteProvider>
++          </ToastProvider></KVProvider></ClipboardProvider>
++        </EpilogueProvider></ExitProvider></ArgsProvider>
++      </OpencodeKeymapProvider>
++    </TestTuiContexts>
++  )
++}
++
++function ReviewProbe(props: { observe: (route: ReturnType<typeof useRoute>) => void }) {
++  props.observe(useRoute())
++  return <Session />
++}

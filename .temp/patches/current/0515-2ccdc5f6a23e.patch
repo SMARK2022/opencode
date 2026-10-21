@@ -550,7 +550,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000
 --- /dev/null
 +++ b/packages/opencode/src/tool/read-lines.ts
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,305 @@
 +import { createReadStream } from "fs"
 +
 +// 256 KiB 足以让常见小尾部保留精确 total，同时把多 MB 头读的重复 I/O 固定在较低上界。
@@ -558,8 +558,8 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +// 读取按 16 KiB chunk 进行，因此物理上界允许最后一个已请求 chunk 越过逻辑额度。
 +export const AUXILIARY_READ_AHEAD_BYTES = 16 * 1024
 +const MAX_CONTENT_BYTES = 16 * 1024
-+// 辅助扫描只需保留足够识别 outline 的行首；超长行余部仅计数，避免恢复整行内存成本。
-+const MAX_AUXILIARY_LINE_CHARS = 4096
++// 辅助行仍受共享扫描上限约束，但预算内长声明不能被固定短前缀丢弃。
++const MAX_AUXILIARY_LINE_CHARS = AUXILIARY_SCAN_BYTES
 +
 +// 同一次 read execute 的 page accounting 与 outline 共用此对象，任何消费者都不能重置额度。
 +export type AuxiliaryBudget = {
@@ -570,6 +570,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +export type ReadPage = {
 +  raw: string[]
 +  count: number
++  totalExact: boolean
 +  cut: boolean
 +  more: boolean
 +  offset: number
@@ -581,6 +582,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +  limit: number
 +  offset: number
 +  budget?: AuxiliaryBudget
++  signal?: AbortSignal
 +  // outline 从首字节起就是辅助消费者，因此它的全部输入都计入共享额度。
 +  auxiliaryFromStart?: boolean
 +  // outline 只消费 callback，不复制扫描文本到 raw，避免第二份 3000 行缓冲。
@@ -599,7 +601,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +  const captureRaw = opts.captureRaw ?? true
 +  const contentBytesLimit = opts.contentBytesLimit ?? MAX_CONTENT_BYTES
 +  const auxiliaryFromStart = opts.auxiliaryFromStart ?? false
-+  const stream = createReadStream(filepath, { highWaterMark: AUXILIARY_READ_AHEAD_BYTES })
++  const stream = createReadStream(filepath, { highWaterMark: AUXILIARY_READ_AHEAD_BYTES, signal: opts.signal })
 +  // 流式 decoder 保留跨 chunk 的 UTF-8 状态，不能按独立 Buffer 逐块解码。
 +  const decoder = new TextDecoder("utf-8", { ignoreBOM: true })
 +  const raw: string[] = []
@@ -625,6 +627,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +  // 唯一例外是边界恰好落在 CR 后：允许一个 chunk 判断后续是否为 LF。
 +  let resolveCRReadAhead = false
 +  let stopped = false
++  let totalExact = false
 +  let physicalBytesRead = 0
 +  let postWindowBytes = 0
 +
@@ -660,7 +663,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +    auxiliaryLineObserved = false
 +  }
 +
-+  const finishLine = () => {
++  const finishLine = (chunkSize = 0) => {
 +    if (mode === "auxiliary") {
 +      // 空行只有分隔符没有正文，仍需在完成分隔符时建立一条行下界。
 +      markAuxiliaryLine()
@@ -685,7 +688,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +    const candidateBytes = lineEncodedBytes
 +    // 行数窗口已满时，当前完整行只用于证明仍有内容，不能进入 raw。
 +    if (returnedLines >= opts.limit) {
-+      enterAuxiliary(0, true)
++      enterAuxiliary(chunkSize, true)
 +      resetLine()
 +      return
 +    }
@@ -693,7 +696,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +    // 16 KiB 按最终 join 语义累计：后续行还要计一个换行分隔字节。
 +    if (contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
 +      cut = true
-+      enterAuxiliary(0, true)
++      enterAuxiliary(chunkSize, true)
 +      resetLine()
 +      return
 +    }
@@ -733,8 +736,8 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +    enterAuxiliaryIfWindowFilled(chunkSize, characterBytes)
 +    if (mode === "auxiliary") {
 +      markAuxiliaryLine()
-+      // outline 只需要有限行首；page accounting 路径没有回调，因此丢弃余部不改变输出。
-+      if (lineText.length < MAX_AUXILIARY_LINE_CHARS) lineText += character
++      // 只有 outline 回调需要辅助正文；page 计数不为未返回行继续积累文本。
++      if (opts.onLine && lineText.length < MAX_AUXILIARY_LINE_CHARS) lineText += character
 +      return
 +    }
 +    lineText += character
@@ -767,12 +770,12 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +        pendingCR = false
 +        if (character === "\n") {
 +          // CRLF 是一个逻辑分隔符，消费 LF 后不能再产生空行。
-+          finishLine()
++          finishLine(chunkSize)
 +          index += character.length
 +          continue
 +        }
 +        // 非 LF 证明前一个 CR 是孤立分隔符；当前字符留给下一轮重新处理。
-+        finishLine()
++        finishLine(chunkSize)
 +        continue
 +      }
 +
@@ -785,7 +788,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +      }
 +
 +      if (character === "\n") {
-+        finishLine()
++        finishLine(chunkSize)
 +        index += character.length
 +        continue
 +      }
@@ -832,8 +835,9 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +      }
 +    }
 +
-+    if (!stopped && !stopAfterChunk) {
++    if (!stopped && !stopAfterChunk && !resolveCRReadAhead) {
 +      // 仅在真实 EOF 刷出 decoder；预算早停时禁止把未读取余部误判为完整文件。
++      totalExact = true
 +      processText(decoder.decode(), 0)
 +      if (pendingCR) {
 +        pendingCR = false
@@ -850,7 +854,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +
 +  // 任一辅助早停原因都证明扫描结果不是 EOF 证明，必须保留内容未完成信号。
 +  if (mode === "auxiliary" && (budget.remaining === 0 || stopAfterChunk || stopped)) more = true
-+  return { raw, count, cut, more, offset: opts.offset, physicalBytesRead, postWindowBytes }
++  return { raw, count, totalExact, cut, more, offset: opts.offset, physicalBytesRead, postWindowBytes }
 +}
 
 diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
@@ -868,42 +872,34 @@ index 834cfa372..b04a12cd8 100644
  
  // #142：短文件无需 outline
  const MIN_LINES = 600
-@@ -242,64 +242,51 @@ function truncateItem(item: string) {
- }
- 
- // #142：异步流式扫前缀，受 MAX_SCAN_LINES/ENTRIES/CHARS 约束
--export async function readOutline(filepath: string, total: number, offset: number): Promise<Outline | undefined> {
-+// #515：budget 与 page 扫描共享额度——outline 不得成为第二条绕过 256 KiB 上限的扫描路径
-+export async function readOutline(
-+  filepath: string,
-+  total: number,
-+  offset: number,
-+  budget?: AuxiliaryBudget,
-+): Promise<Outline | undefined> {
-   // #142：非文件头或不长则跳过
-   if (offset > 1 || total < MIN_LINES || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
-+  // #515：page accounting 已耗尽共享额度时不得再打开 outline 流
-+  if (budget?.remaining === 0) return undefined
- 
+@@ -245,67 +245,45 @@
+-export async function readOutline(filepath: string, total: number, offset: number, totalExact = true): Promise<Outline | undefined> {
+-  // #142：非文件头或已知不足 600 行则跳过；计数下界不足时仍需验证真实资格。
+-  if (offset > 1 || (totalExact && total < MIN_LINES) || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
+-  // #142：条目预算先耗尽也必须确认达到 600 行，不能给短文件误报 outline。
+-  const pendingEligibility = total < MIN_LINES
+-
 -  // #142：readline 流，避免整文件读入内存
 -  const stream = createReadStream(filepath, { encoding: "utf8" })
 -  // #142：按行迭代
 -const rl = createInterface({ input: stream, crlfDelay: Infinity })
-   // #142：收集 label 行
+-  // #142：收集 label 行
 -const items: string[] = []
-+  const items: string[] = []
-   // #142：字符预算计数
+-  // #142：字符预算计数
 -let chars = 0
 -  // #142：扫描行计数
 -let count = 0
-+  let chars = 0
-   // #142：是否因预算截断
+-  // #142：是否因预算截断
 -let truncated = false
 -  // #142：确保 finally 关闭流
 -try {
 -    // #142：顺序扫描前缀
 -for await (const text of rl) {
 -      count += 1
+-      if (truncated && pendingEligibility) {
+-        if (count >= MIN_LINES) break
+-        continue
+-      }
 -      // This is a read-tool hint, not a semantic index; never scan an entire
 -      // huge file just to discover there are no declarations in the prefix.
 -      // #142：扫描上限到点即 truncated
@@ -921,25 +917,11 @@ index 834cfa372..b04a12cd8 100644
 -      // #142：计入换行开销
 -const extra = item.length + (items.length > 0 ? 1 : 0)
 -      // #142：条目或字符预算耗尽
-+  let truncated = false
-+  const page = await readTextPage(filepath, {
-+    limit: MAX_SCAN_LINES,
-+    offset: 1,
-+    budget,
-+    auxiliaryFromStart: true,
-+    captureRaw: false,
-+    contentBytesLimit: Number.POSITIVE_INFINITY,
-+    onLine: (text, count) => {
-+      // #515：callback 只接收受限行首并立即抽取标签，outline 不拥有第二套行分隔或整行缓冲逻辑。
-+      const label = outlineLabel(text, filepath)
-+      if (!label) return
-+      const item = truncateItem(`${count} ${label}`)
-+      const extra = item.length + (items.length > 0 ? 1 : 0)
-       if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
-         truncated = true
+-      if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
+-        truncated = true
+-        if (pendingEligibility && count < MIN_LINES) continue
 -        break
-+        return true
-       }
+-      }
 -      // #142：接受该条目
 -items.push(item)
 -      // #142：累加字符
@@ -952,137 +934,123 @@ index 834cfa372..b04a12cd8 100644
 -    // #142：销毁底层流
 -stream.destroy()
 -  }
+-  if (pendingEligibility && count < MIN_LINES) return undefined
+-  // #142：无声明则不输出 outline 节点
+-  if (items.length === 0) return undefined
+-  // #142：返回大纲
+-return { items, truncated }
+-}
++export async function readOutline(
++  filepath: string,
++  total: number,
++  offset: number,
++  totalExact = true,
++  budget?: AuxiliaryBudget,
++  signal?: AbortSignal,
++): Promise<Outline | undefined> {
++  // 已知短文件直接跳过，未知下界仍沿目标既有规则确认 600 行资格。
++  if (offset > 1 || (totalExact && total < MIN_LINES) || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
++  // page 已耗尽共享额度时不再打开第二条流。
++  if (budget?.remaining === 0) return undefined
++  const pendingEligibility = total < MIN_LINES
++  const items: string[] = []
++  let chars = 0
++  let truncated = false
++  const page = await readTextPage(filepath, {
++    limit: MAX_SCAN_LINES,
++    offset: 1,
++    budget,
++    signal,
++    auxiliaryFromStart: true,
++    captureRaw: false,
++    contentBytesLimit: Number.POSITIVE_INFINITY,
++    onLine: (text, count) => {
++      // 条目已满仍需确认文件资格，不能把短文件的下界当作 600 行证明。
++      if (truncated) return !pendingEligibility || count >= MIN_LINES
++      const label = outlineLabel(text, filepath)
++      if (!label) return
++      const item = truncateItem(`${count} ${label}`)
++      const extra = item.length + (items.length > 0 ? 1 : 0)
++      if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
++        truncated = true
++        return !pendingEligibility || count >= MIN_LINES
++      }
 +      items.push(item)
 +      chars += extra
 +    },
 +  })
-+  // #515：parser 的 more 同时覆盖共享预算和 3000 行早停，二者都要求 outline 标记为不完整。
++  // 预算耗尽只产生下界，不替代 outline 的最小行数门槛。
++  if (pendingEligibility && page.count < MIN_LINES) return undefined
 +  truncated ||= page.more
-   // #142：无声明则不输出 outline 节点
-   if (items.length === 0) return undefined
-   // #142：返回大纲
--return { items, truncated }
++  if (items.length === 0) return undefined
 +  return { items, truncated }
- }
- 
- // [local-smark] outline cache：按 canonicalPath+size+modifiedMs 缓存，
-@@ -314,6 +301,7 @@ export async function readOutlineCached(
-   offset: number,
++}
+@@ -323,4 +301,6 @@ export async function readOutlineCached(
    size: number,
    modifiedMs: number,
+   totalExact = true,
 +  budget?: AuxiliaryBudget,
++  signal?: AbortSignal,
  ): Promise<Outline | undefined> {
-   // [local-smark] 仅在 offset<=1 时使用缓存（readOutline 内部也仅在此条件生成 outline）。
-   // offset>1 时不查缓存也不生成 outline，保持原有行为。
-@@ -326,7 +314,11 @@ export async function readOutlineCached(
-   if (cached && cached.size === size && cached.modifiedMs === modifiedMs) {
-     return cached.outline
-   }
--  const outline = await readOutline(filepath, total, offset)
-+  // #515：cache miss 才需要 I/O；共享额度为零时直接省略且不写入“无 outline”的伪完整缓存。
+@@ -338,1 +318,5 @@ export async function readOutlineCached(
+-  const outline = await readOutline(filepath, total, offset, totalExact)
++  // 额度不足不能把“未观察到声明”写成永久的同版本空缓存。
 +  if (budget?.remaining === 0) return undefined
-+  const outline = await readOutline(filepath, total, offset, budget)
-+  // #515：预算或条目上限导致的截断结果不是完整缓存事实，后续 cache hit 不能把它当作完整 outline。
-+  if (outline?.truncated) return outline
-   // LRU 淘汰：超限时删最早插入的条目（Map 保持插入顺序）
-   if (outlineCache.size >= OUTLINE_CACHE_LIMIT) {
-     const firstKey = outlineCache.keys().next().value
++  const outline = await readOutline(filepath, total, offset, totalExact, budget, signal)
++  // 仅完整且非空的大纲可复用，避免部分扫描污染后续有充足预算的读取。
++  if (!outline || outline.truncated) return outline
 
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 index 236719829..c5ff8db3d 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -17,14 +17,16 @@ import { isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
- import { Image } from "@/image/image"
- import { PartID } from "@/session/schema"
- import { mergeRanges } from "@/util/range"
-+// #515：page 读取与 outline 共享辅助预算的单一流式解析器，取代行限溢出后扫到 EOF 的旧 lines()
+@@ -1,5 +1,5 @@
+ // #188：成功 edit/write/apply_patch 后禁止再 read 确认，工具自身会报错
+-import { Effect, Option, Schema, Scope, Stream } from "effect"
++import { Effect, Option, Schema, Scope } from "effect"
+ import { NonNegativeInt } from "@opencode-ai/core/schema"
+ // #511：头采样指纹用于同版本判定，复用既有 4096B sample，零额外 I/O
+ import { Hash } from "@opencode-ai/core/util/hash"
+@@ -8,7 +8,9 @@
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { LSP } from "@/lsp/lsp"
+ import DESCRIPTION from "./read.txt"
+-import { readOutline, readOutlineCached, type Outline } from "./read-outline"
++import { readOutlineCached, type Outline } from "./read-outline"
++// page 和 outline 共用预算与解析器，不重复扫描完整尾部。
 +import { createAuxiliaryBudget, readTextPage } from "./read-lines"
- import { SessionV1 } from "@opencode-ai/core/v1/session"
- 
- // 默认 400 行：与 notebook source limit 对齐，压低单次工具输出
- // #142：默认 200 行，配合 range/outline 做定点读取
- // #142：默认 200 行与 source 对齐
- const DEFAULT_READ_LIMIT = 200
--// 不再按行截断：超长行完整保留，仅用 MAX_BYTES 控制总输出
--// 默认最大读取字节 16KB：压低单次工具输出内存与上下文占用
-+// 不再按行截断：超长行完整保留，仅用字节预算控制总输出
-+// #515：字节上限迁入 read-lines（MAX_CONTENT_BYTES），此处仅保留展示常量供文案引用
- const MAX_BYTES = 16 * 1024 // #178：默认输出上限 24KiB→16KiB
- const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
- const SAMPLE_BYTES = 4096
-@@ -161,7 +163,7 @@ function cacheKey(filepath: string, offset: number, limit: number | undefined) {
-   return `${filepath}::${offset}::${limit ?? DEFAULT_READ_LIMIT}`
- }
- 
+ import { InstanceState } from "@/effect/instance-state"
+ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { Instruction } from "../session/instruction"
+@@ -32,6 +34,4 @@
+ const MAX_CONTENT_TOKENS = 16000
+-// #142：正文限幅后只追加有界计数，避免为 total 扫描整个超大文件
+-const MAX_SCAN_BYTES = 256 * 1024
+ // #142：单行展示上限
+ // #142：单行展示截断阈值
+ const MAX_LINE_LENGTH = 2000
+@@ -149,2 +149,0 @@
 -class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
-+// #515：旧 lines() 的 ReadStop 已随模块删除（readTextPage 用预算化早停取代 tagged-error 停流）
- 
- // `offset` and `limit` were originally `z.coerce.number()` — the runtime
- // coercion was useful when the tool was called from a shell but serves no
-@@ -303,11 +305,20 @@ function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
+-
+@@ -289,8 +287,8 @@
+   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
    if (sameRange) return { status: "stub_same_range_visible" as const }
    // #142：完全覆盖子区间也可 stub
    const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
 -  // #142：子区间被已见区间覆盖
 -  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
-+  // #515：返回 covering 对象本身——下游需要拥有者的 total（可能是下界）来发布导航事实
-+  if (covering) {
-+    return { status: "stub_covered_range_visible" as const, covering }
-+  }
++  // 导航的 total 与精确性属于外层覆盖读取，不能混用本次较弱的下界。
++  if (covering) return { status: "stub_covered_range_visible" as const, covering }
    return undefined
  }
- 
-+// #515：无新增 exactness 字段——只有返回窗口自身抵达 total 时，total 才能证明真实 EOF；
-+// 下界 total（辅助早停）不能关闭 offset 出口。
-+function isTotalExact(read: ReadRangeMeta) {
-+  if (read.total === 0 && read.end === 0) return true
-+  return read.returned > 0 && read.end === read.total
-+}
-+
- // #142：计算 overlap note
- function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
-   const overlaps = visibleReads
-@@ -418,6 +429,8 @@ function renderReadStub(input: {
-   total: number
-   status: ReadStubStatus
-   coveredBy?: string
-+  // #515：EOF 由调用方用 isTotalExact 证明（返回窗口 end===total），不再由 visibleEnd>=total 推导
-+  reachedEof: boolean
- }) {
-   // 可见覆盖范围的末行：被覆盖时取外部已读区间的 end，否则即本次请求的 end。
-   // 用于推导下一段未读内容的起始 offset，给模型一个明确的"往哪读"指令，
-@@ -425,13 +438,11 @@ function renderReadStub(input: {
-   const visibleEnd = input.coveredBy ? Number(input.coveredBy.split("-")[1]) : input.end
-   // 下一段未读内容的起始行 = 可见末行 + 1。这是打破"重复读同范围"循环的关键锚点。
-   const nextOffset = visibleEnd + 1
--  // 上界钳制：当可见范围已覆盖到文件末尾（visibleEnd >= total）时再给 offset 会指向
--  // EOF 之后的空区间，误导模型发起必失败的 read。此时文案改为声明已达末尾，彻底关闭
--  // offset 出口、仅保留 grep 兜底，消除"还能继续读"的错觉。
--  const reachedEof = visibleEnd >= input.total
-+  // #515：EOF 必须由调用方证明；lower-bound total 即使数值接近 visibleEnd 也不能关闭
-+  // offset 出口，否则会把辅助早停误报成真实文件末尾。
-   // offset 出口：未到末尾时给出精确跳读指令；到末尾时退化为 grep 兜底，
-   // 使第二行在任何分支下都提供至少一个可执行动作，不留空指令。
--  const offsetExit = reachedEof
-+  const offsetExit = input.reachedEof
-     ? "No unread lines remain (end of file reached); use grep to locate symbols."
-     : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
-   // 两行高信息量文案。isSameFileVersion（#511：size+mtime+fp）已门控同版本，故可断言
-@@ -571,50 +582,8 @@ export const ReadTool = Tool.define<
-       )
-     })
- 
+@@ -564,39 +562,0 @@
 -    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
 -      const start = opts.offset - 1
 -      const raw: string[] = []
--      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+-      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false, scanBytes: 0 }
 -
--      // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
--      // ends without flushing, decodeText drops the final unterminated line. We also
--      // avoid Stream.runForEachWhile (it currently swallows the final unterminated
--      // line of the upstream splitLines pipeline) and use a tagged error to stop the
--      // upstream file stream as soon as the byte cap is reached.
+-      // #142：保留手动解码及末尾未换行的处理；正文限幅后最多再计数 256 KiB。
+-      // #142：未到 EOF 就停流时，count 只是下界，不能冒充精确总行数。
 -      const decoder = new TextDecoder("utf-8")
 -      yield* fs.stream(filepath).pipe(
 -        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
@@ -1093,21 +1061,18 @@ index 236719829..c5ff8db3d 100644
 -            flags.count += 1
 -            if (flags.count <= start) return
 -
--            if (raw.length >= opts.limit) {
--              flags.more = true
--              return
--            }
--
--            const line = text
+-            const line = text // 保留完整行，由总字节预算决定当前页是否接纳。
 -            const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
--            if (flags.bytes + size <= MAX_BYTES) {
+-            if (!flags.cut && raw.length < opts.limit && flags.bytes + size <= MAX_BYTES) {
 -              raw.push(line)
 -              flags.bytes += size
 -              return
 -            }
 -
--            flags.cut = true
+-            flags.cut = flags.cut || raw.length < opts.limit
 -            flags.more = true
+-            flags.scanBytes += size
+-            if (flags.scanBytes <= MAX_SCAN_BYTES) return
 -            flags.done = true
 -            return yield* new ReadStop()
 -          }),
@@ -1115,86 +1080,71 @@ index 236719829..c5ff8db3d 100644
 -        Effect.catchTag("ReadStop", () => Effect.void),
 -      )
 -
--      return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
+-      return { raw, count: flags.count, totalExact: !flags.done, cut: flags.cut, more: flags.more, offset: opts.offset }
 -    })
-+    // #515：旧 Effect 流式 lines() 整体移除——行限溢出路径不停流会扫到 EOF（尾部扫描成本根因），
-+    // 字节截断 ReadStop 路径的 count 也不再精确；两者统一由 readTextPage 的预算化解析器承载。
- 
-     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
-       const ext = path.extname(filepath).toLowerCase()
-@@ -861,7 +830,15 @@ export const ReadTool = Tool.define<
-         ))
-       }
- 
+-
+@@ -838,1 +797,10 @@
 -      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
-+      // #515：budget 在 execute 级创建一次，page 与后续 outline 必须消费同一引用而非各自初始化
++      // 每次 execute 仅创建一个预算；Effect 中断同时关闭底层 Node 流。
 +      const auxiliaryBudget = createAuxiliaryBudget()
-+      const file = yield* Effect.promise(() =>
++      const file = yield* Effect.promise((signal) =>
 +        readTextPage(filepath, {
 +          limit: params.limit ?? DEFAULT_READ_LIMIT,
 +          offset: params.offset || 1,
 +          budget: auxiliaryBudget,
++          signal,
 +        }),
 +      )
-       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
-         return yield* Effect.fail(
-           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
-@@ -923,13 +900,17 @@ const visibleReads = collectVisibleReads(ctx.messages, current.canonicalPath)
-       // #142：stub 判定
- const stub = findReadStub(visibleReads, current)
+@@ -900,20 +868,25 @@
        if (stub) {
--        // #142：可见范围 stub，避免重复灌入相同内容
-+        // #515：covered stub 的导航事实由外层覆盖读取拥有，不能发布本次嵌套读取的较弱下界。
-+        const publishedTotal = stub.status === "stub_covered_range_visible" ? stub.covering.total : current.total
-+        const coveredBy =
-+          stub.status === "stub_covered_range_visible" ? `${stub.covering.start}-${stub.covering.end}` : undefined
+         // #142：可见范围 stub，避免重复灌入相同内容
++        // covering 的总行数与 EOF 证明必须一起发布，沿用目标已有 totalExact。
++        const owner = stub.status === "stub_covered_range_visible" ? stub.covering : current
++        const coveredBy = stub.status === "stub_covered_range_visible" ? `${stub.covering.start}-${stub.covering.end}` : undefined
          const read = {
            ...current,
-+          total: publishedTotal,
++          total: owner.total,
++          totalExact: owner.totalExact,
            returned: 0,
            stub: true as const,
            stubStatus: stub.status,
 -          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
 +          coveredBy,
          }
-         const output = renderReadStub({
+         let output = renderReadStub({
            path: filepath,
-@@ -937,9 +918,11 @@ const stub = findReadStub(visibleReads, current)
+           size,
            modified,
            start,
            end,
 -          total: file.count,
-+          total: publishedTotal,
+-          totalExact: file.totalExact,
++          total: owner.total,
++          totalExact: owner.totalExact,
            status: stub.status,
 -          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
 +          coveredBy,
-+          // #515：lower-bound total 始终大于 end，因此不会被误写成“已到文件末尾”。
-+          reachedEof: isTotalExact(stub.status === "stub_covered_range_visible" ? stub.covering : current),
          })
-         return {
-           title,
-@@ -1011,7 +994,9 @@ const stub = findReadStub(visibleReads, current)
-       // #142：异步 outline
- // [local-smark] 使用 readOutlineCached 替代 readOutline，
- // 按 canonicalPath+size+modifiedMs 缓存 outline，避免每次 read 重新扫描文件
--const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs))
-+const outline = yield* Effect.promise(() =>
-+        readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, auxiliaryBudget),
+@@ -968,1 +941,1 @@
+-              `<range start="${start}" end="${end}" total="${file.count}" returned="0" />`,
++              `<range start="${start}" end="${end}" total="${file.count}"${file.totalExact ? "" : ' total_exact="false"'} returned="0" />`,
+@@ -993,1 +966,3 @@
+-const outline = yield* Effect.promise(() => readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact))
++const outline = yield* Effect.promise((signal) =>
++        readOutlineCached(filepath, file.count, file.offset, size, mtimeMs, file.totalExact, auxiliaryBudget, signal),
 +      )
-       // #142：部分重叠仍返回内容，但附 note
-       // #142：overlap 判定
- const overlap = findOverlapNote(visibleReads, current)
 
 diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
 index 775e3da43..85ca71896 100644
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt
-@@ -4,6 +4,9 @@ Usage:
+@@ -4,7 +4,9 @@ Usage:
  - The filePath parameter should be an absolute path.
  - By default, this tool returns up to 200 lines from the start of the file.
- - Text file content is capped at 16 KB per read; use offset/limit to continue.
+ - Text content is capped at 16 KiB per read; displayed lines are limited to 2000 characters. Use offset/limit to continue.
+-- Line accounting scans at most 256 KiB beyond the returned page. If `<range total_exact="false">` appears, `total` is a lower bound; otherwise it is exact.
 +- The tool may inspect up to 256 KB of additional text plus one 16 KB read-ahead chunk to estimate line totals on a large remainder; this input is not returned as content.
-+- The `total` attribute is exact when line accounting reaches EOF; after the bounded scan it is a lower bound, always at least one line beyond the returned range.
++- The `total` attribute is exact when line accounting reaches EOF; `total_exact="false"` marks a bounded-scan lower bound, always at least one line beyond the returned range.
 +- The `<more>` element means unread file content remains. It can be present even when `total` is exact.
  - The offset parameter is the line number to start from (1-indexed).
  - To read later sections, call this tool again with a larger offset.
@@ -1205,7 +1155,7 @@ index c7c3a9d92..fd3133e05 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
 @@ -5,6 +5,8 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { Cause, Effect, Exit, Layer, Stream } from "effect"
+ import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
  import path from "path"
  import { readOutline } from "../../src/tool/read-outline"
 +// #515：预算化解析器直接断言物理输入上界（取代旧 FSUtil.stream 拦截接缝）
@@ -1213,7 +1163,7 @@ index c7c3a9d92..fd3133e05 100644
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -367,34 +369,20 @@ describe("tool.read truncation", () => {
+@@ -441,37 +443,26 @@ describe("tool.read truncation", () => {
      Effect.gen(function* () {
        const test = yield* TestInstance
        const filepath = path.join(test.directory, "huge.txt")
@@ -1249,7 +1199,16 @@ index c7c3a9d92..fd3133e05 100644
 -      expect(result.metadata.truncated).toBe(true)
 -      // #142：长行文件触发 byte_limit 并 ReadStop 停流
 -      expect(result.output).toContain('reason="byte_limit"')
+-      expect(result.output).toContain('total_exact="false"')
+-      expect(result.metadata.read?.totalExact).toBe(false)
+-      expect(result.metadata.read?.total).toBeLessThan(200)
 -      expect(counter.bytes).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
++      const result = yield* run({ filePath: filepath })
++      expect(result.metadata.truncated).toBe(true)
++      expect(result.output).toContain('reason="byte_limit"')
++      expect(result.output).toContain('total_exact="false"')
++      expect(result.metadata.read?.totalExact).toBe(false)
++      expect(result.metadata.read?.total).toBeLessThan(200)
 +      expect(page.cut).toBe(true)
 +      expect(page.more).toBe(true)
 +      expect(page.physicalBytesRead).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
@@ -1264,7 +1223,7 @@ index c7c3a9d92..fd3133e05 100644
        expect(result.output).toContain('<range start="1" end="10" total="100" returned="10" />')
        expect(result.output).toContain('<more offset="11" reason="line_limit" />')
        expect(result.output).toContain("line0")
-@@ -415,6 +404,148 @@ describe("tool.read truncation", () => {
+@@ -415,6 +404,157 @@ describe("tool.read truncation", () => {
      }),
    )
  
@@ -1319,6 +1278,15 @@ index c7c3a9d92..fd3133e05 100644
 +      expect(page.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
 +      expect(page.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
 +      expect(page.physicalBytesRead).toBeLessThan(Buffer.byteLength(content))
++
++      // 空行切换模式也要扣除首块；否则 CR 边界可能再授权一个未计费 chunk。
++      yield* put(filePath, `a\n${"\n".repeat(17 * 16384 - 3)}\r\n${"tail\n".repeat(10000)}`)
++      const emptyLines = yield* Effect.promise(() =>
++        readTextPage(filePath, { limit: 1, offset: 1, budget: createAuxiliaryBudget() }),
++      )
++      expect(emptyLines.raw).toEqual(["a"])
++      expect(emptyLines.totalExact).toBe(false)
++      expect(emptyLines.physicalBytesRead).toBeLessThanOrEqual(2 + 256 * 1024 + 16 * 1024)
 +    }),
 +  )
 +
@@ -1417,11 +1385,23 @@ index c7c3a9d92..fd3133e05 100644
        const result = yield* run({ filePath: path.join(test.directory, "small.txt") })
        expect(result.metadata.truncated).toBe(false)
        // #142：完整读取有 range，无 more
-+      // #515：返回窗口自身覆盖末行时才允许省略 more，这是 schema-free EOF 判据的正向样例。
++      // 返回窗口覆盖末行且计数已到 EOF 时省略 more，保留目标显式精确性契约。
        expect(result.output).toContain('<range start="1" end="1" total="1" returned="1" />')
        expect(result.output).not.toContain("<more")
        expect(result.metadata.display).toMatchObject({
-@@ -761,6 +893,47 @@ describe("tool.read outline", () => {
+@@ -917,1 +1049,1 @@ describe("tool.read outline", () => {
+-        return `// line ${i + 1} ${"x".repeat(2048)}`
++        return `// line ${i + 1} ${"x".repeat(32)}`
+@@ -926,4 +1058,4 @@ describe("tool.read outline", () => {
+-      expect(head.metadata.read?.totalExact).toBe(false)
+-      expect(head.metadata.read?.total).toBeLessThan(600)
+-      expect(head.output).toContain('total_exact="false"')
+-      expect(head.output).toContain('reason="byte_limit"')
++      expect(head.metadata.read?.totalExact).toBe(true)
++      expect(head.metadata.read?.total).toBe(700)
++      expect(head.output).not.toContain('total_exact="false"')
++      expect(head.output).toContain('reason="line_limit"')
+@@ -932,6 +1064,55 @@ describe("tool.read outline", () => {
        expect(bodyRead.output).not.toContain("<outline")
      }),
    )
@@ -1443,6 +1423,14 @@ index c7c3a9d92..fd3133e05 100644
 +      expect(result.output).toContain('<more offset="')
 +      // 没有 outline 是预算 owner 的可观察结果，不是 MIN_LINES gate 的偶然结果。
 +      expect(result.output).not.toContain("<outline")
++
++      // 预算内的长泛型返回类型仍须生成声明提示，不能恢复固定短前缀限制。
++      const declarationPath = path.join(test.directory, "long-declaration.java")
++      yield* put(declarationPath, `public Map<${"SomeType,".repeat(700)}LastType> declared() {}\n${"// filler\n".repeat(700)}`)
++      const declaration = yield* Effect.promise(() =>
++        readOutline(declarationPath, 701, 1, true, createAuxiliaryBudget()),
++      )
++      expect(declaration?.items).toContain("1 method declared")
 +    }),
 +  )
 +
@@ -1467,9 +1455,9 @@ index c7c3a9d92..fd3133e05 100644
 +    }),
 +  )
  })
- describe("tool.read XML preserve channels", () => {
-   // #145：目录条目保留原文
-@@ -901,6 +1074,40 @@ describe("tool.read visible context stubs", () => {
+ 
+ describe("tool.read visible context stubs", () => {
+@@ -1030,6 +1203,41 @@ describe("tool.read visible context stubs", () => {
      }),
    )
  
@@ -1498,12 +1486,13 @@ index c7c3a9d92..fd3133e05 100644
 +
 +      const second = yield* exec(dir, secondInput, { ...ctx, messages: [readMessage(firstInput, first)] })
 +
-+      expect(second.output).toContain(`<range start="10000" end="10019" total="${coveringTotal}" returned="0" />`)
++      expect(second.output).toContain(`<range start="10000" end="10019" total="${coveringTotal}" total_exact="false" returned="0" />`)
 +      expect(second.output).toContain('covered_by="10000-10079"')
 +      expect(second.output).toContain("offset=10080 for unread lines")
 +      // stub 的 total 和导航必须由 covering read 拥有，不能被 nested read 覆盖。
 +      expect(second.output).not.toContain("end of file reached")
 +      expect(second.metadata.read?.total).toBe(coveringTotal)
++      expect(second.metadata.read?.totalExact).toBe(false)
 +    }),
 +  )
 +

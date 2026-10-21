@@ -1295,9 +1295,9 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
 index e1adc9898..d033c5130 100644
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -1142,7 +1142,10 @@ const layer = Layer.effect(
+@@ -746,7 +746,10 @@ const layer = Layer.effect(
        return result
-     })
+     }, Effect.scoped)
  
 -    const create = Effect.fn("SessionCompaction.create")(function* (input: {
 +    // #538：私有 seam 接受 run 预分配的 ID，覆盖 create 尚未返回就被取消的窗口；
@@ -1307,7 +1307,7 @@ index e1adc9898..d033c5130 100644
        sessionID: SessionID
        agent: string
        model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
-@@ -1157,7 +1160,7 @@ const layer = Layer.effect(
+@@ -762,7 +765,7 @@ const layer = Layer.effect(
        yield* session.findMessage(input.sessionID, (info) => info.role === "user").pipe(Effect.orDie),
        )
        const msg = yield* session.updateMessage({
@@ -1316,7 +1316,7 @@ index e1adc9898..d033c5130 100644
          role: "user",
          model: input.model,
          sessionID: input.sessionID,
-@@ -1180,30 +1183,43 @@ const layer = Layer.effect(
+@@ -785,30 +788,43 @@ const layer = Layer.effect(
        return msg
      })
  
@@ -1377,7 +1377,7 @@ index e1adc9898..d033c5130 100644
          const next = {
            ...msg.info,
            // #242：compaction-cancelled 与 undo 语义分离——维护操作取消不得冒充用户回滚
-@@ -1226,10 +1242,11 @@ const layer = Layer.effect(
+@@ -831,10 +847,11 @@ const layer = Layer.effect(
        auto: boolean
        overflow?: boolean
      }) {
@@ -1392,7 +1392,7 @@ index e1adc9898..d033c5130 100644
          return yield* processCompaction({
            parentID: msg.id,
            messages: yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie),
-@@ -1239,10 +1256,11 @@ const layer = Layer.effect(
+@@ -844,10 +861,11 @@ const layer = Layer.effect(
          })
        }).pipe(
          Effect.onExit((exit) => {
@@ -1413,27 +1413,7 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 index d8e73d725..013f666f3 100644
 --- a/packages/opencode/test/session/compaction.test.ts
 +++ b/packages/opencode/test/session/compaction.test.ts
-@@ -17,7 +17,11 @@ import { MessageV2 } from "../../src/session/message-v2"
- import { MessageID, PartID, SessionID } from "../../src/session/schema"
- import { SessionStatus } from "../../src/session/status"
- import { SessionSummary } from "../../src/session/summary"
-+// #538：accounting 保留断言需要 usage 服务；node 进 group 供需要者消费。
-+import { SessionRequestUsage } from "../../src/session/request-usage"
- import { SessionV2 } from "@opencode-ai/core/session"
-+// #538：mock processor 复用生产错误形态（AbortedError 序列化）。
-+import { AbortedError } from "@opencode-ai/core/v1/session"
- import { SessionExecution } from "@opencode-ai/core/session/execution"
- import { SessionProjector } from "@opencode-ai/core/session/projector"
- // #464：evidence 内容级断言需要 path 拼平台真实分隔符；Todo 注入依赖其 node。
-@@ -258,6 +262,7 @@ const compactionTestNode = LayerNode.group([
-   // #464：evidence 的 Outstanding Todos 段读取 Todo 服务；node 架构下经 group 注入。
-   Todo.node,
-   CrossSpawnSpawner.node,
-+  SessionRequestUsage.node,
- ])
- const env = AppNodeBuilder.build(compactionTestNode, [
-   [Provider.node, defaultProvider.layer],
-@@ -274,8 +279,12 @@ const itCompaction = testEffect(compactionEnv)
+@@ -275,10 +275,14 @@ const itCompaction = testEffect(compactionEnv)
  
  type CompactionProcessOptions = {
    result?: "continue" | "compact"
@@ -1441,12 +1421,14 @@ index d8e73d725..013f666f3 100644
 +  processor?: Layer.Layer<SessionProcessorModule.SessionProcessor.Service>
    llm?: Layer.Layer<LLM.Service>
    plugin?: Layer.Layer<Plugin.Service>
+   snapshot?: Layer.Layer<Snapshot.Service>
+   database?: Layer.Layer<Database.Service>
 +  // #538：session 替换 seam——Layer 经 ambient 真实 Session 委托，冻结 compaction part 写入以锁定 create 内中断窗口。
-+  session?: Layer.Layer<SessionNs.Service>
++  session?: Layer.Layer<SessionNs.Service, never, SessionNs.Service>
    provider?: ReturnType<typeof wide>
    config?: Layer.Layer<Config.Service>
  }
-@@ -293,16 +302,19 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
+@@ -298,16 +302,19 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
    if (!options?.llm) {
      return AppNodeBuilder.build(compactionTestNode, [
        ...replacements,
@@ -1467,41 +1449,25 @@ index d8e73d725..013f666f3 100644
    ])
  }
  
-@@ -935,6 +947,282 @@ describe("session.compaction.prune", () => {
+@@ -997,6 +1004,270 @@ describe("session.compaction.prune", () => {
  })
  
  describe("session.compaction.process", () => {
-+  // #538：processor 持久化 error 后 run 结果 stop——marker/summary 必须以 hidden 形式残留，
-+  // 不允许失败 scratch 暴露给可见历史；auto/manual 两入口同一 lifecycle。
-+  // #538：provider 错误的持久化本身由 processor 既有测试覆盖；目标 harness 的 node 图对
-+  // events 替换不生效（record 归因），此处 mock processor 呈现同样的可见结果验证 compaction 生命周期。
 +  itCompaction.instance(
-+    "hides failed compaction state after a non-retryable processor error",
++    "hides failed compaction state after a non-retryable provider error",
 +    () => {
-+      const processor = Layer.succeed(
-+        SessionProcessorModule.SessionProcessor.Service,
-+        SessionProcessorModule.SessionProcessor.Service.of({
-+          create: Effect.fn("FailingSessionProcessor.create")((input) => {
-+            const msg = input.assistantMessage
-+            return Effect.succeed({
-+              get message() {
-+                return msg
-+              },
-+              inputChars: undefined,
-+              inputBreakdown: undefined,
-+              updateToolCall: Effect.fn("FailingSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
-+              completeToolCall: Effect.fn("FailingSessionProcessor.completeToolCall")(() => Effect.void),
-+              process: () =>
-+                Effect.gen(function* () {
-+                  // 与真实 Processor.halt 相同的可见结果：error 持久化到 assistant message 后返回 stop。
-+                  msg.error = new AbortedError({ message: "Bad Request: Invalid request content" }).toObject()
-+                  msg.time.completed = Date.now()
-+                  return "stop" as const
-+                }),
-+            } satisfies SessionProcessorModule.SessionProcessor.Handle)
-+          }),
-+        }),
++      const stub = llm()
++      // 穿过真实Processor.halt，错误持久化与失败隐藏必须在同一链路发生。
++      const failure = () => Stream.concat(
++        Stream.make(LLMEvent.stepStart({ index: 0 })),
++        Stream.fail(new APICallError({
++          message: "Bad Request: Invalid request content: A tool_choice was set on the request but no tools were specified.",
++          url: "https://example.com/v1/chat/completions",
++          requestBodyValues: {}, statusCode: 400, isRetryable: false,
++        })),
 +      )
++      stub.push(failure())
++      stub.push(failure())
 +
 +      return Effect.gen(function* () {
 +        const ssn = yield* SessionNs.Service
@@ -1526,7 +1492,7 @@ index d8e73d725..013f666f3 100644
 +          expect(failed).toHaveLength(2)
 +          expect(failed.every((message) => message.info.hidden?.reason === "compaction-cancelled")).toBe(true)
 +        }
-+      }).pipe(withCompaction({ processor }))
++      }).pipe(withCompaction({ llm: stub.llmLayer }))
 +    },
 +    { git: true },
 +    30_000,
@@ -1612,8 +1578,7 @@ index d8e73d725..013f666f3 100644
 +          expect(visible.map((message) => message.info.id)).toEqual([user.id])
 +          const marker = persisted.find((message) => message.info.id !== user.id)
 +          expect(marker?.info.hidden?.reason).toBe("compaction-cancelled")
-+          // option 类型要求 R=never：ambient 委托层的 R 在运行时由外层图满足，类型侧以 cast 表达该合同。
-+        }).pipe(withCompaction({ session: frozenSession as Layer.Layer<SessionNs.Service> }))
++        }).pipe(withCompaction({ session: frozenSession }))
 +      }),
 +    { git: true },
 +    30_000,
@@ -1669,6 +1634,7 @@ index d8e73d725..013f666f3 100644
 +      const expectedCost = 1.25
 +      return Effect.gen(function* () {
 +        const usage = yield* SessionRequestUsage.Service
++        const ssn = yield* SessionNs.Service
 +        let before: SessionRequestUsage.Request | undefined
 +        const processor = Layer.succeed(
 +          SessionProcessorModule.SessionProcessor.Service,
@@ -1679,8 +1645,6 @@ index d8e73d725..013f666f3 100644
 +                get message() {
 +                  return msg
 +                },
-+                inputChars: undefined,
-+                inputBreakdown: undefined,
 +                updateToolCall: Effect.fn("AccountingSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
 +                completeToolCall: Effect.fn("AccountingSessionProcessor.completeToolCall")(() => Effect.void),
 +                process: () =>
@@ -1690,9 +1654,11 @@ index d8e73d725..013f666f3 100644
 +                    msg.tokens = expectedTokens
 +                    msg.cost = expectedCost
 +                    msg.time.completed = Date.now()
-+                    // cast 锁定 yield 类型：usage 服务的推断通道在 mock 闭包内退化为 any。
-+                    yield* (usage.recordAssistant({ sessionID: msg.sessionID, requestID: msg.parentID, assistant: msg }) as Effect.Effect<void>)
-+                    before = (yield* (usage.get({ sessionID: msg.sessionID, requestID: msg.parentID }) as Effect.Effect<SessionRequestUsage.Request | undefined>)) ?? undefined
++                    // V1账本从真实step-finish归约；只改Message字段会产生伪零用量样本。
++                    yield* ssn.updatePart({ id: PartID.ascending(), sessionID: msg.sessionID, messageID: msg.id,
++                      type: "step-finish", reason: "stop", tokens: expectedTokens, cost: expectedCost })
++                    yield* usage.recordAssistant({ sessionID: msg.sessionID, requestID: msg.parentID, assistant: msg })
++                    before = yield* usage.get({ sessionID: msg.sessionID, requestID: msg.parentID })
 +                    return "compact" as const
 +                  }),
 +              } satisfies SessionProcessorModule.SessionProcessor.Handle)
@@ -1736,12 +1702,16 @@ index d8e73d725..013f666f3 100644
 +          expect(summary.info.tokens).toEqual(expectedTokens)
 +          expect(summary.info.cost).toBe(expectedCost)
 +          expect(before).toBeDefined()
-+          expect(summaryAfter).toEqual(before)
++          // 上游finalizer完成终态结算会更新时间/状态；已确认费用与用量仍须原值保留。
++          expect(before?.cost).toBe(expectedCost)
++          expect(before?.tokens).toMatchObject(expectedTokens)
++          expect(summaryAfter?.tokens).toEqual(before?.tokens)
++          expect(summaryAfter?.cost).toEqual(before?.cost)
++          expect(summaryAfter?.assistantCount).toEqual(before?.assistantCount)
++          expect(summaryAfter?.stepCount).toEqual(before?.stepCount)
 +          expect(requestAfter).toEqual(requestBefore)
 +        }).pipe(withCompaction({ processor }))
-+        // #538：usage 服务在 group 内无消费者不进 node 图；最外层 provide 保证测试体与 mock 都可解析
-+        //（implementation 字段类型含 undefined 联合，运行时必为 Layer，此处 cast 收窄）。
-+      }).pipe(Effect.provide(SessionRequestUsage.node.implementation as Layer.Layer<SessionRequestUsage.Service>))
++      })
 +    },
 +    { git: true },
 +    30_000,

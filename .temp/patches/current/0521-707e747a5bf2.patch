@@ -896,10 +896,10 @@ index 0000000000000000000000000000000000000000..613952ffea20d8a5bbc1da3dafe040d1
 +resolved; the sole residual package-wide finding is recorded above with the
 +user's explicit disposition.
 
-diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
+diff --git a/packages/core/src/patch-match.ts b/packages/core/src/patch-match.ts
 index 586d91963..e41385a31 100644
---- a/packages/opencode/src/patch/match.ts
-+++ b/packages/opencode/src/patch/match.ts
+--- a/packages/core/src/patch-match.ts
++++ b/packages/core/src/patch-match.ts
 @@ -84,30 +84,54 @@ export type ClosestWindow = {
    score: number
  }

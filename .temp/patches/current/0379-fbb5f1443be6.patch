@@ -59,8 +59,8 @@ diff --git a/packages/opencode/src/permission/reviewer/transcript.ts b/packages/
  // #206：截断并返回标记——让 fromMessages 区分整条省略与条目内截短，分别设 truncated 和 entryTruncated
 -function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT) {
 +function truncateWithFlag(text: string, limit = PART_CHAR_LIMIT, preserveTail = false) {
-+  // The marker records exactly how much was omitted so policy can treat missing
-+  // evidence conservatively instead of assuming the hidden tail was benign.
++  // 标记精确披露省略字符数，审查不能把缺失内容假定为无害。
++  // 用户授权保留尾部，工具输出继续遵循既有头截语义。
    if (text.length <= limit) return { text, truncated: false }
 +  if (preserveTail) {
 +    // 头尾保留：头部 60% 提供上下文，尾部 40% 保留末尾授权证据。
@@ -169,3 +169,65 @@ diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/package
 +    expect(transcript.entries[0].text).not.toContain("TAIL_CONTENT_SHOULD_NOT_APPEAR")
 +  })
  })
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -54,5 +54,7 @@
+       const rendered = history.slice(-120).map((message) => {
+         const text = render(message)
+         const role: PermissionReviewerPrompt.TranscriptEntry["role"] = message.type === "user" ? "user" : message.type === "shell" ? "tool" : "assistant"
+-        return { role, text: truncate(text, 1000), truncated: text.length > 1000 }
++        // 真实用户末尾可能包含授权；仅用户条目增大预算并保尾，不扩大工具证据。
++        const limit = role === "user" ? 2000 : 1000
++        return { role, text: truncate(text, limit, role === "user"), truncated: text.length > limit }
+       })
+@@ -110,6 +112,13 @@
+ // 单段和整条截短都留下显式证据标记，而不是静默丢弃剩余内容。
+-function truncate(text: string, limit = 4000) {
+-  return text.length <= limit ? text : text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
++function truncate(text: string, limit = 4000, preserveTail = false) {
++  if (text.length <= limit) return text
++  if (preserveTail) {
++    // 与V1同样保留头部60%和尾部40%，省略标记仍反映真实缺失量。
++    const head = Math.floor(limit * 0.6)
++    const tail = limit - head
++    return text.slice(0, head) + `\n<truncated chars="${text.length - limit}" />\n` + text.slice(text.length - tail)
++  }
++  return text.slice(0, limit) + `\n<truncated chars="${text.length - limit}" />`
+ }
+ 
+ export const node = makeLocationNode({ service: Service, layer,
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -375,13 +375,13 @@
+     const evidenceRows = [
+       ...Array.from({ length: 45 }, (_, index) => ({
+         id: SessionMessage.ID.make(`msg_evidence_${index}`), session_id: SessionV2.ID.make("ses_test"), type: "user" as const, seq: index + 1,
+-        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST AUTHORIZATION" : `Follow-up ${index}` },
++        data: { time: { created: index + 1 }, text: index === 0 ? "FIRST_CONTEXT_" + "x".repeat(2500) + "FIRST AUTHORIZATION" : index === 44 ? "m".repeat(1500) + "Follow-up 44" : `Follow-up ${index}` },
+       })),
+       {
+         id: SessionMessage.ID.make("msg_evidence_assistant"), session_id: SessionV2.ID.make("ses_test"), type: "assistant" as const, seq: 46,
+         data: { time: { created: 46 }, agent: "test", model: { id: "review", providerID: "test" },
+-          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) }] },
++          content: [{ type: "reasoning", id: "thought", text: "PRIVATE REASONING" }, { type: "text", id: "visible", text: "x".repeat(1100) + "ASSISTANT_TAIL" }] },
+       },
+       { id: SessionMessage.ID.make("msg_evidence_synthetic"), session_id: SessionV2.ID.make("ses_test"), type: "synthetic" as const, seq: 47, data: { sessionID: SessionV2.ID.make("ses_test"), time: { created: 47 }, text: "SYNTHETIC AUTHORIZATION" } },
+     ]
+     yield* evidence.db.insert(SessionMessageTable).values(evidenceRows).run().pipe(Effect.orDie)
+@@ -399,8 +399,14 @@
+     const reviewText = JSON.stringify(reviewRequests[0]?.messages)
+     expect(reviewText).toContain("FIRST AUTHORIZATION")
+     expect(reviewText).toContain("Follow-up 44")
+     expect(reviewText).toContain("shortened")
+     expect(reviewText).not.toContain("PRIVATE REASONING")
+     expect(reviewText).not.toContain("SYNTHETIC AUTHORIZATION")
++    // 观察真实发往模型的文本；原生路径也要保留用户尾授权而非只测V1辅助函数。
++    const reviewBody = reviewRequests[0]?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")
++    expect(reviewBody).toContain("FIRST_CONTEXT_")
++    expect(reviewBody).toContain('<truncated chars="533" />')
++    expect(reviewBody).toContain("m".repeat(1500) + "Follow-up 44")
++    expect(reviewBody).not.toContain("ASSISTANT_TAIL")
+     // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
+     // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。

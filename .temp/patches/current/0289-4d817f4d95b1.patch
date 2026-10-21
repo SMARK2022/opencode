@@ -30,8 +30,8 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index e4b83d268..2489abcab 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1075,8 +1075,9 @@
-         file = yield* trunc.write(normalized)
+@@ -869,8 +869,9 @@
+         file = yield* trunc.write(raw)
        }
  
 -      let output = end.text
@@ -41,13 +41,12 @@ index e4b83d268..2489abcab 100644
 +      let output = emptyOutput ? "(no output)" : end.text
  
        if (cut && file) {
-         // #282：统一 output_truncated notice；shown 为 tail 预览的实际行字节量
-@@ -1094,7 +1095,24 @@
-       // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
-       const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+         // 末尾换行不额外算一行；内存只保留计数器与原有尾部窗口。
+@@ -894,6 +895,22 @@
+       // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
+       const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
        if (appendix) output += "\n\n" + appendix
-+      // #289：metadata.exit 已保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
-+      // 空输出和缺少诊断摘要的失败输出会让后续模型误判命令状态，所以只追加退出码 notice。
++      // #289：metadata.exit 不进入模型回放，空输出或缺少诊断的失败需补退出码 notice。
 +      // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
 +      const exitNotice =
 +        code === null
@@ -64,7 +63,6 @@ index e4b83d268..2489abcab 100644
 +      if (exitNotice) meta.push(exitNotice)
 +
        if (meta.length > 0) {
-         // #282：notice 本身自带结构化标记，不再加 <shell_metadata> 包装
          output += "\n\n" + meta.join("\n")
        }
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
@@ -137,7 +135,7 @@ index ccf2e36dd..0b02c5013 100644
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
-+        const command = `${bin} -e ${evalarg('console.log("plain output"); process.exit(7)')}`
++        const command = `${bin} -e ${evalarg("console.log(String.fromCharCode(112,108,97,105,110,32,111,117,116,112,117,116)); process.exit(7)")}`
 +        const result = yield* run({
 +          command: PS.has(sh()) ? `& ${command}` : command,
 +        })
@@ -157,9 +155,9 @@ index ccf2e36dd..0b02c5013 100644
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const script = [
-+          'console.error("fatal: hidden root cause")',
++          "console.error(String.fromCharCode(102,97,116,97,108,58,32,104,105,100,100,101,110,32,114,111,111,116,32,99,97,117,115,101))",
 +          "await new Promise((resolve) => setTimeout(resolve, 2100))",
-+          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log("tail line " + i)`,
++          `for (let i = 0; i < ${Truncate.MAX_LINES + 20}; i++) console.log(String.fromCharCode(116,97,105,108,32,108,105,110,101,32) + i)`,
 +          "process.exit(9)",
 +        ].join(";")
 +        const command = `${bin} -e ${evalarg(script)}`

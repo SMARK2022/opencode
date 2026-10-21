@@ -41,55 +41,6 @@ index 0000000000..3643243ea9
 +    expect(response).toBeInstanceOf(Error)
 +  })
 +})
-diff --git a/packages/core/src/models-dev.ts b/packages/core/src/models-dev.ts
-index b0bde2d5b4..411612c4a3 100644
---- a/packages/core/src/models-dev.ts
-+++ b/packages/core/src/models-dev.ts
-@@ -1,6 +1,5 @@
- import path from "path"
- import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
--import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
- import { ModelsDev } from "@opencode-ai/schema/models-dev"
- import { Global } from "./global"
- import { Flag } from "./flag/flag"
-@@ -10,10 +9,9 @@ import { FSUtil } from "./fs-util"
- import { InstallationChannel, InstallationVersion } from "./installation/version"
- import { EventV2 } from "./event"
- import { makeGlobalNode } from "./effect/app-node"
--import { httpClient } from "./effect/app-node-platform"
- // #71：catalog 刷新经 NetworkProxy，应用系统代理
- import { NetworkProxy } from "./network-proxy"
--// 代理路由：models.dev 请求通过 NetworkProxy.routedFetch 路由，遵循系统代理设置
-+// #150：catalog 只经 NetworkProxy.routedFetch，禁止回退 globalThis.fetch / HttpClient
- // purpose="infrastructure" 区分基础设施请求，便于代理路由策略
- 
- export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
-@@ -145,15 +143,7 @@ const layer = Layer.effect(
-   Effect.gen(function* () {
-     const fs = yield* FSUtil.Service
-     const events = yield* EventV2.Service
--    const http = HttpClient.filterStatusOk(
--      (yield* HttpClient.HttpClient).pipe(
--        HttpClient.retryTransient({
--          retryOn: "errors-and-responses",
--          times: 2,
--          schedule: Schedule.exponential(200).pipe(Schedule.jittered),
--        }),
--      ),
--    )
-+    // #150：模型源 HTTP 仅走 NetworkProxy.routedFetch
- 
-     const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
-     const filepath = path.join(
-@@ -270,6 +260,7 @@ const layer = Layer.effect(
-   }),
- )
- 
--export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node, httpClient] })
-+// #150：ModelsDev 不再依赖 Effect HttpClient 层
-+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node] })
- 
- export * as ModelsDev from "./models-dev"
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 61bd0144c7..f4ac3462a1 100644
 --- a/packages/opencode/test/session/prompt.test.ts
@@ -192,3 +143,13 @@ index 61bd0144c7..f4ac3462a1 100644
  )
  
  it.instance(
+@@ -1705,6 +1784,7 @@
+       }
+     }),
+   { git: true },
+-  10_000,
++  // Windows Git fixture 和模型准备也计入用例预算，取消断言仍完整保留。
++  30_000,
+ )
+ 
+ // Queue semantics

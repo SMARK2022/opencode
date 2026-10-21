@@ -110,9 +110,8 @@ diff --git a/packages/app/src/context/global-sync/event-reducer.test.ts b/packag
 diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/app/src/context/global-sync/event-reducer.ts
 --- a/packages/app/src/context/global-sync/event-reducer.ts
 +++ b/packages/app/src/context/global-sync/event-reducer.ts
-@@ -281,6 +281,24 @@ export function applyDirectoryEvent(input: {
+@@ -327,5 +327,23 @@ export function applyDirectoryEvent(input: {
        }
-       const part = (event.properties as { part: Part }).part
        if (SKIP_PARTS.has(part.type)) break
 +      // 单调守卫：防止 pending 阶段的短快照覆盖已通过 delta 累积的长文本。
 +      // daemon 的 message.part.updated 通过 fire-and-forget 发送
@@ -223,8 +222,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
-@@ -2,7 +2,7 @@
- import { describe, expect, test } from "bun:test"
+@@ -6,6 +6,6 @@
  import { tmpdir } from "../../../fixture/fixture"
  import { directory, json, mount, wait, worktree } from "./sync-fixture"
 -import type { AssistantMessage, GlobalEvent, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"

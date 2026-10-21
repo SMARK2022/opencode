@@ -17,15 +17,18 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 index 037a5bc78ef0fe0f6014964acbf46387b129afee..445c3d62654ac2e977a005f6ae3ff174bd3d620e 100644
 --- a/.github/workflows/test.yml
 +++ b/.github/workflows/test.yml
-@@ -306,7 +306,10 @@ jobs:
+@@ -299,12 +299,13 @@ jobs:
        - name: Run upstream unit compatibility tests
          id: upstream
          continue-on-error: true
--        run: bun turbo test:ci --continue=always --summarize
-+        # --concurrency=1 串行执行：Windows 上 turbo 并行运行 core:test:ci 与
-+        # opencode:test:ci 时，core:test:ci 输出被缓冲且进程不退出，导致 75m 超时。
-+        # 串行消除并行资源竞争，预期总时长 ~30m（opencode 24m + 其余 <2m + 安装 4m）。
-+        run: bun turbo test:ci --continue=always --summarize --concurrency=1
+         run: |
+           # 所有现有test任务共用相同相对报告路径，各包目录先准备好。
+           for package in packages/* packages/console/* packages/stats/*; do
+             if [ -f "$package/package.json" ]; then mkdir -p "$package/.artifacts/unit"; fi
+           done
++          # 串行调度Turbo任务以减少Windows资源竞争；--后的包内reporter参数保持原样。
+-          GITHUB_ACTIONS=false bun turbo test --continue=always --summarize -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
++          GITHUB_ACTIONS=false bun turbo test --continue=always --summarize --concurrency=1 -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
  
        - name: Warn on upstream unit failures
          if: always() && steps.upstream.outcome != 'success'

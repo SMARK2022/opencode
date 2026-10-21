@@ -10,16 +10,16 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
 @@ -27,10 +27,15 @@ export type ReviewDecision =
      }
  
  export interface ReviewInput {
 +  // #208：reviewID 在 auto.ts mint 后传递给 reviewer——UI 和审计事件可引用同一逻辑审查即使模型超时
 +  readonly reviewID: string
-   readonly sessionID?: SessionID
+   readonly sessionID?: string
    readonly permission: string
    readonly patterns: readonly string[]
    readonly metadata: Readonly<Record<string, unknown>>
@@ -105,13 +105,14 @@ diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/p
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -3,11 +3,13 @@ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
+@@ -3,12 +3,13 @@ import { ConfigPermissionV1 } from "@opencode-ai/core/v1/config/permission"
  import { Config } from "@/config/config"
  import { Provider } from "@/provider/provider"
  import { Session } from "@/session/session"
  import { MessageV2 } from "@/session/message-v2"
  import { Database } from "@opencode-ai/core/database/database"
  
+-import { SessionID } from "@/session/schema"
 +import { MessageID, PartID, SessionID } from "@/session/schema"
 +import type { ToolPart, User, Assistant, TextPart } from "@opencode-ai/core/v1/session"
  import { generateObject, type ModelMessage } from "ai"
@@ -138,7 +139,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
              })
          const language = yield* provider.getLanguage(model)
 +        // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
-+        const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
++        const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
 +        // #208：标记工具状态为 reviewing——UI 展示确定性 precheck 到模型审查的进度
 +        // #208：markToolReviewing best-effort 标记——过期工具引用不影响有效决策
 +        yield* markToolReviewing(input)
@@ -171,7 +172,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
            risk_level: assessment.risk_level,
            user_authorization: assessment.user_authorization,
          } satisfies PermissionAuto.ReviewDecision
-@@ -146,6 +170,134 @@ export const layer = Layer.effect(
+@@ -146,6 +170,136 @@ export const layer = Layer.effect(
      })
  
      return Service.of({ review })
@@ -271,14 +272,16 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +    // #208：标记工具状态为 reviewing——UI 展示 precheck 到 reviewer 的进度
 +    function markToolReviewing(input: PermissionAuto.ReviewInput) {
 +      // #208：无 sessionID 或 tool 绑定时跳过标记——非工具触发的审查无需 UI 进度展示
-+      if (!input.sessionID || !input.tool) return Effect.void
++      const sessionID = input.sessionID
++      const tool = input.tool
++      if (!sessionID || !tool) return Effect.void
 +      return Effect.gen(function* () {
 +        // #208：用 session.messages 替代 MessageV2.get——避免 Database.Service 泄漏到 review 类型
-+        const messages = yield* session.messages({ sessionID: input.sessionID!, limit: 50 })
-+        const message = messages.find((m) => m.info.id === input.tool!.messageID)
++        const messages = yield* session.messages({ sessionID: SessionID.make(sessionID), limit: 50 })
++        const message = messages.find((m) => m.info.id === tool.messageID)
 +        if (!message) return
 +        const part = message.parts.find(
-+          (item): item is ToolPart => item.type === "tool" && item.callID === input.tool!.callID,
++          (item): item is ToolPart => item.type === "tool" && item.callID === tool.callID,
 +        )
 +        if (!part || (part.state.status !== "pending" && part.state.status !== "running")) return
 +        yield* session.updatePart({
@@ -306,6 +309,64 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
    }),
  )
  
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -82,1 +82,1 @@
+-        action: result.object.outcome, reason: result.object.rationale, reviewID: crypto.randomUUID(),
++        action: result.object.outcome, reason: result.object.rationale, reviewID: input.reviewID,
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -202,3 +202,9 @@
+-      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
++      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, tool: input.source, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
+         review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
+-      })
++      }, (review) => events.publish(PermissionV1.Event.ReviewStarted, {
++        sessionID: input.sessionID,
++        reviewID: review.reviewID,
++        permission: input.action,
++        patterns: [...resources],
++        precheck: review.precheck,
++      }))
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -2,1 +2,2 @@
+-import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
++import { Cause, Deferred, Effect, Fiber, Layer, Schema } from "effect"
++import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
+@@ -355,1 +356,7 @@
+     const sessions = yield* SessionStore.Service
++    const progress: { type: string; reviewID: string }[] = []
++    const events = yield* EventV2.Service
++    const unsubscribe = yield* events.listen((event) => Effect.sync(() => {
++      if (Schema.is(PermissionV1.Event.ReviewStarted)(event) || Schema.is(PermissionV1.Event.ReviewCompleted)(event)) progress.push({ type: event.type, reviewID: event.data.reviewID })
++    }))
++    yield* Effect.addFinalizer(() => unsubscribe)
+@@ -375,3 +382,6 @@
+     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
+     expect(reviewRequests).toHaveLength(1)
++    expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
++    expect(progress[0]?.reviewID).toBeDefined()
++    expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
+     const reviewText = JSON.stringify(reviewRequests[0]?.messages)
+@@ -442,1 +452,2 @@
+     yield* Deferred.await(reviewStarted)
++    expect(progress.at(-1)?.type).toBe("permission.review.started")
+diff --git a/packages/schema/src/event-manifest.ts b/packages/schema/src/event-manifest.ts
+--- a/packages/schema/src/event-manifest.ts
++++ b/packages/schema/src/event-manifest.ts
+@@ -61,1 +61,2 @@
+   // 两种运行时共用的审查观察事件属于过渡协议；旧 Asked/Replied 仍只进入兼容清单。
++  PermissionV1.Event.ReviewStarted,
+diff --git a/packages/protocol/test/permission-event.test.ts b/packages/protocol/test/permission-event.test.ts
+--- a/packages/protocol/test/permission-event.test.ts
++++ b/packages/protocol/test/permission-event.test.ts
+@@ -10,1 +10,2 @@
+   const events = [
++    { id: Event.ID.create(), type: "permission.review.started", data: { sessionID: SessionID.make("ses_test"), reviewID: "review", permission: "bash", patterns: ["git push"], precheck: { level: "cautious", reason: "publish" } } },
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
 --- a/packages/opencode/test/permission/auto.test.ts
 +++ b/packages/opencode/test/permission/auto.test.ts

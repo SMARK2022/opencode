@@ -17,21 +17,15 @@ index c6000c109b..b70f7bce5b 100644
  import { InstanceState } from "@/effect/instance-state"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import { Instruction } from "../session/instruction"
-@@ -12,7 +13,9 @@ import { isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, form
- import { SessionV1 } from "@opencode-ai/core/v1/session"
- 
- // 默认 400 行：与 notebook source limit 对齐，压低单次工具输出
+@@ -14,1 +15,3 @@
 -const DEFAULT_READ_LIMIT = 400
 +// #142：默认 200 行，配合 range/outline 做定点读取
 +// #142：默认 200 行与 source 对齐
 +const DEFAULT_READ_LIMIT = 200
- // 不再按行截断：超长行完整保留，仅用 MAX_BYTES 控制总输出
- // 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
- const MAX_BYTES = 24 * 1024
-@@ -21,6 +24,15 @@ const SAMPLE_BYTES = 4096
- const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
- 
+@@ -21,1 +24,12 @@
  const MAX_CONTENT_TOKENS = 16000
++// #142：正文限幅后只追加有界计数，避免为 total 扫描整个超大文件
++const MAX_SCAN_BYTES = 256 * 1024
 +// #142：单行展示上限
 +// #142：单行展示截断阈值
 +const MAX_LINE_LENGTH = 2000
@@ -41,20 +35,7 @@ index c6000c109b..b70f7bce5b 100644
 +// #142：重叠占比阈值
 +const OVERLAP_MIN_RATIO = 0.3
 +
- 
- // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
- const BLOCKED_DEVICE_PATHS = new Set([
-@@ -110,7 +122,8 @@ function findUnexpandedFileInContext(
-   limit: number | undefined,
- ): boolean {
-   for (let i = messages.length - 1; i >= 0; i--) {
--    const msg = messages[i]
-+    // #142：stub 文案引导复用上下文而非重读
-+  const msg = messages[i]
-     if (msg.info.role !== "assistant") continue
-     for (const part of msg.parts) {
-       if (part.type !== "tool") continue
-@@ -143,13 +156,231 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
+@@ -143,13 +158,235 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
  // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
  // Schema output is identical (`type: "number"`), so the LLM view is
  // unchanged; purely CLI-facing uses must now send numbers rather than strings.
@@ -74,6 +55,7 @@ index c6000c109b..b70f7bce5b 100644
 +  start: number
 +  end: number
 +  total: number
++  totalExact: boolean
 +  returned: number
 +  stub: boolean
 +  stubStatus?: ReadStubStatus
@@ -155,9 +137,10 @@ index c6000c109b..b70f7bce5b 100644
 +    if (msg.info.role !== "assistant") continue
 +    for (const part of msg.parts) {
 +      if (part.type !== "tool" || part.tool !== "read") continue
-+      if (part.state.status !== "completed" || part.state.time.compacted) continue
++      if (part.state.status !== "completed" || part.state.time.compacted !== undefined) continue
 +      const meta = (part.state.metadata as { read?: unknown } | undefined)?.read
 +      if (!isReadRangeMeta(meta) || meta.stub) continue
++      if (meta.returned === 0 && meta.size > 0) continue
 +      if (meta.canonicalPath !== canonicalPath) continue
 +      reads.push(meta)
 +    }
@@ -217,6 +200,7 @@ index c6000c109b..b70f7bce5b 100644
 +  start: number
 +  end: number
 +  total: number
++  totalExact: boolean
 +  returned: number
 +  raw: string[]
 +  cut: boolean
@@ -229,7 +213,7 @@ index c6000c109b..b70f7bce5b 100644
 +    `<path>${escapeXmlText(input.path)}</path>`,
 +    `<type>file</type>`,
 +    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-+    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="${input.returned}" />`,
++    `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="${input.returned}" />`,
 +  ]
 +  // #142：outline 仅插入结构提示区
 +  if (input.outline?.items.length) {
@@ -257,6 +241,7 @@ index c6000c109b..b70f7bce5b 100644
 +  start: number
 +  end: number
 +  total: number
++  totalExact: boolean
 +  status: ReadStubStatus
 +  coveredBy?: string
 +}) {
@@ -268,7 +253,7 @@ index c6000c109b..b70f7bce5b 100644
 +    `<path>${escapeXmlText(input.path)}</path>`,
 +    `<type>file</type>`,
 +    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-+    `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="0" />`,
++    `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="0" />`,
 +    `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${escapeXmlAttr(input.coveredBy)}"` : ""}>`,
 +    msg,
 +    "</stub>",
@@ -287,7 +272,12 @@ index c6000c109b..b70f7bce5b 100644
    }),
  })
  
-@@ -176,6 +407,9 @@ type Metadata = {
+@@ -171,3 +407,4 @@ type Display =
+       lineEnd: number
+       totalLines: number
++      totalLinesExact: boolean
+       truncated: boolean
+@@ -176,6 +413,9 @@ type Metadata = {
    preview: string
    truncated: boolean
    loaded: string[]
@@ -297,69 +287,59 @@ index c6000c109b..b70f7bce5b 100644
    display?: Display
  }
  
-@@ -392,59 +625,9 @@ export const ReadTool = Tool.define<
--      // 首次读取时从会话历史预热缓存 — 扫描已有的非 stub、未压缩的读取记录
--      if (!cacheSeeded) {
--        for (let i = ctx.messages.length - 1; i >= 0; i--) {
--          const msg = ctx.messages[i]
--          if (msg.info.role !== "assistant") continue
--          for (const part of msg.parts) {
--            if (part.type !== "tool") continue
--            if (part.tool !== "read") continue
--            if (part.state.status !== "completed") continue
--            if (part.state.time.compacted) continue
--            if (part.state.output === FILE_UNCHANGED_STUB) continue
--
--            const seedInput = part.state.input as { filePath?: string; offset?: number; limit?: number }
--            if (!seedInput.filePath) continue
--
--            const seedKey = cacheKey(seedInput.filePath, seedInput.offset ?? 1, seedInput.limit)
--            if (readFileState.has(seedKey)) continue
--
--            const seedStat = yield* fs.stat(seedInput.filePath).pipe(
--              Effect.catch(() => Effect.succeed(undefined)),
--            )
--            if (!seedStat || seedStat.type !== "File") continue
--
--            // V2 stat.mtime 是 Option<Date>，用 getOrElse 取毫秒时间戳
--            const seedMtime = Math.floor(Option.getOrElse(seedStat.mtime, () => new Date(0)).getTime())
--            // 仅当文件在读取后未被修改时才加入缓存（mtime ≤ 读取时间表示无后续修改）
--            if (seedMtime <= part.state.time.end) {
--              readFileState.set(seedKey, {
--                content: part.state.output,
--                timestamp: seedMtime,
--              })
--            }
--          }
--        }
--        cacheSeeded = true
--      }
+@@ -250,44 +490,38 @@ export const ReadTool = Tool.define<
+     const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
+       const start = opts.offset - 1
+       const raw: string[] = []
+-      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
++      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false, scanBytes: 0 }
  
--      // 文件去重检查 - 使用复合键查找同范围的缓存
-+      // #142：重复可见读由 collectVisibleReads/findReadStub 处理，不在此提前 FILE_UNCHANGED 成功返回
-+      // #142：SMARK 以 structured stub 为唯一重复读成功语义，禁用 FILE_UNCHANGED 旁路
-+      // #142：mtime 缓存仍可 seed，但不得在有可见内容时提前成功返回纯文本
-       const requestOffset = params.offset ?? 1
-       const requestLimit = params.limit
--      const existingState = readFileState.get(cacheKey(filepath, requestOffset, requestLimit))
--      if (existingState) {
--        // stat.mtime 在目标中是 Option<Date>，需要 unwrap 后取毫秒时间戳
--        const mtimeMs = Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
--        if (mtimeMs === existingState.timestamp) {
--          // 额外检查：当前上下文中是否有该文件同范围的未压缩读取结果
--          const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath, requestOffset, requestLimit)
--          if (hasUnexpandedContent) {
--            return {
--              title,
--              output: FILE_UNCHANGED_STUB,
--              metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
--            }
--          }
--        }
--      }
+-      // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
+-      // ends without flushing, decodeText drops the final unterminated line. We also
+-      // avoid Stream.runForEachWhile (it currently swallows the final unterminated
+-      // line of the upstream splitLines pipeline) and use a tagged error to stop the
+-      // upstream file stream as soon as the byte cap is reached.
++      // #142：保留手动解码及末尾未换行的处理；正文限幅后最多再计数 256 KiB。
++      // #142：未到 EOF 就停流时，count 只是下界，不能冒充精确总行数。
+       const decoder = new TextDecoder("utf-8")
+       yield* fs.stream(filepath).pipe(
+         Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+         Stream.splitLines,
+         Stream.runForEach((text) =>
+           Effect.gen(function* () {
+             if (flags.done) return yield* new ReadStop()
+             flags.count += 1
+             if (flags.count <= start) return
  
-       if (stat.type === "Directory") {
-         const items = yield* list(filepath)
+-            if (raw.length >= opts.limit) {
+-              flags.more = true
+-              return
+-            }
+-
+             const line = text // 保留完整行，由总字节预算决定当前页是否接纳。
+             const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
+-            if (flags.bytes + size <= MAX_BYTES) {
++            if (!flags.cut && raw.length < opts.limit && flags.bytes + size <= MAX_BYTES) {
+               raw.push(line)
+               flags.bytes += size
+               return
+             }
+ 
+-            flags.cut = true
++            flags.cut = flags.cut || raw.length < opts.limit
+             flags.more = true
++            flags.scanBytes += size
++            if (flags.scanBytes <= MAX_SCAN_BYTES) return
+             flags.done = true
+             return yield* new ReadStop()
+           }),
+         ),
+         Effect.catchTag("ReadStop", () => Effect.void),
+       )
+ 
+-      return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
++      return { raw, count: flags.count, totalExact: !flags.done, cut: flags.cut, more: flags.more, offset: opts.offset }
+     })
 @@ -453,20 +673,25 @@ export const ReadTool = Tool.define<
          const start = offset - 1
          const sliced = items.slice(start, start + limit)
@@ -406,7 +386,7 @@ index c6000c109b..b70f7bce5b 100644
          }
        }
  
-@@ -561,26 +786,93 @@ export const ReadTool = Tool.define<
+@@ -463,20 +692,99 @@ export const ReadTool = Tool.define<
          )
        }
  
@@ -436,12 +416,13 @@ index c6000c109b..b70f7bce5b 100644
 +        start,
 +        end,
 +        total: file.count,
++        totalExact: file.totalExact,
 +        returned,
 +        stub: false,
 +      }
 +      // #142：可见上下文驱动 stub，优先于 mtime 缓存
 +      // #142：加载可见 reads
-+const visibleReads = collectVisibleReads(ctx.messages, current.canonicalPath)
++const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath)
 +      // #142：stub 判定
 +const stub = findReadStub(visibleReads, current)
 +      if (stub) {
@@ -453,16 +434,21 @@ index c6000c109b..b70f7bce5b 100644
 +          stubStatus: stub.status,
 +          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
 +        }
-+        const output = renderReadStub({
++        let output = renderReadStub({
 +          path: filepath,
 +          size,
 +          modified,
 +          start,
 +          end,
 +          total: file.count,
++          totalExact: file.totalExact,
 +          status: stub.status,
 +          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined,
 +        })
++        // #142：stub 只省略已见正文；新解析的目录规则必须实际交付后才能记入 loaded。
++        if (loaded.length > 0) {
++          output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
++        }
 +        return {
 +          title,
 +          output,
@@ -475,12 +461,6 @@ index c6000c109b..b70f7bce5b 100644
 +        }
 +      }
 +
--      // 写入去重缓存 — 使用复合键，不同范围分别缓存
--      readFileState.set(cacheKey(filepath, params.offset ?? 1, params.limit), {
--        content,
--        timestamp: Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime()),
--      })
- 
 -      let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
 -      output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
 -
@@ -497,7 +477,7 @@ index c6000c109b..b70f7bce5b 100644
 -      output += "\n</content>"
 +      // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
 +      // #142：异步 outline
-+const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset))
++const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset, file.totalExact))
 +      // #142：部分重叠仍返回内容，但附 note
 +      // #142：overlap 判定
 +const overlap = findOverlapNote(visibleReads, current)
@@ -509,6 +489,7 @@ index c6000c109b..b70f7bce5b 100644
 +        start,
 +        end,
 +        total: file.count,
++        totalExact: file.totalExact,
 +        returned,
 +        raw: file.raw,
 +        cut: file.cut,
@@ -519,7 +500,21 @@ index c6000c109b..b70f7bce5b 100644
  
        yield* warm(filepath)
  
-@@ -596,20 +893,21 @@ export const ReadTool = Tool.define<
+@@ -493,13 +796,1 @@
+-      if (
+-        // 当前页读取与权限检查已完成；未截掉页内正文时分页仍可去重。
+-        !file.cut &&
+-        // 每次用本会话可见历史证明范围与版本，恢复会话无需预热或借用外会话缓存。
+-        findUnexpandedFileInContext(ctx, params, output)
+-      ) {
+-        return {
+-          title,
+-          output: FILE_UNCHANGED_STUB,
+-          metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
+-        }
+-      }
+ 
+@@ -596,20 +893,22 @@ export const ReadTool = Tool.define<
        return {
          title,
          output,
@@ -537,6 +532,7 @@ index c6000c109b..b70f7bce5b 100644
 -            lineEnd: last,
 +            lineEnd: end,
              totalLines: file.count,
++            totalLinesExact: file.totalExact,
              truncated,
            },
 -        },
@@ -549,7 +545,7 @@ new file mode 100644
 index 0000000000..3e4db15021
 --- /dev/null
 +++ b/packages/opencode/src/tool/read-outline.ts
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,311 @@
 +// #142：源文件大纲提示（非语义索引），限制扫描行数与条目预算
 +// #142：仅 offset=1 且足够长的源码文件才生成 outline
 +import { createReadStream } from "fs"
@@ -794,9 +790,11 @@ index 0000000000..3e4db15021
 +}
 +
 +// #142：异步流式扫前缀，受 MAX_SCAN_LINES/ENTRIES/CHARS 约束
-+export async function readOutline(filepath: string, total: number, offset: number): Promise<Outline | undefined> {
-+  // #142：非文件头或不长则跳过
-+  if (offset > 1 || total < MIN_LINES || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
++export async function readOutline(filepath: string, total: number, offset: number, totalExact = true): Promise<Outline | undefined> {
++  // #142：非文件头或已知不足 600 行则跳过；计数下界不足时仍需验证真实资格。
++  if (offset > 1 || (totalExact && total < MIN_LINES) || !SOURCE_EXTENSIONS.has(basenameExt(filepath))) return undefined
++  // #142：条目预算先耗尽也必须确认达到 600 行，不能给短文件误报 outline。
++  const pendingEligibility = total < MIN_LINES
 +
 +  // #142：readline 流，避免整文件读入内存
 +  const stream = createReadStream(filepath, { encoding: "utf8" })
@@ -815,6 +813,10 @@ index 0000000000..3e4db15021
 +    // #142：顺序扫描前缀
 +for await (const text of rl) {
 +      count += 1
++      if (truncated && pendingEligibility) {
++        if (count >= MIN_LINES) break
++        continue
++      }
 +      // This is a read-tool hint, not a semantic index; never scan an entire
 +      // huge file just to discover there are no declarations in the prefix.
 +      // #142：扫描上限到点即 truncated
@@ -834,6 +836,7 @@ index 0000000000..3e4db15021
 +      // #142：条目或字符预算耗尽
 +      if (items.length >= MAX_ENTRIES || chars + extra > MAX_CHARS) {
 +        truncated = true
++        if (pendingEligibility && count < MIN_LINES) continue
 +        break
 +      }
 +      // #142：接受该条目
@@ -848,6 +851,7 @@ index 0000000000..3e4db15021
 +    // #142：销毁底层流
 +stream.destroy()
 +  }
++  if (pendingEligibility && count < MIN_LINES) return undefined
 +  // #142：无声明则不输出 outline 节点
 +  if (items.length === 0) return undefined
 +  // #142：返回大纲
@@ -859,21 +863,71 @@ index 4cf1074a1d..475b1ea3c7 100644
 +++ b/packages/opencode/test/tool/read.test.ts
 @@ -3,6 +3,7 @@ import { afterEach, describe, expect } from "bun:test"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { Cause, Effect, Exit, Layer, Stream } from "effect"
+ import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
  import path from "path"
 +import { readOutline } from "../../src/tool/read-outline"
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -321,8 +322,9 @@ describe("tool.read truncation", () => {
+@@ -352,1 +353,1 @@
+-      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
++      expect((yield* exec(dir, request, { ...ctx, messages: visible })).output).toContain('status="stub_same_range_visible"')
+@@ -365,1 +366,1 @@
+-      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toBe(FILE_UNCHANGED_STUB)
++      expect((yield* exec(dir, request, { ...b, messages: history(second, b.sessionID) })).output).toContain('status="stub_same_range_visible"')
+@@ -374,10 +375,17 @@
+       delete part.state.time.compacted
++      const read = part.state.metadata.read as NonNullable<typeof second.metadata.read>
+       part.state.output = FILE_UNCHANGED_STUB
++      read.stub = true
+       expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
+       part.state.output = second.output
+-      // 范围变化必须返回正文；权限也必须先于成功的 stub 判定执行。
+-      part.state.input.limit = 2
++      read.stub = false
++      // 非覆盖范围必须返回正文；输入和元数据同时模拟另一真实范围。
++      part.state.input.offset = 2
++      read.start = 2
++      read.end = 2
+       expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain("v2")
+-      part.state.input.limit = 1
++      part.state.input.offset = 1
++      read.start = 1
++      read.end = 1
+       // 恢复范围确实命中，避免拒绝断言仅因测试历史失配而偶然成立。
+-      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toBe(FILE_UNCHANGED_STUB)
++      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain('status="stub_same_range_visible"')
+@@ -391,8 +398,8 @@
+-      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toBe(FILE_UNCHANGED_STUB)
++      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain('status="stub_same_range_visible"')
+       yield* put(target, "x".repeat(3000) + "changed")
+-      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain("changed")
++      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).metadata.read?.size).toBe(3007)
+       // 字节预算省略的正文仍不构成完整版本证明。
+       yield* put(target, "x".repeat(24 * 1024 + 1))
+       const partial = yield* exec(dir, request)
+       expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
+-        .not.toBe(FILE_UNCHANGED_STUB)
++        .not.toContain('<stub status=')
+@@ -315,14 +316,14 @@ describe("tool.read truncation", () => {
+     Effect.gen(function* () {
+       const test = yield* TestInstance
+-      const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
+-      const target = 60 * 1024
+-      const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
+-      yield* put(path.join(test.directory, "large.json"), content)
  
-       const result = yield* run({ filePath: path.join(test.directory, "large.json") })
+-      const result = yield* run({ filePath: path.join(test.directory, "large.json"), limit: 2000 })
++      const content = Array.from({ length: 100 }, (_, i) => `${i}: ${"x".repeat(1024)}`).join("\n")
++      yield* put(path.join(test.directory, "large.txt"), content)
++      const result = yield* run({ filePath: path.join(test.directory, "large.txt") })
        expect(result.metadata.truncated).toBe(true)
 -      expect(result.output).toContain("Output capped at")
 -      expect(result.output).toContain("Use offset=")
-+      // #142：默认 200 行先触发行限；超密字节文件仍可 byte_limit
-+      expect(result.output).toContain("<more offset=")
-+      expect(result.output.includes('reason="line_limit"') || result.output.includes('reason="byte_limit"')).toBe(true)
++      // #142：正文被 24 KiB 截断，但有界尾部扫描足以精确计完原始 100 行样例。
++      expect(result.metadata.read).toMatchObject({ total: 100, totalExact: true })
++      expect(result.output).toContain('total="100"')
++      expect(result.output).toContain('reason="byte_limit"')
      }),
    )
  
@@ -888,13 +942,16 @@ index 4cf1074a1d..475b1ea3c7 100644
        yield* put(filepath, content)
  
        const fs = yield* FSUtil.Service
-@@ -353,7 +357,8 @@ describe("tool.read truncation", () => {
+@@ -353,7 +357,11 @@ describe("tool.read truncation", () => {
        )
  
        expect(result.metadata.truncated).toBe(true)
 -      expect(result.output).toContain("Output capped at")
 +      // #142：长行文件触发 byte_limit 并 ReadStop 停流
 +      expect(result.output).toContain('reason="byte_limit"')
++      expect(result.output).toContain('total_exact="false"')
++      expect(result.metadata.read?.totalExact).toBe(false)
++      expect(result.metadata.read?.total).toBeLessThan(200)
        expect(counter.bytes).toBeLessThan(Buffer.byteLength(content, "utf-8") / 2)
      }),
    )
@@ -932,28 +989,26 @@ index 4cf1074a1d..475b1ea3c7 100644
      }),
    )
  
-@@ -471,16 +481,15 @@ describe("tool.read truncation", () => {
- 
-   it.live("keeps long lines whole until byte budget", () =>
+@@ -560,12 +570,12 @@
+-  it.live("keeps long lines whole within the byte budget", () =>
++  it.live("bounds displayed long lines within the byte budget", () =>
      Effect.gen(function* () {
--      // #90：长行完整保留；禁止出现 2000 字行中截断后缀
-+      // #142：展示层单行 2000 截断；字节预算内保留前缀
        const dir = yield* tmpdirScoped()
        const long = "x".repeat(3000)
-       yield* put(path.join(dir, "long-line.txt"), long + "\n")
+       yield* put(path.join(dir, "long-line.txt"), long)
  
        const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
--      expect(result.output).toContain(long)
+-      expect(result.output).toContain(`1: ${long}`)
 -      expect(result.output).not.toContain("line truncated to 2000")
--      expect(result.output).not.toContain("(line truncated")
--      expect(result.output.length).toBeGreaterThan(3000)
++      expect(result.output).toContain(`1: ${long.slice(0, 2000)}`)
 +      expect(result.output).toContain("line truncated to 2000")
-+      expect(result.output).toContain("x".repeat(100))
-+      expect(result.metadata.truncated).toBe(false)
+       expect(result.metadata.truncated).toBe(false)
      }),
    )
+@@ -692,6 +702,405 @@ describe("tool.read binary detection", () => {
  
-@@ -609,3 +618,389 @@ describe("tool.read binary detection", () => {
+       const err = yield* fail(dir, { filePath: path.join(dir, "module.wasm") })
+       expect(err.message).toContain("Cannot read binary file")
      }),
    )
  })
@@ -1003,7 +1058,7 @@ index 4cf1074a1d..475b1ea3c7 100644
 +      const body = Array.from({ length: 700 }, (_, i) => {
 +        if (i === 9) return "export function alpha() {}"
 +        if (i === 119) return "export class Beta {}"
-+        return `// line ${i + 1}`
++        return `// line ${i + 1} ${"x".repeat(2048)}`
 +      }).join("\n")
 +      yield* put(file, body + "\n")
 +      const head = yield* run({ filePath: file, offset: 1, limit: 20 })
@@ -1011,6 +1066,10 @@ index 4cf1074a1d..475b1ea3c7 100644
 +      expect(head.output).toContain("<outline")
 +      expect(head.output).toContain("function alpha")
 +      expect(head.output).toContain("class Beta")
++      expect(head.metadata.read?.totalExact).toBe(false)
++      expect(head.metadata.read?.total).toBeLessThan(600)
++      expect(head.output).toContain('total_exact="false"')
++      expect(head.output).toContain('reason="byte_limit"')
 +      const bodyRead = yield* run({ filePath: file, offset: 50, limit: 10 })
 +      // #142：非头部读取不重复贴 outline
 +      expect(bodyRead.output).not.toContain("<outline")
@@ -1023,18 +1082,20 @@ index 4cf1074a1d..475b1ea3c7 100644
 +  it.instance("stubs when the same range is already visible", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      const file = path.join(test.directory, "same-range.txt")
++      const file = path.join(test.directory, "nested", "same-range.txt")
 +      yield* put(file, ["one", "two", "three"].join("\n") + "\n")
 +      const first = yield* run({ filePath: file, offset: 1, limit: 2 })
 +      expect(first.output).toContain("<content>")
 +      expect(first.metadata.read?.stub).toBe(false)
++      expect(first.metadata.loaded).toEqual([])
++      yield* put(path.join(test.directory, "nested", "AGENTS.md"), "new directory instructions")
 +      const second = yield* run(
 +        { filePath: file, offset: 1, limit: 2 },
 +        {
 +          ...ctx,
 +          messages: [
 +            {
-+              info: { role: "assistant", id: "a1" },
++              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +              parts: [
 +                {
 +                  type: "tool",
@@ -1057,6 +1118,9 @@ index 4cf1074a1d..475b1ea3c7 100644
 +      expect(second.output).toContain('status="stub_same_range_visible"')
 +      expect(second.output).not.toContain("<content>")
 +      expect(second.metadata.read?.stub).toBe(true)
++      expect(second.output).toContain("<system-reminder>")
++      expect(second.output).toContain("new directory instructions")
++      expect(second.metadata.loaded).toEqual([path.join(test.directory, "nested", "AGENTS.md")])
 +    }),
 +  )
 +
@@ -1074,7 +1138,7 @@ index 4cf1074a1d..475b1ea3c7 100644
 +          ...ctx,
 +          messages: [
 +            {
-+              info: { role: "assistant", id: "a1" },
++              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +              parts: [
 +                {
 +                  type: "tool",
@@ -1113,7 +1177,7 @@ index 4cf1074a1d..475b1ea3c7 100644
 +          ...ctx,
 +          messages: [
 +            {
-+              info: { role: "assistant", id: "a1" },
++              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +              parts: [
 +                {
 +                  type: "tool",
@@ -1161,7 +1225,7 @@ index 4cf1074a1d..475b1ea3c7 100644
 +          ...ctx,
 +          messages: [
 +            {
-+              info: { role: "assistant", id: "a1" },
++              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +              parts: [
 +                {
 +                  type: "tool",
@@ -1202,7 +1266,7 @@ index 4cf1074a1d..475b1ea3c7 100644
 +          ...ctx,
 +          messages: [
 +            {
-+              info: { role: "assistant", id: "a1" },
++              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +              parts: [
 +                {
 +                  type: "tool",
@@ -1252,7 +1316,7 @@ index 4cf1074a1d..475b1ea3c7 100644
 +          ...ctx,
 +          messages: [
 +            {
-+              info: { role: "assistant", id: "a1" },
++              info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +              parts: [
 +                {
 +                  type: "tool",
@@ -1322,6 +1386,10 @@ index 4cf1074a1d..475b1ea3c7 100644
 +      expect(outline!.items.join("\n").length).toBeLessThanOrEqual(640)
 +      expect(outline!.items.every((item) => item.length <= 60)).toBe(true)
 +      expect(outline!.items.some((item) => item.endsWith("..."))).toBe(true)
++      const pending = yield* Effect.promise(() => readOutline(filePath, 1, 1, false))
++      expect(pending).toEqual(outline)
++      yield* put(filePath, source.split("\n").slice(0, 100).join("\n"))
++      expect(yield* Effect.promise(() => readOutline(filePath, 1, 1, false))).toBeUndefined()
 +    }),
 +  )
 +
@@ -1347,12 +1415,15 @@ diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/re
 index f0842253cf..2fa7794ccd 100644
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt
-@@ -2,12 +2,14 @@ Read a file or directory from the local filesystem. If the path does not exist,
+@@ -2,13 +2,16 @@ Read a file or directory from the local filesystem. If the path does not exist,
  
  Usage:
  - The filePath parameter should be an absolute path.
 -- By default, this tool returns up to 400 lines from the start of the file.
 +- By default, this tool returns up to 200 lines from the start of the file.
+-- Text content is capped at 24 KiB per read, with no per-line character truncation.
++- Text content is capped at 24 KiB per read; displayed lines are limited to 2000 characters.
++- Line accounting scans at most 256 KiB beyond the returned page. If `<range total_exact="false">` appears, `total` is a lower bound; otherwise it is exact.
  - The offset parameter is the line number to start from (1-indexed).
  - To read later sections, call this tool again with a larger offset.
  - Use the grep tool to find specific content in large files or files with long lines.

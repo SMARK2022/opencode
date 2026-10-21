@@ -323,42 +323,41 @@ index 6141836333292841845f634512b6ca3684bab04f..0978543f7344476c29db7d81999648a6
  - marker 应短于被替换内容，否则不应替换。
  
  ## 推荐 type 集合
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index b95bdb418910bb31e6f8cd6ee4d0d29b07f88b24..b1e9b831f1279cbd8e0b8f435a7b10baab4b2d9c 100644
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -202,8 +202,9 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
-   // 至少 4 次回车更新才折叠
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -199,8 +199,9 @@
    minCarriageReturnFrames: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_CR_FRAMES ?? 4),
  
--  // 高熵长行压缩配置
+-  // 保留源环境默认值，局部 config 覆盖仍由同一个 configOf 合并。
 -  minHighEntropyLineLength: Number(process.env.OPENCODE_BASH_MIN_HIGH_ENTROPY_LINE_LENGTH ?? 512),
 +  // 高熵长行压缩配置：1024 字符（line.length 口径）——512 会误压 URL/token
 +  // 密集 JSON 等中价值行（512-1023 实测解除误压，≥1024 编码 blob 仍覆盖，用户决定）
 +  minHighEntropyLineLength: Number(process.env.OPENCODE_BASH_MIN_HIGH_ENTROPY_LINE_LENGTH ?? 1024),
    minEntropy: Number(process.env.OPENCODE_BASH_MIN_ENTROPY ?? 4.5),
    maxWhitespaceRatio: Number(process.env.OPENCODE_BASH_MAX_WHITESPACE_RATIO ?? 0.1),
-   
-@@ -1168,6 +1169,14 @@ function compressLongLists(line: string, config: CompressionConfig): { line: str
-   // 检测逗号分隔的长列表
+   minTemplateRepeats: Number(process.env.OPENCODE_BASH_COMPRESSION_MIN_TEMPLATE_REPEATS ?? 3),
+   templateNormalizationLevel: process.env.OPENCODE_BASH_TEMPLATE_NORMALIZATION ?? "safe",
+@@ -382,7 +383,14 @@
+ function compressLongLists(line: string, config: CompressionConfig) {
    const items = line.split(/,\s*/)
-   if (items.length < 10) return { line, applied: false }
+   if (items.length < 10 || byteLen(line) < 200) return { line, applied: false }
 +
-+  // 唯一项占比守卫：≥25% 视为结构化高信息数据（tuple/dict/JSON 的逗号是记录内
-+  // 分隔符，现场 52 伪项 59.6% 唯一被误折叠）；<25%（≥75% 项互为重复）才是本
-+  // 规则目标的真重复列表，照旧折叠。非逗号分隔（空格/;/|/，）本就不触发。
++  // 唯一项占比≥25%保留结构化tuple/dict/JSON，避免记录内逗号被误作重复列表。
++  // 仅真重复继续折叠，既有字节/净收益门槛及首尾三项不变。
 +  const LONG_LIST_MAX_UNIQUE_RATIO = 0.25
 +  if (new Set(items).size / items.length >= LONG_LIST_MAX_UNIQUE_RATIO) {
 +    return { line, applied: false }
 +  }
-   
-   const totalBytes = byteLen(line)
-   if (totalBytes < 200) return { line, applied: false }
+   // 保留首尾各三项和省略数量，完整中段仍可从同一 raw archive 恢复。
+   const replacement = [...items.slice(0, 3), `[... ${items.length - 6} more]`, ...items.slice(-3)].join(", ")
+   return scoreReplacement(line, replacement, config).profitable ? { line: replacement, applied: true } : { line, applied: false }
+ }
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
 index 3dc45f1b0a3c14fe4a7854db4fbef9cad6d7e108..bf915fde94cdeda74fc6b538706ecd87fc741cf7 100644
 --- a/packages/opencode/test/tool/bash-compress.test.ts
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
-@@ -241,23 +241,57 @@ describe("tool.bash-compress", () => {
+@@ -284,23 +284,55 @@ describe("tool.bash-compress", () => {
    })
  
    test("high-entropy marker uses compact dialect", () => {
@@ -373,9 +372,8 @@ index 3dc45f1b0a3c14fe4a7854db4fbef9cad6d7e108..bf915fde94cdeda74fc6b538706ecd87
 +    expect(result.text).toMatch(/^\[\.\.\. high-entropy base64 1088B hash=[0-9a-f]{8} head=ABCDEFG\]$/)
 +  })
 +
-+  // [INV-02/本任务] 512-1023 字符中行保护锁：阈值 1024 前该行被整体省略
-+  // 且不可恢复（URL/token 密集 JSON 同类误压已实测）。fixture 用确定性伪随机
-+  // 构造，避免周期性文本被 inline 真重复规则正确压缩（那属于 INV-03 正向域）。
++  // 896字符必须原样保留，不能再按旧512阈值整行省略。
++  // 确定性伪随机避免被另一条真重复规则正确压缩，保持测试只锁定高熵边界。
 +  test("keeps 896-char base64 lines below the 1024-char high-entropy threshold", () => {
 +    // xorshift32（乘法 LCG 在 JS 里会溢出 2^53 退化）
 +    let s = 123456789
@@ -394,9 +392,8 @@ index 3dc45f1b0a3c14fe4a7854db4fbef9cad6d7e108..bf915fde94cdeda74fc6b538706ecd87
 +    expect(result.text).toBe(blob)
 +  })
 +
-+  // [INV-01/本任务] 用户现场回归锁：numpy 分析打印的 tuple 列表（52 个逗号伪项，
-+  // 唯一占比 59.6%）是高信息结构化数据，长列表折叠会毁掉 12/13 条记录。
-+  // 唯一占比守卫（≥25% 直通）后必须原样返回。
++  // 用户现场tuple列表的逗号属于记录结构，59.6%唯一项不能折叠丢失12/13条记录。
++  // 断言完整原文，防止只保留首尾样例的误压仍通过。
 +  test("keeps structured tuple-list lines intact under the unique-ratio guard", () => {
 +    const seq =
 +      "seq [('AP10', 0.19188188016414642, 0, 1607), ('AP11', 0.18971781432628632, 0, 1607), ('AP12', 0.21857687830924988, 0, 1607), ('AP13', 0.20850607752799988, 0, 1607), ('AP14', 0.18821373581886292, 0, 1607), ('MPM10', 0.2304181307554245, 0, 1571), ('MPM11', 0.22825674712657928, 0, 1571), ('MPM12', 0.26590460538864136, 0, 1571), ('MPM13', 0.17674346268177032, 0, 1571), ('MPM14', 0.1687895655632019, 0, 1571), ('SB11', 0.16373328864574432, 0, 1676), ('SB13', 0.2032642960548401, 0, 1676), ('SM1', 0.1746259480714798, 0, 895)]"
@@ -423,3 +420,14 @@ index 3dc45f1b0a3c14fe4a7854db4fbef9cad6d7e108..bf915fde94cdeda74fc6b538706ecd87
    })
  
    test("progress bar marker uses compact dialect", () => {
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -890,5 +890,6 @@
+         expect(privateKey.snapshot().fatalContexts[0]?.priority).toBe("fatal")
+         expect(compressVisibleOutput("#".repeat(500)).text).toContain("[... bar ")
+-        const list = Array.from({ length: 100 }, (_, i) => `item-${i}-with-long-name`).join(", ")
++        // 原生消费者同样只折叠真重复；保持100项与首尾/省略计数验证，不放宽收益门槛。
++        const list = [...Array.from({ length: 97 }, () => "item-with-long-name"), "tail-one", "tail-two", "tail-three"].join(", ")
+         expect(compressVisibleOutput(list).text).toContain("[... 94 more]")
+         // CSI 清行之后保留终态，未达阈值/收益的编辑则原样通过。

@@ -2962,47 +2962,18 @@ diff --git a/packages/opencode/test/acp/event.test.ts b/packages/opencode/test/a
 index 4680ff686..e8ccf3750 100644
 --- a/packages/opencode/test/acp/event.test.ts
 +++ b/packages/opencode/test/acp/event.test.ts
-@@ -622,9 +622,40 @@ describe("acp event routing", () => {
-     ])
-   })
- 
--  // 完整 terminal-lifecycle 观察（terminal 后 late progress 不重开 tool_call）依赖
--  // toolStart 的 terminal 守卫，属于 #0445 语义；0443 阶段 terminal marker 只在
--  // runningTool 内拒绝 stale snapshot。
-+  it("keeps completed shell terminal over late running progress and replayed pending", async () => {
-+    const harness = createHarness()
-+    await Effect.runPromise(harness.session.create({ id: "ses_term", cwd: "/workspace" }))
-+
-+    await harness.subscription.handle(toolUpdated(versionedRunning("ses_term", "call_term", "running", 1)))
-+    await harness.subscription.handle(toolUpdated(completedTool("ses_term", "call_term", "done")))
-+
-+    // terminal 后观察完整 lifecycle，而不是只筛 in_progress：迟到的更高 version running、
-+    // replay 的 synthetic pending 都不得把已完成的 Tool 重新打开。
-+    await harness.subscription.handle(progressEvent(versionedRunning("ses_term", "call_term", "late", 5)))
-+    await harness.subscription.replayMessage(
-+      assistantToolMessage({
-+        id: "part_call_term",
-+        sessionID: "ses_term",
-+        messageID: "msg_call_term",
-+        type: "tool",
-+        callID: "call_term",
-+        tool: "bash",
-+        state: {
-+          status: "pending",
-+          input: { cmd: "printf done" },
-+          raw: '{"cmd":"printf done"}',
-+        },
-+      }),
-+    )
-+
-+    const updates = toolUpdates(harness.updates)
-+    const terminalIndex = updates.findIndex(
-+      (item) => item.update.status === "completed" || item.update.status === "failed",
-+    )
-+    expect(terminalIndex).toBeGreaterThanOrEqual(0)
-+    expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
-+    expect(updates.filter((item) => item.update.status === "in_progress")).toHaveLength(1)
-+  })
- 
-   it("clears shell snapshot marker when a tool returns to pending", async () => {
-     const harness = createHarness()
+@@ -683,5 +683,14 @@ describe("acp event routing", () => {
+             ...part,
+             state: { status: "error", input: part.state.input, error: "failed", time: part.state.time },
+           })))
++      // 先回放 pending，再送更高版本 running，分别验证两处终态守卫不能被绕过。
++      await harness.subscription.replayMessage(assistantToolMessage({
++        ...part,
++        state: { status: "pending", input: part.state.input, raw: JSON.stringify(part.state.input) },
++      }))
+       await harness.subscription.handle(progressEvent(versionedRunning("ses_progress", callID, `late-${callID}`, 99)))
++      const updates = toolUpdates(harness.updates).filter((item) => item.update.toolCallId === callID)
++      const terminalIndex = updates.findIndex((item) => item.update.status === "completed" || item.update.status === "failed")
++      expect(terminalIndex).toBeGreaterThanOrEqual(0)
++      expect(updates.slice(terminalIndex + 1)).toHaveLength(0)
+     }

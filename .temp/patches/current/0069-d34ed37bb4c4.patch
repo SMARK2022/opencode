@@ -1082,7 +1082,7 @@ index 693e7267e5043e94bb6a055c13b0040f86fb7ce8..87eac81bde25805d83f0c711c0a3173a
 -      tries--
 -    } while (tries > 0)
 +      // 仅 fetch 的网络拒绝进入就绪重试，HTTP 认证错误必须在 catch 外传播。
-+      const response = await fetch(`http://localhost:${port}/app`, { headers: cliHeaders(env) }).catch(() => undefined)
++      const response = await fetch(`http://localhost:${port}/global/health`, { headers: cliHeaders(env) }).catch(() => undefined)
 +      // 401/403 不会靠等待修复，立即交还命令 owner，不能反复探测同一错误凭证。
 +      if (response?.status === 401 || response?.status === 403) throw new Error(`CLI authentication failed: HTTP ${response.status}`)
 +      // fetch 收到 4xx/5xx 也会 resolve，只有 2xx 能作为监听器已就绪的证据。

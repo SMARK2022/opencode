@@ -4943,7 +4943,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
      const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
        const session = yield* store.get(sessionID)
        if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
-@@ -185,17 +190,60 @@
+@@ -185,17 +190,61 @@
        let needsContinuation = false
        let currentStep = step
 -      if (promotion) {
@@ -5011,7 +5011,9 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 +      }))
        const system =
          initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
-       const model = yield* models.resolve(session)
+-      const model = yield* models.resolve(session)
++      const selection = yield* models.resolve(session)
++      const model = selection.model
        const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
        const context = entries.map((entry) => entry.message)
 @@ -219,6 +267,7 @@
@@ -5020,7 +5022,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
        })
 -      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
 +      // 压缩复用本 turn 已采样的模型选择；不从稍后可能切换的 Session 重读 variant。
-+      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, variant: session.model?.variant, request }))
++      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
          return yield* Effect.die(continueAfterCompaction(currentStep))
        const startSnapshot = yield* snapshots.capture()
 @@ -232,6 +281,7 @@
@@ -5044,7 +5046,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
              isContextOverflowFailure(overflowFailure ?? failure) &&
 -            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
 +            // 恢复摘要也属于这次失败 turn 的采样，不能再次 resolve 或采用新选择。
-+            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, variant: session.model?.variant, request })))
++            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })))
            )
              return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
            if (overflowFailure) yield* publish(overflowFailure)
@@ -5100,7 +5102,8 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 -                assistantMessageID: yield* publisher.startAssistant(),
 +                assistantMessageID: yield* publisher.startAssistant(finalizer),
                  finish: stepSettlement.finish,
-                 cost: 0,
+-                cost: 0,
++                cost: SessionRunnerModel.cost(selection.pricing, stepSettlement.tokens),
                  tokens: stepSettlement.tokens,
                  snapshot: endSnapshot,
                  files,
@@ -5146,12 +5149,21 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
  import { SessionProjector } from "@opencode-ai/core/session/projector"
  import { SessionExecution } from "@opencode-ai/core/session/execution"
  import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator"
-@@ -156,3 +158,4 @@
+@@ -156,5 +158,8 @@
 -let modelResolveHook = Effect.void
 +// Hook 保留生产 resolver 的 typed error，不把不可用选择转换成成功模型。
 +let modelResolveHook: Effect.Effect<void, SessionRunnerModel.Error> = Effect.void
  let currentModel = model
++const pricing: ModelV2.Info["cost"][number][] = []
  const models = SessionRunnerModel.layerWith((session) =>
+   modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
++  pricing,
+ )
+@@ -321,3 +326,4 @@
+   currentModel = model
++  pricing.length = 0
+   skillBaselines.clear()
+   responses = undefined
 @@ -521,3 +524,65 @@
          content: [fixture.expectedContent],
        },
@@ -5370,7 +5382,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 @@ -1079,1 +1267,1 @@
 -  it.effect("automatically compacts into a completed summary and retained recent turn", () =>
 +  it.live("automatically compacts into a completed summary and retained recent turn", () =>
-@@ -1088,6 +1276,12 @@
+@@ -1088,8 +1276,20 @@
        yield* session.resume(sessionID)
  
 +      const events = yield* EventV2.Service
@@ -5380,10 +5392,19 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +        model: { id: ModelV2.ID.make(compactModel.id), providerID: ProviderV2.ID.make(compactModel.provider), variant: ModelV2.VariantID.make("high") },
 +      })
        currentModel = compactModel
++      // 摘要和随后普通 turn 都经真实结算；缓存计入上下文阶梯，但不能按普通输入重复收费。
++      pricing.push(
++        { input: 1, output: 2, cache: { read: 0.1, write: 0.2 } },
++        { input: 3, output: 5, cache: { read: 2, write: 4 }, tier: { type: "context", size: 10 } },
++      )
        requests.length = 0
        responses = [
          fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
-@@ -1121,7 +1315,13 @@
+         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
+-      ]
++      ].map(events => events.map(event => LLMEvent.is.stepFinish(event)
++        ? LLMEvent.stepFinish({ ...event, usage: { inputTokens: 13, nonCachedInputTokens: 8, cacheReadInputTokens: 2, cacheWriteInputTokens: 3, outputTokens: 3, reasoningTokens: 1 } }) : event))
+@@ -1121,7 +1315,16 @@
        expect(context[0]).toMatchObject({
          type: "compaction",
          summary: "## Objective\n- Preserve the task",
@@ -5392,12 +5413,15 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      // 查询真实 summary stream 的请求和助手账本，直接 projector fixture 不能证明 producer 携带 variant。
 +      const compacted = (yield* usage.list({ sessionID, source: "system_compaction" }))[0]
 +      if (!compacted) return yield* Effect.die("Missing compaction usage")
-+      expect(compacted).toMatchObject({ status: "completed", model: { variant: "high" } })
-+      expect(yield* usage.assistants({ sessionID, requestID: compacted.requestID })).toMatchObject([{ model: { variant: "high" } }])
++      expect(compacted).toMatchObject({ status: "completed", model: { variant: "high" }, cost: 0.000055 })
++      expect(yield* usage.assistants({ sessionID, requestID: compacted.requestID })).toMatchObject([{ model: { variant: "high" }, cost: 0.000055 }])
++      expect(context[1]).toMatchObject({ type: "assistant", cost: 0.000055 })
++      expect((yield* usage.list({ sessionID, source: "prompt" })).some(row => row.cost === 0.000055)).toBe(true)
++      expect((yield* session.get(sessionID)).cost).toBeCloseTo(0.00011, 10)
  
        requests.length = 0
        executions.length = 0
-@@ -1146,5 +1346,84 @@
+@@ -1146,5 +1346,87 @@
          type: "compaction",
          summary: "## Objective\n- Preserve the updated task",
        })
@@ -5453,6 +5477,9 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      const billed = yield* totals
 +      yield* db.update(SessionTable).set({ cost: 0, tokens_input: 0, tokens_output: 0, tokens_reasoning: 0, tokens_cache_read: 0, tokens_cache_write: 0 })
 +        .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
++      // 全量重建同时清空账本投影；保留旧账本却清零总额会把已确认压缩用量抵消两次。
++      yield* db.delete(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, sessionID)).run().pipe(Effect.orDie)
++      yield* db.delete(RequestUsageTable).where(eq(RequestUsageTable.session_id, sessionID)).run().pipe(Effect.orDie)
 +      yield* replaySessionProjection(sessionID)
 +      expect(yield* totals).toEqual(billed)
 +      expect(yield* usage.get({ sessionID, requestID: compactID })).toMatchObject(aborted)
@@ -5732,7 +5759,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
 --- a/packages/core/src/session/compaction.ts
 +++ b/packages/core/src/session/compaction.ts
-@@ -4,7 +4,13 @@
+@@ -4,7 +4,14 @@
 -import { DateTime, Effect, Stream } from "effect"
 +import { Cause, DateTime, Effect, Exit, Stream } from "effect"
 +import { and, eq, inArray } from "drizzle-orm"
@@ -5748,6 +5775,7 @@ diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session
 +import { tokens } from "./runner/publish-llm-event"
 +import { ModelV2 } from "../model"
 +import { ProviderV2 } from "../provider"
++import { SessionRunnerModel } from "./runner/model"
 @@ -68,6 +74,8 @@
  type Dependencies = {
 +  // 唯一 runner 传入同一个 db；只验证本次 durable 身份，不查询或修改其他请求。
@@ -5757,12 +5785,13 @@ diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session
      readonly stream: (request: LLMRequest) => Stream.Stream<LLMEvent, LLMError>
    }
    readonly config: readonly Config.Entry[]
-@@ -76,6 +84,8 @@
+@@ -76,6 +84,9 @@
  type Input = {
    readonly sessionID: SessionSchema.ID
    readonly entries: readonly Entry[]
    readonly model: Model
-+  // 私有调用输入保留与执行 Model 同次采样的选择，不向公共 LLM Model 增加元数据字段。
++  // 私有调用输入保留同次采样的价格和选择，不向公共 LLM Model 增加元数据字段。
++  readonly pricing: ModelV2.Info["cost"]
 +  readonly variant?: ModelV2.Ref["variant"]
    readonly request: LLMRequest
  }
@@ -5805,11 +5834,14 @@ diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session
        .stream(
          LLM.request({
            model: input.model,
-@@ -212,14 +245,18 @@
+@@ -212,14 +245,21 @@
          Stream.runForEach((event) => {
            if (LLMEvent.is.providerError(event)) failed = true
            if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
-+          if (LLMEvent.is.stepFinish(event)) usage = { tokens: tokens(event.usage), cost: 0, stepCount: 1 }
++          if (LLMEvent.is.stepFinish(event)) {
++            const counted = tokens(event.usage)
++            usage = { tokens: counted, cost: SessionRunnerModel.cost(input.pricing, counted), stepCount: 1 }
++          }
            return Effect.void
          }),
          Effect.as(true),
@@ -5996,10 +6028,22 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 +        expect(yield* ledger.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([{ ...settled, assistantMessageID: summary.info.id }])
 +      }).pipe(Effect.provide(Layer.fresh(compactionProcessLayer({ database: Layer.succeed(Database.Service, database), llm: stub.llmLayer, provider: ProviderTest.fake({ model: createModel({ context: 100_000, output: 32_000, cost: { input: 2, output: 4, cache: { read: 0, write: 0 } } }) }) }))))
      }).pipe(withCompaction({ result: "compact" })),
-@@ -1272,1 +1305,1 @@
+@@ -1248,6 +1281,10 @@
+         }
+-      }).pipe(withCompaction({ llm: stub.llmLayer }))
++      }).pipe(withCompaction({
++        llm: stub.llmLayer,
++        // 此例计量重试取消，不将 Git 快照子进程收尾混入 250ms 预算。
++        config: Layer.succeed(Config.Service, TestConfig.make({ get: () => Effect.succeed({ snapshot: false }) })),
++      }))
+     },
+     { git: true },
+     { timeout: 10_000 },
+   )
+@@ -1272,1 +1309,1 @@
 -        return yield* Effect.gen(function* () {
 +        yield* Effect.gen(function* () {
-@@ -1293,3 +1326,42 @@
+@@ -1293,3 +1330,42 @@
            expect(all.some((msg) => msg.info.role === "assistant" && msg.info.summary)).toBe(false)
 +          const ledger = yield* SessionRequestUsage.Service
 +          expect(yield* ledger.get({ sessionID: session.id, requestID: msg.id })).toMatchObject({ rootRequestID: msg.id, status: "aborted", assistantCount: 0, stepCount: 0, tokens: { total: 0 } })
@@ -6264,3 +6308,58 @@ diff --git a/packages/opencode/test/plugin/trigger.test.ts b/packages/opencode/t
 +        expect(yield* triggerSystemTransform()).toEqual(["sync", "MessageAbortedError"])
        }),
      ),
+
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -74,10 +74,26 @@
+ export interface Interface {
+-  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
++  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model; readonly pricing: ModelV2.Info["cost"] }, Error>
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionRunnerModel") {}
+ 
+-/** Test or embedding seam for supplying a model resolver directly. */
+-export const layerWith = (resolve: Interface["resolve"]) => Layer.succeed(Service, Service.of({ resolve }))
++// 测试和嵌入入口可显式提供价格；未配置价格的模型仍按免费模型处理。
++export const layerWith = (
++  resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>,
++  pricing: ModelV2.Info["cost"] = [],
++) => Layer.succeed(Service, Service.of({
++  resolve: session => resolve(session).pipe(Effect.map(model => ({ model, pricing: [...pricing] }))),
++}))
++
++export const cost = (pricing: ModelV2.Info["cost"], tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) => {
++  // 阶梯按完整输入上下文选择；非缓存输入和缓存读写仍按各自单价结算。
++  const context = tokens.input + tokens.cache.read + tokens.cache.write
++  const rate = pricing.filter(item => item.tier && context > item.tier.size)
++    .sort((a, b) => (b.tier?.size ?? 0) - (a.tier?.size ?? 0))[0] ?? pricing.find(item => !item.tier)
++  if (!rate) return 0
++  // 已分栏的 reasoning 与可见输出合并一次收费，不能再次扣减或重复计算。
++  return Math.max(0, (tokens.input * rate.input + (tokens.output + tokens.reasoning) * rate.output
++    + tokens.cache.read * rate.cache.read + tokens.cache.write * rate.cache.write) / 1_000_000)
++}
+ 
+ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
+@@ -239,11 +255,15 @@
+-        return yield* resolve(
+-          session,
+-          selected,
+-          connection ? yield* integrations.connection.resolve(connection) : undefined,
+-        )
++        return {
++          model: yield* resolve(
++            session,
++            selected,
++            connection ? yield* integrations.connection.resolve(connection) : undefined,
++          ),
++          // 价格与执行模型来自同一个 Catalog 选择，完成时不重新解析已切换的 Session。
++          pricing: selected.cost,
++        }
+       }),
+     })
+   }),
+ )
+ 
+ export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Catalog.node, Integration.node] })

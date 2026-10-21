@@ -23,20 +23,118 @@ slog.error：accountUsage 返回 Effect<void>（error=never），Effect.ignore
 不捕获 defect，DB 运行时错误会被静默丢失。catchDefect 记录日志便于
 诊断 token 计费丢失。
 
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+--- a/packages/core/src/tool/goal.ts
++++ b/packages/core/src/tool/goal.ts
+@@ -1,7 +1,7 @@
+ export * as GoalTool from "./goal"
+ 
+ import { ToolFailure } from "@opencode-ai/llm"
+-import { Effect, Layer, Schema } from "effect"
++import { Effect, Layer, Option, Schema } from "effect"
+ import { makeLocationNode } from "../effect/app-node"
+ import { SessionGoal } from "../session/goal"
+ import { ToolRegistry } from "./registry"
+@@ -13,18 +13,36 @@
+   const goals = yield* SessionGoal.Service
+   yield* tools.register({
+     goal: Tool.make({
+-      description: "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user.",
+-      input: Schema.Struct({ status: Schema.Literals(["complete", "blocked"]) }),
+-      output: SessionGoal.Goal,
++      description: "Get the current goal with no arguments, including objective, status, token usage, budget, remaining tokens and elapsed time, or update its status. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user. When marking a budgeted goal achieved, report the final token usage from the tool result to the user.",
++      input: Schema.Struct({
++        status: Schema.Literals(["complete", "blocked"]).pipe(Schema.optional).annotate({
++          description: "Set to complete when achieved or blocked when genuinely stuck after three consecutive failed attempts. Omit to get the current goal.",
++        }),
++      }),
++      // 无目标用null表示，仍由现有工具输出编码器验证完整Goal快照。
++      output: Schema.NullOr(SessionGoal.Goal),
+       // 原生工具直接调用共享目标服务，不通过 V1 ctx.extra 或旧执行循环。
+-      execute: (input, context) => goals.set(context.sessionID, input).pipe(
+-        Effect.mapError((error) => new ToolFailure({ message: error.message })),
+-      ),
+-      toModelOutput: ({ output }) => [{
++      execute: (input, context) => input.status === undefined
++        ? goals.get(context.sessionID).pipe(Effect.map(Option.getOrNull))
++        : goals.set(context.sessionID, { status: input.status }).pipe(
++            Effect.mapError((error) => new ToolFailure({ message: error.message })),
++          ),
++      toModelOutput: ({ input, output }) => [{
+         type: "text",
+-        text: output.status === "complete"
+-          ? "Goal marked as complete. The session loop will end after this turn."
+-          : "Goal marked as blocked. The session loop will end after this turn. The user can resume the goal later.",
++        text: !output
++          ? "No goal is currently set for this session."
++          : input.status === undefined
++            ? JSON.stringify({
++                goal: { objective: output.objective, status: output.status },
++                tokensUsed: output.tokensUsed,
++                tokenBudget: output.tokenBudget ?? "unbounded",
++                // 超预算只显示零余额，不改变Goal或把提示预算变成硬限额。
++                remainingTokens: output.tokenBudget == null ? "unbounded" : Math.max(0, output.tokenBudget - output.tokensUsed),
++                timeUsedSeconds: output.timeUsedSeconds,
++              }, null, 2)
++            : output.status === "complete"
++              ? "Goal marked as complete. The session loop will end after this turn."
++              : "Goal marked as blocked. The session loop will end after this turn. The user can resume the goal later.",
+       }],
+     }),
+   }).pipe(Effect.orDie)
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -513,7 +513,10 @@
+             // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
+             const tokens = stepSettlement.tokens
+             const seconds = Math.max(0, Math.floor((DateTime.toEpochMillis(yield* DateTime.now) - startedAt) / 1000))
+-            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(Effect.ignore)
++            // 与V1相同：记录计费defect，不能静默丢失或让诊断变成第二个结算路径。
++            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(
++              Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
++            )
+           }
+           if (publisher.hasActiveAssistant() && !stepSettlement) {
+             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -687,8 +687,30 @@
+     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
+     const paused = yield* goals.get(sessionID)
+     expect(Option.getOrThrow(paused).status).toBe("paused")
+     expect(Option.getOrThrow(paused).tokensUsed).toBe(12)
+ 
++    const registry = yield* ToolRegistry.Service
++    const materialized = yield* registry.materialize()
++    const read = yield* materialized.settle({
++      sessionID,
++      agent: AgentV2.ID.make("build"),
++      assistantMessageID: SessionMessage.ID.make("msg_goal_read"),
++      call: LLMEvent.toolCall({ id: "goal-read", name: "goal", input: {} }),
++    })
++    // 读取走真实注册/解码/模型输出链，不能把暂停目标激活或清空用量。
++    expect(read.output?.structured).toEqual(Option.getOrThrow(paused))
++    expect(read.output?.content).toEqual([{
++      type: "text",
++      text: JSON.stringify({
++        goal: { objective: "Finish the native task", status: "paused" },
++        tokensUsed: 12,
++        tokenBudget: 1,
++        remainingTokens: 0,
++        timeUsedSeconds: Option.getOrThrow(paused).timeUsedSeconds,
++      }, null, 2),
++    }])
++    expect(yield* goals.get(sessionID)).toEqual(paused)
++
+     yield* goals.set(sessionID, { status: "active" })
+     responses = [[
+       LLMEvent.stepStart({ index: 0 }),
 diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
 index d09217af65cca60df8f3b415885a896ce48eda6b..e0f37ba3525739fe8c1dffd06d967218cb879d73 100644
 --- a/packages/tui/src/component/dialog-goal.tsx
 +++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -9,7 +9,7 @@
- import { Locale } from "../util/locale"
- 
--// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（4000）对齐：
-+// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（6400）对齐：
- // tui 不依赖 server 包内部模块，本地常量保持同一上限，两处需同步修改
--const MAX_OBJECTIVE_CHARS = 4000
-+const MAX_OBJECTIVE_CHARS = 6400
- 
- // [local-smark] goal 管理 dialog
 @@ -144,7 +144,7 @@
        options={[
          {
@@ -58,47 +156,38 @@ diff --git a/packages/tui/src/ui/dialog-prompt.tsx b/packages/tui/src/ui/dialog-
            // 能随内容增长显示更多行，避免固定 3 行只能看到一小段。与主 Prompt 的 minHeight+maxHeight 模式一致。
            // 对话框 medium 宽度 60 chars，减去 padding 各 2 chars 后 textarea 可用 56 chars 宽。
            minHeight={3}
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
-@@ -8,9 +8,10 @@
- import { Effect, Layer, Context, Schema, Option } from "effect"
- import { EventV2Bridge } from "@/event-v2-bridge"
+diff --git a/packages/schema/src/session-goal.ts b/packages/schema/src/session-goal.ts
+--- a/packages/schema/src/session-goal.ts
++++ b/packages/schema/src/session-goal.ts
+@@ -5,7 +5,8 @@
+ import { SessionID } from "./session-id"
  
--// #364：goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
--// 防止超长 objective 污染上下文或触发 provider 请求体过大
+ // 客户端预检与服务端校验共用静态上限，不能从界面导入持久化服务层。
 -export const MAX_OBJECTIVE_CHARS = 4000
-+// #364：goal objective 最大字符数，比 Codex 的 4000 字符更宽松，
-+// 支持更复杂的 goal 描述（如完整设计文档摘要），仍可防止上下文污染
-+// 与 provider 请求体过大
++// 允许更完整的复杂目标摘要；共享常量让两代服务与TUI同时接受新上限。
 +export const MAX_OBJECTIVE_CHARS = 6400
  
- // #364：goal 状态：只有 active 会触发自动续跑；
- // paused/blocked/complete 均为停止态，loop 正常退出不续跑
+ // [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
+ // 用户和工具显式切换状态；runner只在正常续跑额度耗尽时自动暂停。
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1903,7 +1903,15 @@
+@@ -1779,7 +1779,10 @@
                  0,
                  Math.floor((handle.message.time.completed - handle.message.time.created) / 1000),
                )
 -              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(Effect.ignore)
-+              // catchDefect 而非 ignore：accountUsage 返回 Effect<void>（error=never），
-+              // 但 DB 操作会抛 defect（运行时错误）。记录日志而非静默吞掉，便于诊断 token 计费丢失
++              // 计费DB缺陷保留诊断但不截断provider轮次；ignore不能捕获defect。
 +              yield* goalSvc.accountUsage(sessionID, tokenDelta, timeDelta).pipe(
-+                Effect.catchDefect((defect) => {
-+                  console.error("[goal] accountUsage defect:", defect)
-+                  // Effect v4 的 catchDefect 回调必须返回 Effect——显式归还 void 通道
-+                  return Effect.void
-+                }),
++                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
 +              )
              }
              if (result === "compact") {
-               // #242：provider overflow 发生在真实 assistant 尝试后——直接对当前会话快照
+               nearOverflowNotified = false
 diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
 --- a/packages/opencode/src/tool/goal.ts
 +++ b/packages/opencode/src/tool/goal.ts
-@@ -1,11 +1,18 @@
+@@ -1,11 +1,16 @@
 -import { Effect, Schema } from "effect"
 +import { Effect, Option, Schema } from "effect"
  import * as Tool from "./tool"
@@ -106,10 +195,8 @@ diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goa
  import { SessionGoal } from "@/session/goal"
  
 -// #364：goal 工具参数：status 只接受 complete 或 blocked
-+// goal 工具参数：status 可选。
-+// 无 status → get 模式：返回当前 goal 的状态、objective、用量和预算
-+// 有 status → update 模式：标记 goal complete 或 blocked
-+// 镜像 Codex 的 get_goal + update_goal 合并为单工具设计
++// 空参只读取目标与用量，传status才更新；合并读取和更新但不扩大模型权限。
++// pause/resume/clear和预算仍由用户或系统控制。
  const Parameters = Schema.Struct({
 -  status: Schema.Literals(["complete", "blocked"] as const),
 +  // 与其他工具一致：每个字段都带 .annotate({ description }) 供 JSON Schema 生成
@@ -120,7 +207,7 @@ diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goa
  })
  
  // #364：goal 工具的执行上下文需要 SessionGoal.Service，
-@@ -14,7 +21,7 @@
+@@ -14,7 +19,7 @@
    goalSvc: SessionGoal.Interface
  }
  
@@ -129,7 +216,7 @@ diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goa
  // 不允许模型 pause/resume/clear/改预算——这些由用户或系统控制。
  // 防止模型通过滥用状态来逃避任务
  export const GoalTool = Tool.define<typeof Parameters, Record<string, never>, never>(
-@@ -24,13 +31,48 @@
+@@ -24,13 +29,48 @@
      parameters: Parameters,
      // Effect.orDie 将 GoalError 转为 defect，使 error 类型为 never，
      // 与 Def.execute 的签名 Effect.Effect<ExecuteResult<M>> 对齐
@@ -231,9 +318,10 @@ diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/openc
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -114,15 +114,15 @@
+@@ -114,15 +114,17 @@
  
- // #364：超过 4000 字符的 objective 必须被拒绝
+-// #364：超过 4000 字符的 objective 必须被拒绝
++// 新上限必须真正接受，而不只是让拒绝用例换一个更大的数。
  it.instance(
 -  "set with objective over 4000 chars is rejected",
 +  "set with objective over 6400 chars is rejected",
@@ -246,6 +334,8 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 -      // 超过 MAX_OBJECTIVE_CHARS(4000) 的 objective 必须被拒绝
 -      const longObjective = "a".repeat(4001)
 +      // 超过 MAX_OBJECTIVE_CHARS(6400) 的 objective 必须被拒绝
++      const accepted = yield* goalSvc.set(session.id, { objective: "a".repeat(6400) })
++      expect(accepted.objective).toHaveLength(6400)
 +      const longObjective = "a".repeat(6401)
        const result = yield* goalSvc.set(session.id, { objective: longObjective }).pipe(Effect.exit)
        expect(Exit.isFailure(result)).toBe(true)

@@ -30,23 +30,20 @@ index 7ab5dab8eb..e3dddf9c38 100644
 +    "The edit response includes the updated cell ID and shifted neighbor info.",
    ].join("\n"),
  
-   // env 描述含 restart；删除 kernel 描述块
+   env: [
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
 index 63d8dce48c..dac6c9a7fa 100644
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -158,9 +158,27 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
- // edit 可整 cell 替换或进入字符串/类型变更路径
- // 语言不变走 TextEdit；语言变化走整 cell 替换，两路径不互相 fallback
+@@ -147,4 +147,22 @@
  async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
 -  const targetCell = resolveNotebookCell(notebook, undefined, cellId)
--  const language = stringProp(input, "language")
 +  let targetCell: vscode.NotebookCell
 +  try {
 +    targetCell = resolveNotebookCell(notebook, undefined, cellId)
 +  } catch (resolveErr) {
 +    // #105：cellId 失效时用 oldCode 扫描候选，只提示不自动改写
-     const oldCodeRaw = sourceProp(input, "oldCode")
++    const oldCodeRaw = sourceProp(input, "oldCode")
 +    if (!oldCodeRaw) throw resolveErr
 +    const candidates = scanNotebookCellsForOldCode(notebook, oldCodeRaw)
 +    if (candidates.length === 0) throw resolveErr
@@ -60,39 +57,22 @@ index 63d8dce48c..dac6c9a7fa 100644
 +        : `oldCode matches ${candidates.length} cells:\n  ${parts.join("\n  ")}\nSpecify the correct cellId.`),
 +    )
 +  }
-+  const language = stringProp(input, "language")
-+  const oldCodeRaw = sourceProp(input, "oldCode")
-   const typeChange = language !== undefined && language !== targetCell.document.languageId
- 
-   if (typeChange) {
-@@ -233,6 +251,8 @@ async function handleTypeChange(
-   }
- 
+   const language = stringProp(input, "language")
+   // oldCode 从格内文本定位，不接受仍可能随编辑漂移的 range 坐标。
+@@ -215,3 +233,5 @@
    const newCell = new vscode.NotebookCellData(newKind, newSource, newLang)
 +  // #105：type change 保留原 metadata，避免丢失自定义键
 +  newCell.metadata = targetCell.metadata ? { ...targetCell.metadata } : undefined
+   const anchorCellIndex = targetCell.index
    const edit = new vscode.WorkspaceEdit()
-   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(targetCell.index, targetCell.index + 1), [newCell])])
-   // notebook 结构编辑：等待 notebook.version 推进
-@@ -312,6 +332,10 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
-   // exact 策略标签供 context 与多命中门禁共用
-   matchIdx = src.indexOf(old)
-   if (matchIdx !== -1) {
-+    // #105：exact 多命中立即失败，要求更多上下文
-+    if (src.indexOf(old, matchIdx + 1) !== -1) {
-+      throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
-+    }
-     matchLen = old.length
-     strategy = "exact"
-   }
-@@ -329,11 +353,16 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
-   // 第三阶：块首尾 trim，最后才放宽
+@@ -271,11 +291,16 @@
+   // 只有前两阶均未命中才裁块边界，避免宽松规则掩盖精确匹配。
    if (matchIdx === -1) {
      const trimmedOld = old.trim()
 -    matchIdx = src.indexOf(trimmedOld)
 -    if (matchIdx !== -1) {
+-      // 替换跨度取裁剪后的实际长度，保留命中片段外的原始空白。
 -      matchLen = trimmedOld.length
--      // border 阶放在最后：避免过早 trim 掩盖 exact 多命中风险
 -      strategy = "border-trimmed"
 +    // #105：空 trim 或与 old 相同则跳过，避免假匹配
 +    if (trimmedOld && trimmedOld !== old) {
@@ -107,11 +87,12 @@ index 63d8dce48c..dac6c9a7fa 100644
      }
    }
  
-@@ -349,7 +378,19 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
+@@ -294,9 +319,21 @@
      throw new Error(`oldCode matches multiple locations in cell c${c1(targetCell)}. Provide more surrounding context to make the match unique.`)
    }
  
--  const source = content.substring(0, matchIdx) + rep + content.substring(matchIdx + matchLen)
+-  // 拼接也使用 LF 索引，再恢复目标 EOL，避免在 CRLF 原文中切错前后缀。
+-  const source = (src.substring(0, matchIdx) + rep + src.substring(matchIdx + matchLen)).replace(/\n/g, eol)
 +  // #105：line/border 策略携带源缩进到 newCode
 +  let replacement = rep
 +  if (strategy !== "exact") {
@@ -124,55 +105,35 @@ index 63d8dce48c..dac6c9a7fa 100644
 +      }
 +    }
 +  }
-+  const source = content.substring(0, matchIdx) + replacement + content.substring(matchIdx + matchLen)
-   const preMatch = content.substring(0, matchIdx)
-   const preLines = preMatch.split(/\r?\n/)
-   const matchStartLine = preLines.length
-@@ -360,10 +401,11 @@ function matchAndReplace(targetCell: vscode.NotebookCell, oldCode: string, newCo
++  // 替换正文仍按 LF 坐标拼接后恢复原 EOL，缩进迁移不改变范围外内容。
++  const source = (src.substring(0, matchIdx) + replacement + src.substring(matchIdx + matchLen)).replace(/\n/g, eol)
  
- // 逐行 trim 后对齐：容忍缩进差异但保持行结构
- // 行级 trim 只用于定位，写回长度取自源切片而非 trim 后长度
-+// #105：行 trim 匹配；多命中抛错而非返回首个
+   const preMatch = src.substring(0, matchIdx)
+   const preLines = preMatch.split("\n")
+   const matchStartLine = preLines.length
+@@ -310,7 +347,8 @@
  function lineTrimmedMatch(src: string, old: string) {
--  const oldLines = old.split("\n")
+   // 尾部换行仍是匹配结构的一部分，不能为了放宽定位删掉最后的空行。
+   const oldLines = old.split("\n")
    const srcLines = src.split("\n")
--  if (oldLines.length > srcLines.length) return undefined
-+  const oldLines = old.split("\n")
+   if (oldLines.length > srcLines.length) return undefined
+ 
 +  let found: { index: number; length: number } | undefined
    for (let i = 0; i <= srcLines.length - oldLines.length; i++) {
-     let matches = true
-     for (let j = 0; j < oldLines.length; j++) {
-@@ -372,18 +414,19 @@ function lineTrimmedMatch(src: string, old: string) {
-         break
-       }
-     }
--    if (matches) {
--      let start = 0
--      for (let k = 0; k < i; k++) start += srcLines[k].length + 1
--      let end = start
--      for (let k = 0; k < oldLines.length; k++) {
--        end += srcLines[i + k].length
--        if (k < oldLines.length - 1) end += 1
--      }
+@@ -325,2 +363,4 @@
+     if (matches) {
++      // 行级宽松匹配也必须唯一，不能静默选择第一处。
++      if (found) throw new Error("oldCode matches multiple locations (line-trimmed). Provide more surrounding context.")
+       // 起点包含命中首行的完整缩进，不能按 trim 后长度回推源偏移。
+@@ -336,5 +376,4 @@
+-      // 保留原算法的首个宽松命中；多命中拒绝仅属于 exact 策略。
 -      return { index: start, length: end - start }
-+    if (!matches) continue
-+    // #105：line-trimmed 也必须唯一
-+    if (found) throw new Error("oldCode matches multiple locations (line-trimmed). Provide more surrounding context.")
-+    let start = 0
-+    for (let k = 0; k < i; k++) start += srcLines[k].length + 1
-+    let end = start
-+    for (let k = 0; k < oldLines.length; k++) {
-+      end += srcLines[i + k].length
-+      if (k < oldLines.length - 1) end += 1
++      found = { index: start, length: end - start }
      }
-+    found = { index: start, length: end - start }
    }
 -  return undefined
 +  return found
- }
- 
- // 用虚拟全局行号拼 above/match/below，供 compactEditResult 摘要
-@@ -554,6 +597,12 @@ function compactEditResult(
+@@ -518,6 +557,12 @@
      lines.push(`Preview: ${JSON.stringify(previewText(info.sourcePreview, 50))}`)
    }
  
@@ -185,7 +146,7 @@ index 63d8dce48c..dac6c9a7fa 100644
    return {
      ran: false,
      summary: lines.join("\n"),
-@@ -570,3 +619,40 @@ function compactEditResult(
+@@ -534,3 +579,40 @@
      },
    }
  }
@@ -230,23 +191,11 @@ diff --git a/sdks/vscode/src/notebook/format.ts b/sdks/vscode/src/notebook/forma
 index bdab7fdc44..542af9791b 100644
 --- a/sdks/vscode/src/notebook/format.ts
 +++ b/sdks/vscode/src/notebook/format.ts
-@@ -74,10 +74,12 @@ export function isTextLikeMime(mime: string) {
- // ---------------------------------------------------------------------------
- 
- /**
-- * Generates a Copilot-compatible stable cell identifier: `#VSC-` + first 8 hex chars
-+ * Generates a Copilot-compatible cell identifier: `#VSC-` + first 8 hex chars
-  * of SHA1(cell.document.uri.toString()). This is the same algorithm Copilot uses
-- * (`getCellId` in platform/notebook/common/helpers.ts), making the ID stable across
-- * insert/delete/move operations since it's derived from the cell's VS Code document URI.
-+ * (`getCellId` in platform/notebook/common/helpers.ts), The ID is derived from the cell's VS Code document URI and is stable for
-+ * existing cells within the current open notebook session (insert/delete/move
-+ * preserves the URI). Cell replacement (e.g. type change via replaceCells)
-+ * creates a new URI and thus a new ID.
-  *
-  * ≠ cell.index (which shifts on insert/delete)
-  * ≠ cell.metadata.id (the .ipynb id field)
-@@ -112,6 +114,18 @@ export function cellIdentifiers(cell: vscode.NotebookCell) {
+@@ -65,2 +65,2 @@
+- * 与 Copilot 的 getCellId 算法一致，同一打开格的插入、删除或移动不改变文档 URI。
++ * 与 Copilot 的 getCellId 算法一致；同一打开格的插入、删除、移动不改变 URI，类型替换会产生新 URI 和新 ID。
+  * 它不是会漂移的 cell.index，也不是保存的 .ipynb metadata.id。
+@@ -90,6 +90,18 @@
    ].filter((value): value is string => !!value)
  }
  
@@ -262,85 +211,33 @@ index bdab7fdc44..542af9791b 100644
 +}
 +
 +
- /** Returns 1-based display index for summary text. All LLM-facing cN MUST use this. */
- // c1 仅 1-based 显示；解析/编辑主路径永远优先 cellId
+ /** LLM 可见的 cN 显示编号为一基，内部 VS Code 索引仍为零基。 */
  export const c1 = (cell: vscode.NotebookCell) => cell.index + 1
+ 
 diff --git a/sdks/vscode/src/notebook/resolve.ts b/sdks/vscode/src/notebook/resolve.ts
 index 8c4f384aa8..8afa7eef93 100644
 --- a/sdks/vscode/src/notebook/resolve.ts
 +++ b/sdks/vscode/src/notebook/resolve.ts
-@@ -3,7 +3,7 @@
-  */
- import * as vscode from "vscode"
- import { stringProp, numberProp, uriFromInput } from "../util"
--import { cellIdentifiers } from "./format"
-+import { cellIdentifiers, normalizeCellId } from "./format"
- 
- // ---------------------------------------------------------------------------
- // Notebook resolution
-@@ -44,12 +44,14 @@ export async function resolveNotebook(filePath: string) {
- export function resolveNotebookCell(notebook: vscode.NotebookDocument, cellIndex?: number, cellId?: string) {
-   if (cellId) {
-     // 规范化 cellId：去除 # 前缀
--const normalized = cellId.replace(/^#/, "")
-+// #105：先 normalize 再剥离 #，避免只 strip 导致漏匹配
+@@ -4,1 +4,1 @@
+-import { cellIdentifiers, shortId } from "./format"
++import { cellIdentifiers, shortId, normalizeCellId } from "./format"
+@@ -25,2 +25,3 @@
+-    const normalized = cellId.replace(/^#/, "")
++    // 先接受模型返回的 ID 别名，再沿既有多格歧义检查匹配。
 +    const normalized = normalizeCellId(cellId)
-+    const stripped = normalized.replace(/^#/, "")
-     const cell = notebook
-       .getCells()
--      .find((candidate) => cellIdentifiers(candidate).some((id) => id.replace(/^#/, "") === normalized))
-+      .find((candidate) => cellIdentifiers(candidate).some((id) => id.replace(/^#/, "") === stripped))
-     if (cell) return cell
+     // 仅在给定文档内以 summary 同款 canonical ID 匹配，不比较截短显示片段。
+@@ -32,1 +33,1 @@
 -    throw new Error(`Notebook cell not found: ${cellId}`)
 +    throw new Error(`Notebook cell not found: ${cellId}. The edit response contains updated cell IDs after type changes.`)
-   }
- 
-   if (cellIndex !== undefined) return notebook.cellAt(cellIndex)
-diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index 3995caad51..2b97e874dd 100644
---- a/sdks/vscode/src/notebook/source.ts
-+++ b/sdks/vscode/src/notebook/source.ts
-@@ -15,7 +15,7 @@ import * as vscode from "vscode"
- import { stringProp, numberProp } from "../util"
- // source header 的 range 必须来自统一虚拟坐标
- import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges } from "./format"
--import { resolveNotebook } from "./resolve"
-+import { resolveNotebook, resolveNotebookCell } from "./resolve"
- 
- // ---------------------------------------------------------------------------
- // Handler
-@@ -40,7 +40,12 @@ export async function notebookSource(input: Record<string, unknown>) {
- 
-   // Resolve target cell via cellId (only stable identifier; no cellIndex in schema)
-   const cellId = stringProp(input, "cellId")
--  const cell = cellId ? notebook.getCells().find((c) => copilotLikeCellId(c) === cellId) : undefined
-+  let cell: vscode.NotebookCell | undefined
-+  if (cellId) {
-+    // #105：source 与 resolve 共用 normalizeCellId 路径，避免手写 # 剥离分叉
-+    try { cell = resolveNotebookCell(notebook, undefined, cellId) }
-+    catch { cell = undefined }
-+  }
-   const targetCellIndex = cell?.index
- 
-   // Determine line window
 diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
 index 40def0ef42..2fb48b3c74 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -50,6 +50,7 @@ const cells = notebook.getCells().map(compactCell)
- // Summary text
- // ---------------------------------------------------------------------------
- 
-+// #105：session 内稳定——type change 会换 URI/ID，文案与 edit 对齐
- function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnType<typeof compactCell>[]) {
-   const virtualRanges = computeVirtualRanges(notebook)
-   const code = cells.filter((cell) => cell.kind === "code")
-@@ -65,7 +66,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
+@@ -50,6 +50,6 @@
      `Notebook: ${toPosixPath(notebook.uri.fsPath || notebook.uri.toString())}`,
      `Type: ${notebook.notebookType}, dirty=${notebook.isDirty}, num_cells=${notebook.cellCount}, runtime=${runtimeLabel(notebook) ?? "unknown"}. ${status}`,
      "",
--    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable across insert/delete; line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
-+    `Conventions: cell indexes (cN) are 1-based; cell IDs (#VSC-xxxxxxxx) are stable for existing cells within the current session (insert/delete preserves the URI; type change may mint a new id); line range=[A,B] is 1-based inclusive in the virtual source document; headers and visual separators are unnumbered.`,
-     // 虚拟源码约定：header/分隔行不占全局行号
+-    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定；range=[A,B] 是虚拟源码的一基闭区间；格头和视觉分隔行不占编号。`,
++    `规范：cN 是一基显示编号；#VSC-xxxxxxxx 在同一打开格的插入/删除后稳定，类型替换会产生新 ID，以 edit 响应为准；range=[A,B] 是虚拟源码的一基闭区间；格头和视觉分隔行不占编号。`,
      "",
      'Cells (format: cN id=<#VSC-xxx> <kind>/<lang> lines=<count> range=[A,B] exec="<run state>" existing_outs="<mime list>" first="<first source line>"):',

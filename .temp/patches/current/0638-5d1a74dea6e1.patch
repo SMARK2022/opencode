@@ -1491,15 +1491,16 @@ diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/
 index aea1a12..117c45c 100644
 --- a/packages/opencode/src/config/tui.ts
 +++ b/packages/opencode/src/config/tui.ts
-@@ -22,7 +22,6 @@ import { Filesystem } from "@/util/filesystem"
+@@ -22,8 +22,6 @@ import { Filesystem } from "@/util/filesystem"
  import { ConfigVariable } from "@/config/variable"
  import { Npm } from "@opencode-ai/core/npm"
  import { FormatError, FormatUnknownError } from "@/cli/error"
 -import type { VoiceTranscriber } from "@opencode-ai/tui/prompt-voice-input"
+-import { ConfigV2Compat } from "./v2-compat"
  import { TuiConfig } from "@opencode-ai/tui/config"
  
  export const Info = TuiConfig.Info
-@@ -81,44 +80,6 @@ function dropUnknownKeybinds(input: Record<string, unknown>) {
+@@ -81,47 +80,6 @@ function dropUnknownKeybinds(input: Record<string, unknown>) {
    }
  }
  
@@ -1516,7 +1517,10 @@ index aea1a12..117c45c 100644
 -
 -function voiceTranscriberFromMcpConfig(input: unknown, cwd: string, source: VoiceTranscriberSource): VoiceTranscriber | undefined {
 -  if (!isRecord(input) || !isRecord(input.mcp)) return
--  for (const [key, server] of Object.entries(input.mcp)) {
+-  // 只降低MCP结构，复用上游servers/disabled与flat优先级；auth仍按原文件位置读取。
+-  const lowered = ConfigV2Compat.lower({ mcp: input.mcp }, source.filepath).value
+-  if (!isRecord(lowered) || !isRecord(lowered.mcp)) return
+-  for (const [key, server] of Object.entries(lowered.mcp)) {
 -    // 只复用名称明确包含 chatgpt 的 MCP 配置，避免把其它本地 MCP server 误当成语音后端。
 -    if (!key.toLowerCase().includes("chatgpt")) continue
 -    if (!isRecord(server)) continue
@@ -1835,7 +1839,7 @@ diff --git a/packages/opencode/src/server/shared/tui-control.ts b/packages/openc
 index 03b62bb..4161c52 100644
 --- a/packages/opencode/src/server/shared/tui-control.ts
 +++ b/packages/opencode/src/server/shared/tui-control.ts
-@@ -1,5 +1,26 @@
+@@ -1,5 +1,27 @@
  import { AsyncQueue } from "@/util/queue"
  import { Schema } from "effect"
 +import { Flock } from "@opencode-ai/core/util/flock"
@@ -1844,6 +1848,7 @@ index 03b62bb..4161c52 100644
 +import path from "path"
 +import { applyEdits, modify, type FormattingOptions } from "jsonc-parser"
 +import { ConfigParse } from "@/config/parse"
++import { ConfigV2Compat } from "@/config/v2-compat"
 +import { isRecord } from "@/util/record"
 +import { Process } from "@/util/process"
 +import { ConfigVariable } from "@/config/variable"
@@ -1862,7 +1867,7 @@ index 03b62bb..4161c52 100644
  
  export const TuiRequest = Schema.Struct({
    path: Schema.String,
-@@ -26,3 +47,186 @@ export function submitTuiResponse(body: unknown) {
+@@ -26,3 +48,192 @@ export function submitTuiResponse(body: unknown) {
  export function nextTuiResponse() {
    return response.next()
  }
@@ -1880,8 +1885,10 @@ index 03b62bb..4161c52 100644
 +    const text = await ConfigVariable.substitute({ text: await Bun.file(file).text(), type: "path", path: file, missing: "empty" })
 +    const data = ConfigParse.jsonc(text, file)
 +    if (!isRecord(data) || !isRecord(data.mcp)) continue
++    const lowered = ConfigV2Compat.lower({ mcp: data.mcp }, file).value
++    if (!isRecord(lowered) || !isRecord(lowered.mcp)) continue
 +    // disabled 也写入覆盖结果，随后统一选择，保持显式禁用的语义。
-+    for (const [key, server] of Object.entries(data.mcp)) entries.set(key, { config: path.resolve(file), server })
++    for (const [key, server] of Object.entries(lowered.mcp)) entries.set(key, { config: path.resolve(file), server })
 +  }
 +  for (const [key, entry] of entries) {
 +    const server = entry.server
@@ -1960,8 +1967,10 @@ index 03b62bb..4161c52 100644
 +  // 配置文件错误保留原错误语义；只有合法文件中的缺席快照才触发 profile 读取。
 +  const text = await fs.readFile(config, "utf8")
 +  const data = ConfigParse.jsonc(text, config)
-+  if (!isRecord(data) || !isRecord(data.mcp) || !isRecord(data.mcp[key])) return
-+  const auth = data.mcp[key].auth
++  if (!isRecord(data) || !isRecord(data.mcp)) return
++  const servers = Object.hasOwn(data.mcp, key) ? data.mcp : isRecord(data.mcp.servers) ? data.mcp.servers : data.mcp
++  if (!isRecord(servers[key])) return
++  const auth = servers[key].auth
 +  if (!isRecord(auth) || !isRecord(auth.cookies) || typeof auth.fetched_at !== "string") return
 +  const cookies: VoiceAuthCookies = {}
 +  for (const [name, cookie] of Object.entries(auth.cookies)) {
@@ -1978,7 +1987,9 @@ index 03b62bb..4161c52 100644
 +  const text = await fs.readFile(config, "utf8")
 +  // 定点替换 mcp.<key>.auth：与 `opencode mcp add` 写 mcp.<name> 相同的注释保真机制；
 +  // 注意 mcp add 会整体替换 mcp.<name> 并移除 auth 子节点，那是用户主动重注册语义，这里不做防御。
-+  const edits = modify(text, ["mcp", key, "auth"], auth, { formattingOptions: formatting })
++  const data = ConfigParse.jsonc(text, config)
++  const nested = isRecord(data) && isRecord(data.mcp) && !Object.hasOwn(data.mcp, key) && isRecord(data.mcp.servers)
++  const edits = modify(text, nested ? ["mcp", "servers", key, "auth"] : ["mcp", key, "auth"], auth, { formattingOptions: formatting })
 +  const next = applyEdits(text, edits)
 +  // 临时文件名含 PID+时间戳：两个 opencode 实例同时收割不会写同一个 tmp 互相覆盖。
 +  const temp = `${config}.tmp-${process.pid}-${Date.now()}`
@@ -2103,6 +2114,15 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
 index af50140..18fd262 100644
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts
+@@ -10,7 +10,7 @@
+ import { Config } from "@/config/config"
+ import { ConfigParse } from "@/config/parse"
+ import { ConfigV2Compat } from "@/config/v2-compat"
+-import { readVoiceAuth, writeVoiceAuth } from "@opencode-ai/tui/util/voice-auth"
++import { readVoiceAuth, resolveVoiceTarget, writeVoiceAuth } from "@/server/shared/tui-control"
+ import { isRecord } from "@opencode-ai/tui/util/record"
+ import { ConfigPlugin } from "@/config/plugin"
+ import { CurrentWorkingDirectory } from "@/config/tui-cwd"
 @@ -518,8 +518,8 @@ it.instance("resolves keybind lookup from canonical keybinds", () =>
        expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(
          process.platform === "darwin" ? "f8" : "alt+v",
@@ -2242,14 +2262,46 @@ index af50140..18fd262 100644
        } finally {
          if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT
          else process.env.OPENCODE_CONFIG_CONTENT = previous
+@@ -731,7 +699,6 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =>
+       const authNode = {
+         access_token: "token-1",
+-        token_expires_at: 1_800_000_000,
+         fetched_at: "2026-09-06T00:00:00Z",
+         cookies: { "oai-did": { value: "did-1", expires: 0 } },
+       }
+       const agentDir = path.join(test.directory, "tools", "chatgpt-agent")
+@@ -745,7 +712,7 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =>
+         { mcp: { chatgpt: server, servers: { chatgpt: { ...server, disabled: true } } }, enabled: true },
+       ]) {
+         yield* fs.writeJson(config, { mcp: item.mcp })
+-        yield* Effect.promise(() => writeVoiceAuth(config, "chatgpt", authNode))
++        yield* Effect.promise(() => writeVoiceAuth(config, "chatgpt", authNode, new AbortController().signal))
+         expect(yield* Effect.promise(() => readVoiceAuth(config, "chatgpt"))).toEqual(authNode)
+         const text = yield* fs.readFileStringSafe(config)
+         const lowered = ConfigV2Compat.lower(ConfigParse.jsonc(text ?? "{}", config)).value
+@@ -753,9 +720,12 @@ it.instance("keeps the voice auth node invisible to the mcp config schema", () =>
+         const decoded = ConfigParse.schema(ConfigMCPV1.Info, lowered.mcp.chatgpt, config)
+         expect(decoded.type).toBe("local")
+         expect("auth" in decoded).toBe(false)
++        // 前端已退休选择职责；布局、禁用和写回合同继续由真实后端验证。
++        if (item.enabled) expect(yield* Effect.promise(() => resolveVoiceTarget([config])))
++          .toMatchObject({ config, key: "chatgpt", script: path.join(agentDir, "chatgpt.js") })
++        if (!item.enabled) yield* Effect.promise(async () => { await expect(resolveVoiceTarget([config])).rejects.toThrow("Voice input requires a user-configured ChatGPT MCP") })
+         const resolved = yield* getTuiConfig(test.directory)
+-        expect(resolved.voice?.transcriber?.type === "chatgpt-direct").toBe(item.enabled)
+-        if (item.enabled) expect(resolved.voice?.transcriber).toMatchObject({ config, key: "chatgpt", scope: "project", script: path.join(agentDir, "chatgpt.js") })
++        expect(resolved).not.toHaveProperty("voice")
+       }
+     }),
+   ),
 diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/opencode/test/server/httpapi-event.test.ts
 index 9dfd9e8..9c440d8 100644
 --- a/packages/opencode/test/server/httpapi-event.test.ts
 +++ b/packages/opencode/test/server/httpapi-event.test.ts
-@@ -117,11 +117,14 @@ describe("event HttpApi", () => {
-         }
-         // [0624] /global/event 是 GlobalBus 包装流（帧为 {directory, payload}），与 /event 的
-         // payload-直接流不同；TUI SDK 的 sdk.global.event 连接的就是这一端点。
+@@ -205,11 +205,14 @@ describe("event HttpApi", () => {
+           type: Schema.String,
+           properties: Schema.optionalKey(Schema.Struct({ part: Schema.optionalKey(SessionV1.Part) })),
+         }) })
 +        // 两个全局流由本用例拥有；取消 reader 不保证 raw Response 的底层订阅一起退出，
 +        // 请求 signal 才能释放 heartbeat、GlobalBus 订阅和连接计数。
 +        const controller = new AbortController()
@@ -2259,12 +2311,12 @@ index 9dfd9e8..9c440d8 100644
              if (viewer) headers.set("x-opencode-tui-message-projection", "viewer")
 -            const response = yield* requestInDirectory("/global/event", directory, { headers })
 +            const response = yield* requestInDirectory("/global/event", directory, { headers, signal: controller.signal })
-             const reader = yield* Queue.unbounded<Uint8Array>()
+             const reader = yield* Queue.unbounded<typeof Frame.Type["payload"]>()
              yield* response.stream.pipe(
-               Stream.runForEach((value) => Queue.offer(reader, value)),
-@@ -169,6 +172,8 @@ describe("event HttpApi", () => {
-           expect(viewerPart?.state.metadata.filediff as unknown).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
-           expect((completePart?.state.metadata.filediff as { patch?: unknown }).patch).toBe(patch)
+               // 网络chunk可拆分/合并SSE帧，复用正式decoder后再读取完整事件。
+@@ -258,6 +261,8 @@ describe("event HttpApi", () => {
+             .toEqual({ file: "a.ts", additions: 64, deletions: 0 })
+           expect(completePart).toMatchObject({ type: "tool", state: { metadata: { filediff: { patch } } } })
          } finally {
 +          // 先沿请求 signal 释放 heartbeat、GlobalBus 订阅和连接计数，再结算两个 reader。
 +          controller.abort()
@@ -2356,11 +2408,27 @@ index 839a013..f89c8ef 100644
  import { pathToFileURL } from "node:url"
  import { Flag } from "@opencode-ai/core/flag/flag"
  import { Server } from "../../src/server/server"
-+import { onSseClientCountChange } from "../../src/server/routes/instance/httpapi/handlers/global"
++import { EventClients } from "@opencode-ai/server/event-clients"
  import { PtyPaths } from "../../src/server/routes/instance/httpapi/groups/pty"
  import { withTimeout } from "../../src/util/timeout"
  import { resetDatabase } from "../fixture/db"
-@@ -167,6 +168,91 @@ async function openPtySocket(listener: Awaited<ReturnType<typeof startListener>>
+@@ -38,13 +39,13 @@ async function startListener() {
+ }
+ 
+-async function startNoAuthListener() {
++async function startNoAuthListener(eventClients?: EventClients.Interface) {
+   Flag.OPENCODE_SERVER_PASSWORD = undefined
+   Flag.OPENCODE_SERVER_USERNAME = auth.username
+   delete process.env.OPENCODE_SERVER_PASSWORD
+   process.env.OPENCODE_SERVER_USERNAME = auth.username
+-  return Server.listen({ hostname: "127.0.0.1", port: 0 })
++  return Server.listen({ hostname: "127.0.0.1", port: 0, eventClients })
+ }
+ 
+ function authorization() {
+   return `Basic ${btoa(`${auth.username}:${auth.password}`)}`
+ }
+@@ -167,6 +168,89 @@ async function openPtySocket(listener: Awaited<ReturnType<typeof startListener>>
  }
  
  describe("HttpApi Server.listen", () => {
@@ -2403,17 +2471,16 @@ index 839a013..f89c8ef 100644
 +  }, 15_000)
 +
 +  test("drains the real SSE stream after its client disconnects", async () => {
-+    const listener = await startNoAuthListener()
-+    const socket = net.connect(listener.port, "127.0.0.1")
 +    let connected = false
-+    // 使用 daemon 已有的连接计数通知，证明服务端资源结束，而非只观察客户端 close。
-+    const drained = new Promise<void>((resolve) => {
-+      onSseClientCountChange((count) => {
-+        if (count === 1) connected = true
-+        // 必须先观察建立再观察清零，避免初始零连接让清理断言空通过。
-+        if (connected && count === 0) resolve()
-+      })
++    const drained = Promise.withResolvers<void>()
++    // 注入生产已有的listener-scoped计数服务，不恢复模块全局测试钩子。
++    const eventClients = EventClients.make((count) => {
++      if (count === 1) connected = true
++      // 必须先观察建立再观察清零，避免初始零连接让清理断言空通过。
++      if (connected && count === 0) drained.resolve()
 +    })
++    const listener = await startNoAuthListener(eventClients)
++    const socket = net.connect(listener.port, "127.0.0.1")
 +    try {
 +      const response = await withTimeout(
 +        new Promise<string>((resolve, reject) => {
@@ -2435,7 +2502,7 @@ index 839a013..f89c8ef 100644
 +      expect(response).toContain("text/event-stream")
 +      socket.destroy()
 +      // 等待生产收尾通知，不用固定 sleep 假定 fiber、heartbeat 与订阅已经释放。
-+      await withTimeout(drained, 5_000, "SSE client count did not return to zero")
++      await withTimeout(drained.promise, 5_000, "SSE client count did not return to zero")
 +      expect(connected).toBe(true)
 +      // 断开流式连接后 listener 仍服务普通请求；读取正文也完成后继请求的生命周期。
 +      const health = await fetch(new URL("/global/health", listener.url))
@@ -2443,8 +2510,7 @@ index 839a013..f89c8ef 100644
 +      expect(await health.json()).toMatchObject({ healthy: true })
 +    } finally {
 +      socket.destroy()
-+      // 解除测试闭包的观察者引用，避免后续测试的连接计数触发本用例回调。
-+      onSseClientCountChange(() => {})
++      // 观察者随本listener服务释放，不修改其他连接持有的计数服务。
 +      await stop(listener, "timed out cleaning up SSE listener")
 +    }
 +  }, 15_000)
@@ -2457,7 +2523,7 @@ new file mode 100644
 index 0000000..0fa0ff0
 --- /dev/null
 +++ b/packages/opencode/test/server/tui-control-voice.test.ts
-@@ -0,0 +1,1040 @@
+@@ -0,0 +1,1082 @@
 +import { describe, expect, spyOn, test } from "bun:test"
 +import Http from "node:http"
 +import fs from "node:fs/promises"
@@ -2493,6 +2559,48 @@ index 0000000..0fa0ff0
 +
 +const voiceE2E = process.env.CHATGPT_VOICE_E2E === "1" ? test : test.skip
 +const defaultProfileE2E = process.env.CHATGPT_VOICE_E2E === "1" && process.env.CHATGPT_VOICE_DEFAULT_PROFILE_E2E === "1" ? test : test.skip
++
++// 旧TUI argv回归迁到共享后端，Windows解释器shim仍必须原样接收带元字符的文件参数。
++test.skipIf(process.platform !== "win32")("backend transcriber accepts a Windows command shim", async () => {
++  await using tmp = await tmpdir()
++  const target = await browserFixture(tmp.path, `console.log(JSON.stringify({text:process.argv[4],auth:{cookies:[],fetchedAt:'fixture'}}))`)
++  const command = path.join(tmp.path, "voice transcriber.cmd")
++  const file = path.join(tmp.path, "voice & literal.wav")
++  await Bun.write(file, "RIFF....WAVE")
++  await Bun.write(command, `@echo off\r\n"${process.execPath}" %*\r\n`)
++  expect(await transcribeVoiceFile(file, { ...target, interpreter: command }, new AbortController().signal)).toBe(file)
++})
++
++// cmd入口同样不能连带终止独立后代；有界CLI自退保证夹具不制造遗留父进程。
++test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber without killing its lifecycle child", async () => {
++  await using tmp = await tmpdir()
++  const node = Bun.which("node")
++  if (!node) throw new Error("Node is required for the Windows fixture")
++  const pidFile = path.join(tmp.path, "child.pid")
++  const command = path.join(tmp.path, "transcriber.cmd")
++  const abort = new AbortController()
++  let pid = 0
++  const target = await browserFixture(tmp.path, `const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); setTimeout(()=>{},500)`)
++  await Bun.write(command, `@echo off\r\n"${node}" %*\r\n`)
++  const pending = transcribeVoiceFile("voice.wav", { ...target, interpreter: command }, abort.signal).catch((error: unknown) => error)
++  try {
++    const ready = Date.now() + 5_000
++    while (!(await Bun.file(pidFile).exists()) && Date.now() < ready) await Bun.sleep(20)
++    pid = Number(await Bun.file(pidFile).text())
++    expect(pid).toBeGreaterThan(0)
++    abort.abort()
++    expect(await pending).toBeInstanceOf(Error)
++    const running = () => {
++      try { process.kill(pid, 0); return true } catch { return false }
++    }
++    expect(running()).toBe(true)
++  } finally {
++    abort.abort()
++    await pending
++    // 只清理本用例创建并记录的PID，失败也不能留下无限计时的子进程。
++    if (pid > 0) await Bun.spawn(["taskkill", "/pid", String(pid), "/T", "/F"], { windowsHide: true, stdout: "ignore", stderr: "ignore" }).exited
++  }
++}, 15_000)
 +
 +async function writeLateMarkerWav(source: string, target: string, seconds: number) {
 +  const input = Buffer.from(await Bun.file(source).arrayBuffer())
@@ -3137,7 +3245,7 @@ index 0000000..0fa0ff0
 +    if (!process.env.CHATGPT_BROWSER_USER_DATA_DIR) {
 +      throw new Error("voice E2E requires CHATGPT_BROWSER_USER_DATA_DIR for a logged-in agent profile")
 +    }
-+    const agent = path.resolve(import.meta.dir, "../../../thirdparty/chatgpt-browser-agent")
++    const agent = path.resolve(import.meta.dir, "../../../../thirdparty/chatgpt-browser-agent")
 +    const script = path.join(agent, "chatgpt.js")
 +    const source = path.join(agent, "test-voice-hello.wav")
 +    const root = path.join(os.tmpdir(), "opencode", "voice")
@@ -3195,7 +3303,7 @@ index 0000000..0fa0ff0
 +    }
 +    if (process.platform !== "darwin") throw new Error("voice E2E late-marker fixture requires Darwin system audio tools")
 +    const { createVoiceInputController } = await import("@opencode-ai/tui/prompt-voice-input")
-+    const agent = path.resolve(import.meta.dir, "../../../thirdparty/chatgpt-browser-agent")
++    const agent = path.resolve(import.meta.dir, "../../../../thirdparty/chatgpt-browser-agent")
 +    const script = path.join(agent, "chatgpt.js")
 +    const source = path.join(agent, "test-voice-hello.wav")
 +    const root = path.join(process.env.TMPDIR || "/private/tmp", "opencode", "voice")
@@ -3907,11 +4015,11 @@ index 182b75e..335da8e 100644
      // recorder 单独放在 native 边界文件，Prompt 组件不直接加载 optional addon。
      startRecorder: PromptVoiceRecorder.startPromptVoiceRecorder,
      insertText: insertVoiceText,
-@@ -1999,9 +1999,9 @@ export function Prompt(props: PromptProps) {
+@@ -1978,9 +1978,9 @@ export function Prompt(props: PromptProps) {
                    <text flexShrink={0} fg={theme.text} wrapMode="none">
                      {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                    </text>
--                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示（比 usage 的 >100 更晚），窄终端把 chrome 让给更高频信息；
+-                  {/* 仅显示判定：promptWidth>120 才露出 voice 提示（比 usage 的 >90 更晚），窄终端把 chrome 让给更高频信息；
 +                  {/* 仅显示判定：promptWidth 足够宽才露出 voice 提示，窄终端把 chrome 让给更高频信息；
                        不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
 -                  <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
@@ -3994,8 +4102,8 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
 index c456804..7134dcb 100644
 --- a/packages/tui/src/prompt-voice-input.ts
 +++ b/packages/tui/src/prompt-voice-input.ts
-@@ -1,33 +1,28 @@
--import { spawn } from "node:child_process"
+@@ -1,32 +1,27 @@
+-import spawn from "cross-spawn"
 -import { which } from "@opencode-ai/core/util/which"
 -import path from "path"
 -import { takeVoiceAuthNotice, transcribeDirect, type VoiceAuthRuntime } from "./util/voice-auth"
@@ -4007,8 +4115,7 @@ index c456804..7134dcb 100644
 +// 整轮从 WAV 完成后计时，上传和锁等待也消耗同一份预算。
 +export const VOICE_TRANSCRIBE_TIMEOUT_MS = 120_000
  // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
- // 阈值由 140 下调至 120：usage 分拆阈值降至 90 后，voice 提示相应提前，保持露出梯度。
- // 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
+ // 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
  export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
  
 -export type VoiceTranscriberDirect = {
@@ -4217,7 +4324,7 @@ index c456804..7134dcb 100644
 -  // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
 -  // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
 -  // AbortSignal.any 合并外部取消信号和兜底超时；任一触发都终止 transcriber CLI。
--  // 用户取消只终止transcriber父进程（tui 私有 runProcess 仅以 signal 杀父）；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
+-  // transcriber拥有的daemon/browser自行维护生命周期，取消不得连带递归终止后代。
 -  const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
 -  const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, file))], {
 -    abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
@@ -4282,7 +4389,7 @@ index c456804..7134dcb 100644
  }
  
  export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string, now = Date.now(), options: { compact?: boolean } = {}) {
-@@ -284,51 +174,10 @@ export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string,
+@@ -284,63 +174,10 @@ export function voiceInputStatusText(status: VoiceInputStatus, shortcut: string,
    return ""
  }
  
@@ -4314,23 +4421,35 @@ index c456804..7134dcb 100644
 -  return transcriber
 -}
 -
--// child_process spawn 的最小封装：收集 stdout/stderr，返回退出码。与 source 的
--// Process.run 语义对齐（nothrow + abort 信号），但 tui 包没有跨包 run 工具。
+-// 沿用source进程边界的cross-spawn，让Windows脚本和原生程序共用argv转义。
+-// 保留nothrow结果与取消信号，TUI无需新增通用进程服务。
 -function runProcess(
 -  commandArgs: string[],
 -  options: { abort: AbortSignal },
 -): Promise<{ code: number; stdout: Buffer; stderr: Buffer }> {
 -  return new Promise((resolve, reject) => {
+-    options.abort.throwIfAborted()
 -    const child = spawn(commandArgs[0], commandArgs.slice(1), {
 -      stdio: ["ignore", "pipe", "pipe"],
--      signal: options.abort,
+-      windowsHide: process.platform === "win32",
 -    })
 -    const stdout: Buffer[] = []
 -    const stderr: Buffer[] = []
 -    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
 -    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+-    // 转写器后代由各自owner维护；只终止本调用拥有的CLI，不递归强杀浏览器生命周期。
+-    const abort = () => {
+-      if (child.exitCode !== null || child.signalCode !== null) return
+-      child.kill("SIGTERM")
+-    }
+-    options.abort.addEventListener("abort", abort, { once: true })
+-    if (options.abort.aborted) abort()
 -    child.on("error", reject)
--    child.on("close", (code) => resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }))
+-    child.on("close", (code) => {
+-      options.abort.removeEventListener("abort", abort)
+-      if (options.abort.aborted) return reject(options.abort.reason)
+-      resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) })
+-    })
 -  })
 -}
 -
@@ -4421,11 +4540,11 @@ deleted file mode 100644
 index d812b34..0000000
 --- a/packages/tui/src/util/voice-auth.ts
 +++ /dev/null
-@@ -1,372 +0,0 @@
+@@ -1,392 +0,0 @@
 -import fs from "node:fs/promises"
--import { spawn } from "node:child_process"
+-import spawn from "cross-spawn"
 -import path from "path"
--import { applyEdits, modify, parse, type FormattingOptions } from "jsonc-parser"
+-import { applyEdits, modify, parse, type FormattingOptions, type ParseError } from "jsonc-parser"
 -import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 -import { isRecord } from "./record"
 -// type-only：voice-auth 需要 direct 变体形状，但不引入 prompt-voice-input 的运行时依赖，避免循环。
@@ -4468,14 +4587,17 @@ index d812b34..0000000
 -  }
 -  let data: unknown
 -  try {
--    // tui 包没有 opencode 的 ConfigParse：jsonc-parser 的 parse 容忍注释/尾逗号，
--    // 解析失败（残缺 JSON）按"无凭据"降级，与配置侧告警职责分离。
--    data = parse(text)
+-    // 与ConfigParse一致地容忍注释/尾逗号，但不能将带语法错误的部分对象当有效凭据。
+-    const errors: ParseError[] = []
+-    data = parse(text, errors, { allowTrailingComma: true })
+-    if (errors.length) return undefined
 -  } catch {
 -    return undefined
 -  }
--  if (!isRecord(data) || !isRecord(data.mcp) || !isRecord(data.mcp[key])) return undefined
--  return parseVoiceAuth(data.mcp[key].auth)
+-  if (!isRecord(data) || !isRecord(data.mcp)) return undefined
+-  const servers = Object.hasOwn(data.mcp, key) ? data.mcp : isRecord(data.mcp.servers) ? data.mcp.servers : data.mcp
+-  if (!isRecord(servers[key])) return undefined
+-  return parseVoiceAuth(servers[key].auth)
 -}
 -
 -function parseVoiceAuth(input: unknown): VoiceAuth | undefined {
@@ -4493,9 +4615,11 @@ index d812b34..0000000
 -
 -export async function writeVoiceAuth(config: string, key: string, auth: VoiceAuth): Promise<void> {
 -  const text = await fs.readFile(config, "utf8")
--  // 定点替换 mcp.<key>.auth：与 `opencode mcp add` 写 mcp.<name> 相同的注释保真机制；
--  // 注意 mcp add 会整体替换 mcp.<name> 并移除 auth 子节点，那是用户主动重注册语义，这里不做防御。
--  const edits = modify(text, ["mcp", key, "auth"], auth, { formattingOptions: formatting })
+-  // 定点替换auth保持注释；mcp add主动重注册会移除auth，这里不额外防御用户操作。
+-  // 定位真实raw节点而非lower产物：flat同名项优先，不能把native凭据写成旁边的新条目。
+-  const data: unknown = parse(text)
+-  const nested = isRecord(data) && isRecord(data.mcp) && !Object.hasOwn(data.mcp, key) && isRecord(data.mcp.servers)
+-  const edits = modify(text, nested ? ["mcp", "servers", key, "auth"] : ["mcp", key, "auth"], auth, { formattingOptions: formatting })
 -  const next = applyEdits(text, edits)
 -  // 临时文件名含 PID+时间戳：两个 opencode 实例同时收割不会写同一个 tmp 互相覆盖。
 -  const temp = `${config}.tmp-${process.pid}-${Date.now()}`
@@ -4773,27 +4897,42 @@ index d812b34..0000000
 -  return text
 -}
 -
--// harvest 的 spawn 封装：与 prompt-voice-input 的 runProcess 同款语义（收集 stdio+abort 信号），
--// 收割预算由调用方的 AbortSignal.any 承担。
--// signal 终止只杀父进程、不做 SIGKILL 升级：agent daemon/browser 独立维护 profile，
--// 由 CLI ownership 自行收敛（与 transcribe-file 相同的 killTree:false 约定），进程树强杀会连带破坏登录态。
+-// 收割与既有TUI入口同样使用cross-spawn及close结算；预算由外层signal承担。
+-// source的一秒升级只针对本调用父进程，不能递归终止独立daemon/browser。
 -function runHarvestProcess(
 -  commandArgs: string[],
 -  options: { abort: AbortSignal },
 -): Promise<{ code: number; stdout: Buffer; stderr: Buffer }> {
 -  return new Promise((resolve, reject) => {
+-    options.abort.throwIfAborted()
 -    const child = spawn(commandArgs[0], commandArgs.slice(1), {
 -      stdio: ["ignore", "pipe", "pipe"],
--      signal: options.abort,
+-      windowsHide: process.platform === "win32",
 -    })
 -    const stdout: Buffer[] = []
 -    const stderr: Buffer[] = []
 -    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
 -    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
+-    let escalation: ReturnType<typeof setTimeout> | undefined
+-    const abort = () => {
+-      if (child.exitCode !== null || child.signalCode !== null) return
+-      child.kill("SIGTERM")
+-      escalation = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL") }, 1_000)
+-      escalation.unref()
+-    }
+-    options.abort.addEventListener("abort", abort, { once: true })
+-    if (options.abort.aborted) abort()
 -    child.on("error", reject)
--    child.on("close", (code) => resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }))
+-    child.on("close", (code) => {
+-      clearTimeout(escalation)
+-      options.abort.removeEventListener("abort", abort)
+-      if (options.abort.aborted) return reject(options.abort.reason)
+-      resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) })
+-    })
 -  })
 -}
+-
+-export * as VoiceAuth from "./voice-auth"
 diff --git a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx b/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
 index 9ee7bd0..b4bbcfc 100644
 --- a/packages/tui/test/cli/cmd/tui/prompt-submit-transport.test.tsx
@@ -4849,7 +4988,7 @@ index 9ee7bd0..b4bbcfc 100644
 +      },
        async (_prompt, _route, app, context) => {
          // 断言最终字符帧而非复制 Yoga 算法，确保 flex 收缩和 renderer 换行都走生产路径。
-         // #510：renderOnce 后完整 drain（microtask/nextTick/setTimeout(0)）——Bun.sleep 会阻塞
+         const waitForFrame = async (predicate: (frame: string) => boolean) => {
 @@ -547,11 +562,22 @@ test("keeps the constrained Prompt extension bar on one row across active states
          expect(busy).toContain("interrupt")
          expect(retry).toContain("details")
@@ -4945,8 +5084,8 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 index f044e85..a8cb066 100644
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -1,146 +1,227 @@
- import * as PromptVoiceInput from "../../src/prompt-voice-input"
+@@ -1,155 +1,227 @@
++import { PromptVoiceInput } from "../../src/prompt-voice-input"
  import { describe, expect, test } from "bun:test"
 -import fs from "node:fs/promises"
 -import os from "node:os"
@@ -5065,6 +5204,16 @@ index f044e85..a8cb066 100644
 +    expect(VOICE_TRANSCRIBE_TIMEOUT_MS).toBe(120_000)
    })
  
+-  // Windows脚本入口及带元字符的录音路径仍须保持逐项argv，不能拼接裸shell字符串。
+-  test.skipIf(process.platform !== "win32")("transcriber accepts a Windows command shim", async () => {
+-    await using tmp = await tmpdir()
+-    const command = path.join(tmp.path, "voice transcriber.cmd")
+-    const file = path.join(tmp.path, "voice & literal.wav")
+-    await Bun.write(file, "RIFF....WAVE")
+-    await Bun.write(command, `@echo off\r\n"${process.execPath}" -e "process.stdout.write(JSON.stringify({text:process.argv[1]}))" %*\r\n`)
+-    expect(await transcribeVoiceFile({ file, transcriber: { command, args: ["{file}"] } })).toBe(file)
+-  })
+-
 -  // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
 -  // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
 -  // 这里不检查实现函数名，只观察转写器实际收到的参数值，避免测试和实现耦合。
@@ -5507,7 +5656,45 @@ index f044e85..a8cb066 100644
          return new Promise<string>((_, reject) => {
            const timer = setInterval(() => {
              if (signal.aborted) { clearInterval(timer); reject(new Error("aborted")) }
-@@ -641,7 +657,6 @@ describe("prompt voice input", () => {
+@@ -641,37 +658,6 @@ describe("prompt voice input", () => {
+     expect(controller.status()).toEqual({ type: "idle" })
+   })
+ 
+-  // cmd入口同样不能连带终止独立后代；有界CLI自退保证夹具不制造遗留父进程。
+-  test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber without killing its lifecycle child", async () => {
+-    await using tmp = await tmpdir()
+-    const node = Bun.which("node")!
+-    const pidFile = path.join(tmp.path, "child.pid")
+-    const script = path.join(tmp.path, "transcriber.cjs")
+-    const command = path.join(tmp.path, "transcriber.cmd")
+-    const abort = new AbortController()
+-    let pid = 0
+-    await Bun.write(script, 'const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(process.argv[2],String(child.pid)); setTimeout(()=>{},500)')
+-    await Bun.write(command, `@echo off\r\n"${node}" "${script}" "${pidFile}" %*\r\n`)
+-    const pending = transcribeVoiceFile({ file: "voice.wav", transcriber: { command, args: ["{file}"] }, signal: abort.signal }).catch((error: unknown) => error)
+-    try {
+-      const ready = Date.now() + 5_000
+-      while (!(await Bun.file(pidFile).exists()) && Date.now() < ready) await Bun.sleep(20)
+-      pid = Number(await Bun.file(pidFile).text())
+-      expect(pid).toBeGreaterThan(0)
+-      abort.abort()
+-      expect(await pending).toBeInstanceOf(Error)
+-      const running = () => {
+-        try { process.kill(pid, 0); return true } catch { return false }
+-      }
+-      expect(running()).toBe(true)
+-    } finally {
+-      abort.abort()
+-      await pending
+-      // 只清理本用例创建并记录的PID，失败也不能留下无限计时的子进程。
+-      if (pid > 0) await Bun.spawn(["taskkill", "/pid", String(pid), "/T", "/F"], { windowsHide: true, stdout: "ignore", stderr: "ignore" }).exited
+-    }
+-  }, 15_000)
+-
+   // [local-smark] 以下测试覆盖 DialogPrompt / QuestionPrompt voice 接入所依赖的 controller 安全边界。
+   // 对话框场景生命周期更复杂（onCleanup + createEffect 可能先后触发 abort、
+   // textarea ref 可能已销毁），需独立锁定以防止重构破坏对话框 voice 的安全假设。
+@@ -681,7 +667,6 @@ describe("prompt voice input", () => {
    test("abort is idempotent when called from both onCleanup and createEffect", async () => {
      let abortCount = 0
      const controller = createVoiceInputController({
@@ -5515,7 +5702,7 @@ index f044e85..a8cb066 100644
        startRecorder: async () => ({
          file: "voice.wav",
          stop: async () => {},
-@@ -676,12 +691,12 @@ describe("prompt voice input", () => {
+@@ -716,12 +701,12 @@ describe("prompt voice input", () => {
      let lateResolve: ((text: string) => void) | undefined
      const inserted: string[] = []
      const controller = createVoiceInputController({
@@ -5531,7 +5718,7 @@ index f044e85..a8cb066 100644
          return new Promise<string>((resolve, reject) => {
            lateResolve = resolve
            const timer = setInterval(() => {
-@@ -718,7 +733,6 @@ describe("prompt voice input", () => {
+@@ -758,7 +743,6 @@ describe("prompt voice input", () => {
    test("insertText receives the full transcribed text for consumer-side guards to check", async () => {
      const inserted: string[] = []
      const controller = createVoiceInputController({
@@ -5539,7 +5726,7 @@ index f044e85..a8cb066 100644
        startRecorder: async () => ({ file: "voice.wav", stop: async () => {}, abort: async () => {} }),
        transcribe: async () => "hello world",
        insertText: (text) => inserted.push(text),
-@@ -731,279 +745,9 @@ describe("prompt voice input", () => {
+@@ -771,279 +755,9 @@ describe("prompt voice input", () => {
      expect(controller.status()).toEqual({ type: "idle" })
    })
  
@@ -5887,7 +6074,7 @@ deleted file mode 100644
 index 6164448..0000000
 --- a/packages/tui/test/util/voice-auth.test.ts
 +++ /dev/null
-@@ -1,486 +0,0 @@
+@@ -1,493 +0,0 @@
 -import { describe, expect, test } from "bun:test"
 -import path from "path"
 -import { tmpdir } from "../fixture/fixture"
@@ -5979,6 +6166,9 @@ index 6164448..0000000
 -
 -    const broken = path.join(tmp.path, "broken.json")
 -    await Bun.write(broken, "{ not json")
+-    expect(await readVoiceAuth(broken, "chatgpt")).toBeUndefined()
+-    // jsonc-parser会返回部分对象：完整auth后面的语法错误也必须按source合同拒绝。
+-    await Bun.write(broken, JSON.stringify({ mcp: { chatgpt: { auth } } }) + " trailing")
 -    expect(await readVoiceAuth(broken, "chatgpt")).toBeUndefined()
 -
 -    expect(await readVoiceAuth(path.join(tmp.path, "absent.json"), "chatgpt")).toBeUndefined()
@@ -6106,7 +6296,8 @@ index 6164448..0000000
 -      cookies: [{ name: "oai-did", value: "did-9", expires: -1 }],
 -      fetchedAt: "2026-09-06T01:00:00Z",
 -    })
--    await Bun.write(script, `process.stdout.write(${JSON.stringify(payload)})`)
+-    const invoked = path.join(tmp.path, "invoked")
+-    await Bun.write(script, `require('fs').writeFileSync(${JSON.stringify(invoked)}, '1'); process.stdout.write(${JSON.stringify(payload)})`)
 -    const direct: VoiceTranscriberDirect = {
 -      type: "chatgpt-direct",
 -      config,
@@ -6116,6 +6307,9 @@ index 6164448..0000000
 -      scope: "user",
 -      transcriber: { command: "unused", args: [] },
 -    }
+-    // 已取消时不能spawn；只观察本fixture写出的marker，不调用真实agent或浏览器。
+-    await expect(ensureVoiceCredential(direct, { signal: AbortSignal.abort(new Error("cancelled harvest")), runtime: { now: () => now } })).rejects.toThrow("cancelled harvest")
+-    expect(await Bun.file(invoked).exists()).toBe(false)
 -    const auth = await ensureVoiceCredential(direct, { runtime: { now: () => now } })
 -    expect(auth.access_token).toBe("harvested-token")
 -    // CDP 会话 cookie expires=-1 归一为 0

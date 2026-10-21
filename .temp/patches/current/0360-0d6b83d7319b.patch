@@ -15,6 +15,18 @@ footer 从 session title 提取 agent 名的正则 /@(\w+) subagent/ 中 \w
 
 [\w-]+ 是 \w+ 的超集,general/explore 等无连字符 agent 名行为不变;
 title 不含 (@... subagent) 时回退为 Subagent 的既有行为保持不变。
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -444,3 +444,5 @@
+         }, { maxPasses: 300 })
++        // 导航到真实审查子会话后，页脚必须保留含连字符的代理名。
++        expect(app.captureCharFrame()).toContain("Permission-Reviewer")
+         expect(app.captureCharFrame()).not.toContain("Click to collapse")
+       }
+@@ -487,1 +489,1 @@
+-    const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }) })
++    const details = (id: string) => ({ ...info, id, ...(id === sessionID ? {} : { parentID: sessionID }), ...(id === "ses_reviewer_child" ? { title: "Permission review (@permission-reviewer subagent)" } : {}) })
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 index 6e091ce4c..d4e13b642 100644
 --- a/packages/tui/src/routes/session/subagent-footer.tsx

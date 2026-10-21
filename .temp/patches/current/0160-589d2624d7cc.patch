@@ -4,10 +4,10 @@ Date: Mon, 18 May 2026 00:50:46 +0800
 Subject: [PATCH] feat: 代理对安全截断与 GBK 门控，避免乱码中文
 
 
-diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
+diff --git a/packages/core/src/text-decoding.ts b/packages/core/src/text-decoding.ts
 index 1111111111..2222222222 100644
---- a/packages/opencode/src/util/text-decoding.ts
-+++ b/packages/opencode/src/util/text-decoding.ts
+--- a/packages/core/src/text-decoding.ts
++++ b/packages/core/src/text-decoding.ts
 @@ -115,6 +115,99 @@
    return controls >= 4 || controls / bytes.length > 0.05
  }

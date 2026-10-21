@@ -424,9 +424,9 @@ diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
  }
  
  export interface Interface {
-@@ -238,10 +233,8 @@ const layer = Layer.effect(
-           // #499：claim 变化经 EventV2Bridge 发布——TUI 重拉作用域化 status。
-           updated: events.publish(Event.Updated, {}) as Effect.Effect<void>,
+@@ -242,10 +237,8 @@ const layer = Layer.effect(
+             Effect.provideService(WorkspaceRef, yield* WorkspaceRef),
+           ) as Effect.Effect<void>,
            tokens: new Map(),
 -          bridgeOwners: new Map(),
            closed: false,
@@ -921,8 +921,9 @@ diff --git a/packages/opencode/src/lsp/server.ts b/packages/opencode/src/lsp/ser
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -1,6 +1,7 @@
+@@ -1,7 +1,8 @@
  import { describe, expect, spyOn } from "bun:test"
+ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
  import fs from "node:fs/promises"
  import path from "path"
 +import { pathToFileURL } from "node:url"
@@ -1101,7 +1102,7 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
    it.instance(
      "does not spawn builtin LSP for files outside instance",
      () =>
-@@ -349,7 +495,7 @@ describe("lsp.spawn", () => {
+@@ -351,30 +497,31 @@ describe("lsp.spawn", () => {
      () =>
        LSP.Service.use((lsp) =>
          Effect.gen(function* () {
@@ -1110,7 +1111,31 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
            const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
              id: "bridge",
              port: 1,
-@@ -379,7 +525,7 @@ describe("lsp.spawn", () => {
+             token: "token",
+             host: "127.0.0.1",
+             source: "registry",
+             capabilities: { lsp: true },
+           } satisfies VscodeBridge.BridgeRef)
+           const call = spyOn(VscodeBridge, "callBridge").mockResolvedValue({ ok: true })
+           const spawn = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+ 
+           try {
+             yield* lsp.touchFile(file)
+             // read warm 使用无 diagnostics touch：bridge 环境下不能打开 VSCode，也不回退 spawn 内置 LSP
+             expect(call).toHaveBeenCalledTimes(0)
+             expect(spawn).toHaveBeenCalledTimes(0)
+           } finally {
+             resolve.mockRestore()
+             call.mockRestore()
+             spawn.mockRestore()
+           }
+         }),
+       ),
++    { config: { lsp: true }, init: (dir) => Effect.promise(() => Bun.write(path.join(dir, "src", "inside.repro"), "content")).pipe(Effect.asVoid) },
+   )
+   it.instance(
+     "uses VSCode bridge touch for document diagnostics",
+@@ -381,7 +528,7 @@ describe("lsp.spawn", () => {
      () =>
        LSP.Service.use((lsp) =>
          Effect.gen(function* () {
@@ -1169,6 +1194,23 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
    )
    it.instance(
      "publishes lsp.updated after custom LSP initialization",
+@@ -566,7 +714,7 @@ describe("lsp.spawn", () => {
+     LSP.Service.use((lsp) =>
+       Effect.gen(function* () {
+         const dir = (yield* TestInstance).directory
+-        const file = path.join(dir, "src", "inside.ts")
++        const file = path.join(dir, "src", "inside.repro")
+         const resolve = spyOn(VscodeBridge, "resolveBridge").mockResolvedValue({
+           id: "bridge",
+           port: 1,
+@@ -589,6 +737,7 @@ describe("lsp.spawn", () => {
+         }
+       }),
+     ),
++    { config: { lsp: true }, init: (dir) => Effect.promise(() => Bun.write(path.join(dir, "src", "inside.repro"), "content")).pipe(Effect.asVoid) },
+   )
+ 
+   it.instance("does not spawn builtin LSP when VSCode bridge is unavailable for diagnostics", () =>
 
 diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
 --- a/packages/opencode/test/lsp/lifecycle.test.ts

@@ -10,7 +10,7 @@ Content-Transfer-Encoding: 8bit
 
 元数据 diff 全链改走唯一有界 seam file-diff.ts（二进制/超限中段改标记表示，计数随产物单遍推导）；summary-cache 双摄入界免疫 legacy 巨型 metadata；write 摄入端携带显式计数；edit/apply_patch 删除第二遍 diffLines 计数。
 
-适配说明：全部 hunk 机械重锚至目标形态——summary-cache 五 hunk 原样（offset 自动吸收）；apply_patch/edit/write 的 import 与分支 hunk 按目标 core Watcher/LSPClient 无 type 形态与 #518/#533 行内注释重排（被删代码行连同其行内注释移除，保留行注释不动）；write 的 0581 统一 finalSource 形态承载 source 双分支语义（新文件 contentOld 为空串，单分支等价）；file-diff.ts/plan/测试尾段 8 describe 直落。
+适配说明：保留source三路diff表示、生产内容身份、单遍计数与双摄入界；Write按真实finalSource内的覆写/格式化新文件两分支接线。纯生成owner下沉Core，V1原路径转导出，原生V2 Edit/ApplyPatch复用同一实现，保持mutation、授权、EOL、事件及历史回写责任不变。完整计划与八个source测试切片保留；后续预算门仍按原序推进。
 
 
 diff --git a/docs/plans/tool-diff-bounding-performance-repair.md b/docs/plans/tool-diff-bounding-performance-repair.md
@@ -870,29 +870,25 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
  
            yield* ctx.metadata({
 
-diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
+diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-diff.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/tool/file-diff.ts
-@@ -0,0 +1,116 @@
++++ b/packages/core/src/tool/file-diff.ts
+@@ -0,0 +1,106 @@
 +import { createHash } from "crypto"
 +import { createTwoFilesPatch } from "diff"
 +
-+// [local-smark] 工具元数据 diff 的唯一生成 seam（apply_patch/edit/write 三工具共用）。
-+// 背景事故（2026-08-27）：apply_patch 删除 ~200MB ELF 二进制时，全文行 diff 产生了
-+// 407MB 的单 part 行；jsdiff 对"无公共前后缀的大中段"是二次方 Myers（实测中段
-+// 8000 行约 30s、640KB 文本重写 >139s）。本 seam 用三分表示同时界住入库体积与计算成本。
++// V1三工具与原生V2 Edit/ApplyPatch共用表示owner，避免另一执行路径重新生成全文diff。
++// source事故涉及二进制巨型metadata和大中段Myers耗时；三路表示保留变更事实与计数，不改变写盘。
 +
-+// 与 git buffer_is_binary 的 8000 字节窗口同值：只判 U+0000、不用不可打印比例启发式。
-+// snapshot/index.ts 的 git diffFull 路径（binary -> 计数 0/0）与本规则语义对齐。
++// 前8192个JS字符只检查NUL，不使用不可打印比例启发式；字符窗口不等同Git的字节窗口。
++// 二进制计数0/0与Snapshot既有展示一致，完整文件内容仍由工作树与快照持有。
 +export const BINARY_SCAN_CHARS = 8192
 +
-+// 中段界同时是计算界与产物界：行级 diff 产物体积 ≈ 差异中段体积，64KiB 中段保证
-+// Myers 亚秒级且单文件 patch ≤ ~256KB 量级（中段 + hunk 上下文开销）。
++// 超限差异中段跳过Myers；公共上下文仍可能很长，不承诺固定运行时间或总字节界。
 +export const MAX_DIFF_MIDDLE_CHARS = 64 * 1024
 +
-+// SummaryCache 聚合把逐轮 patch 永久拼接（事故：216MB user message 行）。摄入界只
-+// 降级 patch 文本、计数照常累加，以此免疫已入库的 legacy 巨型 tool metadata。
++// 单文件摘要归并超过1Mi字符时只换patch表示，显式计数继续累加，不是整个会话总量界。
 +export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
 +
 +export type RenderedFileDiff = { patch: string; additions: number; deletions: number }
@@ -921,9 +917,8 @@ new file mode 100644
 +}
 +
 +function binaryMarker(filePath: string, oldText: string, newText: string): RenderedFileDiff {
-+  // 二进制行级 diff 不可读、无人工审计价值（正是 407MB 事故的构成物）；审计记录 =
-+  // 变更事实 + 度量 + sha256 身份对，完整内容由工作树与 git snapshot 持有。
-+  // 计数 0/0 与 snapshot git 路径的 binary 语义对齐。
++  // 二进制用变更事实、字符度量和生产内容身份代替乱码行diff，完整内容仍在工作树/快照中。
++  // 计数0/0沿用Snapshot二进制语义，不影响实际文件变更或恢复。
 +  return {
 +    patch: [
 +      `Index: ${filePath}`,
@@ -968,13 +963,8 @@ new file mode 100644
 +  return { patch, ...stats }
 +}
 +
-+// hunk 门控计数：unified 格式的文件头（Index/===/---/+++）只出现在首个 hunk 标记之前，
-+// 进入 hunk 后 "+"/"-" 前缀行即内容行——因此 hunk 内以 "--"/"++" 开头的内容行（SQL/Lua
-+// 注释、YAML 分隔符）被正确计入；仓库先例 plugin/vscode-bridge.ts 的 diffStats 同构。
-+// hunk 标记按 "@@" 前缀识别而非要求 range 后缀：既有写入方除 unified "@@ -a +b @@" 外，
-+// legacy 摘要 fixture 还使用裸 "@@" 头（summary-tool-diff 契约）；正文行在 unified 中
-+// 总以 +/-/空格开头，不会以 "@@" 误触。
-+// rewrite 标记的 "@@ rewrite @@" 之后的正文行不以 "+"/"-" 开头，天然不计数（计数由显式字段携带）。
++// 首个hunk前的---/+++是文件头，进入后同形前缀是内容；SQL注释等不能被误当文件头丢计数。
++// 接受legacy裸@@头；rewrite标记的计数由显式字段携带，其正文不含增删前缀。
 +export function countPatchStats(patch: string) {
 +  let additions = 0
 +  let deletions = 0
@@ -990,6 +980,22 @@ new file mode 100644
 +  return { additions, deletions }
 +}
 +
++export * as FileDiff from "./file-diff"
+
+diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/tool/file-diff.ts
+@@ -0,0 +1,10 @@
++// 保留V1既有导入路径，真实实现归Core所有，原生V2不反向依赖应用包。
++export {
++  BINARY_SCAN_CHARS,
++  MAX_DIFF_MIDDLE_CHARS,
++  MAX_MERGED_PATCH_CHARS,
++  countPatchStats,
++  renderFileDiff,
++  type RenderedFileDiff,
++} from "@opencode-ai/core/tool/file-diff"
 +export * as FileDiff from "./file-diff"
 
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
@@ -1028,16 +1034,16 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
            yield* ctx.ask({
              permission: "edit",
              patterns: [path.relative(instance.worktree, filepath)],
-@@ -127,18 +125,15 @@ export const WriteTool = Tool.define(
+@@ -127,32 +125,29 @@ export const WriteTool = Tool.define(
            // 覆写和新文件都检查：新文件也可能被 formatter 改变内容。
            let metadataDiff: string | undefined
            let formattedContent: string | undefined
-+          // [local-smark] 摄入端（summary-cache diff/filepath 分支）优先读取显式计数，
-+          // 避免对有界标记重扫描退化为 0/0（plan B-02）；与 edit/apply_patch 的计数口径一致。
++          // 显式计数与最终patch同源，摄入端不能从不含增删正文的标记重新推导为0/0。
 +          let diffCounts: { additions: number; deletions: number } | undefined
            // #518：finalSource 只在锁内赋值；冲突失败时保持 undefined，不生成误导性 metadata。
            if (finalSource) {
 -            // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
+             if (exists) {
 -            metadataDiff = trimDiff(
 -              createTwoFilesPatch(
 -                filepath,
@@ -1047,16 +1053,25 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
 -                normalizeLineEndings(finalSource.text),
 -              ),
 -            )
-+            // diff 生成：唯一有界 seam 渲染格式化后最终内容（#131 归一行尾语义不变）。
-+            const overwrite = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(finalSource.text))
-+            metadataDiff = overwrite.patch
-+            diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
++              // 覆写仍取锁内最终文本，不能复用格式化前审批结果。
++              const overwrite = renderFileDiff(filepath, normalizeLineEndings(contentOld), normalizeLineEndings(finalSource.text))
++              metadataDiff = overwrite.patch
++              diffCounts = { additions: overwrite.additions, deletions: overwrite.deletions }
+             } else {
+               // 格式化新文件的diff必须取最终落盘文本，不能漏记或回用格式化前内容。
+-              metadataDiff = trimDiff(
+-                createTwoFilesPatch(filepath, filepath, "", normalizeLineEndings(finalSource.text)),
+-              )
++              const created = renderFileDiff(filepath, "", normalizeLineEndings(finalSource.text))
++              metadataDiff = created.patch
++              diffCounts = { additions: created.additions, deletions: created.deletions }
+             }
              // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
              if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
                formattedContent = finalSource.text
-@@ -147,6 +142,7 @@ export const WriteTool = Tool.define(
-             // #477：新文件且未格式化：用写入前算好的 diff（""→contentNew），
-             // git 兜底移除后这是新文件入工具流的唯一路径。
+             }
+           } else {
+             // 未格式化的新文件复用写前diff；该分支属于外层最终内容判断。
              metadataDiff = diff
 +            diffCounts = { additions: rendered.additions, deletions: rendered.deletions }
            }
@@ -1331,3 +1346,125 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +    }),
 +  )
 +})
+
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -9,7 +9,7 @@
+ import { ToolFailure } from "@opencode-ai/llm"
+ import { FileDiff } from "@opencode-ai/schema/file-diff"
+-import { createTwoFilesPatch, diffLines } from "diff"
++import { renderFileDiff } from "./file-diff"
+ import { Effect, Layer, Schema } from "effect"
+ import { makeLocationNode } from "../effect/app-node"
+ import { FileMutation } from "../file-mutation"
+ import { FSUtil } from "../fs-util"
+@@ -196,10 +196,5 @@
+-                const counts = diffLines(source.text, replaced).reduce(
+-                  (result, item) => ({
+-                    additions: result.additions + (item.added ? (item.count ?? 0) : 0),
+-                    deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
+-                  }),
+-                  { additions: 0, deletions: 0 },
+-                )
++                // 原生结果同样持久化structured files；复用单一有界生成点，不靠content截断补救。
++                const rendered = renderFileDiff(target.resource, source.text, replaced)
+                 const next = splitBom(replaced)
+                 const result = yield* unableToEdit(
+                   files.writeIfUnchanged({
+@@ -212,10 +206,9 @@
+                   files: [
+                     {
+                       file: result.resource,
+-                      patch: createTwoFilesPatch(result.resource, result.resource, source.text, replaced),
+                       status: "modified" as const,
+-                      ...counts,
++                      ...rendered,
+                     },
+                   ],
+                   replacements,
+                 } satisfies Output
+
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -3,7 +3,7 @@
+ import { ToolFailure } from "@opencode-ai/llm"
+ import { FileDiff } from "@opencode-ai/schema/file-diff"
+-import { createTwoFilesPatch, diffLines } from "diff"
++import { renderFileDiff } from "./file-diff"
+ import { Effect, Layer, Schema } from "effect"
+ import { makeLocationNode } from "../effect/app-node"
+ import { FileMutation } from "../file-mutation"
+ import { FSUtil } from "../fs-util"
+@@ -245,15 +245,9 @@
+ function patchFile(change: Prepared): typeof FileDiff.Info.Type {
+-  const counts = diffLines(change.before, change.after).reduce(
+-    (result, item) => ({
+-      additions: result.additions + (item.added ? (item.count ?? 0) : 0),
+-      deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
+-    }),
+-    { additions: 0, deletions: 0 },
+-  )
++  // add/update/delete在执行前生成元数据；表示降级不改变授权、mutation或部分成功合同。
++  const rendered = renderFileDiff(change.target.resource, change.before, change.after)
+   return {
+     file: change.target.resource,
+-    patch: createTwoFilesPatch(change.target.resource, change.target.resource, change.before, change.after),
+     status: change.type === "add" ? "added" : change.type === "delete" ? "deleted" : "modified",
+-    ...counts,
++    ...rendered,
+   }
+ }
+
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -4,3 +4,3 @@
+ import { describe, expect, test } from "bun:test"
+-import { Effect, Layer } from "effect"
++import { Effect, Layer, Schema } from "effect"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+@@ -160,3 +160,42 @@
+   )
+ 
++  it.live("bounds native structured diffs without changing file mutation", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => {
++        reset()
++        return withTool(tmp.path, (registry) =>
++          Effect.gen(function* () {
++            // 同一公开settlement覆盖二进制与大中段，避免只测共享函数却遗漏原生调用点。
++            const cases = [
++              { before: "a\u0000b".repeat(24 * 1024), after: "x\u0000y".repeat(24 * 1024), marker: "Binary file", count: 0 },
++              {
++                before: Array.from({ length: 2200 }, (_, i) => `old ${i} ${"x".repeat(40)}\n`).join(""),
++                after: Array.from({ length: 2200 }, (_, i) => `new ${i} ${"y".repeat(40)}\n`).join(""),
++                marker: "whole-file rewrite",
++                count: 2200,
++              },
++            ]
++            for (const [index, item] of cases.entries()) {
++              const name = `bounded-${index}.txt`
++              const target = path.join(tmp.path, name)
++              yield* Effect.promise(() => fs.writeFile(target, item.before))
++              const settled = yield* settleTool(registry, call({ path: name, oldString: item.before, newString: item.after }, `bounded-${index}`))
++              expect(settled.result.type).toBe("text")
++              // 独立字面量锁定中段计数；表示降级不能变成写盘截断或丢失文件归属。
++              const output = Schema.decodeUnknownSync(EditTool.Output)(settled.output?.structured)
++              // Bun1.3.14的非对称matcher会改写匹配对象，必须先检查原始字符串长度。
++              expect(output.files[0]?.patch?.length).toBeLessThan(64 * 1024)
++              expect(output).toMatchObject({ files: [{ file: name, status: "modified", additions: item.count, deletions: item.count, patch: expect.stringContaining(item.marker) }] })
++              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(item.after)
++            }
++            expect(writes).toHaveLength(2)
++          }),
++        )
++      },
++      // 文件与托管输出都使用现成fixture/scope释放，不创建独立应用或daemon。
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   it.live("accepts an absolute file path inside the active Location", () =>

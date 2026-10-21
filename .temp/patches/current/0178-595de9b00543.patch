@@ -6,30 +6,18 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E8=B0=83=E6=95=B4=E8=BE=93=E5=87=BA?=
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -17,8 +17,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
- // #142：默认 200 行与 source 对齐
- const DEFAULT_READ_LIMIT = 200
- // 不再按行截断：超长行完整保留，仅用 MAX_BYTES 控制总输出
--// 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
+@@ -18,2 +18,3 @@
+ // 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
 -const MAX_BYTES = 24 * 1024
-+// 默认最大读取字节 16KB：压低单次工具输出内存与上下文占用
-+const MAX_BYTES = 16 * 1024 // #178：默认输出上限 24KiB→16KiB
- const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
- const SAMPLE_BYTES = 4096
- const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
++// #178：正文页降低到16KiB，续读与媒体上限不变。
++const MAX_BYTES = 16 * 1024
 diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
 --- a/packages/opencode/src/tool/truncate.ts
 +++ b/packages/opencode/src/tool/truncate.ts
-@@ -15,7 +15,8 @@ const RETENTION = Duration.days(7)
- // 工具输出默认最大行数 1000，与 DEFAULT_READ_LIMIT 锁步
- export const MAX_LINES = 1000
- // 截断管道默认字节上限与 read MAX_BYTES 对齐，避免双口径
+@@ -17,1 +17,2 @@
 -export const MAX_BYTES = 24 * 1024
 +// #178：默认输出上限 24KiB→16KiB
 +export const MAX_BYTES = 16 * 1024
- export const DIR = TRUNCATION_DIR
- export const GLOB = path.join(TRUNCATION_DIR, "*")
- 
 diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
 --- a/packages/opencode/test/tool/truncation.test.ts
 +++ b/packages/opencode/test/tool/truncation.test.ts
@@ -45,126 +33,63 @@ diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/
 diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -136,7 +136,7 @@ export const Info = Schema.Struct({
-         description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
-       }),
-       max_bytes: Schema.optional(PositiveInt).annotate({
+@@ -144,1 +144,1 @@ export const Info = Schema.Struct({
 -        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
 +        description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)",
-       }),
-       // 启用 Bash 输出压缩，减少 token 用量
-       bash_compression: Schema.optional(Schema.Boolean).annotate({
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -1016,7 +1016,7 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
-     .replaceAll("${shellGuidance}", shellGuidance)
-     .replaceAll("${listCommand}", listCommand)
-     .replaceAll("${maxLines}", "1000")
+@@ -831,1 +831,1 @@ function resolveTemplateVars(text: string, paths: ContextUsagePaths): string {
 -    .replaceAll("${maxBytes}", "24576")
 +    .replaceAll("${maxBytes}", "16384")
-     .replaceAll("${compressionGuidance}", "")
- }
- 
 diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt
-@@ -3,6 +3,7 @@ Read a file or directory from the local filesystem. If the path does not exist,
+@@ -3,8 +3,8 @@ Read a file or directory from the local filesystem. If the path does not exist,
  Usage:
  - The filePath parameter should be an absolute path.
  - By default, this tool returns up to 200 lines from the start of the file.
-+- Text file content is capped at 16 KB per read; use offset/limit to continue.
+-- Text content is capped at 24 KiB per read; displayed lines are limited to 2000 characters.
++- Text content is capped at 16 KiB per read; displayed lines are limited to 2000 characters. Use offset/limit to continue.
+ - Line accounting scans at most 256 KiB beyond the returned page. If `<range total_exact="false">` appears, `total` is a lower bound; otherwise it is exact.
  - The offset parameter is the line number to start from (1-indexed).
  - To read later sections, call this tool again with a larger offset.
  - Use the grep tool to find specific content in large files or files with long lines.
 diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
 --- a/packages/core/src/tool-output-store.ts
 +++ b/packages/core/src/tool-output-store.ts
-@@ -12,8 +12,9 @@ import type { ToolOutput } from "@opencode-ai/llm"
- 
- // V2 主路径工具输出默认行数与 SMARK Truncate 对齐 1000
- export const MAX_LINES = 1_000
--// V2 主路径工具输出默认字节与 SMARK Truncate 对齐 24KB
+@@ -16,1 +16,2 @@
 -export const MAX_BYTES = 24 * 1024
-+// V2 主路径工具输出默认字节与 SMARK Truncate 对齐 16KB
 +// #178：默认输出上限 24KiB→16KiB
 +export const MAX_BYTES = 16 * 1024
- export const RETENTION = Duration.days(7)
- 
- export const MANAGED_DIRECTORY = "tool-output"
 diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
 --- a/packages/core/src/tool/read-filesystem.ts
 +++ b/packages/core/src/tool/read-filesystem.ts
-@@ -10,8 +10,10 @@ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
- 
--// V2 read 默认行上限与 SMARK DEFAULT_READ_LIMIT 对齐 1000
--export const MAX_READ_LINES = 1_000
-+// V2 read 行上限跟随 SMARK V1 演进终值（#78 400 → #142 200），消除 V1/V2 行为分裂
-+export const MAX_READ_LINES = 200
- // V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 24KB
+@@ -16,1 +16,2 @@
 -export const MAX_READ_BYTES = 24 * 1024
-+// V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 16KB
 +// #178：V2 读路径对齐 16KiB
 +export const MAX_READ_BYTES = 16 * 1024
- export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
- // #90：禁止行中 2000 字截断；仅行数+总字节预算分页
- 
 diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
 --- a/packages/core/test/tool-output-store.test.ts
 +++ b/packages/core/test/tool-output-store.test.ts
-@@ -134,8 +134,8 @@ describe("ToolOutputStore", () => {
-   it.live("does not double-count structured data duplicated in projected text", () =>
-     withStore(({ store }) =>
-       Effect.gen(function* () {
--        // #65：MAX_BYTES=24KB 后单份须低于上限（双计会超限）
--        // #65：MAX_BYTES=24KB；单份文本取 10KB 确保低于上限（双计会超限）
-+        // #65：MAX_BYTES=16KB 后单份须低于上限（双计会超限）
-+        // #65：MAX_BYTES=16KB；单份文本取 10KB 确保低于上限（双计会超限）
-         const text = "x".repeat(10_000)
-         const output = { structured: { output: text }, content: [{ type: "text" as const, text }] }
-         expect(yield* store.bound({ sessionID, toolCallID: "call-duplicated", output })).toEqual({
+@@ -145,1 +145,1 @@ describe("ToolOutputStore", () => {
+-        expect(ToolOutputStore.MAX_BYTES).toBe(24 * 1024)
++        expect(ToolOutputStore.MAX_BYTES).toBe(16 * 1024)
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -23,7 +23,7 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
- 
- /**
-  * Bridge endpoint handler: returns notebook source code with global line numbering.
-- * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
-+ * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 16 KB.
-  */
- // #94：renderedLines 与 bytesCut 分离；header 不占行预算
- export async function notebookSource(input: Record<string, unknown>) {
-@@ -75,8 +75,8 @@ export async function notebookSource(input: Record<string, unknown>) {
-   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
- 
-   // Render cells one by one, emitting headers + in-range source lines
--  // 24KB 字节预算；满额后设 bytesCut 并 break 外层
+@@ -17,1 +17,1 @@
+- * 24 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
++ * 16 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
+@@ -65,1 +65,2 @@ export async function notebookSource(input: Record<string, unknown>) {
 -  const maxBytes = 24 * 1024
-+  // 16KB 字节预算；满额后设 bytesCut 并 break 外层
++  // #178：源码页预算降为16KiB，保留既有长行推进与全局续读坐标。
 +  const maxBytes = 16 * 1024
-   let bytes = 0
-   // renderedLines：仅计数带全局行号的源码行，header 不计
-   let renderedLines = 0
-@@ -151,7 +151,7 @@ export async function notebookSource(input: Record<string, unknown>) {
-   }
- 
-   if (!bytesCut && !lineLimited) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
--  // more：窗口内仍有未返回行，且不是因为 24KB 截断
-+  // more：窗口内仍有未返回行，且不是因为 16KB 截断
-   const more = !bytesCut && lastRenderedLine < globalEnd
- 
-   let output = warning ? `${warning}\n\n` : ""
-@@ -161,9 +161,9 @@ export async function notebookSource(input: Record<string, unknown>) {
-     ) + "\n"
-   output += outputCells.join("\n")
- 
--  // 页脚仅在 bytesCut 时提示 24KB；行限走 more 分页文案
-+  // 页脚仅在 bytesCut 时提示 16KB；行限走 more 分页文案
+@@ -134,5 +135,5 @@ export async function notebookSource(input: Record<string, unknown>) {
    if (bytesCut) {
 -    output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
 +    output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
-   } else if (more || lineLimited) {
+   } else if (more) {
      output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
    }
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
@@ -197,3 +122,31 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
  }
  
  const runArgs = {
+diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
+--- a/packages/core/test/tool-read-filesystem.test.ts
++++ b/packages/core/test/tool-read-filesystem.test.ts
+@@ -51,6 +51,6 @@
+-      // 多字节每行计 2000 字节，十二行连同换行仍可容纳，第十三行必须留给 next。
++      // 多字节每行计 2000 字节，16 KiB 可容纳八行，第九行必须留给 next。
+       yield* fixtureData.files.writeFileString(file, Array.from({ length: 20 }, () => "é".repeat(1000)).join("\n"))
+       const bytes = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
+-      expect(bytes).toMatchObject({ type: "text-page", truncated: true, next: 13 })
+-      expect(bytes.content.split("\n")).toHaveLength(12)
+-      expect(Buffer.byteLength(bytes.content)).toBe(24_011)
++      expect(bytes).toMatchObject({ type: "text-page", truncated: true, next: 9 })
++      expect(bytes.content.split("\n")).toHaveLength(8)
++      expect(Buffer.byteLength(bytes.content)).toBe(16_007)
+@@ -94,6 +94,10 @@
+       const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 2 })
+-      expect(first.content).toBe(Array.from({ length: 4 }, () => long).join("\n"))
+-      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 6 })
+-      expect(Buffer.byteLength(first.content)).toBe(24_003)
++      expect(first.content).toBe(Array.from({ length: 2 }, () => long).join("\n"))
++      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 4 })
++      expect(Buffer.byteLength(first.content)).toBe(12_001)
++      // 预算缩小后仍逐页检查完整长行，不能跳过中间两行来放宽原来的连续性断言。
++      const middle = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 4 })
++      expect(middle.content).toBe(Array.from({ length: 2 }, () => long).join("\n"))
++      expect(middle).toMatchObject({ type: "text-page", truncated: true, next: 6 })
+       const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 6 })
+       expect(last.content).toBe(long)

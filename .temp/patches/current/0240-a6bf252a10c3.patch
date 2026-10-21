@@ -131,10 +131,9 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +    async function resolveSDK(model: Model, s: State, envs: Record<string, string | undefined>, bridge: EffectBridge.Shape) {
        try {
          const provider = s.providers[model.providerID]
-@@ -1992,6 +2058,31 @@ for (const [id, provider] of configProviders) {
+@@ -2024,5 +2090,30 @@
  
-           // #83：customFetch 仅鉴权透传；默认走 NetworkProxy.fetch 主路由
-           // #83：provider 请求 purpose=provider，区别于基础设施和 npm
+           // 自定义鉴权不重复注入路由，两条路径保留组合取消信号与 header timer 清理。
 +          const timingHeaders = new Headers(opts.headers)
 +          const timingInput = {
 +            requestID: ++providerFetchRequestID,
@@ -162,8 +161,8 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +          })
            const res = await (
              customFetch
-               ? NetworkProxy.fetchWithRoute(customFetch, input, {
-@@ -2006,11 +2090,23 @@ for (const [id, provider] of configProviders) {
+               ? NetworkProxy.fetchWithRoute(customFetch, input, { ...opts, purpose: "provider" })
+@@ -2032,10 +2123,22 @@
                    // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
                    timeout: false,
                  })
@@ -181,7 +180,6 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +            contentType,
 +            isSSE: contentType?.includes("text/event-stream") ?? false,
 +          })
- 
  
            if (!chunkAbortCtl) return res
 -          return wrapSSE(res, chunkTimeout, chunkAbortCtl)

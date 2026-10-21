@@ -244,7 +244,7 @@ index dbc8646ca4..447d77a264 100644
                part.state.metadata?.rationale === "private key read was not explicitly authorized",
            ),
          ),
-@@ -1356,6 +1365,141 @@ it.instance(
+@@ -1356,6 +1365,145 @@ it.instance(
    { git: true },
  )
  
@@ -310,6 +310,8 @@ index dbc8646ca4..447d77a264 100644
 +    Effect.gen(function* () {
 +      const { llm } = yield* useServerConfig((url) => ({
 +        ...providerCfg(url),
++        // 本例验证权限与工具metadata，独立关闭不相关的Git快照采集。
++        snapshot: false,
 +        permission: { approvals_reviewer: "auto_review" },
 +      }))
 +      const prompt = yield* SessionPrompt.Service
@@ -322,7 +324,9 @@ index dbc8646ca4..447d77a264 100644
 +          { permission: "external_directory", pattern: "*", action: "allow" },
 +        ],
 +      })
-+      const command = "cat ~/.ssh/id_rsa"
++      const key = path.join(chat.directory, ".ssh", "id_rsa")
++      yield* Effect.promise(() => Bun.write(key, "fixture-key"))
++      const command = process.platform === "win32" ? `Get-Content -LiteralPath "${key}"` : `cat "${key}"`
 +      yield* prompt.prompt({
 +        sessionID: chat.id,
 +        agent: "build",
@@ -386,6 +390,98 @@ index dbc8646ca4..447d77a264 100644
  it.instance("failed subtask preserves metadata on error tool state", () =>
    Effect.gen(function* () {
      const { llm } = yield* useServerConfig((url) => ({
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -222,6 +222,17 @@
+         const row = lines.findIndex((line) => line.includes(command))
+         expect(row).toBeGreaterThanOrEqual(0)
+-        expect(lines[row + 1]).toContain(expected)
++        const reviewRow = lines.findIndex((line) => line.includes(expected))
++        expect(reviewRow).toBeGreaterThanOrEqual(0)
++        if (scenario === "completed" || scenario === "collapsed") expect(reviewRow).toBeLessThan(row)
++        if (scenario === "running" || scenario === "error") expect(reviewRow).toBe(row + 1)
++        expect(lines.filter((line) => line.includes(expected))).toHaveLength(1)
+         if (scenario === "collapsed") expect(lines.join("\n")).toContain("Click to expand")
++        if (scenario === "running") {
++          await app.mockMouse.click(lines[row].indexOf(command), row)
++          expect(route.data).toMatchObject({ type: "session", sessionID })
++          await app.renderOnce()
++          await app.mockMouse.click(lines[reviewRow].indexOf("auto review"), reviewRow)
++          expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
++        }
+         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
+         if (scenario === "error") {
+@@ -320,2 +331,69 @@
+ 
++// 覆盖源新增的共享槽位、无审查外观、多文件去重和非Shell导航，不复制生产组件布局。
++test.each(["read", "read-error", "generic", "edit", "write", "running-output", "plain-read", "patch", "plain-patch"] as const)(
++  "shared auto review is rendered by the real tool: %s", async (scenario) => {
++    const childID = "ses_reviewer_child"
++    const plain = scenario.startsWith("plain-")
++    const patch = scenario === "patch" || scenario === "plain-patch"
++    const toolName = patch ? "apply_patch" : scenario === "generic" ? "future_tool" : scenario === "running-output" ? "bash" : scenario.replace("plain-", "").replace("-error", "")
++    const review = { reviewID: "review_shared", sessionID: childID, status: scenario === "read-error" ? "denied" : "allowed",
++      result: { risk_level: "high", user_authorization: "high", rationale: "authorized" } }
++    const info: AssistantMessage = {
++      id: "msg_shared", sessionID, role: "assistant", parentID: "msg_user", time: { created: 1, completed: 2 },
++      modelID: "model", providerID: "provider", mode: "build", agent: "build", path: { cwd: directory, root: directory }, cost: 0,
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    }
++    const files = (plain ? ["a"] : ["a", "b"]).map((name) => ({ filePath: `external/${name}.ts`, relativePath: `external/${name}.ts`,
++      type: "update", patch: `--- external/${name}.ts\n+++ external/${name}.ts\n@@ -1 +1 @@\n-old\n+new`, additions: 1, deletions: 1 }))
++    const metadata = {
++      ...(plain ? {} : { autoReview: review }),
++      ...(patch ? { files, diagnostics: {} } : {}),
++      ...(scenario === "edit" ? { diff: Array.from({ length: 30 }, (_, i) => `+line ${i}`).join("\n"), diagnostics: {} } : {}),
++      ...(scenario === "running-output" ? { output: "streamed output" } : {}),
++    }
++    const input = patch ? { patchText: "*** Begin Patch\n*** End Patch" } : scenario === "running-output" ? { command } : scenario === "edit" ? { filePath: "external/config.ts", oldString: "old", newString: "new" } : scenario === "write" ? { filePath: "external/config.ts", content: "created" } : { filePath: "external/config.ts" }
++    const part: Part = {
++      id: "part_shared", sessionID, messageID: info.id, type: "tool", tool: toolName, callID: "shared_call",
++      state: scenario === "read-error"
++        ? { status: "error", input, error: "auto reviewer denied", metadata, time: { start: 1, end: 2 } }
++        : scenario === "running-output"
++          ? { status: "running", input, metadata, title: "running", time: { start: 1 } }
++          : { status: "completed", input, metadata, output: "", title: "completed", time: { start: 1, end: 2 } },
++    }
++    await withRenderedReview([{ info, parts: [part] }], async (app) => {
++      await waitForReviewFrame(app, async (frame) => {
++        if (plain ? frame.includes(patch ? "a.ts" : "config.ts") : frame.includes("@permission-reviewer")) return true
++        await Bun.sleep(10)
++        return false
++      }, { maxPasses: 300 })
++      await app.renderOnce()
++      await app.renderOnce()
++      const lines = app.captureCharFrame().split("\n")
++      const reviewRows = lines.filter((line) => line.includes("auto review"))
++      expect(reviewRows).toHaveLength(plain ? 0 : 1)
++      if (plain) {
++        expect(lines.join("\n")).not.toContain("% Patch")
++        return
++      }
++      const row = lines.findIndex((line) => line.includes("auto review"))
++      if (patch) {
++        expect(lines.join("\n")).toContain("b.ts")
++        expect(row).toBeLessThan(lines.findIndex((line) => line.includes("a.ts")))
++      }
++      if (scenario === "running-output") expect(row).toBeLessThan(lines.findIndex((line) => line.includes(command)))
++      if (scenario === "read" || scenario === "read-error") expect(row).toBe(lines.findIndex((line) => line.includes("config.ts")) + 1)
++      if (scenario === "read" || scenario === "edit") {
++        await app.mockMouse.click(lines[row].indexOf("auto review"), row)
++        await waitForReviewFrame(app, async (frame) => {
++          if (frame.includes("reviewer child visible")) return true
++          await Bun.sleep(10)
++          return false
++        }, { maxPasses: 300 })
++        expect(app.captureCharFrame()).not.toContain("Click to collapse")
++      }
++    }, {}, { [childID]: () => [{ info: { ...info, id: "msg_reviewer_shared", sessionID: childID, agent: "permission-reviewer" },
++      parts: [{ id: "part_reviewer_shared", sessionID: childID, messageID: "msg_reviewer_shared", type: "text", text: "reviewer child visible" }] }] })
++  },
++)
++
+ // 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index 21fa77517b..dfa0e7a627 100644
 --- a/packages/tui/src/routes/session/index.tsx
@@ -528,10 +624,10 @@ index 21fa77517b..dfa0e7a627 100644
        onMouseOver={() => clickable() && setHover(true)}
        onMouseOut={() => setHover(false)}
 -      onMouseUp={() => {
-+      onMouseUp={(evt?: TuiMouseEvent) => {
++      onMouseUp={(evt?: MouseEvent) => {
          // #209：无 sessionID 不可导航——无子会话的纯流式审查不产生可跳转目标
          if (!props.review.sessionID) return
-         // #209：用户选中文本时不导航——避免复制审查结论时误触发跳转
+         // 拖选审查结论时保留复制行为，不将选择动作当作导航。
          if (renderer.getSelection()?.getSelectedText()) return
 +        // #214：审查行可能位于可点击/可折叠工具卡片内——stop event 避免打开 reviewer 同时切换父 diff/输出卡片
 +        evt?.preventDefault()
@@ -561,19 +657,37 @@ index 21fa77517b..dfa0e7a627 100644
  }) {
    const { theme } = useTheme()
    const ctx = use()
-@@ -2391,6 +2408,10 @@ function InlineTool(props: {
+@@ -2389,6 +2406,11 @@ function InlineTool(props: {
+         }
+         props.onClick?.()
        }}
++      review={
++        <Show when={props.autoReview !== false}>
++          <ToolAutoReviewLine />
++        </Show>
++      }
      >
        {props.children}
-+      {/* #214：共享审查状态行——autoReview !== false 时从 context 渲染 */}
-+      <Show when={props.autoReview !== false}>
-+        <ToolAutoReviewLine />
-+      </Show>
      </InlineToolRow>
-   )
- }
-@@ -2499,6 +2520,8 @@ function BlockTool(props: {
-   totalLines?: number
+@@ -2411,6 +2433,8 @@ export function InlineToolRow(props: {
+   spinner?: boolean
+   separate?: boolean
+   children: JSX.Element
++  // 审查行含 box，必须独立于 text/Spinner 的正文 children。
++  review?: JSX.Element
+   onMouseOver?: () => void
+   onMouseOut?: () => void
+   onMouseUp?: () => void
+@@ -2468,6 +2492,7 @@ export function InlineToolRow(props: {
+           </Show>
+         </Match>
+       </Switch>
++      {props.review}
+       <Show when={props.failed && props.errorExpanded}>
+         <box paddingLeft={INLINE_TOOL_ICON_WIDTH}>
+           <text fg={props.errorColor}>{props.error}</text>
+@@ -2499,6 +2524,8 @@ function BlockTool(props: {
+   contextLabel?: string
    // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
    preview?: JSX.Element
 +  // #214：autoReview=false 时跳过共享审查状态行——apply_patch 内部 BlockTool 由外部统一渲染
@@ -581,7 +695,7 @@ index 21fa77517b..dfa0e7a627 100644
  }) {
    const { theme } = useTheme()
    const renderer = useRenderer()
-@@ -2566,6 +2589,10 @@ function BlockTool(props: {
+@@ -2566,6 +2593,10 @@ function BlockTool(props: {
            </Show>
          )}
        </Show>
@@ -589,10 +703,10 @@ index 21fa77517b..dfa0e7a627 100644
 +      <Show when={props.autoReview !== false}>
 +        <ToolAutoReviewLine />
 +      </Show>
-       <box
-         marginTop={1}
-         // #144：有 preview 时不靠 maxHeight 硬裁切；无 preview 仍用 #111 高度限制
-@@ -2640,12 +2667,7 @@ function Shell(props: ToolProps) {
+       {/* 预览是否存在由原有外层展开状态决定，容器不维护第二套折叠状态。 */}
+       <box marginTop={1}>{props.preview ?? props.children}</box>
+       <Show when={props.preview}>
+@@ -2640,12 +2671,7 @@ function Shell(props: ToolProps) {
    const { theme } = useTheme()
    const pathFormatter = usePathFormatter()
    const ctx = use()
@@ -602,53 +716,56 @@ index 21fa77517b..dfa0e7a627 100644
 -  // #209：autoReview 从工具 metadata 提取——reviewing/allowed/denied 状态驱动 UI
 -  // #209：createMemo 缓存提取结果——metadata 仅在 part 更新时变化，避免每帧重复解析
 -  const autoReview = createMemo(() => autoReviewMetadata(props.metadata))
-   // 上下文输出信号：右键切换显示返回给模型的内容
    const [showContextOutput, setShowContextOutput] = createSignal(false)
+   // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
    const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
-@@ -2714,8 +2736,8 @@ function Shell(props: ToolProps) {
-           // #144：Shell 折叠预览前 10 行
+@@ -2714,8 +2740,8 @@ function Shell(props: ToolProps) {
+           // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
            preview={
-             shellCanCollapse() && !showContextOutput() ? (
+             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
 -              // #209：Shell 预览带命令前缀和 auto-review 状态行——折叠时也保留两行审查合约
--              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
+-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, autoReview() ? autoReviewLabel(autoReview()!) : undefined, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
 +              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
-+              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(output(), 10)].filter(Boolean).join(String.fromCharCode(10))}</text>
++              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, previewText(limited(), 10, maxChars())].filter(Boolean).join(String.fromCharCode(10))}</text>
              ) : undefined
            }
          >
-@@ -2726,8 +2748,6 @@ function Shell(props: ToolProps) {
-             </Show>
+@@ -2726,9 +2752,5 @@ function Shell(props: ToolProps) {
+           <box gap={1}>
+-            {/* 命令与审查行相邻，其余输出仍沿用上游段间距。 */}
+-            <box>
+             <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
                <Spinner color={theme.text}>{stringValue(props.input.command)}</Spinner>
              </Show>
--            {/* #209：auto-review 状态行——可点击导航到 reviewer 子会话 */}
 -            <Show when={autoReview()}>{(review) => <AutoReviewLine review={review()} />}</Show>
-             <Show when={output()}>
-               <text fg={theme.text}>{limited()}</text>
-             </Show>
-@@ -2738,20 +2758,14 @@ function Shell(props: ToolProps) {
+-            </box>
+             {/* 完成态没有 spinner，也可能没有 workdir 标题；标识必须独立可见。 */}
+@@ -2738,21 +2760,8 @@ function Shell(props: ToolProps) {
          </BlockTool>
        </Match>
        <Match when={true}>
--        {/* #209：InlineTool 支持点击导航到 reviewer 子会话，children 附加 auto-review 状态行 */}
-+        {/* #214：InlineTool 共享审查状态行——autoReview 由 context 自动渲染 */}
-         <InlineTool
-           icon="$"
-           pending="Writing command…"
-           complete={stringValue(props.input.command)}
-           part={props.part}
+-        <>
+-          <InlineTool
+-          icon="$"
+-          pending="Writing command…"
+-          complete={stringValue(props.input.command)}
+-          part={props.part}
 -          onClick={() => {
 -            const sessionID = autoReview()?.sessionID
 -            if (sessionID) navigate({ type: "session", sessionID })
 -          }}
-         >
--          {[stringValue(props.input.command), autoReview() ? `  ${autoReviewLabel(autoReview()!)}` : undefined]
--            .filter(Boolean)
--            .join("\n")}
+-          >
+-            {stringValue(props.input.command)}
+-          </InlineTool>
+-          {/* 独立审查行保留导航，命令行仍使用原有错误详情展开。 */}
+-          <Show when={autoReview()}>{(review) => <box paddingLeft={5}><AutoReviewLine review={review()} /></box>}</Show>
+-        </>
++        <InlineTool icon="$" pending="Writing command…" complete={stringValue(props.input.command)} part={props.part}>
 +          {stringValue(props.input.command)}
-         </InlineTool>
++        </InlineTool>
        </Match>
      </Switch>
-@@ -3267,6 +3281,8 @@ function ApplyPatch(props: ToolProps) {
+@@ -3267,6 +3285,8 @@ function ApplyPatch(props: ToolProps) {
    })
  
    const files = createMemo(() => parseApplyPatchFiles(props.metadata.files))
@@ -657,7 +774,7 @@ index 21fa77517b..dfa0e7a627 100644
  
    const view = createMemo(() => {
      const diffStyle = ctx.tui.diff_style
-@@ -3301,7 +3317,18 @@ function ApplyPatch(props: ToolProps) {
+@@ -3301,7 +3321,18 @@ function ApplyPatch(props: ToolProps) {
    return (
      <Switch>
        <Match when={files().length > 0}>
@@ -677,16 +794,16 @@ index 21fa77517b..dfa0e7a627 100644
            {(file) => {
              // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
              const [patchExpanded, setPatchExpanded] = createSignal(false)
-@@ -3311,6 +3338,8 @@ function ApplyPatch(props: ToolProps) {
+@@ -3311,6 +3342,8 @@ function ApplyPatch(props: ToolProps) {
              return (
              <BlockTool
-           // #144：ApplyPatch 按 file.patch 行数武装，delete 走摘要预览
+               // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
 +          // #214：autoReview=false——审查状态行由外层 box 统一渲染，避免每个文件块重复
 +          autoReview={false}
-           maxLines={10}
-           threshold={20}
-           totalLines={countLines(file.patch ?? "")}
-@@ -3353,6 +3382,7 @@ function ApplyPatch(props: ToolProps) {
+               preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <DiffPreview diff={previewDiff(file.patch || "", 10)} filePath={file.filePath} view={view()} maxLines={10} /> : undefined}
+               title={title(file)}
+               part={props.part}
+@@ -3353,6 +3386,7 @@ function ApplyPatch(props: ToolProps) {
              )
            }}
          </For>
@@ -694,3 +811,47 @@ index 21fa77517b..dfa0e7a627 100644
        </Match>
        <Match when={true}>
          <InlineTool icon="%" pending={patchPending()} failure="Patch failed" complete={false} part={props.part}>
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -257,6 +257,40 @@ describe("TUI inline tool wrapping", () => {
+     // #187：pending 态 label 未就绪；JSX 片段与 ~ 前缀同行渲染
+   })
+ 
++  test("keeps boxed auto review below pending and completed tool text", async () => {
++    const [complete, setComplete] = createSignal(false)
++    // 审查行使用真实 box，原生渲染器会拒绝把它嵌入正文 text。
++    const frame = await renderFrame(
++      () => (
++        <InlineToolRow
++          icon="$"
++          complete={complete()}
++          pending="Writing command"
++          review={
++            <box>
++              <text>auto review</text>
++            </box>
++          }
++        >
++          echo hello
++        </InlineToolRow>
++      ),
++      { width: 72, height: 4 },
++    )
++    expect(frame.split("\n").map((line) => line.trim())).toEqual(["~ Writing command", "auto review"])
++
++    setComplete(true)
++    await testSetup!.renderOnce()
++    await testSetup!.renderOnce()
++    expect(
++      testSetup!
++        .captureCharFrame()
++        .split("\n")
++        .map((line) => line.trim())
++        .filter(Boolean),
++    ).toEqual(["$ echo hello", "auto review"])
++  })
++
+   test("preserves useful completed copy when a tool fails", async () => {
+     const frame = await renderFrame(() => <FailedCompleteToolFixture />, { width: 72, height: 3 })
+     expect(frame).toContain("Read src/index.ts")

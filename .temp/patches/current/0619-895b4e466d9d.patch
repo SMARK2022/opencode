@@ -12,7 +12,7 @@ Git 快照原先缓存在进程内存的 cwd-keyed Map，服务重启后重新�
 
 compaction 或 undo 使历史窗口收缩时仅重建日期代际，Git 快照跨代保留；fork/新 Session 独立初始化。同日 prepare 为纯读路径，不产生写放大。
 
-适配说明：fork 0619 的 Git/日期上下文按 Session 持久化语义迁移到目标 V2 SystemContext 架构（工作流第 4 条：V2 已完整承载同语义时不机械复制 V1 结构）。裁记（SUPERSEDED_BY_V2）：V1 机制全套——session 表 context_epoch JSON 列（session.sql.ts 不存在于目标；V2 用独立 SessionContextEpochTable，core TS migration 20260605/20260622 已建并简化）、packages/opencode/src/session/context-epoch.ts V1 模块（依赖目标不存在的 @/storage/db 与 Database.use/transaction API；V2 core/src/session/context-epoch.ts 以 initialize/prepare/reset 完整承载，且 reconcile/replace/幂等/事件化持久化更强——ContextUpdated 经 EventV2 commit hook 推进快照）、prompt.ts 6 hunk 与 system.ts 7 hunk 的 V1 接线（V2 由 runner/llm.ts:103/183/198 消费 registry+epoch，history.ts 按 baseline_seq 过滤 system 消息——比 fork 的 user-message 注入设计更强；AGENTS.md V2 规则禁止把 V1 循环桥接到 epoch）、SQL migration+snapshot（migration 所有权已移至 core TS migration）、V1 测试三文件（llm 日期 user-message/，prompt rewind/，migration——V2 等价面由 core 既有 session-runner.test/registry.test/builtins.test 覆盖日期与 epoch）。承载（fork 唯一 V2 缺口）：core/git SystemContext source——fork 的 smark/git 语义（git 身份按 session 冻结+显式更新）以 packages/core/src/system-context/git.ts 落地（discover/branch/defaultRemoteBranch→branch/main branch/repo root 三行快照；非 git 目录确定性单行；V2 reconcile 显式 update 强于 fork 的永久冻结），经 locationServices 组合进 V2 运行器；新测试 git.test.ts 四用例（baseline 冻结/Unchanged 幂等/分支切换 Updated/非 git 占位）移植 fork system.test 的 TestClock 冻结+隔离+rebuild 精神。
+适配说明：保留V1真实路径的Session冻结、跨日持久reminder、历史块边界投影与事务重读，改用Core持有的同连接sync facade及私有nullable列；迁移和fresh schema按Core入口适配，不复制旧完整snapshot。V2沿既有详细Git来源及epoch存储，增加Session-frozen观察模式并去掉Location缓存；日期更新继续原事件，rewind丢失最后更新投影时重建日期代际且保留Git。不注册第二个core/git，不让V2依赖legacy loop。日期归因交唯一prepared估算器，单次转移至system而不重复计数。源测试意图迁实际数据库、环境、provider与fork/compaction接缝；独立数据库层恢复代替禁止运行的子进程helper，不宣称跨进程CLI认证。
 
 diff --git a/docs/plans/session-git-date-context-persistence.md b/docs/plans/session-git-date-context-persistence.md
 new file mode 100644
@@ -611,217 +611,871 @@ index 0000000000000000000000000000000000000000..58b003700daa2c4875db78daeae2ee79
 +```
 +
 +本条为 verdict 行政记录，不含设计修改。
-diff --git a/packages/core/src/system-context/git.ts b/packages/core/src/system-context/git.ts
-new file mode 100644
---- /dev/null
-+++ b/packages/core/src/system-context/git.ts
-@@ -0,0 +1,51 @@
-+export * as GitContext from "./git"
-+
-+import { makeLocationNode } from "../effect/app-node"
-+import { Effect, Layer, Schema } from "effect"
-+import { Location } from "../location"
-+import { Git } from "../git"
-+import { SystemContext } from "./index"
-+import { SystemContextRegistry } from "./registry"
-+
-+const source = Layer.effectDiscard(
-+  Effect.gen(function* () {
-+    const location = yield* Location.Service
-+    const git = yield* Git.Service
-+    const registry = yield* SystemContextRegistry.Service
-+    // [local-smark] 0619 语义迁移到 V2 SystemContext：git 身份（branch/main branch/repo
-+    // root）作为 context source 进入 session 持有的 context epoch——baseline 在会话
-+    // 首轮冻结，后续轮次经 reconcile 显式产出 update 文本（"The git context is
-+    // now:"），消除 V1 每轮重采 git 造成的系统提示漂移。fork 原实现冻结后永不更新；
-+    // V2 代数在此更强：合法的分支切换会以显式 update 呈现而不是被忽略。
-+    const summary = Effect.gen(function* () {
-+      const repository = yield* git.repo.discover(location.directory).pipe(Effect.orDie)
-+      if (repository === undefined) return "not a git repository"
-+      // 三分量快照：branch/main/repo root 都是会话身份的组成——少一分则同名分支跨仓库会混淆。
-+      const [branch, main] = yield* Effect.all(
-+        [git.history.branch(repository), git.history.defaultRemoteBranch(repository)],
-+        { concurrency: "unbounded" },
-+      ).pipe(Effect.orDie)
-+      return [
-+        branch === undefined ? "branch: (detached HEAD)" : `branch: ${branch}`,
-+        main === undefined ? "main branch: (unknown)" : `main branch: ${main}`,
-+        `repo root: ${repository.worktree}`,
-+      ].join("\n")
-+    })
-+    const context = SystemContext.make({
-+      key: SystemContext.Key.make("core/git"),
-+      codec: Schema.toCodecJson(Schema.String),
-+      load: summary,
-+      // baseline 与 update 的措辞与 core/date 同构：陈述句前缀 + 当前值，模型侧无需学习新格式。
-+      baseline: (value) => ["Git context:", value].join("\n"),
-+      update: (_previous, value) => ["The git context is now:", value].join("\n"),
-+    })
-+
-+    yield* registry.register({ key: SystemContext.Key.make("core/git"), load: Effect.succeed(context) })
-+  }),
-+)
-+
-+export const node = makeLocationNode({
-+  name: "system-context-git",
-+  layer: source,
-+  deps: [Location.node, Git.node, SystemContextRegistry.node],
-+})
-
-diff --git a/packages/core/src/location-services.ts b/packages/core/src/location-services.ts
---- a/packages/core/src/location-services.ts
-+++ b/packages/core/src/location-services.ts
-@@ -31,6 +31,7 @@ import { SkillV2 } from "./skill"
- import { SkillGuidance } from "./skill/guidance"
- import { Snapshot } from "./snapshot"
- import { SystemContextBuiltIns } from "./system-context/builtins"
-+import { GitContext } from "./system-context/git"
- import { SystemContextRegistry } from "./system-context/registry"
- import { BuiltInTools } from "./tool/builtins"
- import { ReadToolFileSystem } from "./tool/read-filesystem"
-@@ -60,6 +61,8 @@ export const locationServices = LayerNode.group([
-   SkillV2.node,
-   SystemContextRegistry.node,
-   SystemContextBuiltIns.node,
-+  // [local-smark] 0619：git 身份作为 V2 context source 进入 session epoch（fork smark/git 语义的 V2 承载）。
-+  GitContext.node,
-   LocationMutation.node,
-   FileMutation.node,
-   PermissionV2.node,
+diff --git a/packages/core/src/system-context/index.ts b/packages/core/src/system-context/index.ts
+--- a/packages/core/src/system-context/index.ts
++++ b/packages/core/src/system-context/index.ts
+@@ -33,5 +33,7 @@ export interface Source<A> {
+   readonly key: Key
+   readonly codec: Schema.Codec<A, Schema.Json, never, never>
++  // Session来源已有持久值时不再观察；日期等动态来源继续沿用原刷新语义。
++  readonly lifetime?: "session"
+   readonly load: Effect.Effect<A | Unavailable>
+   readonly baseline: (current: A) => string
+   readonly update: (previous: A, current: A) => string
+@@ -99,4 +101,4 @@
+ interface PackedSource {
+   readonly key: Key
+-  readonly load: Effect.Effect<Loaded | Unavailable>
++  readonly load: (previous?: SourceSnapshot) => Effect.Effect<Loaded | Unavailable>
+ }
+@@ -142,1 +144,3 @@
+-      load: source.load.pipe(
++      load: (previous) => (source.lifetime === "session" && previous
++        ? Schema.decodeUnknownEffect(source.codec)(previous.value).pipe(Effect.orDie)
++        : source.load).pipe(
+@@ -182,6 +186,6 @@
+-const observe = (value: SystemContext) =>
++const observe = (value: SystemContext, previous?: Snapshot) =>
+   Effect.forEach(
+     value[ContextTypeId],
+     (source) =>
+-      source.load.pipe(
++      source.load(previous && getSnapshot(previous, source.key)).pipe(
+         Effect.map(
+@@ -221,1 +225,1 @@
+-  return observe(value).pipe(
++  return observe(value, previous).pipe(
+@@ -290,1 +294,1 @@
+-  return observe(value).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
++  return observe(value, previous).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -246,2 +246,0 @@
+-    // 目录级首次采样与源补丁一致；缓存仅随既有 Location 层存活，不扩展通用 Source 协议。
+-    const snapshot = yield* Effect.cached(gitContext())
+@@ -281,5 +279,6 @@
+         key: SystemContext.Key.make("core/git"),
+         codec: Schema.toCodecJson(Schema.String),
+-        // cached 返回延迟执行的 Effect，禁用或非仓库分支不会触发 Git。
+-        load: snapshot,
++        // 冻结归Session已保存的snapshot，不让同Location的新Session继承旧采样。
++        lifetime: "session",
++        load: gitContext(),
+         baseline: (text) => text,
+diff --git a/packages/core/src/session/context-epoch.ts b/packages/core/src/session/context-epoch.ts
+--- a/packages/core/src/session/context-epoch.ts
++++ b/packages/core/src/session/context-epoch.ts
+@@ -14,1 +14,1 @@
+-import { SessionContextEpochTable } from "./sql"
++import { SessionContextEpochTable, SessionMessageTable } from "./sql"
+@@ -21,2 +21,4 @@
+   sections: Schema.Array(Schema.Struct({ kind: Schema.Literals(["instructions", "skills"]), text: Schema.String })),
++  // rewind严格删除后缀；最后一次更新仍在即可证明此前更新没有被删。
++  anchor: Schema.optional(SessionMessage.ID),
+ })
+@@ -79,8 +81,11 @@
+-    ), sections: [],
++    ), sections: [], anchor: undefined,
+   }
+   const replacementSeq = compaction !== undefined && compaction.seq > stored.baseline_seq ? compaction.seq : undefined
+-  const result = replacementSeq
++  // 查原始投影而非已裁剪的模型历史；正常compaction过滤不等于用户删除更新。
++  const missingAnchor = snapshot.anchor && !(yield* db.select({ id: SessionMessageTable.id })
++    .from(SessionMessageTable).where(eq(SessionMessageTable.id, snapshot.anchor)).get().pipe(Effect.orDie))
++  const result = replacementSeq !== undefined || missingAnchor
+     ? yield* SystemContext.replace(value, snapshot.sources, capture(sections))
+     : yield* SystemContext.reconcile(value, snapshot.sources, capture(sections))
+   // 不可用来源继续保守复用原 baseline/证明，估算不能偷读当前文件生成替代正文。
+   if (result._tag === "Unchanged" || result._tag === "ReplacementBlocked") {
+@@ -97,4 +102,5 @@
+-  const state = { sources: result.snapshot, sections: [...snapshot.sections, ...sections] }
++  const messageID = SessionMessage.ID.create()
++  const state = { sources: result.snapshot, sections: [...snapshot.sections, ...sections], anchor: messageID }
+   yield* events.publish(
+     SessionEvent.ContextUpdated,
+-    { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: result.text },
++    { sessionID, messageID, timestamp: yield* DateTime.now, text: result.text },
 
 diff --git a/packages/core/test/system-context/git.test.ts b/packages/core/test/system-context/git.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/test/system-context/git.test.ts
-@@ -0,0 +1,131 @@
-+import { describe, expect } from "bun:test"
-+import { Effect, Layer } from "effect"
+@@ -0,0 +1,81 @@
++import { expect } from "bun:test"
++import { eq } from "drizzle-orm"
++import { DateTime, Effect, Schema } from "effect"
++import { adjust, setTime } from "effect/testing/TestClock"
 +import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 +import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-+import { Location } from "@opencode-ai/core/location"
-+import { FSUtil } from "@opencode-ai/core/fs-util"
-+import { Global } from "@opencode-ai/core/global"
++import { Database } from "@opencode-ai/core/database/database"
++import { EventV2 } from "@opencode-ai/core/event"
++import { Project } from "@opencode-ai/core/project"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
 +import { AbsolutePath } from "@opencode-ai/core/schema"
-+import { Git } from "@opencode-ai/core/git"
++import { SessionContextEpoch } from "@opencode-ai/core/session/context-epoch"
++import { SessionEvent } from "@opencode-ai/core/session/event"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { SessionContextEpochTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 +import { SystemContext } from "@opencode-ai/core/system-context"
-+import { GitContext } from "@opencode-ai/core/system-context/git"
-+import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
-+import { location } from "../fixture/location"
 +import { testEffect } from "../lib/effect"
 +
-+// fork 0619（Git 与日期上下文按 Session 持久化）的 V2 承载回归锁：git 身份作为
-+// context source 冻结进 baseline，变更经 reconcile 显式 update，不再每轮重采。
-+// Git.Service 以桩替换（fork 的 contextGit 桩同款意图）：分支由受控引用驱动，
-+// 不依赖真实子进程。日期 source 已由 builtins.test 覆盖，此处聚焦 git 面。
++const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
 +
-+const directory = AbsolutePath.make(FSUtil.resolve("/repo/packages/core"))
-+const worktree = AbsolutePath.make(FSUtil.resolve("/repo"))
-+const repository = new Git.Repository({
-+  worktree,
-+  gitDirectory: AbsolutePath.make(FSUtil.resolve("/repo/.git")),
-+  commonDirectory: AbsolutePath.make(FSUtil.resolve("/repo/.git")),
++it.effect("persists frozen Session Git across reload, dates and committed rewind", () => Effect.gen(function* () {
++  yield* setTime(Date.parse("2026-09-11T12:00:00Z"))
++  const db = (yield* Database.Service).db
++  const events = yield* EventV2.Service
++  const firstID = SessionSchema.ID.make("ses_epoch_first")
++  const secondID = SessionSchema.ID.make("ses_epoch_second")
++  yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
++  yield* db.insert(SessionTable).values([firstID, secondID].map(id => ({ id, project_id: Project.ID.global,
++    slug: id, directory: "/project", title: "context", version: "test" }))).run()
++  let currentGit = "git:first"
++  let loads = 0
++  // 每次构造新carrier模拟服务层重建；冻结事实只能来自数据库而非闭包缓存。
++  const context = () => Effect.succeed(SystemContext.combine([
++    SystemContext.make({ key: SystemContext.Key.make("core/git"), codec: Schema.toCodecJson(Schema.String), lifetime: "session",
++      load: Effect.sync(() => { loads++; return currentGit }), baseline: text => text, update: (_old, text) => text }),
++    SystemContext.make({ key: SystemContext.Key.make("core/date"), codec: Schema.toCodecJson(Schema.String),
++      load: DateTime.nowAsDate.pipe(Effect.map(date => date.toDateString())),
++      baseline: date => `Today's date: ${date}`, update: (_old, date) => `Today's date is now: ${date}` }),
++  ]))
++  const first = yield* SessionContextEpoch.prepare(db, events, context(), firstID)
++  expect(loads).toBe(1)
++  const boundary = SessionMessage.ID.make("msg_epoch_boundary")
++  yield* events.publish(SessionEvent.ContextUpdated, { sessionID: firstID, messageID: boundary,
++    timestamp: yield* DateTime.now, text: "boundary" })
++  currentGit = "git:second"
++  expect(yield* SessionContextEpoch.prepare(db, events, context(), firstID)).toEqual(first)
++  yield* adjust(25 * 60 * 60 * 1000)
++  const day2 = yield* SessionContextEpoch.prepare(db, events, context(), firstID)
++  expect(day2.baseline).toBe(first.baseline)
++  const rows = yield* db.select().from(SessionMessageTable).all()
++  expect(rows).toHaveLength(2)
++  expect(JSON.stringify(rows.at(-1)?.data)).toContain("Today's date is now:")
++  expect(yield* SessionContextEpoch.prepare(db, events, context(), firstID)).toEqual(day2)
++  expect(yield* db.select().from(SessionMessageTable).all()).toHaveLength(2)
++  expect(loads).toBe(1)
++  const second = yield* SessionContextEpoch.prepare(db, events, context(), secondID)
++  expect(second.baseline).toContain("git:second")
++  expect(loads).toBe(2)
++  const stored = yield* db.select().from(SessionContextEpochTable).where(eq(SessionContextEpochTable.session_id, firstID)).get()
++  const snapshot = Schema.decodeUnknownSync(Schema.Struct({ sources: SystemContext.Snapshot }))(JSON.parse(JSON.stringify(stored?.snapshot)))
++  expect(snapshot.sources[SystemContext.Key.make("core/git")]?.value).toBe("git:first")
++  currentGit = "git:third"
++  // replacement同样读取已保存Git，但日期仍是当前值，不冻结整个上下文。
++  expect(yield* SystemContext.replace(yield* context(), snapshot.sources)).toMatchObject({
++    _tag: "ReplacementReady", generation: { baseline: expect.stringContaining("git:first") },
++  })
++  yield* events.publish(SessionEvent.RevertEvent.Committed, { sessionID: firstID, messageID: boundary,
++    timestamp: yield* DateTime.now })
++  expect(yield* db.select().from(SessionMessageTable).all()).toHaveLength(1)
++  const rebuilt = yield* SessionContextEpoch.prepare(db, events, context(), firstID)
++  expect(rebuilt.baseline).not.toBe(first.baseline)
++  expect(rebuilt.baseline).toContain("git:first")
++  expect(rebuilt.baseline).toContain(`Today's date: ${(yield* DateTime.nowAsDate).toDateString()}`)
++  expect(loads).toBe(2)
++  const final = yield* db.select().from(SessionContextEpochTable).where(eq(SessionContextEpochTable.session_id, firstID)).get()
++  expect(final?.snapshot).toMatchObject({ sources: { "core/git": { value: "git:first" } } })
++  expect(final?.snapshot).not.toHaveProperty("anchor")
++  expect(yield* SessionContextEpoch.prepare(db, events, context(), firstID)).toEqual(rebuilt)
++}))
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -158,1 +158,1 @@
+-gitIt.effect("retains the Location Git snapshot through refresh and replacement", () => Effect.gen(function* () {
++gitIt.effect("freezes admitted Git while new Sessions sample the same Location independently", () => Effect.gen(function* () {
+@@ -172,2 +172,3 @@
+-  // 同目录重复初始化沿用源补丁的缓存，不增加跨会话身份管理。
+-  expect(second.baseline).toBe(first.baseline)
++  // 新initialize代表另一Session，必须独立采样，而不是复用Location缓存。
++  expect(second.baseline).toContain(" M file with spaces-2")
++  expect(second.baseline).not.toBe(first.baseline)
+@@ -182,2 +183,2 @@
+-  // 重复观察不启动新的 Git 采样，其他动态上下文仍由各自 Source 管理。
+-  expect(third.baseline).toBe(first.baseline)
++  // reconcile/replacement未重采Git，第三个新Session才观察到第三份状态。
++  expect(third.baseline).toContain(" M file with spaces-3")
+diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
+--- a/packages/core/src/session/sql.ts
++++ b/packages/core/src/session/sql.ts
+@@ -152,1 +152,3 @@
+     metadata: text({ mode: "json" }).$type<Record<string, unknown>>(),
++    // V1私有epoch不进入公开Session映射；V2继续使用既有session_context_epoch表。
++    context_epoch: text({ mode: "json" }).$type<unknown>(),
+diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
+--- a/packages/core/src/database/schema.gen.ts
++++ b/packages/core/src/database/schema.gen.ts
+@@ -282,2 +282,3 @@
+           \`metadata\` text,
++          \`context_epoch\` text,
+           \`cost\` real DEFAULT 0 NOT NULL,
+diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
+--- a/packages/core/src/database/migration.gen.ts
++++ b/packages/core/src/database/migration.gen.ts
+@@ -52,1 +52,2 @@
+     import("./migration/20260930100000_cold_storage_pack_v2"),
++    import("./migration/20260911173121_session_context_epoch"),
+diff --git a/packages/core/src/database/migration/20260911173121_session_context_epoch.ts b/packages/core/src/database/migration/20260911173121_session_context_epoch.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/database/migration/20260911173121_session_context_epoch.ts
+@@ -0,0 +1,8 @@
++import { Effect } from "effect"
++import type { DatabaseMigration } from "../migration"
++
++export default {
++  id: "20260911173121_session_context_epoch",
++  // 旧Session保持NULL，首次环境准备才采集；不新增表或回写公开metadata。
++  up: (tx) => tx.run("ALTER TABLE `session` ADD `context_epoch` text;").pipe(Effect.asVoid),
++} satisfies DatabaseMigration.Migration
+diff --git a/packages/opencode/src/session/context-epoch.ts b/packages/opencode/src/session/context-epoch.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/session/context-epoch.ts
+@@ -0,0 +1,124 @@
++import { eq, sql } from "drizzle-orm"
++import { Effect, Schema } from "effect"
++import { Database } from "@opencode-ai/core/database/database"
++import { SessionTable } from "@opencode-ai/core/session/sql"
++import { NotFoundError } from "@/storage/storage"
++import { MessageID, SessionID } from "./schema"
++
++// 持久形状沿用来源命名空间与baseline；日期更新保存完整System编码，wire适配仍归prompt。
++const SourceSnapshot = Schema.Struct({ value: Schema.String })
++const SystemMessage = Schema.Struct({
++  id: MessageID,
++  type: Schema.Literal("system"),
++  time: Schema.Struct({ created: Schema.Number }),
++  text: Schema.String,
 +})
-+
-+function gitStub(state: { discovered: boolean; current: string | undefined; main: string | undefined }) {
-+  // 桩只补 repo/history 两族：本测试面消费的接口；其余 undefined 由 as unknown 兜底，
-+  // 逐项补全会让桩耦合无关能力面。
-+  const repo = state.discovered ? repository : undefined
-+  return Layer.succeed(
-+    Git.Service,
-+    Git.Service.of({
-+      repo: { discover: () => Effect.succeed(repo), clone: undefined, create: undefined },
-+      history: {
-+        branch: () => Effect.succeed(state.current),
-+        defaultRemoteBranch: () => Effect.succeed(state.main),
-+        head: () => Effect.succeed(undefined),
-+        rootCommits: () => Effect.succeed([]),
-+      },
-+    } as unknown as Git.Interface),
-+  )
++export const Update = Schema.Struct({ after_message_id: MessageID, message: SystemMessage })
++export type Update = typeof Update.Type
++export const Stored = Schema.Struct({
++  baseline: Schema.String,
++  snapshot: Schema.Struct({ "smark/git": SourceSnapshot, "core/date": SourceSnapshot }),
++  boundary: Schema.String,
++  updates: Schema.Array(Update),
++})
++export type Stored = typeof Stored.Type
++export interface History {
++  readonly boundary: string
++  readonly messageIDs: readonly MessageID[]
 +}
 +
-+const locationLayer = Layer.succeed(
-+  Location.Service,
-+  Location.Service.of(
-+    location(
-+      { directory },
-+      { projectDirectory: worktree, vcs: { type: "git", store: AbsolutePath.make(FSUtil.resolve("/repo/.git")) } },
-+    ),
-+  ),
-+)
++// 新代只重建日期，Git沿用已保存值；不从工作区写文件，也不维护进程级Session缓存。
++const generation = (git: string, today: string, boundary: string): Stored => ({
++  baseline: `${git}\nToday's date: ${today}`,
++  snapshot: { "smark/git": { value: git }, "core/date": { value: today } },
++  boundary,
++  updates: [],
++})
 +
-+const node = LayerNode.group([GitContext.node, SystemContextRegistry.node])
-+
-+function makeIt(state: { discovered?: boolean; current: string | undefined; main: string | undefined }) {
-+  return testEffect(
-+    AppNodeBuilder.build(node, [
-+      [Location.node, locationLayer],
-+      [Git.node, gitStub({ discovered: true, ...state })],
-+      [Global.node, Global.layerWith({ config: "/global" })],
-+    ]),
-+  )
++const reconcile = (stored: Stored, now: Date, history: History):
++  { readonly _tag: "unchanged" | "changed"; readonly value: Stored } => {
++  const today = now.toDateString()
++  // compaction换代或undo隐藏锚点都会退休旧日期更新；两者都不能重新采集Git。
++  const anchorsVisible = stored.updates.every(update => history.messageIDs.includes(update.after_message_id))
++  if (stored.boundary !== history.boundary || !anchorsVisible) {
++    return { _tag: "changed", value: generation(stored.snapshot["smark/git"].value, today, history.boundary) }
++  }
++  if (stored.snapshot["core/date"].value === today) return { _tag: "unchanged", value: stored }
++  const anchor = history.messageIDs.at(-1)
++  // 空窗口没有可锚定消息；只重建当前日期baseline，不制造悬空更新。
++  if (!anchor) return { _tag: "changed", value: generation(stored.snapshot["smark/git"].value, today, history.boundary) }
++  const update: Update = {
++    after_message_id: anchor,
++    message: { id: MessageID.ascending(), type: "system", time: { created: now.getTime() }, text: `Today's date is now: ${today}` },
++  }
++  return { _tag: "changed", value: { ...stored,
++    snapshot: { ...stored.snapshot, "core/date": { value: today } }, updates: [...stored.updates, update] } }
 +}
 +
-+describe("GitContext", () => {
-+  // baseline 冻结：首轮 initialize 把 git 身份写入 baseline——V1 每轮重采的漂移在 V2 由 epoch 快照消除。
-+  makeIt({ current: "feature/context-epoch", main: "dev" }).effect(
-+    "freezes the git identity into the session baseline",
-+    () =>
-+      Effect.gen(function* () {
-+        const registry = yield* SystemContextRegistry.Service
-+        const initialized = yield* SystemContext.initialize(yield* registry.load())
-+        expect(initialized.baseline).toContain("Git context:")
-+        expect(initialized.baseline).toContain("branch: feature/context-epoch")
-+        expect(initialized.baseline).toContain("main branch: dev")
-+        expect(initialized.baseline).toContain(`repo root: ${worktree}`)
-+      }),
-+  )
-+
-+  // reconcile 不重发：同一 git 状态重入必须 Unchanged——fork 的幂等 prepare 语义在 V2 代数下的等价物。
-+  makeIt({ current: "feature/context-epoch", main: "dev" }).effect("keeps the baseline when git state is unchanged", () =>
-+    Effect.gen(function* () {
-+      const registry = yield* SystemContextRegistry.Service
-+      const initialized = yield* SystemContext.initialize(yield* registry.load())
-+      expect(yield* SystemContext.reconcile(yield* registry.load(), initialized.snapshot)).toEqual({ _tag: "Unchanged" })
-+    }),
-+  )
-+
-+  // 显式更新：分支切换产出 update 文本——比 fork 的永久冻结更强（合法变更可见而非被忽略）。
-+  // 手工构造“旧分支”快照：同 key 单 source 快照替换 value 后对当前 load reconcile。
-+  testEffect(
-+    AppNodeBuilder.build(node, [
-+      [Location.node, locationLayer],
-+      [Git.node, gitStub({ discovered: true, current: undefined, main: "dev" })],
-+      [Global.node, Global.layerWith({ config: "/global" })],
-+    ]),
-+  ).effect("reports a git context update when the branch changed", () =>
-+    Effect.gen(function* () {
-+      // 直接对两个不同 load 结果做 initialize→reconcile：旧 load 的快照 + 新 load 的当前值。
-+      const registry = yield* SystemContextRegistry.Service
-+      const fresh = yield* registry.load()
-+      const stale = yield* SystemContext.initialize(fresh)
-+      // 手工构造“旧分支”快照：用同 key 的单 source context 重放 initialize 的等价路径。
-+      const updated = yield* SystemContext.reconcile(
-+        fresh,
-+        { ...stale.snapshot, "core/git": { value: "branch: feature/context-epoch\nmain branch: dev" } } as never,
-+      )
-+      expect(updated).toMatchObject({ _tag: "Updated" })
-+      if (updated._tag === "Updated") expect(updated.text).toContain("The git context is now:")
-+    }),
-+  )
-+
-+  // 非 git 目录：discover 无仓库时输出确定性的单行说明，不阻塞 epoch 初始化。
-+  testEffect(
-+    AppNodeBuilder.build(node, [
-+      [Location.node, locationLayer],
-+      [Git.node, gitStub({ discovered: false, current: undefined, main: undefined })],
-+      [Global.node, Global.layerWith({ config: "/global" })],
-+    ]),
-+  ).effect("renders a deterministic placeholder outside git repositories", () =>
-+    Effect.gen(function* () {
-+      const registry = yield* SystemContextRegistry.Service
-+      const initialized = yield* SystemContext.initialize(yield* registry.load())
-+      expect(initialized.baseline).toContain("Git context:\nnot a git repository")
-+    }),
-+  )
++export const prepare = Effect.fn("SessionContextEpoch.prepare")(function* (input: {
++  sessionID: SessionID
++  history: History
++  now: Date
++  captureGit: Effect.Effect<string>
++}) {
++  const database = yield* Database.Service
++  // withSync预约当前Effect层的同一原生连接，不另开DB或跨await持有事务。
++  const row = yield* Database.withSync(database, db =>
++    db.select({ epoch: SessionTable.context_epoch }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get())
++  if (!row) return yield* new NotFoundError({ message: `Session not found: ${input.sessionID}` })
++  if (row.epoch !== null) {
++    const stored = Schema.decodeUnknownSync(Stored)(row.epoch)
++    const result = reconcile(stored, input.now, input.history)
++    // 同日同窗口只读，不拿写锁、不更新Session排序时间。
++    if (result._tag === "unchanged") return stored
++    return yield* Database.withSync(database, db => db.transaction(tx => {
++      const fresh = tx.select({ epoch: SessionTable.context_epoch }).from(SessionTable)
++        .where(eq(SessionTable.id, input.sessionID)).get()
++      if (!fresh) throw new Error(`Session deleted during context epoch update: ${input.sessionID}`)
++      // immediate内重读胜者；并发请求不能各自产生同一日期更新。
++      const winner = reconcile(Schema.decodeUnknownSync(Stored)(fresh.epoch), input.now, input.history)
++      if (winner._tag !== "unchanged") write(tx, input.sessionID, winner.value)
++      return winner.value
++    }, { behavior: "immediate" }))
++  }
++  // Git在事务外采集；最终采用事务内已提交的胜者，不覆盖另一个初始化者的快照。
++  const git = yield* input.captureGit
++  return yield* Database.withSync(database, db => db.transaction(tx => {
++    const fresh = tx.select({ epoch: SessionTable.context_epoch }).from(SessionTable)
++      .where(eq(SessionTable.id, input.sessionID)).get()
++    if (!fresh) throw new Error(`Session deleted during context epoch initialization: ${input.sessionID}`)
++    if (fresh.epoch !== null) return Schema.decodeUnknownSync(Stored)(fresh.epoch)
++    const created = generation(git, input.now.toDateString(), input.history.boundary)
++    write(tx, input.sessionID, created)
++    return created
++  }, { behavior: "immediate" }))
 +})
++
++// 只更新私有列，显式保留time_updated，避免环境准备改变Session排序。
++const write = (tx: Pick<Database.Interface["sync"], "update">, sessionID: SessionID, value: Stored) =>
++  tx.update(SessionTable).set({ context_epoch: value, time_updated: sql`${SessionTable.time_updated}` })
++    .where(eq(SessionTable.id, sessionID)).run()
++
++export interface UpdatePlacement {
++  readonly placement: { readonly type: "after"; readonly id: MessageID }
++    | { readonly type: "before"; readonly id: MessageID } | { readonly type: "end" }
++  readonly text: string
++}
++
++export function projectUpdates(input: {
++  updates: readonly Update[]
++  canonicalIDs: readonly MessageID[]
++  retainedIDs: ReadonlySet<MessageID>
++}): UpdatePlacement[] {
++  // 每条更新仅放一次；裁剪不改canonical顺序，tool-call/result完整块不会被插开。
++  return input.updates.map(update => {
++    const anchor = update.after_message_id
++    if (input.retainedIDs.has(anchor)) return { placement: { type: "after", id: anchor }, text: update.message.text }
++    const order = input.canonicalIDs.indexOf(anchor)
++    const successor = order < 0 ? undefined : input.canonicalIDs.slice(order + 1).find(id => input.retainedIDs.has(id))
++    return successor ? { placement: { type: "before", id: successor }, text: update.message.text }
++      : { placement: { type: "end" }, text: update.message.text }
++  })
++}
++
++export * as SessionContextEpoch from "./context-epoch"
+diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
+--- a/packages/opencode/src/session/system.ts
++++ b/packages/opencode/src/session/system.ts
+@@ -2,1 +2,1 @@
+-import { Context, Effect, Layer } from "effect"
++import { Context, DateTime, Effect, Layer } from "effect"
+@@ -34,1 +34,5 @@
+ import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
++import { Database } from "@opencode-ai/core/database/database"
++import { NotFoundError } from "@/storage/storage"
++import { SessionContextEpoch } from "./context-epoch"
++import type { SessionID } from "./schema"
+@@ -67,2 +71,12 @@
++export interface EnvironmentInput {
++  readonly sessionID: SessionID
++  readonly model: Provider.Model
++  readonly history: SessionContextEpoch.History
++}
++export interface EnvironmentResult {
++  readonly system: string[]
++  readonly updates: readonly SessionContextEpoch.Update[]
++}
++
+ export interface Interface {
+-  readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
++  readonly environment: (input: EnvironmentInput) => Effect.Effect<EnvironmentResult, NotFoundError>
+@@ -83,4 +98,4 @@
+     const config = yield* Config.Service
++    const database = yield* Database.Service
+ 
+-    // 沿用源补丁的目录级缓存，工具改变工作树后仍返回首次采集的状态。
+-    const gitContextCache = new Map<string, string>()
++    // Git只描述采集；首次冻结与重启恢复由Session私有epoch持有。
+@@ -91,2 +106,0 @@
+-      const cached = gitContextCache.get(cwd)
+-      if (cached) return cached
+@@ -96,3 +109,1 @@
+-        const result = `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
+-        gitContextCache.set(cwd, result)
+-        return result
++        return `Is directory a git repo: ${ctx.project.vcs === "git" ? "yes" : "no"}`
+@@ -102,3 +113,1 @@
+-        const result = "Is directory a git repo: no"
+-        gitContextCache.set(cwd, result)
+-        return result
++        return "Is directory a git repo: no"
+@@ -147,3 +156,1 @@
+-      const result = lines.join("\n")
+-      gitContextCache.set(cwd, result)
+-      return result
++      return lines.join("\n")
+@@ -153,4 +160,7 @@
+-      environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
++      environment: Effect.fn("SystemPrompt.environment")(function* (input: EnvironmentInput) {
+         const ctx = yield* InstanceState.context
+-        // Effect.fn 返回函数，必须调用后再 yield*，不能直接执行函数值。
+-        const gitContext = yield* getGitContext()
++        const model = input.model
++        const epoch = yield* SessionContextEpoch.prepare({
++          sessionID: input.sessionID, history: input.history,
++          now: yield* DateTime.nowAsDate, captureGit: getGitContext(),
++        }).pipe(Effect.provideService(Database.Service, database))
+@@ -171,1 +181,1 @@
+-            ...gitContext.split("\n").map((line) => `  ${line}`),
++            ...epoch.snapshot["smark/git"].value.split("\n").map((line) => `  ${line}`),
+@@ -178,1 +188,2 @@
+-            `  Today's date: ${new Date().toDateString()}`,
++            // baseline保留初始日期；比较snapshot推进到今天也不能改写旧前缀。
++            `  ${epoch.baseline.slice(epoch.snapshot["smark/git"].value.length + 1)}`,
+@@ -183,1 +194,1 @@
+-        return [
++        return { system: [
+@@ -205,1 +216,1 @@
+-        ].filter((part): part is string => part !== undefined)
++        ].filter((part): part is string => part !== undefined), updates: epoch.updates }
+@@ -253,1 +264,1 @@
+-  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node],
++  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node, Database.node],
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -56,1 +56,2 @@
+ import { Database } from "@opencode-ai/core/database/database"
++import { SessionContextEpoch } from "./context-epoch"
+@@ -1525,1 +1526,2 @@
+       systemText: string
++      contextReminders: string
+@@ -1548,1 +1550,2 @@
+-            text: [input.systemText, decideEstimate.text].join("\n"),
++            // 裁剪后的reminder仍出现一次，预算候选必须计入同一份实际包装文本。
++            text: [input.systemText, input.contextReminders, decideEstimate.text].filter(Boolean).join("\n"),
+@@ -2017,10 +2020,12 @@
+             // decide 跳过 skills/MCP 指令，只保留 env + instructions
++            // canonical在插件改写前已捕获，epoch不把临时wire裁剪当作持久历史删除。
++            const epochHistory = { boundary: proof.boundary, messageIDs: canonical.map(message => message.info.id) }
+             const [skills, env, instructions, mcpInstructions] = yield* Effect.all([
+               decide ? Effect.succeed(undefined) : sys.skills(agent),
+-              sys.environment(model),
++              sys.environment({ sessionID, model, history: epochHistory }).pipe(Effect.orDie),
+               instruction.system().pipe(Effect.orDie),
+               decide ? Effect.succeed(undefined) : sys.mcp(agent, session.permission),
+             ])
+             const system = [
+-              ...env,
++              ...env.system,
+               ...instructions,
+@@ -2034,8 +2039,27 @@
++            // Anthropic不接纳历史中部system消息；只在wire投影为user reminder，不修改真实用户身份。
++            const reminderMessage = (text: string) => ({ role: "user", content: `<system-reminder>\n${text}\n</system-reminder>` } satisfies ModelMessage)
++            const contextReminders = env.updates.map(update => reminderMessage(update.message.text).content)
+             const requestMsgs = decide
+-              ? yield* selectDecideMessages({ messages: msgs, model, systemText })
++              ? yield* selectDecideMessages({ messages: msgs, model, systemText, contextReminders: contextReminders.join("\n") })
+               : msgs
+-            const modelMsgs = decide
+-              ? yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
++            const before = new Map<MessageID, ModelMessage[]>()
++            const after = new Map<MessageID, ModelMessage[]>()
++            const end: ModelMessage[] = []
++            for (const projected of SessionContextEpoch.projectUpdates({ updates: env.updates,
++              canonicalIDs: epochHistory.messageIDs, retainedIDs: new Set(requestMsgs.map(message => message.info.id)) })) {
++              const message = reminderMessage(projected.text)
++              if (projected.placement.type === "before") {
++                before.set(projected.placement.id, [...(before.get(projected.placement.id) ?? []), message])
++                continue
++              }
++              if (projected.placement.type === "after") {
++                after.set(projected.placement.id, [...(after.get(projected.placement.id) ?? []), message])
++                continue
++              }
++              end.push(message)
++            }
++            const blocks = decide
++              ? yield* MessageV2.toModelMessageChunksEffect(requestMsgs, model)
+               : yield* Effect.gen(function* () {
+                   // #557：stable prefix 只用本轮 admitted canonical IDs 的已转换块，不从 working clone 写回。
+                   const stable = requestMsgs.slice(0, conversionDirty)
+@@ -2051,9 +2075,14 @@
+-                    ...stable.flatMap((message) => messageEntry.chunks.get(message.info.id) ?? []),
++                    ...stable.map((message) => messageEntry.chunks.get(message.info.id) ?? []),
+                     ...(conversionDirty < requestMsgs.length
+-                      ? yield* MessageV2.toModelMessagesEffect(requestMsgs.slice(conversionDirty), model)
++                      ? yield* MessageV2.toModelMessageChunksEffect(requestMsgs.slice(conversionDirty), model)
+                       : []),
+                   ]
+                 })
++            // 按完整转换块插入，不能拆开tool-call/result；稳定块继续复用原缓存。
++            const modelMsgs = requestMsgs.flatMap((message, index) => [
++              ...(before.get(message.info.id) ?? []), ...(blocks[index] ?? []), ...(after.get(message.info.id) ?? []),
++            ])
++            modelMsgs.push(...end)
+             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
+             if (!isLastStep) {
+               const prior = msgs.findLast(message => message.info.role === "assistant" && message.info.inputEstimate)?.info
+@@ -2086,2 +2115,4 @@
+               inputSections: [
++                // 交付单条实际包装文本，由唯一prepared估算器从userText转入system，不另加字符总数。
++                ...contextReminders.map(text => ({ kind: "system" as const, text })),
+                 ...instructions.map(text => ({ kind: "instructions" as const, text })),
+diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
+--- a/packages/core/src/util/token.ts
++++ b/packages/core/src/util/token.ts
+@@ -6,1 +6,1 @@
+-export type SystemSection = { readonly kind: "instructions" | "skills"; readonly text: string }
++export type SystemSection = { readonly kind: "system" | "instructions" | "skills"; readonly text: string }
+@@ -116,9 +116,10 @@
+-    if (section === "system" && typeof scalar === "string" && sections) {
++    if ((section === "system" || section === "messages" && bucket === "userText") && typeof scalar === "string" && sections) {
+       // 仅匹配服务端 source 真正渲染的片段；插件删除或改写的文本不会凭本地文件重新补回。
+       const spans = sections.flatMap((item) => {
+         const found: Array<{ start: number; end: number; kind: SystemSection["kind"]; text: string }> = []
+-        if (!item.text) return found
++        // user历史仅接受明确的系统reminder归属，不能把普通用户文字认作指令或skill。
++        if (!item.text || section !== "system" && item.kind !== "system") return found
+         for (let start = scalar.indexOf(item.text); start >= 0; start = scalar.indexOf(item.text, start + item.text.length))
+           found.push({ start, end: start + item.text.length, kind: item.kind, text: item.text })
+         return found
+       }).toSorted((a, b) => a.start - b.start || b.end - a.end)
+@@ -135,1 +136,3 @@
+-      counts.system += prefix + chars - attributed
++      // 只转移匹配的转义后正文；原消息结构和未匹配字符仍留user桶，实际body总长不变。
++      if (section === "system") counts.system += prefix + chars - attributed
++      else counts.messages.userText += prefix + chars - attributed
+diff --git a/packages/core/test/util-token.test.ts b/packages/core/test/util-token.test.ts
+--- a/packages/core/test/util-token.test.ts
++++ b/packages/core/test/util-token.test.ts
+@@ -61,2 +61,16 @@
+   expect(absent.inputBreakdown?.skills).toBe(0)
++  // wrapped日期以user角色传输，归因只转移一次，转义、总长和估算输入必须守恒。
++  const reminder = "<system-reminder>\nToday's date is now: \"next\"\\date\n</system-reminder>"
++  const messages = { messages: [{ role: "user", content: "actual user" }, { role: "user", content: reminder }] }
++  const ordinary = Token.estimateRequest(messages, [], [])
++  const attributed = Token.estimateRequest(messages, [], [{ kind: "system", text: reminder }, { kind: "system", text: reminder }])
++  const size = JSON.stringify(reminder).length - 2
++  expect(attributed.bodyChars).toBe(ordinary.bodyChars)
++  expect(attributed.input).toBe(ordinary.input)
++  expect(attributed.inputBreakdown?.system).toBe((ordinary.inputBreakdown?.system ?? 0) + size)
++  expect(attributed.inputBreakdown?.messages.userText).toBe((ordinary.inputBreakdown?.messages.userText ?? 0) - size)
++  expect(attributed.inputBreakdown?.messages.total).toBe(attributed.inputBreakdown?.messages.userText)
++  // 无实际载荷的声明和普通instructions提示不能窃取真实user正文。
++  expect(Token.estimateRequest(messages, [], [{ kind: "system", text: "absent" }, { kind: "instructions", text: "actual user" }]).inputBreakdown)
++    .toEqual(ordinary.inputBreakdown)
+ })
+diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
+--- a/packages/opencode/test/session/system.test.ts
++++ b/packages/opencode/test/session/system.test.ts
+@@ -3,1 +3,1 @@
+-import { Effect, Layer } from "effect"
++import { DateTime, Effect, Layer } from "effect"
+@@ -14,1 +14,9 @@
+ import { testEffect } from "../lib/effect"
++import { Database } from "@opencode-ai/core/database/database"
++import { Project } from "@opencode-ai/core/project"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { SessionTable } from "@opencode-ai/core/session/sql"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import { SessionContextEpoch } from "../../src/session/context-epoch"
++import { MessageID, SessionID } from "../../src/session/schema"
++import { adjust, setTime } from "effect/testing/TestClock"
+@@ -55,1 +63,1 @@
+-  LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node]), [
++  LayerNode.compile(LayerNode.group([SystemPrompt.node, Git.node, Database.node]), [
+@@ -95,1 +103,17 @@
++// 复用真实Core连接布置私有持久行，不启动应用或复刻Session业务实现。
++const seedContextSession = Effect.fn("test.seedContextSession")(function* (sessionID: SessionID, directory: string) {
++  const database = yield* Database.Service
++  yield* Database.withSync(database, db => {
++    db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make(directory), sandboxes: [] }).onConflictDoNothing().run()
++    db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: sessionID,
++      directory, title: "context", version: "test", time_updated: 1234 }).run()
++  })
++})
++const contextHistory = { boundary: "null", messageIDs: [MessageID.make("msg_context_seed")] }
++const contextIt = testEffect(LayerNode.compile(Database.node))
++const prepareContext = (sessionID: SessionID, git: string, history = contextHistory) => Effect.gen(function* () {
++  return yield* SessionContextEpoch.prepare({ sessionID, history, now: yield* DateTime.nowAsDate,
++    captureGit: Effect.succeed(git) })
++})
++
+ describe("session.system", () => {
+@@ -110,15 +134,22 @@
+-  it.instance("retains the directory Git snapshot after the worktree changes", () => Effect.gen(function* () {
++  it.instance("retains the Session Git snapshot after the worktree changes", () => Effect.gen(function* () {
+     const prompt = yield* SystemPrompt.Service
+     const git = yield* Git.Service
+     const ctx = yield* InstanceState.context
+     const model = { providerID: "test", api: { id: "test" } } as Provider.Model
+-    const initial = yield* prompt.environment(model)
++    const sessionID = SessionID.make("ses_system_git")
++    yield* seedContextSession(sessionID, ctx.directory)
++    const input = { sessionID, model, history: contextHistory }
++    const initial = yield* prompt.environment(input)
+     const changed = yield* git.run(["checkout", "-b", "snapshot-next"], { cwd: ctx.directory })
+     expect(changed.exitCode).toBe(0)
+-    // 使用真实 Git 改变工作树，再验证源补丁的目录缓存而非新的 Session 生命周期。
++    // 真实工作树变化不改写Session已保存的快照，不能依赖目录级内存缓存。
+     expect((yield* git.branch(ctx.directory))).toBe("snapshot-next")
+-    expect(yield* prompt.environment(model)).toEqual(initial)
++    expect(yield* prompt.environment(input)).toEqual(initial)
+   }), { git: true })
+   it.instance("does not inject private Git fields into non-repository environments", () => Effect.gen(function* () {
+     const prompt = yield* SystemPrompt.Service
+-    const text = (yield* prompt.environment({ providerID: "test", api: { id: "test" } } as Provider.Model)).join("\n")
++    const ctx = yield* InstanceState.context
++    const sessionID = SessionID.make("ses_system_plain")
++    yield* seedContextSession(sessionID, ctx.directory)
++    const text = (yield* prompt.environment({ sessionID, history: contextHistory,
++      model: { providerID: "test", api: { id: "test" } } as Provider.Model })).system.join("\n")
+@@ -213,1 +244,63 @@
++  contextIt.effect("session context: persists Git across fresh preparations and isolates Sessions", () => Effect.gen(function* () {
++    const directory = "/context"
++    const firstID = SessionID.make("ses_context_a")
++    const secondID = SessionID.make("ses_context_b")
++    yield* seedContextSession(firstID, directory)
++    yield* seedContextSession(secondID, directory)
++    const first = yield* prepareContext(firstID, "before.ts")
++    expect((yield* prepareContext(firstID, "after.ts")).baseline).toBe(first.baseline)
++    expect((yield* prepareContext(secondID, "after.ts")).baseline).toContain("after.ts")
++    expect((yield* prepareContext(firstID, "later.ts")).baseline).toBe(first.baseline)
++  }))
++  contextIt.effect("session context: appends one durable date update without rewriting baseline", () => Effect.gen(function* () {
++    yield* setTime(Date.parse("2026-09-11T12:00:00Z"))
++    const id = SessionID.make("ses_context_date")
++    yield* seedContextSession(id, "/context")
++    const first = yield* prepareContext(id, "before.ts")
++    expect(first.updates).toEqual([])
++    yield* adjust(25 * 60 * 60 * 1000)
++    const next = yield* prepareContext(id, "after.ts")
++    expect(next.baseline).toBe(first.baseline)
++    expect(next.updates).toHaveLength(1)
++    expect(next.updates[0]?.message.text).toContain("Today's date is now:")
++    expect((yield* prepareContext(id, "later.ts")).updates).toEqual(next.updates)
++    // epoch写入不得改变Session排序时间，亦不能泄漏到公开metadata。
++    const database = yield* Database.Service
++    expect(yield* Database.withSync(database, db => db.select({ updated: SessionTable.time_updated,
++      metadata: SessionTable.metadata }).from(SessionTable).get())).toEqual({ updated: 1234, metadata: null })
++  }))
++  contextIt.effect("session context: hidden update anchor retires dates while preserving Git", () => Effect.gen(function* () {
++    const id = SessionID.make("ses_context_undo")
++    yield* seedContextSession(id, "/context")
++    const first = yield* prepareContext(id, "before.ts")
++    yield* adjust(25 * 60 * 60 * 1000)
++    expect((yield* prepareContext(id, "after.ts")).updates).toHaveLength(1)
++    const rebuilt = yield* prepareContext(id, "later.ts", { boundary: "null", messageIDs: [MessageID.make("msg_other")] })
++    expect(rebuilt.updates).toEqual([])
++    expect(rebuilt.baseline).not.toBe(first.baseline)
++    expect(rebuilt.snapshot["smark/git"].value).toBe("before.ts")
++  }))
++  contextIt.effect("session context: compaction replaces date generation but keeps Session Git", () => Effect.gen(function* () {
++    const id = SessionID.make("ses_context_compact")
++    yield* seedContextSession(id, "/context")
++    const first = yield* prepareContext(id, "before.ts")
++    yield* adjust(25 * 60 * 60 * 1000)
++    expect((yield* prepareContext(id, "after.ts")).updates).toHaveLength(1)
++    const compacted = yield* prepareContext(id, "later.ts", { boundary: "completed-compaction", messageIDs: [MessageID.make("msg_tail")] })
++    expect(compacted.updates).toEqual([])
++    expect(compacted.baseline).not.toBe(first.baseline)
++    expect(compacted.snapshot["smark/git"].value).toBe("before.ts")
++  }))
++  test("session context: update placement preserves after, before-successor and end slots", () => {
++    const a = MessageID.make("msg_a")
++    const b = MessageID.make("msg_b")
++    const update: SessionContextEpoch.Update = { after_message_id: a,
++      message: { id: MessageID.make("msg_update"), type: "system", time: { created: 1 }, text: "date" } }
++    expect(SessionContextEpoch.projectUpdates({ updates: [update], canonicalIDs: [a, b], retainedIDs: new Set([a]) }))
++      .toEqual([{ placement: { type: "after", id: a }, text: "date" }])
++    expect(SessionContextEpoch.projectUpdates({ updates: [update], canonicalIDs: [a, b], retainedIDs: new Set([b]) }))
++      .toEqual([{ placement: { type: "before", id: b }, text: "date" }])
++    expect(SessionContextEpoch.projectUpdates({ updates: [update], canonicalIDs: [a], retainedIDs: new Set() }))
++      .toEqual([{ placement: { type: "end" }, text: "date" }])
++  })
+ })
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -2732,8 +2732,11 @@
+         const modelMessages = yield* Effect.promise(() => MessageV2.toModelMessages(input as any, resolved))
++        // 原tool配对断言不变；追加历史assistant后接user reminder，验证Anthropic真实wire适配。
++        const reminder = "<system-reminder>\nToday's date is now: Sat Sep 12 2026\n</system-reminder>"
++        modelMessages.push({ role: "assistant", content: "prior answer" }, { role: "user", content: reminder }, { role: "user", content: "current turn" })
+         yield* drain({
+           user,
+           sessionID,
+           model: resolved,
+           agent,
+-          system: [],
++          system: ["baseline prefix", "second system part"],
+           messages: modelMessages,
+@@ -2758,1 +2761,3 @@
+         const messages = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>
++        expect(JSON.stringify(body.system)).toContain("baseline prefix")
++        expect(messages.some(message => message.role === "user" && message.content.some(part => part.type === "text" && part.text === reminder))).toBe(true)
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -11,1 +11,1 @@
+-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
++import { Cause, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+@@ -44,1 +44,2 @@
+-import { MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionContextEpoch } from "../../src/session/context-epoch"
+@@ -858,6 +859,89 @@
+ const useServerConfig = Effect.fn("test.useServerConfig")(function* (config: (url: string) => Partial<ConfigV1.Info>) {
+   const { directory: dir } = yield* TestInstance
+   const llm = yield* TestLLMServer
+   yield* writeConfig(dir, config(llm.url))
+   return { dir, llm }
+ })
++
++const seedGitContext = (sessionID: SessionID, git: string) => Effect.gen(function* () {
++  // 只控制Git采集边界；真实environment、epoch读写及prompt装配都继续执行生产路径。
++  return yield* SessionContextEpoch.prepare({ sessionID, history: { boundary: "null", messageIDs: [] },
++    now: yield* DateTime.nowAsDate, captureGit: Effect.succeed(git) })
++})
++const rewindContextDate = (sessionID: SessionID) => Effect.gen(function* () {
++  const database = yield* Database.Service
++  yield* Database.withSync(database, db => {
++    const row = db.select({ epoch: SessionTable.context_epoch }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
++    const stored = Schema.decodeUnknownSync(SessionContextEpoch.Stored)(row?.epoch)
++    db.update(SessionTable).set({ context_epoch: { ...stored,
++      snapshot: { ...stored.snapshot, "core/date": { value: "Thu Jan 01 1970" } } } }).where(eq(SessionTable.id, sessionID)).run()
++  })
++})
++const contextTurn = (sessionID: SessionID, text: string) => Effect.gen(function* () {
++  const llm = yield* TestLLMServer
++  const prompt = yield* SessionPrompt.Service
++  yield* llm.text(`reply ${text}`)
++  return yield* prompt.prompt({ sessionID, agent: "build", parts: [{ type: "text", text }] })
++})
++
++it.instance("session context: real requests freeze Git and replay a persisted date exactly once", () => Effect.gen(function* () {
++  const { dir, llm } = yield* useServerConfig(providerCfg)
++  const sessions = yield* Session.Service
++  const chat = yield* sessions.create({ title: "Context epoch" })
++  yield* seedGitContext(chat.id, "Current branch: before\nStatus: clean")
++  yield* contextTurn(chat.id, "first")
++  const initial = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
++  const baselineDate = /Today's date: ([A-Za-z]{3} [A-Za-z]{3} \d{2} \d{4})/.exec(initial)?.[1]
++  expect(baselineDate).toBeDefined()
++  yield* writeText(path.join(dir, "dirty-marker.txt"), "dirty")
++  yield* contextTurn(chat.id, "second")
++  const second = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
++  expect(second).toContain("Current branch: before")
++  expect(second).not.toContain("dirty-marker.txt")
++  expect(second).toContain(`Today's date: ${baselineDate}`)
++  yield* rewindContextDate(chat.id)
++  yield* contextTurn(chat.id, "third")
++  const third = (yield* llm.inputs).at(-1)?.messages
++  if (!Array.isArray(third)) throw new Error("expected provider messages array")
++  expect(JSON.stringify(third)).toContain(`Today's date: ${baselineDate}`)
++  expect(JSON.stringify(third).split("Today's date is now:").length - 1).toBe(1)
++  expect(third?.at(-1)?.role).toBe("user")
++  expect(JSON.stringify(third?.at(-1)?.content)).toContain("Today's date is now:")
++  yield* contextTurn(chat.id, "fourth")
++  expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages).split("Today's date is now:").length - 1).toBe(1)
++}))
++
++it.instance("session context: actual fork starts without inheriting the parent's epoch", () => Effect.gen(function* () {
++  const { llm } = yield* useServerConfig(providerCfg)
++  const sessions = yield* Session.Service
++  const chat = yield* sessions.create({ title: "Fork context" })
++  yield* seedGitContext(chat.id, "Current branch: before")
++  yield* contextTurn(chat.id, "origin")
++  const forked = yield* sessions.fork({ sessionID: chat.id })
++  const database = yield* Database.Service
++  expect(yield* Database.withSync(database, db => db.select({ epoch: SessionTable.context_epoch })
++    .from(SessionTable).where(eq(SessionTable.id, forked.id)).get())).toEqual({ epoch: null })
++  yield* seedGitContext(forked.id, "Current branch: after-fork")
++  yield* contextTurn(forked.id, "fork turn")
++  expect(JSON.stringify((yield* llm.inputs).at(-1)?.messages)).toContain("Current branch: after-fork")
++  yield* contextTurn(chat.id, "origin turn")
++  const parent = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
++  expect(parent).toContain("Current branch: before")
++  expect(parent).not.toContain("Current branch: after-fork")
++}))
++
++it.instance("session context: completed compaction rebuilds dates without recapturing Git", () => Effect.gen(function* () {
++  const { llm } = yield* useServerConfig(providerCfg)
++  const prompt = yield* SessionPrompt.Service
++  const sessions = yield* Session.Service
++  const chat = yield* sessions.create({ title: "Compaction context" })
++  yield* seedGitContext(chat.id, "Current branch: before")
++  yield* contextTurn(chat.id, "first")
++  yield* rewindContextDate(chat.id)
++  yield* llm.text("context compacted summary")
++  yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref, auto: false })
++  yield* contextTurn(chat.id, "after compact")
++  const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
++  expect(body).toContain("Current branch: before")
++  expect(body).not.toContain("Today's date is now:")
++}))
+diff --git a/packages/opencode/test/storage/session-context-migration.test.ts b/packages/opencode/test/storage/session-context-migration.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/storage/session-context-migration.test.ts
+@@ -0,0 +1,60 @@
++import { expect } from "bun:test"
++import { eq, sql } from "drizzle-orm"
++import { Effect, Layer } from "effect"
++import path from "node:path"
++import { Database } from "@opencode-ai/core/database/database"
++import { DatabaseMigration } from "@opencode-ai/core/database/migration"
++import migration from "@opencode-ai/core/database/migration/20260911173121_session_context_epoch"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Project } from "@opencode-ai/core/project"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import { SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionContextEpoch } from "../../src/session/context-epoch"
++import { MessageID, SessionID } from "../../src/session/schema"
++import { tmpdir } from "../fixture/fixture"
++import { testEffect } from "../lib/effect"
++
++const memory = testEffect(LayerNode.compile(Database.node))
++const isolated = testEffect(Layer.empty)
++const seed = (id: SessionID) => Effect.gen(function* () {
++  const db = (yield* Database.Service).db
++  yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/context"), sandboxes: [] }).run()
++  yield* db.insert(SessionTable).values({ id, project_id: Project.ID.global, slug: id, directory: "/context",
++    title: "original title", version: "test", time_updated: 1234 }).run()
++})
++
++memory.effect("context migration adds nullable storage without changing existing rows", () => Effect.gen(function* () {
++  const id = SessionID.make("ses_context_migration")
++  yield* seed(id)
++  const db = (yield* Database.Service).db
++  // 从等价旧schema及已有行起步，走真实迁移journal，不手动写出目标列来冒充升级。
++  yield* db.run(sql`ALTER TABLE session DROP COLUMN context_epoch`)
++  yield* db.run(sql`DELETE FROM migration WHERE id = ${migration.id}`)
++  yield* DatabaseMigration.applyOnly(db, [migration])
++  expect(yield* db.select({ epoch: SessionTable.context_epoch, title: SessionTable.title,
++    updated: SessionTable.time_updated }).from(SessionTable).where(eq(SessionTable.id, id)).get())
++    .toEqual({ epoch: null, title: "original title", updated: 1234 })
++}))
++
++isolated.live("context epoch survives independent database layers on one isolated file", () => Effect.acquireUseRelease(
++  Effect.promise(() => tmpdir()),
++  tmp => Effect.gen(function* () {
++    const file = path.join(tmp.path, "context.db")
++    const id = SessionID.make("ses_context_file")
++    const history = { boundary: "null", messageIDs: [MessageID.make("msg_seed")] }
++    const first = yield* Effect.gen(function* () {
++      yield* seed(id)
++      return yield* SessionContextEpoch.prepare({ sessionID: id, history, now: new Date("2026-09-11T12:00:00"), captureGit: Effect.succeed("git-A") })
++    }).pipe(Effect.provide(Database.layerFromPath(file)))
++    // 新连接只从持久文件恢复；禁止第二次Git采集，避免通过共享闭包缓存得到假阳性。
++    const second = yield* SessionContextEpoch.prepare({ sessionID: id, history, now: new Date("2026-09-12T12:00:00"),
++      captureGit: Effect.die("persisted Git must not be sampled again") }).pipe(Effect.provide(Database.layerFromPath(file)))
++    expect(second.snapshot["smark/git"].value).toBe("git-A")
++    expect(second.baseline).toBe(first.baseline)
++    expect(second.updates).toHaveLength(1)
++    expect(second.updates[0]?.message.text).toContain("Today's date is now:")
++    expect(second.updates[0]?.after_message_id).toBe(history.messageIDs[0])
++  }),
++  tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++))

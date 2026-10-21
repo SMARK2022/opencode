@@ -4,6 +4,67 @@ Date: Sat, 23 May 2026 01:52:32 +0800
 Subject: [PATCH] feat(permission): 增加 Auto 智能体以应用 auto 权限路由
 
 
+diff --git a/packages/core/src/agent.ts b/packages/core/src/agent.ts
+--- a/packages/core/src/agent.ts
++++ b/packages/core/src/agent.ts
+@@ -77,1 +77,2 @@
+-        if (fallback) return fallback
++        // Auto 只接受显式选择，禁用其他主代理不应悄悄启用自动权限。
++        if (fallback && agent.id !== "Auto") return fallback
+@@ -103,1 +104,4 @@
+-        return Array.fromIterable(state.get().agents.values())
++        const data = state.get()
++        const selected = data.default ?? defaultID
++        // 与旧运行时一致：默认项居首，其余使用本地化名称顺序。
++        return Array.fromIterable(data.agents.values()).toSorted((a, b) => Number(b.id === selected) - Number(a.id === selected) || a.id.localeCompare(b.id))
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -134,1 +134,1 @@
+-      for (const id of ["interactive", "decide"]) {
++      for (const id of ["Auto", "interactive", "decide"]) {
+@@ -143,1 +143,3 @@
+-          item.description = "The default agent. Executes tools based on configured permissions."
++          item.description = id === "Auto"
++            ? "Build-like agent that routes shell commands through auto permission review."
++            : "The default agent. Executes tools based on configured permissions."
+@@ -152,2 +154,2 @@
+-              // ask 触发原生审批；持久授权和拒绝仍由 PermissionV2 判定。
+-              { action: "bash", resource: "*", effect: "ask" },
++              // Auto 只改变shell路由；其余基础权限及后续配置覆盖保持原样。
++              { action: "bash", resource: "*", effect: id === "Auto" ? "auto" : "ask" },
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -121,2 +121,3 @@
+       expect(agents.map((item) => String(item.id)).sort()).toEqual([
++        "Auto",
+         "build",
+@@ -138,1 +139,1 @@
+-        if (item.id === "interactive") continue
++        if (item.id === "interactive" || item.id === "Auto") continue
+@@ -142,1 +143,1 @@
+-      for (const id of ["interactive"]) {
++      for (const id of ["interactive", "Auto"]) {
+@@ -147,1 +148,1 @@
+-        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe("ask")
++        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
+@@ -155,1 +156,15 @@
+       }
++      // 显式默认可以选择Auto；仅剩Auto时仍不能成为隐式fallback。
++      const explicit = yield* agent.transform((draft) => draft.default(AgentV2.ID.make("Auto")))
++      expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("Auto"))
++      expect((yield* agent.all())[0]?.id).toBe(AgentV2.ID.make("Auto"))
++      yield* explicit.dispose
++      const only = yield* agent.transform((draft) => {
++        for (const item of draft.list()) if (item.id !== "Auto") draft.remove(item.id)
++      })
++      expect(yield* agent.default()).toBeUndefined()
++      expect((yield* agent.resolve("Auto"))?.id).toBe(AgentV2.ID.make("Auto"))
++      yield* only.dispose
++      expect((yield* agent.default())?.id).toBe(AgentV2.ID.make("build"))
++      const listed = yield* agent.all()
++      expect(listed.slice(1).map((item) => item.id)).toEqual(listed.slice(1).map((item) => item.id).toSorted((a, b) => a.localeCompare(b)))
 diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/agent.ts
 index 882e5daa21..003dd71521 100644
 --- a/packages/opencode/src/agent/agent.ts

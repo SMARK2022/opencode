@@ -9,10 +9,10 @@ Content-Transfer-Encoding: 8bit
 
 将实际出现的 git bundle create 精确提升为 cautious，同时保留 verify 等非创建模式的原有边界。
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
-@@ -1106,6 +1106,9 @@ function classifyGit(tokens: string[]): Decision | undefined {
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
+@@ -1102,6 +1102,9 @@ function classifyGit(tokens: string[]): Decision | undefined {
      return { level: "cautious", reason: "destructive git clean requires explicit approval" }
    if (sub === "push" && tokens.some((item) => item === "--force" || item === "-f"))
      return { level: "cautious", reason: "force push requires explicit approval" }

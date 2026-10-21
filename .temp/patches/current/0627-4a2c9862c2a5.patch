@@ -474,9 +474,9 @@ diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/p
            // #199：reviewer 不可用或返回 ask 时回退到用户审批，保持 fail-open 语义
            // #199：而非 fail-closed——未配置 reviewer 不应阻断正常工作流。
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -67,30 +67,66 @@ const RAW_FILE_MOVE_PATTERN = String.raw`${RAW_COMMAND_START}${RAW_COMMAND_PATH}
  // #220：预编译正则常量——dangerous raw 层，模块加载时编译一次。
  // 递归保护根判定仅依赖递归标志：-f（force）只压制提示符不增加破坏性，
@@ -515,7 +515,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +// 绝对路径（os.remove("/tmp/x") 都被 forbidden）。真实矩阵：forbidden 根/家/系统根
 +// 一级；dangerous 恰好二级；任意路径由 cautious 兑底（RE_C_*）。边界前瞻前必须
 +// 容忍可选尾斜杠（tab 补全形态 "/etc/ssl/"），该族无 token 层兑底。
-+const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
++const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
 +const INTERPRETER_DANGEROUS_PATH = String.raw`\/(?:${POSIX_SYSTEM_ROOTS})\/[^\/\s"']+\/[^\/\s"']+\/?(?=["'\s)])`
  const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i
  const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
@@ -575,8 +575,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +// 多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc）。
 +function foldProtectedPathText(text: string) {
 +  let out = text.replace(/(?!^)\/{2,}/g, "/")
-+  while (/\/[^/]+\/\.\.(?=\/|$)/.test(out)) {
-+    out = out.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
++  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(out)) {
++    out = out.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
 +  }
 +  return out
 +}
@@ -590,8 +590,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -  // 折叠多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc），
 -  // 归一化后才能正确匹配保护根路径
 -  let rawNormalized = normalized.replace(/(?!^)\/{2,}/g, "/")
--  while (/\/[^/]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
--    rawNormalized = rawNormalized.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
+-  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(rawNormalized)) {
+-    rawNormalized = rawNormalized.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
 -  }
 -  if (RE_D_RM_RF_ROOT.test(rawNormalized)) return "critical recursive delete"
 +  const rawNormalized = foldProtectedPathText(normalized)
@@ -625,8 +625,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
    // #220：反弹 shell——含扩展变体（/dev/tcp、nc -e、socat、bash >&/dev/tcp、mkfifo、PowerShell TCPClient）
    if (RE_D_REVERSE_SHELL.test(normalized)) return "reverse shell pattern"
  
-@@ -914,6 +965,13 @@ function dangerousRaw(command: string): string | undefined {
-   // 抢先降为 cautious（R2 GAP-2 实测）。源位形式（sudoers 在前）不匹配。
+@@ -896,5 +947,12 @@ function dangerousRaw(command: string): string | undefined {
    if (RE_D_SUDOERS_COPY_DEST.test(normalized)) return "sudoers modification grants privilege escalation"
  
 +  // ---- 系统根二级子目录删除（R3 分级：可授权高风险，显式授权可放行）----
@@ -684,13 +683,12 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
    if (FILE_DELETE_COMMANDS.has(cmd) && tokens.length > 1)
      return { level: "cautious", reason: "file deletion requires explicit approval" }
    // #222：find -delete / -exec rm 也属于文件删除——argv 语义判断
-@@ -1116,11 +1182,21 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
+@@ -1116,10 +1182,21 @@ function classifyTokens(tokens: string[], cwd?: string, stripped?: boolean[]): D
    if (cmd === "dd" && tokens.some((item) => item.startsWith("of=/dev/")))
      return { level: "forbidden", reason: "raw disk write" }
  
--  // ---- 磁盘格式化/分区（R2 五级拆分 + GAP-1）----
--  // mkfs 前缀族覆盖全部文件系统变体（vfat/ntfs/exfat/f2fs/msdos/...），
--  // 避免封闭集合枚举漏项；盘上数据不可逆 → forbidden（用户决策）
+-  // mkfs前缀覆盖文件系统变体，磁盘数据不可逆；不能恢复有限集合的漏项直通。
+-  // fdisk/parted/wipefs共用此forbidden分支，关机族单独送审。
 -  if (cmd === "mkfs" || cmd.startsWith("mkfs.") || DISK_FORMAT_COMMANDS.has(cmd))
 +  // ---- 磁盘格式化/分区（R2 五级拆分 + GAP-1；R3 只读形态收窄）----
 +  // mkfs 前缀族覆盖全部文件系统变体，任何形态都写盘 → forbidden（用户决策）。
@@ -1016,13 +1014,33 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
    test("marks dangerous command substitutions forbidden instead of treating wrappers as safe", () => {
      expect(bash("echo $(rm -rf /)")).toMatchObject({ level: "forbidden" })
    })
-@@ -562,7 +633,8 @@ describe("permission precheck bash classifier", () => {
-     expect(bash("rm -rf /root")).toMatchObject({ level: "forbidden" })
-     // 系统根子目录仍 dangerous
-     expect(bash("rm -rf /etc/passwd")).toMatchObject({ level: "forbidden" })
+@@ -572 +643,2 @@ describe("permission precheck bash classifier", () => {
 -    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "forbidden" })
 +    // R3 分级：/usr/local/bin 是系统根恰好二级 → dangerous（不再是 forbidden）
 +    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "dangerous" })
-   })
- 
-   // sudo 包装器应提取内层命令递归评估，而非短路。
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -236 +236,5 @@
+-        return { effect: "deny" as const, rules: all, reason: `Auto permission preflight rejected this tool call: ${decision.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.` }
++        // native不经V1错误getter；仅precheck终审追加无授权路径说明，reviewer原文不变。
++        const terminal = decision.source === "precheck"
++          ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
++          : ""
++        return { effect: "deny" as const, rules: all, reason: `Auto permission preflight rejected this tool call: ${decision.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${terminal}` }
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -501,2 +501,4 @@
+     expect(denied.message).toContain("Do not retry the same outcome")
++    expect(denied.message).toContain("cannot be executed even with explicit user authorization")
++    expect(denied.message).not.toContain("ask the user for explicit confirmation")
+     expect(reviewRequests).toHaveLength(0)
+diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
+--- a/packages/opencode/test/permission/next.test.ts
++++ b/packages/opencode/test/permission/next.test.ts
+@@ -893,2 +914,4 @@
+       expect(err instanceof Error ? err.message : "").toContain("Do not retry the same outcome through shell indirection")
++      expect(err instanceof Error ? err.message : "").toContain("cannot be executed even with explicit user authorization")
++      expect(err instanceof Error ? err.message : "").not.toContain("ask the user for explicit confirmation")
+       expect(yield* list()).toHaveLength(0)

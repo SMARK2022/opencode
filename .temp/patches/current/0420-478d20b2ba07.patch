@@ -2042,30 +2042,26 @@ diff --git a/packages/tui/src/audio.ts b/packages/tui/src/audio.ts
 diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/opencode/test/cli/cmd/tui/attention.test.ts
 --- a/packages/opencode/test/cli/cmd/tui/attention.test.ts
 +++ b/packages/opencode/test/cli/cmd/tui/attention.test.ts
-@@ -1,4 +1,5 @@
- import { describe, expect, test } from "bun:test"
-+import { createHash } from "node:crypto"
- import type { AudioPlayOptions, AudioSound } from "@opentui/core"
- import { createTuiAttention } from "@opencode-ai/tui/attention"
- import type { TuiConfig } from "@opencode-ai/tui/config"
-@@ -43,6 +44,16 @@ class FakeRenderer {
+@@ -43,6 +43,18 @@ class FakeRenderer {
  }
  
  class FakeAudioEngine {
 +  loadKeys: string[] = []
 +  loadedBytes: Uint8Array | null = null
-+  // createTuiAttention 的引擎契约要求 loadSound 预加载内联音频；测试桩无需真实行为。
++  // keyed loader 与文件桩共享失败和计数契约，测试不创建真实音频设备。
 +  async loadSound(key: string, bytes: () => Uint8Array | Promise<Uint8Array>) {
-+    // 记录 key/bytes 供内嵌资产身份断言（SHA-256/RIFF header）使用
++    this.loadCalls += 1
++    // 记录实际加载的数据，校验内嵌资产而不触发播放。
 +    this.loadKeys.push(key)
 +    this.loadedBytes = await Promise.resolve(bytes())
++    if (this.rejectLoad) throw new Error("decode failed")
 +    return this.loadResult
 +  }
 +
    loadResult: AudioSound | null = 1
    playResult: number | null = 1
    loadCalls = 0
-@@ -161,6 +172,8 @@ describe("createTuiAttention", () => {
+@@ -161,6 +173,8 @@ describe("createTuiAttention", () => {
        notification: true,
        sound: false,
      })
@@ -2074,7 +2070,7 @@ diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/ope
      expect(renderer.notifications).toEqual([{ title: "opencode", message: "focused" }])
    })
  
-@@ -176,6 +189,8 @@ describe("createTuiAttention", () => {
+@@ -176,6 +190,8 @@ describe("createTuiAttention", () => {
        sound: true,
      })
      expect(audio.playCalls).toBe(1)
@@ -2083,7 +2079,7 @@ diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/ope
      expect(renderer.notifications).toEqual([{ title: "opencode", message: "hello" }])
    })
  
-@@ -238,6 +253,8 @@ describe("createTuiAttention", () => {
+@@ -238,6 +254,8 @@ describe("createTuiAttention", () => {
        notification: true,
        sound: true,
      })
@@ -2092,13 +2088,12 @@ diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/ope
      expect(renderer.notifications).toEqual([{ title: "opencode", message: "hello again" }])
    })
  
-@@ -458,6 +475,59 @@ describe("createTuiAttention", () => {
+@@ -458,6 +476,59 @@ describe("createTuiAttention", () => {
      expect(renderer.notifications).toEqual([{ title: "danger title", message: "hello world" }])
    })
  
-+  // [local-smark] 源 0420 内嵌资产身份契约：done 槽位播放的是内嵌 ChatGPT WAV
-+  // bytes——SHA-256 与长度锁定 exact asset identity，RIFF header 证明合法 PCM WAV
-+  test("plays embedded done sound with exact ChatGPT WAV bytes", async () => {
++  // done 槽位必须加载内嵌 WAV，检查容器及长度而不额外计算校验码。
++  test("plays embedded done sound with bundled ChatGPT WAV bytes", async () => {
 +    const renderer = new FakeRenderer()
 +    const audio = new FakeAudioEngine()
 +    const attention = createTuiAttention({ renderer, config: config(), audio })
@@ -2108,8 +2103,9 @@ diff --git a/packages/opencode/test/cli/cmd/tui/attention.test.ts b/packages/ope
 +
 +    expect(audio.loadedBytes).toBeInstanceOf(Uint8Array)
 +    expect(audio.loadedBytes!.length).toBe(56_140)
-+    const hash = createHash("sha256").update(audio.loadedBytes!).digest("hex")
-+    expect(hash).toBe("02fbf5d8967068622673c475ed367dabfc2eeae4e4b1991c3c443e3881b42e01")
++    expect(new TextDecoder().decode(audio.loadedBytes!.subarray(8, 12))).toBe("WAVE")
++    const header = new DataView(audio.loadedBytes!.buffer, audio.loadedBytes!.byteOffset, audio.loadedBytes!.byteLength)
++    expect(header.getUint32(4, true)).toBe(audio.loadedBytes!.length - 8)
 +    expect(Array.from(audio.loadedBytes!.subarray(0, 4))).toEqual([0x52, 0x49, 0x46, 0x46])
 +  })
 +

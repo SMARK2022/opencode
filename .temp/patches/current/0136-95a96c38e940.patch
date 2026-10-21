@@ -9,67 +9,28 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 index 9efe05cdc4..39d5073cb8 100644
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -1221,7 +1221,11 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     maxTokens || undefined,
-   )
-   const stepConfirmed = acc.step.confirmed
--  const instructions = stepConfirmed ? await gatherInstructionFiles(input) : []
-+  // #136：磁盘扫描需确认；测试/注入 instructionFiles 未确认也可展示
-+  const instructions =
-+    stepConfirmed || input.instructionFiles !== undefined
-+      ? await gatherInstructionFiles(input)
-+      : []
-   let instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
-   const messageText = msg.text.join("\n")
-   // 加载的指令路径去重：已在消息文本中出现的跳过
-@@ -1233,9 +1237,12 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-   }
- 
-   // #125：未确认时 skills/toolDefs 为空，分类总量仍可由 bd 路径填充
--  const skills = stepConfirmed ? await gatherSkills(input) : []
-+  // #136：skills 同：确认可 FS；未确认仅走注入早返回
-+  const skills =
-+    stepConfirmed || input.skills !== undefined ? await gatherSkills(input) : []
-   const skillListing = skillsSection(skillInfo(skills))
-   // #125：磁盘扫描仍需 stepConfirmed；嵌入 catalog 的 toolDefs 始终可组装（避免历史 tool call 塌缩）
-+  // #136：嵌入 catalog 的 toolDefs 始终组装；磁盘扫描仍由 stepConfirmed/注入门控
-   let toolDefs = await toolDefinitionTokens(
-     input,
-     compacted,
-@@ -1244,6 +1251,7 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     { modelID: modelInfo.modelID, providerID: modelInfo.providerID },
-     ratio,
-   )
-+
-   // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
-   const systemText = [
-     baseSystemPrompt(input, lastUser, modelInfo.model),
-@@ -1354,11 +1362,15 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     { name: "Autocompact buffer", tokens: window.compactionBuffer, color: "textMuted", isDeferred: true },
-   ]
- 
-+  // #136：主 total = 最近 step 上下文窗口；footer 的 details.usage 仍是会话累计
-+  // #136：step 窗口优先于 used 重建，对齐模型当前上下文占用
-+  const stepWindowTokens = acc.step.input + acc.step.output
+@@ -1162,1 +1162,1 @@
+-  const instructions = input.instructionFiles ?? (prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
++  const instructions = input.instructionFiles ?? (bd && prepared?.confirmed === false ? [] : await gatherInstructionFiles(input))
+@@ -1174,1 +1174,1 @@
+-  const skills = input.skills ?? (prepared?.confirmed === false ? [] : await gatherSkills(input))
++  const skills = input.skills ?? (bd && prepared?.confirmed === false ? [] : await gatherSkills(input))
+@@ -1234,1 +1234,3 @@
++  // 首包前没有助手时仍使用服务端准备值；旧历史无统计时保留分类估算。
++  const stepWindowTokens = input.session?.request && !input.session.request.assistantID ? prepared?.input ?? 0 : acc.step.input + acc.step.output
    return {
-     model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
+@@ -1236,1 +1238,1 @@
 -    totalTokens: used,
 +    totalTokens: stepWindowTokens > 0 ? stepWindowTokens : used,
-     maxTokens,
+@@ -1238,1 +1240,2 @@
 -    percentage: maxTokens ? used / maxTokens : 0,
 +    // #136：percentage 与 totalTokens 同源窗口，避免主柱与百分比分叉
 +    percentage: maxTokens ? (stepWindowTokens > 0 ? stepWindowTokens : used) / maxTokens : 0,
-     categories,
-     // 无模型限制时用已用+缓冲+自由作为网格基数，保证网格有内容
-     gridRows: contextGrid(categories, maxTokens || Math.max(used + window.compactionBuffer + free, 1), { columns: input.columns }),
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 index 2e19ad9bb7..49641768ee 100644
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -407,6 +407,55 @@ test("counts message, instruction, skill, tool, buffer, and free categories", as
-   })
- 
-   // 验证压缩历史过滤：保留压缩摘要后的尾部消息，丢弃被压缩的旧消息
+@@ -783,3 +783,52 @@
 +
 +  // #136：主 total 用最近 step 窗口，footer 仍展示会话累计 Session Totals
 +  test("main total is latest context window while footer keeps session totals", async () => {
@@ -120,5 +81,5 @@ index 2e19ad9bb7..49641768ee 100644
 +  })
 +
    test("filters compacted history and keeps summary plus retained tail", () => {
-     // 按时间倒序输入（最旧在前）：old → old answer → tail → tail answer → compaction → summary
+     // fixture 先按时间正序构造，调用处显式 toReversed 进入倒序裁剪路径。
      const messages = [

@@ -757,10 +757,9 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 index cc32b5da3..e88f2e2c1 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -885,7 +885,9 @@ it.live("session.processor retries a real first-progress timeout", () =>
-         yield* llm.push(raw({ wait: gated.promise, error: { message: "delayed" } }))
-         // #498：成功响应以 repeat 形式入队——每次 retry 请求都由同一 queued 响应服务，
-         // 固定 calls 计数断言不再成立（repeat 是可重放契约，count 由行为而非次数证明）。
+@@ -893,7 +893,9 @@ it.live("session.processor retries a real first-progress timeout", () =>
+         yield* llm.push(httpError(503, { error: { message: "delayed" } }, gate.promise))
+         // 成功响应显式 repeat；后续 retry 仍消费同一 Provider 结果，不借 queue-miss 默认值自证恢复。
 -        yield* llm.pushRepeat(reply().text("after"))
 +        // #525：repeat 响应必须携带 stop——无 Tool 的 other/unknown finish 是可重试 incomplete，
 +        // 只有显式 stop 才代表恢复成功并沿既有 other 重试合同终止。
@@ -768,6 +767,7 @@ index cc32b5da3..e88f2e2c1 100644
  
          const chat = yield* session.create({})
          const parent = yield* user(chat.id, "first progress")
+         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
 
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 1ed5bde6f..942c83d3f 100644

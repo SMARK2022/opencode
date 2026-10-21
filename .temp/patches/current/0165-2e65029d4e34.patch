@@ -18,12 +18,12 @@ index 1111111111..2222222222 100644
  export type EventSource = {
    subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
  }
-@@ -14,9 +15,12 @@
+@@ -14,9 +15,13 @@
    init: (props: {
      url: string
      directory?: string
--    fetch?: typeof fetch
-+    // #165：唯一允许的传输注入缝（测试专用）
+     fetch?: typeof fetch
++    // #165：事件源替身只服务测试，生产 HTTP fetch 适配仍沿用上游入口。
 +    testTransport?: {
 +      fetch?: typeof globalThis.fetch
 +      events?: EventSource
@@ -38,7 +38,7 @@ index 1111111111..2222222222 100644
          signal: abort.signal,
          directory: props.directory,
 -        fetch: props.fetch,
-+        fetch: props.testTransport?.fetch,
++        fetch: props.fetch ?? props.testTransport?.fetch,
          headers: props.headers,
        })
      }
@@ -59,7 +59,7 @@ index 1111111111..2222222222 100644
        directory: props.directory,
        event: emitter,
 -      fetch: props.fetch ?? fetch,
-+      fetch: props.testTransport?.fetch ?? fetch,
++      fetch: props.fetch ?? props.testTransport?.fetch ?? fetch,
        get url() {
          return url
        },
@@ -75,14 +75,14 @@ index 1111111111..2222222222 100644
  import { DialogVariant } from "./component/dialog-variant"
  import { createTuiAttention } from "./attention"
  import * as TuiAudio from "./audio"
-@@ -146,9 +145,12 @@
+@@ -146,9 +145,13 @@
    config: TuiConfig.Resolved
    onSnapshot?: () => Promise<string[]>
    directory?: string
--  fetch?: typeof fetch
+   fetch?: typeof fetch
    headers?: RequestInit["headers"]
 -  events?: EventSource
-+  // #165：仅测试可注入；生产 run 不传（非 RPC 生产面）
++  // #165：测试事件替身独立于上游已有的生产 HTTP 适配。
 +  testTransport?: {
 +    fetch?: typeof globalThis.fetch
 +    events?: import("./context/sdk").EventSource
@@ -90,17 +90,17 @@ index 1111111111..2222222222 100644
    // #139：运行时 daemon 恢复回调，返回新 base URL
    reconnect?: () => Promise<string>
    // #139：可测心跳超时
-@@ -318,12 +320,12 @@
+@@ -318,12 +320,13 @@
                                    >
                                      <TuiConfigProvider config={input.config}>
                                        <PluginRuntimeProvider value={pluginRuntime}>
 -                                        <SDKProvider
-+                                        {/* #165：生产只挂 url/headers；禁止 fetch/events 生产注入 */}
++                                        {/* #165：HTTP 适配保留；事件替身不作为线程 RPC 生产入口。 */}
 +                                        <SDKProvider
 +                                          testTransport={input.testTransport}
                                            url={input.url}
                                            directory={input.directory}
--                                          fetch={input.fetch}
+                                           fetch={input.fetch}
                                            headers={input.headers}
 -                                          events={input.events}
                                            reconnect={input.reconnect}
@@ -110,43 +110,34 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 index 1111111111..2222222222 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -4,12 +4,9 @@
+@@ -4,12 +4,8 @@
  import { Server } from "@/server/server"
  import { NetworkProxy } from "@opencode-ai/core/network-proxy"
  import { InstanceRuntime } from "@/project/instance-runtime"
 -import { Rpc } from "@/util/rpc"
  import { upgrade } from "@/cli/upgrade"
  import { Config } from "@/config/config"
- import { GlobalBus } from "@/bus/global"
+-import { GlobalBus } from "@/bus/global"
 -import { ServerAuth } from "@/server/auth"
 -import { writeHeapSnapshot } from "node:v8"
  import { Heap } from "@/cli/heap"
  import { AppRuntime } from "@/effect/app-runtime"
  import { Effect } from "effect"
-@@ -29,7 +26,7 @@
- process.on("uncaughtException", onUncaughtException)
- 
- // 守护进程模式：由 index.ts 旁路启动
--// worker 角色：RPC 旁路或 daemon 生命周期二选一
-+// worker 角色：仅 daemon 生命周期（#165 禁用 RPC-thread）
- 
- // 预热外部插件：在写锁/监听前动态 import，避免 TUI 在冷编译时等死
- async function warmupExternalPlugins() {
-@@ -64,73 +61,17 @@
- 
+@@ -28,78 +24,3 @@
+-// 相同模块保留线程 RPC 与进程 daemon 两种入口，只按明确 worker 角色选择生命周期。
+-// 主进程不能同时安装线程转发，否则 GlobalBus 会向没有 parentPort 的 transport 发事件。
  const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
- 
--// Worker 线程模式：通过 RPC 转发事件
+-
+-// 旧线程仍使用 RPC fanout，daemon 的 HTTP 客户端不能改变该兼容入口的事件来源。
 -if (!isDaemon) {
 -  GlobalBus.on("event", (event) => {
 -    Rpc.emit("global.event", event)
 -  })
 -}
-+// #165：生产仅守护进程 HTTP/SSE；已删除 Worker RPC 事件转发
- 
- 
- let server: Awaited<ReturnType<typeof Server.listen>> | undefined
- 
+-
+-
+-let server: Awaited<ReturnType<typeof Server.listen>> | undefined
+-
 -export const rpc = {
 -  async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
 -    const headers = { ...input.headers }
@@ -192,32 +183,32 @@ index 1111111111..2222222222 100644
 -  async shutdown() {
 -    await InstanceRuntime.disposeAllInstances()
 -    if (server) await server.stop(true)
--    // 仅在进程关闭路径做 WAL TRUNCATE；server() 重启监听时不得 close（原版仅 shutdown）
--    Database.close()
+-    // 先停止生产者再 checkpoint；server() 的监听重启不能释放进程级数据库。
+-    try {
+-      await AppRuntime.runPromise(Effect.gen(function* () {
+-        const database = yield* Database.Service
+-        yield* Database.checkpoint(database.db)
+-      }))
+-    } finally {
+-      // checkpoint 剩余失败仍向 RPC 传播；释放不能被拒绝跳过，native close 仍由既有 Layer 负责。
+-      await AppRuntime.dispose()
+-    }
 -    process.off("unhandledRejection", onUnhandledRejection)
 -    process.off("uncaughtException", onUncaughtException)
 -  },
 -}
 -
--Rpc.listen(rpc)
-+// #165：已删除 export const rpc 与 Rpc.listen；共享 daemon 为唯一 SQLite owner
-+// #165：TUI 不得 Rpc.client 连接 worker-thread
- 
- // ── 守护进程生命周期 ──────────────────────────────────────────────────────
- // 仅在守护进程模式下运行：启动内部回环 HTTP 服务器、写入锁文件、注册信号
--// 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
-+// 处理与空闲超时。非 daemon 角色不应作为生产入口；生产仅 isDaemon HTTP/SSE。
- if (isDaemon) {
-   // 安装全局 fetch 代理路由，使 daemon 内未显式 routedFetch 的请求也走系统代理
-   NetworkProxy.installGlobalFetch()
+-// RPC 属于线程模式；主进程 daemon 不安装线程的 message handler。
+-if (!isDaemon) Rpc.listen(rpc)
+-
+-// 线程入口不创建第二个 HTTP listener，也不安装 daemon 的 idle 退出回调。
++// 共享 daemon 是唯一生产入口；线程 RPC 不再持有数据库或转发事件。
++
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 index 1111111111..2222222222 100644
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -120,6 +120,7 @@
- 
- // 单服务器发现主路径：快速复用存活守护进程，或在选举锁下拉起新 daemon
- // 单服务器发现主路径：健康锁复用或选举后 spawn，失败则 kill+抛错
+@@ -128,3 +128,4 @@
 +// #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
  export async function discoverOrSpawnDaemon(
    networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
@@ -459,11 +450,12 @@ diff --git a/packages/cli/src/tui.ts b/packages/cli/src/tui.ts
 index 1111111111..2222222222 100644
 --- a/packages/cli/src/tui.ts
 +++ b/packages/cli/src/tui.ts
-@@ -10,7 +10,6 @@
+@@ -10,7 +10,8 @@
      ...transport,
      args: {},
      config,
--    fetch: gracefulFetch,
++    // #165：native CLI 的既有 HTTP 适配承接 legacy 查询，与被移除的线程 RPC 无关。
+     fetch: gracefulFetch,
      pluginHost: {
        async start() {},
        async dispose() {},

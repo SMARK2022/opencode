@@ -16,41 +16,28 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -98,6 +98,15 @@
-   // 输入字符数和细分：由 prompt.ts 计算，在 step-finish 中持久化
-   inputChars: number | undefined
-   inputBreakdown: SessionV1.StepFinishPart["inputBreakdown"] | undefined
-+  // [local-smark] 追踪当前 step 是否产生了语义输出（text/reasoning/tool）。
-+  // 在 finish-step 时用于检测 provider 空完成：
-+  // finishReason="unknown"（目标词表无 "other"：AI SDK 原生路径与 openai-chat 协议路径均把
-+  // network_error 等未知 finish_reason 归一化为 "unknown"，ids.ts FinishReason 联合可证）+ 三个标志全 false
-+  // = provider 返回了空终止流，必须抛出 retryable APIError 而非静默写成 completed。
-+  // 每个 process() 调用开头重置，retry 时也重置（与 currentText/reasoningMap 同处）。
+@@ -139,3 +139,8 @@
+   currentText: SessionV1.TextPart | undefined
+   reasoningMap: Record<string, SessionV1.ReasoningPart>
++  // 仅记录本次provider尝试的语义输出；重试不能借用上一轮的标志。
++  // 空start/end不算正文，真实tool-call则必须防止重复副作用。
 +  hasText: boolean
 +  hasReasoning: boolean
 +  hasToolCall: boolean
  }
- 
- type StreamEvent = LLMEvent
-@@ -148,6 +156,9 @@ const layer = Layer.effect(
+@@ -187,3 +192,6 @@
+         currentText: undefined,
          reasoningMap: {},
-         inputChars: undefined,
-         inputBreakdown: undefined,
 +        hasText: false,
 +        hasReasoning: false,
 +        hasToolCall: false,
        }
-       let aborted = false
- 
-@@ -375,6 +386,8 @@ const layer = Layer.effect(
-         switch (value.type) {
-           case "reasoning-start":
-             if (value.id in ctx.reasoningMap) return
-+            // [local-smark] 标记本轮已产生 reasoning 输出，用于 finish-step 空完成检测
-+            ctx.hasReasoning = true
-             ctx.reasoningMap[value.id] = {
-               id: PartID.ascending(),
-               messageID: ctx.assistantMessage.id,
+@@ -425,3 +433,5 @@
+             // Match dev: silently drop orphan deltas (no preceding reasoning-start).
+             if (!(value.id in ctx.reasoningMap)) return
++            // 只有接纳的非空delta才证明provider实际输出了推理。
++            if (value.text.length > 0) ctx.hasReasoning = true
+             ctx.reasoningMap[value.id].text += value.text
 @@ -453,6 +466,8 @@ const layer = Layer.effect(
            }
  
@@ -60,79 +47,49 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
              if (ctx.assistantMessage.summary) {
                throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
              }
-@@ -666,6 +681,24 @@
+@@ -713,6 +725,13 @@
                usage: value.usage ?? new Usage({}),
                metadata: value.providerMetadata,
              })
-+            // [local-smark] 空完成检测：provider 返回了 finish-step 但本轮没有产生
-+            // 任何 text/reasoning/tool 输出，且 reason="unknown"（两条 runtime 归一化路径
-+            // 一致产出，ai-sdk.ts:21-23 / openai-chat.ts:378-384）。这通常表示服务端
-+            // 推理阶段异常终止（如 GLM 大上下文下的 network_error）。
-+            // 必须在设置 assistantMessage.finish 之前抛出，否则空消息会被
-+            // cleanup 写成 time.completed，被 prompt.ts 误判为正常结束。
-+            // 抛出 APIError(isRetryable=true) → SessionRetry.retry 重试 →
-+            // 耗尽后 halt 设置 error → process 返回 "stop" → loop break。
-+            if (["other", "unknown"].includes(value.reason) && !ctx.hasText && !ctx.hasReasoning && !ctx.hasToolCall) {
-+              // 目标 message-v2 未转出 APIError——SessionV1.APIError 即 core/v1/session 的同一类
-+              // throw 在 Effect.gen 内是 defect，SessionRetry 只重试 failure——必须 yield* 让错误进重试通道
-+              // NamedError 类非 yieldable：throw 的 defect 由外层 catchCauseIf squash 转回
-+              // typed failure，正好进入 SessionRetry.retry 的分类重试通道
-+              throw new SessionV1.APIError({
++            // 未知完成且无输出才重试；正常空stop和有工具调用的回合保持原语义。
++            if (value.reason === "unknown" && !ctx.hasText && !ctx.hasReasoning && !ctx.hasToolCall) {
++              yield* Effect.fail(new SessionV1.APIError({
 +                message: `Provider returned empty completion (finish_reason: ${value.reason}), no content/reasoning/tool produced`,
 +                isRetryable: true,
-+              })
++              }))
 +            }
              ctx.assistantMessage.finish = value.reason
              ctx.assistantMessage.cost += usage.cost
              ctx.assistantMessage.tokens = usage.tokens
-@@ -722,6 +751,8 @@ const layer = Layer.effect(
-           }
- 
-           case "text-start":
-+            // [local-smark] 标记本轮已产生 text 输出，用于 finish-step 空完成检测
-+            ctx.hasText = true
-             ctx.currentText = {
-               id: PartID.ascending(),
-               messageID: ctx.assistantMessage.id,
-@@ -909,6 +940,11 @@ const layer = Layer.effect(
-           yield* Effect.gen(function* () {
+@@ -785,3 +804,5 @@
+           case "text-delta":
+             if (!ctx.currentText) return
++            // 只建立文本块而没有正文，不应绕过空完成检测。
++            if (value.text.length > 0) ctx.hasText = true
+             ctx.currentText.text += value.text
+@@ -955,3 +976,7 @@
              ctx.currentText = undefined
              ctx.reasoningMap = {}
-+            // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志
-+            // 必须清零，否则空完成检测会因残留标志而跳过。
++            // 每次重试都重新判断本轮输出，不能被旧标志误放行。
 +            ctx.hasText = false
 +            ctx.hasReasoning = false
 +            ctx.hasToolCall = false
              yield* status.set(ctx.sessionID, { type: "busy" })
-             const stream = llm.stream(streamInput)
- 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index 9958a78e46d0328a5d733f4b8068aa9ce738ab01..7825c95ce6d5357eb3362a4c6ceec4b2456f3835 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -2136,6 +2136,10 @@
- 
-          if (
-            lastAssistant?.finish &&
-+            // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
-+            // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
-+            // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
-+            !lastAssistant.error &&
-            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
-            !hasToolCalls &&
-            lastAssistant.parentID === lastUser.id
-+            !lastAssistant.error &&
-             !["tool-calls"].includes(lastAssistant.finish) &&
-             !hasToolCalls &&
-             lastUser.id < lastAssistant.id
+@@ -1478,3 +1478,5 @@
+             lastAssistant.parentID === lastUser.id
+           ) {
++            // 错误助手仍走退出分支，不能因跳过整个if而重新进入模型或Goal续跑。
++            if (lastAssistant.error) break
+             const orphan = lastAssistantMsg?.parts.find(
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 index 74ed65d3d13a088da7feb2d2db1a17fd856f8461..ec8a737481d57d006347cf6f24843dd9e9d82fe7 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -2162,3 +2162,36 @@ describe("session.message-v2.filterCompacted", () => {
-     ).toStrictEqual(expected)
-   })
- })
+@@ -16,1 +16,34 @@
 +
 +// [local-smark] fromError 透传测试：已分类的 APIError 实例不应被降级为 UnknownError。
 +// 触发场景：processor.ts finish-step 检测到 provider 空完成时直接抛出 APIError，
@@ -166,6 +123,7 @@ index 74ed65d3d13a088da7feb2d2db1a17fd856f8461..ec8a737481d57d006347cf6f24843dd9
 +    expect((result.data as { metadata: Record<string, string> }).metadata.finishReason).toBe("other")
 +  })
 +})
+ const model: Provider.Model = {
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
 index 02417793594e8bd97c8bee8fd4f4ac9653a7eead..0e89caebf7144e27ad6ae0fe0df2d3fa1e1238f8 100644
 --- a/packages/opencode/test/session/processor-effect.test.ts

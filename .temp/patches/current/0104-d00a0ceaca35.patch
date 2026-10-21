@@ -9,9 +9,7 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 index 1f0f5b196e..546da7f88f 100644
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -1,16 +1,11 @@
- # 构建工作流：手动触发或 dev-smark 推送自动触发，编译打包 OpenCode CLI
--# 产物包含 Linux(tar.gz/deb)、macOS(tar.gz)、Windows(zip) 多架构包
+@@ -1,14 +1,10 @@
 +# #104：版本从 packages/opencode/package.json 自动提取；GitHub Release 直传资产
  name: Build OpenCode CLI
  
@@ -29,8 +27,7 @@ index 1f0f5b196e..546da7f88f 100644
    push:
      branches:
        - dev-smark
-@@ -19,53 +14,93 @@ on:
-       - "packages/opencode/**"
+@@ -25,52 +21,101 @@ on:
        - "package.json"
        - "bun.lock"
 -
@@ -41,8 +38,6 @@ index 1f0f5b196e..546da7f88f 100644
 +      - ".github/actions/setup-bun/action.yml"
  
  jobs:
--  # 三平台并行构建：Linux/macOS/Windows 互不依赖，提升 CI 吞吐
--  # Linux 构建：产出 tar.gz 通用包和 deb Debian 系包两种格式
 +  # #104：唯一版本源 = packages/opencode/package.json，读失败 fail-closed
 +  version:
 +    runs-on: ubuntu-latest
@@ -102,14 +97,15 @@ index 1f0f5b196e..546da7f88f 100644
      steps:
        - uses: actions/checkout@v4
 -
--      # setup-bun 复用自定义 composite action，统一 Bun 版本和缓存策略
+       # setup-bun 从根 packageManager 取 Bun 版本，并保留缓存及 Windows hoisted 安装分支
        - uses: ./.github/actions/setup-bun
  
+       # build.ts 会清空 dist，三平台在各自 runner 执行构建，不能共享同一构建目录
        - name: Build Linux
          run: |
            cd packages/opencode
--          # --skip-embed-web-ui：跳过内嵌 Web UI 编译，CLI-only 构建减小产物体积
--          # inputs.version || env.DEFAULT_VERSION：手动触发用输入值，push 触发回退默认值
+           # --skip-embed-web-ui 同时排除文件映射与 UI entrypoint，沿用上游 CLI-only 构建入口
+-          # dispatch 输入或 push 默认值交给 --version，version-env 先于 Script 求值以统一嵌入和打包版本
 -          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=linux --skip-embed-web-ui
 +          # #104：--version 仅来自 package.json 解析结果
 +          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=linux --skip-embed-web-ui
@@ -118,42 +114,43 @@ index 1f0f5b196e..546da7f88f 100644
          run: |
 +          VERSION="${{ needs.version.outputs.version }}"
            cd packages/opencode/dist/opencode-linux-x64/bin
--          # tar.gz 打包：保留单文件二进制，解压即用
+           # bin 位于 dist/<target>/bin，回退两级才与 upload-artifact 的 dist 路径一致
 -          tar -czf ../../opencode-linux-x64-${{ inputs.version || env.DEFAULT_VERSION }}.tar.gz opencode
 +          # #103：相对 bin 的 ../../ 落到 dist/
 +          tar -czf ../../opencode-linux-x64-${VERSION}.tar.gz opencode
  
        - name: Package Linux .deb
+         # YAML 自动剥离公共缩进，control/EOF 顶格；Description 续行仍多一空格。
          run: |
--          # VERSION shell 变量：避免在 heredoc 中展开 GitHub表达式，deb 元数据需纯 shell 变量
+-          # Actions 先替换表达式，再由 shell 展开 VERSION，让 control 与 deb 文件名共享回退值
 -          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
 +          VERSION="${{ needs.version.outputs.version }}"
            DEB_DIR="/tmp/deb_build"
            PKG_NAME="opencode_${VERSION}_amd64"
            BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
 -
--          # deb 包结构：DEBIAN/control 存元数据，usr/local/bin 存可执行文件（FHS 规范）
+           # 保留源包的 usr/local/bin 安装位置，control 必须放在包根的 DEBIAN 目录
            mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
            mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
 -
            cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
--          # chmod 755：确保二进制对所有用户可执行，符合 deb 包权限规范
+           # 复制后显式赋予执行位，避免归档或 runner 文件权限影响安装后的 CLI 启动
            chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
 -
--          # YAML run:| 会剥离公共缩进，故源文件 10 空格写入后 shell 侧字段仍为列 0，dpkg 可解析
--          # Description 续行比字段多 1 空格，剥离后保留 debian 扩展描述必需的前导空格
+           # Description 续行保留第十一空格，剥离公共缩进后仍是 Debian 必需的单空格续行
+           # Linux deb 的 amd64 元数据只对应 x64 二进制，不能把 arm64 混入同一包
            cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
            Package: opencode
            Version: ${VERSION}
-@@ -76,91 +111,100 @@ jobs:
+@@ -81,87 +126,102 @@ jobs:
            Description: opencode AI-powered development tool (smark build)
             A standalone AI coding assistant with TUI, version ${VERSION}.
            EOF
 -
            dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
  
--      # upload-artifact 汇总本平台产物，供后续下载或发布
--      # 通配符路径：避免版本号变化时遗漏产物，自动匹配所有版本包
+-      # Linux 仅上传源集合的 x64/amd64 产物，路径从仓库根定位 dist，不能漏包或扩张架构集合
+-      # glob 只放宽版本段，保留 x64/amd64 边界，避免误上传 Linux arm64 或目录内容
 -      - uses: actions/upload-artifact@v4
 -        with:
 -          name: opencode-linux
@@ -162,7 +159,6 @@ index 1f0f5b196e..546da7f88f 100644
 -            packages/opencode/dist/opencode_*_amd64.deb
 -          if-no-files-found: error
 -
--  # macOS 构建：arm64 (Apple Silicon) 和 x64 (Intel) 双架构
 +      - name: Upload Linux assets to release
 +        env:
 +          GH_TOKEN: ${{ github.token }}
@@ -179,7 +175,6 @@ index 1f0f5b196e..546da7f88f 100644
 +
 +  # #104：macOS 双架构 tar.gz 直传 release
    build-macos:
--    # macOS runner 原生支持跨架构编译，无需交叉编译工具链
      runs-on: macos-latest
 +    needs: [version, ensure-release]
 +    permissions:
@@ -192,19 +187,22 @@ index 1f0f5b196e..546da7f88f 100644
        - name: Build macOS
          run: |
            cd packages/opencode
+           # --os=darwin 选择双架构而非 runner 本机架构，不能替换为 --single
 -          bun run script/build.ts --version=${{ inputs.version || env.DEFAULT_VERSION }} --os=darwin --skip-embed-web-ui
 +          bun run script/build.ts --version=${{ needs.version.outputs.version }} --os=darwin --skip-embed-web-ui
  
        - name: Package macOS tar.gz
          run: |
--          # VERSION shell 变量：统一两架构的命名，避免重复展开 GitHub 表达式
+           # VERSION shell 变量：统一两架构的命名，避免重复展开 GitHub 表达式
 -          VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
 +          VERSION="${{ needs.version.outputs.version }}"
+           # darwin 目标名来自 build.ts，保持原生目录名以匹配两架构打包路径
            cd packages/opencode/dist/opencode-darwin-arm64/bin
            tar -czf ../../opencode-darwin-arm64-${VERSION}.tar.gz opencode
            cd ../../opencode-darwin-x64/bin
            tar -czf ../../opencode-darwin-x64-${VERSION}.tar.gz opencode
  
+-      # macOS 保留源双架构产物集合，分别上传原生 darwin 目标目录生成的归档
 -      - uses: actions/upload-artifact@v4
 -        with:
 -          name: opencode-macos
@@ -213,7 +211,6 @@ index 1f0f5b196e..546da7f88f 100644
 -            packages/opencode/dist/opencode-darwin-x64-*.tar.gz
 -          if-no-files-found: error
 -
--  # Windows 构建：x64 和 arm64 双架构，使用 pwsh 执行 PowerShell 脚本
 +      - name: Upload macOS assets to release
 +        env:
 +          GH_TOKEN: ${{ github.token }}
@@ -236,18 +233,12 @@ index 1f0f5b196e..546da7f88f 100644
      steps:
        - uses: actions/checkout@v4
 -
--      # Windows 原生编译工具链：Bun 在 Windows 构建时需编译 native addon
--      # setup-node 提供 node-gyp 所需的 Node.js 运行时（22 LTS）
-       - uses: actions/setup-node@v4
-         with:
-           node-version: "22"
--
--      # setup-python：node-gyp 依赖 Python 构建 native addon，Windows runner 默认不带
+       # setup-bun 已提供 Node 24；Python 必须先就绪，供其安装阶段的 node-gyp 使用
        - uses: actions/setup-python@v5
          with:
            python-version: "3.12"
 -
--      # setup-msbuild：Windows C++ 编译工具链，native addon 的 .node 文件需 MSBuild
+       # MSBuild 先于 setup-bun 的依赖安装，保留 Windows 原生 addon 的编译工具链入口
        - uses: microsoft/setup-msbuild@v2
 -
        - uses: ./.github/actions/setup-bun
@@ -265,15 +256,17 @@ index 1f0f5b196e..546da7f88f 100644
 +      - name: Package Windows x64 exe
          shell: pwsh
          run: |
--          # PowerShell 变量语法 $VERSION：与 bash 不同，pwsh 用 $ 前缀引用变量
+-          # push 没有 version 输入，pwsh 也须先取同一回退值，否则双架构 zip 会丢失版本段
 -          $VERSION = "${{ inputs.version || env.DEFAULT_VERSION }}"
+-          # --os 使用 win32，而 build.ts 目录名转成 windows；pwsh 路径须沿此映射
 -          cd packages/opencode/dist/opencode-windows-x64/bin
--          # #103：产物落在 dist/ 下（../../ 相对 bin），仅打包 x64
+-          # 本项仅发布 x64，归档继续写入 dist，保持上传路径一致。
 -          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-$VERSION.zip"
 +          # #104：发布裸 exe（相对 zip）
 +          $VERSION = "${{ needs.version.outputs.version }}"
 +          Copy-Item "packages/opencode/dist/opencode-windows-x64/bin/opencode.exe" "packages/opencode/dist/opencode-windows-x64-$VERSION.exe" -Force
  
+-      # Windows 的产物集合与显式 x64 构建保持一致。
 -      - uses: actions/upload-artifact@v4
 -        with:
 -          name: opencode-windows

@@ -14,9 +14,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 index b2b30c49b6..fc75739aa9 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -31,6 +31,17 @@ import { Usage, type LLMEvent } from "@opencode-ai/llm"
- const ABORTED_TOOL_SETTLE_TIMEOUT = "4 seconds"
- 
+@@ -38,2 +38,13 @@
  const DOOM_LOOP_THRESHOLD = 3
 +// #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
 +export const TOOL_ABORTED_ERROR = "Tool execution aborted"
@@ -30,9 +28,7 @@ index b2b30c49b6..fc75739aa9 100644
 +}
 +
  export type Result = "compact" | "stop" | "continue"
- 
- export interface Handle {
-@@ -216,17 +227,24 @@ const layer = Layer.effect(
+@@ -256,15 +267,19 @@ const layer = Layer.effect(
            yield* settleToolCall(toolCallID)
            return false
          }
@@ -49,26 +45,24 @@ index b2b30c49b6..fc75739aa9 100644
 +            error: toolAborted ? TOOL_ABORTED_ERROR : reason,
              // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
              // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
-             // #209：error 分支不合并 output.metadata——失败时无工具输出，仅保留 autoReview 注解使 UI 能渲染审查结论与导航链接
-+            // #216：中止且有 autoReview 时用 interruptedToolMetadata 标记 aborted 状态——UI 从 reviewing 切换到 aborted 终态行
-             metadata: match.part.state.metadata?.autoReview
--              ? { autoReview: match.part.state.metadata.autoReview }
-+              ? toolAborted
-+                ? interruptedToolMetadata(match.part.state.metadata)
-+                : { autoReview: match.part.state.metadata.autoReview }
-               : match.part.state.metadata,
+-            // 保留完整运行态metadata，审查链接与上游子调用进度可同时追溯。
+-            metadata: match.part.state.metadata,
++            // 中止时只更新审查终态，其他运行进度和普通错误metadata均保持完整。
++            metadata: toolAborted ? interruptedToolMetadata(match.part.state.metadata) : match.part.state.metadata,
              time: { start: match.part.state.time.start, end: Date.now() },
            },
-@@ -682,9 +700,10 @@ const layer = Layer.effect(
-                 : {}),
+@@ -734,11 +752,12 @@ const layer = Layer.effect(
+               ...part.state,
                status: "error",
                // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
                // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
 -              error: aborted ? "Tool execution aborted" : "Tool execution did not complete before stream ended",
 +              // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
 +              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
--              metadata: aborted ? { ...metadata, interrupted: true } : metadata,
-+              metadata: aborted ? interruptedToolMetadata(metadata) : metadata,
+-              metadata: { ...metadata, ...(aborted ? { interrupted: true } : {}),
++              metadata: { ...(aborted ? interruptedToolMetadata(metadata) : metadata),
+                 ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
+               },
                time: { start: "time" in part.state ? part.state.time.start : end, end },
              },
            })
@@ -76,55 +70,29 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index d5d78fb956..cf8c3e62ee 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -189,12 +189,13 @@ function interruptedToolState(
- ): SessionV1.ToolStateError {
-   // #173：running 保留 start；pending 用 now 作 start
-   // #173：error 文案与 processor 中断路径对齐
-+  // #216：复用 processor 的 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持跨路径一致
-   return {
-     status: "error",
-     input: state.input,
--    error: "Tool execution aborted",
-+    error: SessionProcessor.TOOL_ABORTED_ERROR,
-     // #173：interrupted 标记供 UI/用量识别非模型失败
--    metadata: state.status === "running" ? { ...state.metadata, interrupted: true } : { interrupted: true },
-+    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined),
-     time: { start: state.status === "running" ? state.time.start : now, end: now },
-   }
- }
-@@ -281,14 +282,19 @@ const layer = Layer.effect(
-     })
- 
--    const abortPendingAssistants = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-+    // #216：显式类型标注使 abortPendingAssistants 可在 abortChildren 中递归自引用
-+    const abortPendingAssistants: (sessionID: SessionID) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID) {
-      // #153：cancel 必须覆盖全部可见未完成 assistant，而非仅 findMessage 命中的第一条
-      // sessions.messages 返回 chronological 顺序且默认过滤 hidden，取消只需覆盖可见项
-      const visible = yield* sessions.messages({ sessionID })
-      const pending = visible.filter(
-        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
-          msg.info.role === "assistant" && !msg.info.time.completed,
-      )
--      if (pending.length === 0) return
-+      // #216：递归中止子会话——auto-review 创建的 permission-reviewer 子会话也需终态化
-+      const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
-+        discard: true,
-+      })
-+      if (pending.length === 0) return yield* abortChildren
- 
-      // 同一时间戳保证同批被取消的 assistant 时间线一致
-      const now = Date.now()
-@@ -313,8 +319,10 @@ const layer = Layer.effect(
-      )
- 
-      // #173：无 active runner 时仍终态化 open tool（#149 工具 handler 路径保留给 live tool）
- 
-      yield* abortPendingToolParts(sessionID, pending, now)
-+      // #216：子会话在父 assistant 终态化后递归中止——保证 reviewer 子会话不残留 active assistant
-+      yield* abortChildren
-     })
- 
-     // #173：把 pending/running tool 标为 interrupted error，防止 cancel 后卡死
+@@ -233,1 +233,2 @@
+-    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
++    // #216：复用取消owner递归收尾子会话，保留冻结ID、runner等待与原子结算順序。
++    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+@@ -245,1 +246,3 @@
+           // 冻结 ID 在同会话锁内完成，不能在 idle 发布后重新扫描新运行的消息。
++          // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
++          const children = yield* sessions.children(sessionID)
+@@ -250,4 +253,5 @@
+           yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+             discard: true,
+           })
++          yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
+         }),
+@@ -289,5 +293,6 @@
+                 status: "error",
+                 input: part.state.input,
+-                error: "Tool execution aborted",
+-                metadata: part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true },
++                // #216：空闲修复与活动processor共用中止信封，reviewing必须变成aborted。
++                error: SessionProcessor.TOOL_ABORTED_ERROR,
++                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined),
+                 // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
 diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
 index 12e7f11f48..3f75b67acf 100644
 --- a/packages/opencode/src/session/tools.ts
@@ -158,11 +126,30 @@ index 12e7f11f48..3f75b67acf 100644
    })
  
    for (const item of yield* registry.tools({
+diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
+--- a/packages/opencode/src/permission/reviewer/service.ts
++++ b/packages/opencode/src/permission/reviewer/service.ts
+@@ -377,6 +377,14 @@ function runReviewerStream(
+             const toolInput = new Map<string, string>()
+ 
++            const iterator = result.fullStream[Symbol.asyncIterator]()
++            const close = iterator.return
++            if (close) iterator.return = (value) => {
++              // SDK的tee分支关闭要等待底层流结束，必须先中止请求再等待迭代器释放。
++              abort.abort()
++              return close.call(iterator, value)
++            }
++
+             yield* Stream.runForEach(
+               // #209：fullStream 聚合 reasoning/text/tool 全部事件——逐事件持久化使子会话 transcript 实时可审计
+-              Stream.fromAsyncIterable(result.fullStream, (error) => error),
++              Stream.fromAsyncIterable({ [Symbol.asyncIterator]: () => iterator }, (error) => error),
+               // #209：fnUntraced 避免每个 stream 事件创建 span——fullStream 事件高频，tracing 噪声远大于诊断价值
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 447d77a264..a7bcf649a4 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1500,6 +1500,132 @@ it.instance(
+@@ -1500,6 +1500,139 @@ it.instance(
    15_000,
  )
  
@@ -173,6 +160,8 @@ index 447d77a264..a7bcf649a4 100644
 +    Effect.gen(function* () {
 +      const { llm } = yield* useServerConfig((url) => ({
 +        ...providerCfg(url),
++        // 审批中止不验证Git快照；隔离真实Windows快照I/O，确保进入目标审查边界。
++        snapshot: false,
 +        permission: { approvals_reviewer: "auto_review" },
 +      }))
 +      const prompt = yield* SessionPrompt.Service
@@ -208,12 +197,17 @@ index 447d77a264..a7bcf649a4 100644
 +
 +      // #216：fork loop 使 cancel 可在 review 进行中并发触发
 +      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
++      // 以真实请求到达作为就绪信号，短状态轮询不承担首次模型准备的等待。
++      yield* llm.wait(2)
++
 +      // #216：等待 shell 工具进入 reviewing 状态——确认 auto-review 已启动
 +      const reviewing = yield* pollWithTimeout(
 +        Effect.gen(function* () {
 +          const part = (yield* MessageV2.filterCompactedEffect(chat.id))
 +            .flatMap((msg) => msg.parts)
 +            .find((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "bash")
++          // 审查前已失败时直接呈现真实工具错误，不能用轮询超时掩盖入口故障。
++          if (part?.state.status === "error") return yield* Effect.die(new Error(JSON.stringify(part)))
 +          if (part?.state.status === "running" && part.state.metadata?.autoReview?.status === "reviewing") return part
 +        }),
 +        "shell auto review never started",
@@ -319,11 +313,11 @@ index dfa0e7a627..a44b0c4aed 100644
      default:
        return `◌ auto review · ${review.precheck?.level ?? "reviewing"} · ${agent}`
    }
-diff --git a/packages/tui/test/routes/session/auto-review-render.test.ts b/packages/tui/test/routes/session/auto-review-render.test.ts
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
 index acce6c4e55..0ec89b822d 100644
---- a/packages/tui/test/routes/session/auto-review-render.test.ts
-+++ b/packages/tui/test/routes/session/auto-review-render.test.ts
-@@ -86,6 +86,12 @@ describe("auto review rendering (#209)", () => {
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -120,6 +120,12 @@ describe("auto review rendering (#209)", () => {
      expect(label).toBe("! auto review · unavailable · asking user · @permission-reviewer")
    })
  
@@ -336,3 +330,52 @@ index acce6c4e55..0ec89b822d 100644
    test("autoReviewLabel defaults to reviewing when status is undefined", () => {
      // #209：无 status 时默认展示 reviewing + precheck level
      // #209：默认 reviewing 是安全假设——metadata 写入与状态更新非原子，读取时可能尚未标记终态
+@@ -145,12 +151,12 @@ const rationale = "private key read was not explicitly authorized"
+-// 六种源场景均挂载生产Session组件，纯标签测试不能证明实际卡片仍显示审查结果。
++// 中止与原六种场景共用真实Session，确保终态审查行仍可见且可以导航。
+-test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
++test.each(["running", "completed", "collapsed", "error", "decision", "transcript", "aborted"] as const)(
+   "renders the real review session: %s",
+   async (scenario) => {
+     const review = {
+       reviewID: "review_render",
+       sessionID: "ses_reviewer_child",
+-      status: scenario === "running" ? "reviewing" : scenario === "error" ? "denied" : "allowed",
++      status: scenario === "aborted" ? "aborted" : scenario === "running" ? "reviewing" : scenario === "error" ? "denied" : "allowed",
+       precheck: { level: "cautious", reason: "requires review" },
+       result: { risk_level: "high", user_authorization: scenario === "error" ? "unknown" : "high", rationale },
+     }
+     const decision = { outcome: "deny", risk_level: "high", user_authorization: "unknown", rationale }
+@@ -165,8 +171,8 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
+       type: "tool",
+       tool: scenario === "decision" || scenario === "transcript" ? "permission_review_decision" : "bash",
+       callID: "call_review",
+-      state: scenario === "error"
+-        ? { status: "error", input, error: "auto reviewer denied", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
++      state: scenario === "error" || scenario === "aborted"
++        ? { status: "error", input, error: scenario === "aborted" ? "Tool execution aborted" : "auto reviewer denied", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
+         : scenario === "running"
+           ? { status: "running", input, title: "Review", metadata: { autoReview: review }, time: { start: 1 } }
+           : { status: "completed", input, title: "Review", metadata, output: "", time: { start: 1, end: 2 } },
+@@ -198,4 +204,5 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
+       async (app, route) => {
+-        const expected = scenario === "running" ? "◌ auto review"
++        const expected = scenario === "aborted" ? "! auto review · aborted · @permission-reviewer"
++          : scenario === "running" ? "◌ auto review"
+           : scenario === "error" ? "! auto review"
+           : scenario === "decision" || scenario === "transcript" ? rationale : "✓ auto review"
+@@ -227,7 +234,7 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
+         const reviewRow = lines.findIndex((line) => line.includes(expected))
+         expect(reviewRow).toBeGreaterThanOrEqual(0)
+         if (scenario === "completed" || scenario === "collapsed") expect(reviewRow).toBeLessThan(row)
+-        if (scenario === "running" || scenario === "error") expect(reviewRow).toBe(row + 1)
++        if (scenario === "running" || scenario === "error" || scenario === "aborted") expect(reviewRow).toBe(row + 1)
+         expect(lines.filter((line) => line.includes(expected))).toHaveLength(1)
+         if (scenario === "collapsed") expect(lines.join("\n")).toContain("Click to expand")
+         if (scenario === "running") {
+@@ -240,4 +247,4 @@ test.each(["running", "completed", "collapsed", "error", "decision", "transcript"] as const)(
+         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
+-        if (scenario === "error") {
++        if (scenario === "error" || scenario === "aborted") {
+           const x = lines[row + 1].indexOf("auto review")
+           await app.mockMouse.drag(x, row + 1, x + 6, row + 1)

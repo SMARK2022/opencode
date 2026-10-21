@@ -9,76 +9,53 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +// 导出供 block-tool-collapse 回归测试直接挂载：测试是唯一新增消费点，不改变运行时语义。
 +export function BlockTool(props: {
    title?: string
-@@ -2733,6 +2734,19 @@ function BlockTool(props: {
-     }
+@@ -2667,6 +2668,14 @@ function BlockTool(props: {
+     if (props.contextView) return theme.diffContextBg
+     if (hover()) return theme.backgroundMenu
+     return theme.backgroundPanel
    })
-   const [expanded, setExpanded] = createSignal(false)
-+  // 目标以 canCollapse() 承担上游 collapsible() 的语义——统一收敛为 collapsed memo，
-+  // 让下方 JSX 与上游保持同构引用。
-+  const collapsed = createMemo(() => canCollapse() && !expanded())
-+  const hasPreview = createMemo(() => props.preview !== undefined)
-+  // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
-+  // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
-+  // 常驻，折叠态通过 maxHeight=0 + overflow=hidden 隐藏，而非卸载 DOM 节点。
-+  const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
-+  // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
-+  // 一旦挂载就不再卸载，后续折叠仅靠布局裁剪隐藏。
++  // 外层拥有展开状态；保存预览节点，使它暂时缺席时不会销毁后再挂载。
++  const collapsed = createMemo(() => props.preview !== undefined)
++  const preview = createMemo<JSX.Element>((previous) => props.preview ?? previous)
++  const [bodyMounted, setBodyMounted] = createSignal(!collapsed())
++  // 正文首次展开才挂载，此后仅隐藏，保留diff等renderable的内部状态。
 +  createEffect(() => {
-+    if (!hasPreview() || !collapsed()) setBodyMounted(true)
++    if (!collapsed()) setBodyMounted(true)
 +  })
    return (
      <box
-       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-@@ -2782,17 +2796,27 @@ function BlockTool(props: {
+@@ -2715,8 +2724,15 @@ function BlockTool(props: {
        <Show when={props.autoReview !== false}>
          <ToolAutoReviewLine />
        </Show>
--      <box
--        marginTop={1}
--        // #144：有 preview 时不靠 maxHeight 硬裁切；无 preview 仍用 #111 高度限制
--        maxHeight={canCollapse() && !expanded() && !props.preview ? previewLines() : undefined}
--        overflow={canCollapse() && !expanded() && !props.preview ? "hidden" : undefined}
--      >
--        {/* #144：折叠且提供 preview 时只渲染预览 */}
--        <Show when={!canCollapse() || expanded() || !props.preview} fallback={props.preview}>
-+      {/* preview 区：折叠态可见（marginTop=1 撑出间距），展开态用 maxHeight=0 隐藏 */}
-+      <Show when={hasPreview()}>
-+        <box
-+          marginTop={collapsed() ? 1 : 0}
-+          maxHeight={collapsed() ? undefined : 0}
-+          overflow={collapsed() ? undefined : "hidden"}
-+        >
-+          {props.preview}
-+        </box>
-+      </Show>
-+      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 maxHeight=0 隐藏，
-+          无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
+-      {/* 预览是否存在由原有外层展开状态决定，容器不维护第二套折叠状态。 */}
+-      <box marginTop={1}>{props.preview ?? props.children}</box>
++      {/* 预览与正文分开挂载，显示状态继续由外层驱动。 */}
++      <box marginTop={collapsed() ? 1 : 0} maxHeight={collapsed() ? undefined : 0} overflow={collapsed() ? undefined : "hidden"}>
++        {preview()}
++      </box>
 +      <Show when={bodyMounted()}>
-+        <box
-+          marginTop={hasPreview() && collapsed() ? 0 : 1}
-+          maxHeight={collapsed() ? (hasPreview() ? 0 : previewLines()) : undefined}
-+          overflow={collapsed() ? "hidden" : undefined}
-+        >
-           {props.children}
--        </Show>
--      </box>
++        <box marginTop={collapsed() ? 0 : 1} maxHeight={collapsed() ? 0 : undefined} overflow={collapsed() ? "hidden" : undefined}>
++          {props.children}
 +        </box>
 +      </Show>
-       <Show when={canCollapse()}>
-         <box marginTop={1}>
-           <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+       <Show when={props.preview}>
+         <text fg={theme.textMuted}>Click to expand</text>
+       </Show>
 
 diff --git a/packages/tui/test/routes/session/block-tool-collapse.test.tsx b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,90 @@
 +import { expect, test } from "bun:test"
 +import { randomUUID } from "node:crypto"
 +import { mkdir, writeFile } from "node:fs/promises"
 +import { tmpdir } from "node:os"
 +import path from "node:path"
 +import { testRender } from "@opentui/solid"
++import { engine } from "@opentui/core"
++import { createSignal } from "solid-js"
 +import { TuiPathsProvider, TuiStartupProvider } from "../../../src/context/runtime"
 +import { KVProvider } from "../../../src/context/kv"
 +import { TuiConfigProvider } from "../../../src/config"
@@ -98,6 +75,8 @@ new file mode 100644
 +  const output = Array.from({ length: 24 }, (_, index) => `source line ${index + 1}`).join("\n")
 +
 +  function Harness() {
++    const [expanded, setExpanded] = createSignal(false)
++    const preview = <text>PREVIEW-FRONT preview body PREVIEW-END</text>
 +    return (
 +      <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: stateDir, worktree: "/work" }}>
 +        <TuiStartupProvider value={{ skipInitialLoading: true }}>
@@ -107,11 +86,11 @@ new file mode 100644
 +                <RouteProvider>
 +                  <BlockTool
 +                    title="source · cell 3"
-+                    totalLines={24}
-+                    threshold={20}
-+                    maxLines={10}
-+                    preview={<text>PREVIEW-FRONT preview body PREVIEW-END</text>}>
++                    autoReview={false}
++                    onClick={() => setExpanded((value) => !value)}
++                    preview={expanded() ? undefined : preview}>
 +                    <text>{output}</text>
++                    <text>Click to collapse</text>
 +                  </BlockTool>
 +                </RouteProvider>
 +              </ThemeProvider>
@@ -122,7 +101,13 @@ new file mode 100644
 +    )
 +  }
 +
-+  const app = await testRender(() => <Harness />, { width: 60, height: 40 })
++  const app = await testRender(() => <Harness />, { width: 60, height: 40, useThread: false })
++  const click = async (label: string) => {
++    const row = app.captureCharFrame().split("\n").findIndex((line) => line.includes(label))
++    expect(row).toBeGreaterThanOrEqual(0)
++    await app.mockMouse.click(10, row)
++  }
++
 +  // KV/theme 的 init 走真实文件 I/O（Flock + 读 kv.json），需要真实异步节拍后 ready 才置位。
 +  await new Promise((resolve) => setTimeout(resolve, 100))
 +  try {
@@ -133,22 +118,23 @@ new file mode 100644
 +    expect(frame).toContain("PREVIEW-FRONT")
 +    expect(frame).not.toContain("source line 24")
 +
-+    await app.mockMouse.click(10, 5)
++    await click("Click to expand")
 +    await app.waitForFrame((f) => f.includes("Click to collapse"))
 +    frame = app.captureCharFrame()
 +    expect(frame).toContain("source line 24")
 +
-+    await app.mockMouse.click(10, 5)
++    await click("Click to collapse")
 +    await app.waitForFrame((f) => f.includes("Click to expand"))
 +    frame = app.captureCharFrame()
 +    expect(frame).not.toContain("source line 24")
 +
 +    // 回归点：再展开后完整内容必须恢复——旧的 <Show> 卸载实现在此处会渲染空白。
-+    await app.mockMouse.click(10, 5)
++    await click("Click to expand")
 +    await app.waitForFrame((f) => f.includes("Click to collapse"))
 +    frame = app.captureCharFrame()
 +    expect(frame).toContain("source line 24")
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
 +  }
 +})

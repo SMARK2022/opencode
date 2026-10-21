@@ -14,16 +14,12 @@ diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-prox
 index b62531cc73b7a52e1e09554f2dccc2f387bd1ec0..dd1a378e19efc25fd2e6ae661af6ddccb872b218 100644
 --- a/packages/core/src/network-proxy.ts
 +++ b/packages/core/src/network-proxy.ts
-@@ -99,7 +99,8 @@ function envProxy(url: URL): SystemProxy | undefined {
- 
- /** Execute a shell command and return its stdout text */
+@@ -95,3 +95,4 @@
  async function execText(command: string, args: string[], timeout = 1500) {
+   // 系统代理探测有独立短期限，系统命令卡住不能占满每次 HTTP 请求的预算。
 -  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore" })
 +  // Windows 系统代理读取会定期调用 reg.exe；必须隐藏 helper 控制台，否则 daemon 每次刷新代理都会弹出 conhost。
 +  const proc = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "ignore", windowsHide: process.platform === "win32" })
-   const timer = setTimeout(() => proc.kill(), timeout)
-   try {
-     const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()])
 diff --git a/packages/core/test/network-proxy.test.ts b/packages/core/test/network-proxy.test.ts
 index 55e365762bdceaa4ac0aa800039b9b30c396881e..d22c2d471da196b0f3ed5dd97665121bc3a2a9e5 100644
 --- a/packages/core/test/network-proxy.test.ts

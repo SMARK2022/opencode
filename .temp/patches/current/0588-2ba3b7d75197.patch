@@ -14,7 +14,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 index 2edb7461c0a88b78c0761e6799cfefbc18c2d00d..726aa4da0e83e5c4a70ba227825313fb7b88a3c7 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -555,13 +555,16 @@ describe("tool.edit", () => {
+@@ -523,13 +523,16 @@ describe("tool.edit", () => {
            ],
          })
  
@@ -25,8 +25,8 @@ index 2edb7461c0a88b78c0761e6799cfefbc18c2d00d..726aa4da0e83e5c4a70ba227825313fb
 -        expect(result.output).toContain("+y")
 -        expect(result.output).not.toContain("-c")
 -        expect(result.output).not.toContain("+c")
-+        // #588：Changed 段头携带绝对临时路径，Windows 目录名含 -c 子串时
-+        // 整串匹配会把路径片段误判为 diff 删除行——按完整 diff 行收紧断言边界。
++        // Changed 段的 diff 文件头可能含路径子串 -c，不能据此认定删除了 c。
++        // 完整行匹配排除路径误判，同时保留 -c/+c 否定断言。
 +        const lines = result.output.split(/\r?\n/)
 +        expect(lines).toContain("Changed:")
 +        expect(lines).toContain("-a")

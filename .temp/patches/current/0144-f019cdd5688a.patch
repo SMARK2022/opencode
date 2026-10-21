@@ -21,39 +21,27 @@ index 297ba0f914..3b800f492a 100644
                    paddingRight: showScrollbar() ? 1 : 0,
                  }}
                  verticalScrollbarOptions={{
-@@ -1995,6 +2000,21 @@ type ToolProps = {
+@@ -1995,6 +2000,13 @@ type ToolProps = {
    output?: string
    part: ToolPart
  }
-+// #144：折叠预览取前 N 行，避免 maxHeight 裁切半行
++// #144：折叠预览沿用现有行数与字符预算，避免长单行绕过限幅
 +
-+// #144：行数统计，供 BlockTool totalLines 武装
-+function countLines(input: string) {
-+  if (!input) return 0
-+  return input.split("\n").length
-+}
-+function previewText(input: string, maxLines: number) {
-+  // #144：按行切分，不截断半行字符
-+  const rows = input.split("\n")
-+  if (rows.length <= maxLines) return input
-+  // #144：截断时追加省略提示
-+  return rows.slice(0, maxLines).join("\n") + "\n…"
++function previewText(input: string, maxLines: number, maxChars: number) {
++  // #144：复用 Unicode 安全的 collapseToolOutput，宽度变化仍驱动原预算。
++  return collapseToolOutput(input, maxLines, maxChars).output
 +}
 +
  function GenericTool(props: ToolProps) {
    const { theme } = useTheme()
    const ctx = use()
-@@ -2023,9 +2043,17 @@ function GenericTool(props: ToolProps) {
+@@ -2023,9 +2038,13 @@ function GenericTool(props: ToolProps) {
          title={`# ${props.tool} ${input(props.input)}`}
          part={props.part}
          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
-+        // #144：武装 BlockTool 内置折叠以启用 preview 主路径
-+        maxLines={10}
-+        threshold={20}
-+        totalLines={output().split(String.fromCharCode(10)).length}
 +        // #144：通用工具折叠预览
 +        preview={
-+          collapsed().overflow ? <text fg={theme.text}>{previewText(output(), 10)}</text> : undefined
++          collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
 +        }
        >
          <box gap={1}>
@@ -62,120 +50,99 @@ index 297ba0f914..3b800f492a 100644
            <Show when={collapsed().overflow}>
              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
            </Show>
-@@ -2207,6 +2235,8 @@ function BlockTool(props: {
-   maxLines?: number
-   threshold?: number
-   totalLines?: number
+@@ -2196,1 +2213,3 @@
+   contextLabel?: string
 +  // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
 +  preview?: JSX.Element
- }) {
-   const { theme } = useTheme()
-   const renderer = useRenderer()
-@@ -2276,11 +2306,14 @@ function BlockTool(props: {
-       </Show>
-       <box
-         marginTop={1}
--        // #111：仅内置折叠激活时限制高度
--        maxHeight={canCollapse() && !expanded() ? previewLines() : undefined}
--        overflow={canCollapse() && !expanded() ? "hidden" : undefined}
-+        // #144：有 preview 时不靠 maxHeight 硬裁切；无 preview 仍用 #111 高度限制
-+        maxHeight={canCollapse() && !expanded() && !props.preview ? previewLines() : undefined}
-+        overflow={canCollapse() && !expanded() && !props.preview ? "hidden" : undefined}
-       >
--        {props.children}
-+        {/* #144：折叠且提供 preview 时只渲染预览 */}
-+        <Show when={!canCollapse() || expanded() || !props.preview} fallback={props.preview}>
-+          {props.children}
-+        </Show>
-       </box>
-       <Show when={canCollapse()}>
-         <box marginTop={1}>
-@@ -2362,6 +2395,17 @@ function Shell(props: ToolProps) {
+@@ -2250,1 +2269,5 @@
+-      <box marginTop={1}>{props.children}</box>
++      {/* 预览是否存在由原有外层展开状态决定，容器不维护第二套折叠状态。 */}
++      <box marginTop={1}>{props.preview ?? props.children}</box>
++      <Show when={props.preview}>
++        <text fg={theme.textMuted}>Click to expand</text>
++      </Show>
+@@ -2362,6 +2385,13 @@ function Shell(props: ToolProps) {
            onRightClick={contextOutputAvailable() ? toggleContextOutput : undefined}
            contextView={showContextOutput()}
            contextLabel="returned to model"
-+          // #144：武装内置折叠以启用 preview
-+          maxLines={10}
-+          threshold={20}
-+          totalLines={output().split(String.fromCharCode(10)).length}
-+          // #144：Shell 折叠预览前 10 行
++          // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
 +          preview={
-+            shellCanCollapse() && !showContextOutput() ? (
++            shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
 +              // #144：Shell 预览带命令前缀
-+              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(output(), 10)}`}</text>
++              <text fg={theme.text}>{`$ ${stringValue(props.input.command) ?? ""}${String.fromCharCode(10)}${previewText(limited(), 10, maxChars())}`}</text>
 +            ) : undefined
 +          }
          >
            <box gap={1}>
              <Show when={isRunning()} fallback={<text fg={theme.text}>$ {stringValue(props.input.command)}</text>}>
-@@ -2402,7 +2446,7 @@ function Write(props: ToolProps) {
-   const threshold = 20
-   const maxChars = createMemo(() => threshold * Math.max(20, ctx.width - 6))
-   const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars(), threshold))
--  // #111：Write 外置折叠 sticky（唯一折叠 owner；勿传 totalLines 给 BlockTool）
-+  // #111/#144：外置折叠保留；同时 totalLines 武装 preview
-   const [writeCanCollapse, setWriteCanCollapse] = createSignal(false)
-   createEffect(() => {
-     if (writeCanCollapse()) return
-@@ -2437,6 +2481,12 @@ function Write(props: ToolProps) {
+@@ -2437,6 +2466,8 @@ function Write(props: ToolProps) {
      <Switch>
        <Match when={isOverwrite()}>
          <BlockTool
 +          // #144：Write diff 折叠预览
-+          maxLines={10}
-+          threshold={20}
-+          // #144：武装 canCollapse 使 preview 可达
-+          totalLines={countLines(diff() ?? "")}
-+          preview={diffOverflow() ? <text fg={theme.text}>{previewText(diff() ?? "", 10)}</text> : undefined}
++          preview={diffOverflow() && !expanded() ? <text fg={theme.text}>{previewText(diff() ?? "", 10, maxChars())}</text> : undefined}
            title={"← Write " + pathFormatter.format(stringValue(props.input.filePath)) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
            part={props.part}
            onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
-@@ -2477,6 +2527,12 @@ function Write(props: ToolProps) {
+@@ -2477,6 +2508,8 @@ function Write(props: ToolProps) {
            title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
            part={props.part}
            onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
 +          // #144：Write 内容折叠预览
-+          maxLines={10}
-+          threshold={20}
-+          // #144：武装 canCollapse 使 preview 可达
-+          totalLines={countLines(code())}
-+          preview={writeCanCollapse() ? <text fg={theme.text}>{previewText(code(), 10)}</text> : undefined}
++          preview={writeCanCollapse() && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined}
          >
            <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
              <code
-@@ -2795,6 +2851,12 @@ function Edit(props: ToolProps) {
+@@ -2795,7 +2828,9 @@ function Edit(props: ToolProps) {
      <Switch>
        <Match when={stringValue(props.metadata.diff) !== undefined}>
          <BlockTool
 +          // #144：Edit diff 折叠预览
-+          maxLines={10}
-+          threshold={20}
-+          // #144：武装 canCollapse 使 preview 可达
-+          totalLines={countLines(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "")}
-+          preview={<text fg={theme.text}>{previewText(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "", 10)}</text>}
++          preview={overflow() && !expanded() ? <text fg={theme.text}>{previewText(diffContent(), 10, 10 * Math.max(20, ctx.width - 6))}</text> : undefined}
+           // 保留路径格式化与 unknown 解码，只给真实变更附加统计后缀。
            title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath)) + (stats().added > 0 || stats().removed > 0 ? ` +${stats().added} -${stats().removed}` : "")}
            part={props.part}
-           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
-@@ -2888,6 +2950,22 @@ function ApplyPatch(props: ToolProps) {
-             const patchOverflow = createMemo(() => patchLines().length > 20)
-             return (
-             <BlockTool
-+          // #144：ApplyPatch 按 file.patch 行数武装，delete 走摘要预览
-+          maxLines={10}
-+          threshold={20}
-+          totalLines={countLines(file.patch ?? "")}
-+          preview={
-+            <Show
-+              when={file.type !== "delete"}
-+              fallback={
-+                <text fg={theme.textMuted}>
-+                  -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-+                </text>
-+              }
-+            >
-+              <text fg={theme.text}>{previewText(file.patch || "", 10)}</text>
-+            </Show>
-+          }
+           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
+@@ -2841,3 +2876,5 @@
++              // 文件各自拥有展开状态；删除项沿原 children 显示删除摘要。
++              preview={file.type !== "delete" && patchOverflow() && !patchExpanded() ? <text fg={theme.text}>{previewText(file.patch || "", 10, 10 * Math.max(20, ctx.width - 6))}</text> : undefined}
                title={title(file)}
                part={props.part}
-               onClick={patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 patch
+               onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
+diff --git a/packages/tui/test/util/tool-display.test.ts b/packages/tui/test/util/tool-display.test.ts
+--- a/packages/tui/test/util/tool-display.test.ts
++++ b/packages/tui/test/util/tool-display.test.ts
+@@ -1,4 +1,33 @@
+ import { describe, expect, test } from "bun:test"
+ import { toolDisplayMetadata, webSearchProviderLabel } from "../../src/util/tool-display"
++import { collapseToolOutput } from "../../src/util/collapse-tool-output"
+ 
++describe("collapseToolOutput previews", () => {
++  test("bounds a 10K single line by the terminal character budget", () => {
++    const output = "x".repeat(10_000)
++    const maxChars = 10 * Math.max(20, 80 - 6)
++    const preview = collapseToolOutput(output, 10, maxChars)
++    expect(preview.overflow).toBe(true)
++    expect(Array.from(preview.output).length).toBe(maxChars)
++    expect(preview.output).toBe("x".repeat(maxChars - 1) + "…")
++    expect(output.length).toBe(10_000)
++  })
++
++  test("keeps ten source lines and an overflow hint", () => {
++    const output = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n")
++    const preview = collapseToolOutput(output, 10, 1000)
++    expect(preview.output).toBe([...output.split("\n").slice(0, 10), "…"].join("\n"))
++    expect(preview.overflow).toBe(true)
++    expect(collapseToolOutput(output.split("\n").slice(0, 10).join("\n"), 10, 1000).overflow).toBe(false)
++  })
++
++  test("counts Unicode code points without splitting surrogate pairs", () => {
++    const output = String.fromCodePoint(0x1f600).repeat(10_000)
++    const preview = collapseToolOutput(output, 10, 200)
++    expect(Array.from(preview.output).length).toBe(200)
++    expect(preview.output.endsWith("…")).toBe(true)
++    expect(Array.from(preview.output).slice(0, -1).every((item) => item === String.fromCodePoint(0x1f600))).toBe(true)
++  })
++})
++
+ describe("webSearchProviderLabel", () => {

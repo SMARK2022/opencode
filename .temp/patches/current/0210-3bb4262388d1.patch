@@ -4,10 +4,10 @@ Date: Sun, 24 May 2026 04:34:37 +0800
 Subject: [PATCH] feat(permission): 增强外部目录权限处理，支持工具来源证据以优化自动审查决策
 
 
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
 index 2d3a740eb4..44e1224163 100644
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
 @@ -55,6 +55,8 @@ export function evaluate(
      const precheck = PermissionPrecheck.evaluate(input)
      const isShell = input.permission === "bash"
@@ -40,7 +40,7 @@ index 2d3a740eb4..44e1224163 100644
 +function hasToolExternalDirectoryEvidence(metadata: Readonly<Record<string, unknown>>) {
 +  if (metadata.action_kind !== "tool") return false
 +  if (metadata.tool === "read") return metadata.operation === "read"
-+  // #210：write 需 content 字符串证据——空内容写入与路径型请求不可区分时不授权，content 存在才让 reviewer 判断写入意图
++  // 空字符串也是有效写入负载；缺少content的纯路径请求才继续人工审批。
 +  if (metadata.tool === "write") return metadata.operation === "write" && typeof metadata.content === "string"
 +  if (metadata.tool === "edit") {
 +    return (
@@ -62,6 +62,170 @@ index 2d3a740eb4..44e1224163 100644
  // #198：提取错误消息——provider/model 错误在 deny reason 中暴露用于诊断，但 AutoDeniedError 仍阻止鼓励绕过策略的重试建议
  function errorMessage(error: unknown) {
    if (error instanceof Error) return error.message
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -187,6 +187,8 @@
+       const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata, agent: agent?.id }
++      // 工具外部路径门禁需逐次审查操作负载，不能复用自动审批缓存。
++      const toolExternal = input.action === "external_directory" && input.metadata?.action_kind === "tool"
+       const key = JSON.stringify([input.action, resources, metadata, input.agent, all, options, Config.latest(entries, "approvals_reviewer")])
+       const known = cache.get(input.sessionID) ?? new Set<string>()
+       cache.set(input.sessionID, known)
+       const state = circuits.get(input.sessionID) ?? { consecutive: 0, recent: [], triggered: false }
+       circuits.set(input.sessionID, state)
+@@ -198,4 +200,4 @@
+-      if (known.has(key)) {
++      if (!toolExternal && known.has(key)) {
+         record(false)
+         return { effect, rules: all }
+       }
+@@ -231,5 +233,5 @@
+       if (decision.action === "ask") return { effect: "ask" as const, rules: all }
+       record(false)
+-      if (decision.source === "reviewer") known.add(key)
++      if (decision.source === "reviewer" && !toolExternal) known.add(key)
+       // 自动批准不覆盖请求中另一个仍为 ask 的资源。
+       return { effect, rules: all }
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -79,6 +79,8 @@
+                 yield* permission.assert({
+                   ...LocationMutation.externalDirectoryPermission(external),
++                  // 路径解析仍由Location负责，leaf只提供即将执行的工具语义。
++                  metadata: { action_kind: "tool", tool: "read", operation: "read", filepath: target.canonical },
+                   sessionID: context.sessionID,
+                   agent: context.agent,
+                   source,
+                 })
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -73,6 +73,8 @@
+                   yield* permission.assert({
+                     ...LocationMutation.externalDirectoryPermission(external),
++                    // 外部目录审批发生在写入前，包括清空文件的空字符串负载。
++                    metadata: { action_kind: "tool", tool: "write", operation: "write", content: input.content, filepath: target.canonical },
+                     sessionID: context.sessionID,
+                     agent: context.agent,
+                     source,
+                   })
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -142,7 +142,12 @@
+                     permission.assert({
+                       ...LocationMutation.externalDirectoryPermission(external),
+                       sessionID: context.sessionID,
+                       agent: context.agent,
+-                      metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
++                      metadata: {
++                        // 保留原生diff证据，补齐共享reviewer需要的操作与原始替换负载。
++                        filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }),
++                        action_kind: "tool", tool: "edit", operation: "edit",
++                        oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll === true,
++                      },
+                       source: permissionSource,
+                     }),
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -103,13 +103,15 @@
+-                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization>()
+-                for (const { target } of targets) {
++                // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
++                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] }>()
++                for (const { hunk, target } of targets) {
+                   const external = target.externalDirectory
+-                  if (external) externalDirectories.set(external.resource, external)
++                  if (external) externalDirectories.set(`${external.resource}:${hunk.type}`, { ...external, operation: hunk.type })
+                 }
+                 for (const external of externalDirectories.values()) {
+                   yield* permission.assert({
+                     ...LocationMutation.externalDirectoryPermission(external),
++                    metadata: { action_kind: "tool", tool: "apply_patch", operation: external.operation, patchText: input.patchText },
+                     sessionID: context.sessionID,
+                     agent: context.agent,
+                     source,
+                   })
+                 }
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -447,6 +447,16 @@
+     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
+     expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
+     assessment = { ...assessment, risk_level: "low" }
++    // 完全相同的工具门禁也必须重复审查，空字符串写入同样携带有效负载。
++    const external = { ...edit, action: "external_directory", resources: ["/outside/*"], metadata: { action_kind: "tool", tool: "write", operation: "write", content: "" } }
++    const reviews = reviewRequests.length
++    expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
++    expect(yield* service.ask(external)).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(reviews + 2)
++    expect(reviewRequests.at(-1)?.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n")).toContain('"operation": "write"')
++    const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
++    expect(pathOnly.effect).toBe("ask")
++    yield* service.reply({ requestID: pathOnly.id, reply: "reject" })
+     // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
+     reviewGate = yield* Deferred.make<void>()
+     reviewStarted = yield* Deferred.make<void>()
+diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
+--- a/packages/opencode/test/permission/next.test.ts
++++ b/packages/opencode/test/permission/next.test.ts
+@@ -962,7 +962,17 @@
+       yield* ask(request)
+       yield* ask(request)
+ 
+       expect(reviewedCalls).toBe(1)
++      // 外部工具门禁既不能读取旧路径缓存，也不能写入可复用的新路径批准。
++      const cache = yield* PermissionSessionCache.Service
++      const stored = { ...request, permission: "external_directory", metadata: {} }
++      yield* cache.put(stored, "allow")
++      expect(yield* cache.has({ ...stored, metadata: { action_kind: "tool" } })).toBe(false)
++      const uncached = { ...stored, sessionID: SessionID.make("ses_uncached"), metadata: { action_kind: "tool" } }
++      yield* cache.put(uncached, "allow")
++      expect(yield* cache.has({ ...uncached, metadata: {} })).toBe(false)
++      expect(yield* cache.has(stored)).toBe(true)
++      expect(reviewedCalls).toBe(1)
+     }),
+   { git: true },
+ )
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -219,6 +219,8 @@
+               const canonicalTarget = path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "external.txt")
+               expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
++              // 真实leaf必须先传写入内容，再允许执行文件变更。
++              expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "write", operation: "write", content: "external" })
+               expect(assertions[0]).toMatchObject({
+                 resources: [
+                   path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),
+                 ],
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -201,5 +201,7 @@
+               expect(result.type).toBe("text")
+               expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
++              // 授权证据保留原始替换串，不通过提前读取外部文件生成第二份内容。
++              expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "edit", operation: "edit", oldString: "before", newString: "after" })
+               expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after")
+               expect(writes).toHaveLength(1)
+             }),
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -284,6 +284,8 @@
+                   ),
+                 ).toMatchObject({ type: "text" })
++                // 同目录同操作仍只批准一次，同时reviewer得到完整批次而非只有路径。
++                expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "apply_patch", operation: "update", patchText: expect.stringContaining(`*** Update File: ${second}`) })
+                 expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+                 expect(assertions[0]?.resources).toEqual([
+                   path.join(yield* Effect.promise(() => fs.realpath(outside.path)), "*").replaceAll("\\", "/"),
+                 ])
 diff --git a/packages/opencode/src/permission/cache/session-cache.ts b/packages/opencode/src/permission/cache/session-cache.ts
 index 538a6fe23d..2fe7604a9d 100644
 --- a/packages/opencode/src/permission/cache/session-cache.ts

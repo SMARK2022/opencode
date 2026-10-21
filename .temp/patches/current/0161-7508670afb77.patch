@@ -412,13 +412,12 @@ index 68a12db8491688fa46be5d723aff1d5fea37a99e..d5644398148f695fd034b6319250894c
        "dependencies": {
          "@octokit/auth-app": "8.0.1",
          "@octokit/rest": "catalog:",
-@@ -565,7 +565,7 @@
+@@ -565,6 +565,6 @@
      // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
      "packages/opencode": {
        "name": "opencode",
 -      "version": "1.18.37-smark", // 版本链：与 packages/opencode/package.json 同步
 +      "version": "1.18.38-smark",
-       "optionalDependencies": { "sharp": "0.33.5" }, // #59：可选压缩依赖，复用上游既有 0.33.5 解析树
        "bin": {
          "opencode": "./bin/opencode",
 @@ -697,7 +697,7 @@

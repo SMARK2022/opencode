@@ -5,15 +5,15 @@ diff --git a/CONTEXT.md b/CONTEXT.md
  
  # opencode (SMARK fork)
  
--The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.9-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
-+The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.10-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
+-The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above.
++The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.18.42-smark`.
  
  ## Language
  
 diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 --- a/packages/opencode/package.json
 +++ b/packages/opencode/package.json
-@@ -1,7 +1,8 @@
+@@ -1,5 +1,6 @@
  {
    "$schema": "https://json.schemastore.org/package.json",
 -  "version": "1.18.41-smark",
@@ -21,10 +21,3 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 +  "//396-release-note": "#396 源 patch bump 1.15.9→1.15.10 按版本线映射为 1.18.41→1.18.42；禁止回写 1.14/1.15。",
    "//363-release-note": "#363 协同升号至 1.18.41-smark；源 patch bump 1.15.8→1.15.9 映射到目标版本线递增",
    "//version-note": "#253 协同升号至 1.18.40-smark；禁止回写 1.14/1.15",
-   "//287-release-note": "source 全量更新 22 个 README 翻译文件添加 SMARK 品牌信息；目标 README 为纯上游未移植 SMARK 段，patch pre-image 期望 SMARK 增强版而目标为纯上游版，上下文完全不匹配；按 #161/#231 先例跳过整个 patch；版本展示语义由 package.json 和 workflow 承载",
-   "//284-release-note": "source bump 1.15.5→1.15.6 已被目标版本线 1.18.40-smark 超越；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
- 
-   "//287-release-note": "source 全量更新 22 个 README 翻译文件添加 SMARK 品牌信息；目标 README 为纯上游未移植 SMARK 段，patch pre-image 期望 SMARK 增强版而目标为纯上游版，上下文完全不匹配；按 #161/#231 先例跳过整个 patch；版本展示语义由 package.json 和 workflow 承载",
- 
-   "//284-release-note": "source bump 1.15.5→1.15.6 已被目标版本线 1.18.40-smark 超越；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
-   "//287-release-note": "source 全量更新 22 个 README 翻译文件添加 SMARK 品牌信息；目标 README 为纯上游未移植 SMARK 段，patch pre-image 期望 SMARK 增强版而目标为纯上游版，上下文完全不匹配；按 #161/#231 先例跳过整个 patch；版本展示语义由 package.json 和 workflow 承载",

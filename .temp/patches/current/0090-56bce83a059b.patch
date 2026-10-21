@@ -208,7 +208,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
      }),
    )
  
-   it.live("image files set truncated to false", () =>
+   it.live("PNG, BMP, TIFF and AVIF files attach without truncation and normalize for the processor", () =>
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts

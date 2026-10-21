@@ -1,3 +1,135 @@
+diff --git a/packages/core/src/tool/edit-excerpt.ts b/packages/core/src/tool/edit-excerpt.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/edit-excerpt.ts
+@@ -0,0 +1,18 @@
++export function closestMatch(content: string, expected: string) {
++  const first = expected.split("\n").find(line => line.trim().length >= 3)?.trim().toLowerCase()
++  if (!first) return undefined
++  const letters = new Set(first)
++  const lines = content.split("\n")
++  // 摘录只辅助重试，不能把相似位置当作授权后的真实匹配。
++  const best = lines.map((line, index) => {
++    const candidate = line.trim().toLowerCase()
++    const common = [...candidate].filter(letter => letters.has(letter)).length
++    return { index, score: common / Math.max(1, Math.min(first.length, candidate.length)) }
++  }).sort((a, b) => b.score - a.score)[0]
++  if (!best || best.score < 0.3) return undefined
++  const start = Math.max(0, best.index - 1)
++  return {
++    line: start + 1,
++    excerpt: lines.slice(start, best.index + 4).join("\n").slice(0, 500),
++  }
++}
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -18,3 +18,4 @@
+ import { ToolRegistry } from "./registry"
++import { closestMatch } from "./edit-excerpt"
+ import { Tool } from "./tool"
+ import { Tools } from "./tools"
+@@ -172,6 +173,8 @@
+                 const replacements = countOccurrences(source.text, oldString)
+                 if (replacements === 0) {
++                  const closest = closestMatch(source.text, oldString)
+                   return yield* new ToolFailure({
+                     message:
+-                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
++                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation." +
++                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
+                   })
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -1,0 +1,1 @@
++import { closestMatch } from "./edit-excerpt"
+@@ -31,4 +31,5 @@
+ export const Output = Schema.Struct({
+   applied: Schema.Array(Applied),
+   files: Schema.Array(FileDiff.Info),
++  errors: Schema.optional(Schema.Array(Schema.String)),
+ })
+@@ -43,3 +44,4 @@
++    ...(output.errors?.length ? [`\nFailed to update ${output.errors.length} file(s):`, ...output.errors] : []),
+   ].join("\n")
+ 
+ type Prepared =
+@@ -126,4 +128,6 @@
+                   source,
+                 })
+ 
++                // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
++                const errors: string[] = []
+                 const prepared: Prepared[] = []
+@@ -150,1 +154,7 @@
+-                    const update = Patch.derive(hunk.path, hunk.chunks, original)
++                    const update = yield* Effect.try({
++                      try: () => Patch.derive(hunk.path, hunk.chunks, original),
++                      catch: (error) => {
++                        const closest = closestMatch(before, hunk.chunks.flatMap(chunk => chunk.oldLines).join("\n"))
++                        return new ToolFailure({ message: `${error}${closest ? `\n\nActual content near expected location:\n${closest.excerpt}` : ""}` })
++                      },
++                    })
+@@ -159,4 +170,8 @@
+-                  }).pipe(Effect.mapError(() => fail(hunk.path)))
++                  }).pipe(Effect.catch(error => {
++                    errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
++                    return Effect.void
++                  }))
+                 }
+ 
++                if (prepared.length === 0) return yield* new ToolFailure({ message: errors.join("\n") })
+                 const patchFiles = prepared.map(patchFile)
+@@ -192,1 +207,1 @@
+-                return { applied, files: patchFiles }
++                return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
+diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+--- a/packages/core/src/tool/read-filesystem.ts
++++ b/packages/core/src/tool/read-filesystem.ts
+@@ -23,3 +23,23 @@
+   override get message() {
+-    return `Cannot read binary file: ${this.resource}`
++    // 继续使用统一的二进制错误类型，给已识别格式补充可执行的读取方向。
++    const suggestions: Record<string, string> = {
++      ".gz": "Decompress with gunzip or bun -e with zlib first, then read.",
++      ".tar": "Extract with tar -xf first, then read individual files.",
++      ".zip": "Extract with unzip first, then read individual files.",
++      ".7z": "Extract with 7z first, then read individual files.",
++      ".db": "Use bun -e with bun:sqlite to query this database.",
++      ".vscdb": "Use bun -e with bun:sqlite to query this database.",
++      ".sqlite": "Use bun -e with bun:sqlite to query this database.",
++      ".exe": "Use strings or hexdump via bash to inspect binary content.",
++      ".dll": "Use strings or hexdump via bash to inspect binary content.",
++      ".so": "Use strings or hexdump via bash to inspect binary content.",
++      ".wasm": "Use strings or hexdump via bash to inspect binary content.",
++      ".class": "Use javap -c via bash to disassemble Java bytecode.",
++      ".jar": "Extract with jar -xf or unzip first, then read individual files.",
++      ".doc": "Use python-docx or convert to text via libreoffice --headless.",
++      ".docx": "Use python-docx or unzip to read XML content.",
++      ".pyc": "Use python -m dis or uncompyle6 to decompile.",
++    }
++    const suggestion = suggestions[path.extname(this.resource).toLowerCase()]
++    return `Cannot read binary file: ${this.resource}${suggestion ? `\n${suggestion}` : ""}`
+   }
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -310,1 +310,1 @@
+-  it.live("rejects invalid later update before applying an earlier add", () =>
++  it.live("applies valid files while reporting a failed later update", () =>
+@@ -324,2 +324,3 @@
+-            ).toEqual({ type: "error", value: "Unable to apply patch at missing.txt" })
+-            expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(false)
++            ).toEqual({ type: "text", value: "Applied patch sequentially:\nA created.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.\n\nFailed to update 1 file(s):\nUnable to apply patch at missing.txt" })
++            expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
++            expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "created.txt"), "utf8"))).toBe("created\n")
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -322,1 +322,1 @@
+-                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
++                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.\n\nClosest match at line 1:\nsame same",
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts

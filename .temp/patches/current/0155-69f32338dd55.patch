@@ -140,6 +140,6 @@ index 1111111111..2222222222 100644
 +    ),
 +  )
 +
-   each("basic", () =>
+   each("basic", (item) =>
      runIn(
        projectRoot,

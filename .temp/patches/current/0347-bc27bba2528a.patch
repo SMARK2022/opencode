@@ -1,3 +1,78 @@
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -110,1 +110,1 @@
+-              result: { type: "text", value: "Created file successfully: src/new.txt" },
++              result: { type: "text", value: "Created file successfully: src/new.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety." },
+@@ -118,1 +118,1 @@
+-                content: [{ type: "text", text: "Created file successfully: src/new.txt" }],
++                content: [{ type: "text", text: "Created file successfully: src/new.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety." }],
+@@ -144,1 +144,1 @@
+-              expect(settled.result).toEqual({ type: "text", value: "Wrote file successfully: existing.txt" })
++              expect(settled.result).toEqual({ type: "text", value: "Wrote file successfully: existing.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety." })
+@@ -197,1 +197,1 @@
+-              expect(result).toEqual({ type: "text", value: "Created file successfully: absolute.txt" })
++              expect(result).toEqual({ type: "text", value: "Created file successfully: absolute.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety." })
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -136,1 +136,1 @@
+-                  value: "Edited file successfully: hello.txt\nReplacements: 1\n```diff\n-before\n+after\n```",
++                  value: "Edited file successfully: hello.txt\nReplacements: 1\n```diff\n-before\n+after\n```\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -155,1 +155,1 @@
+-                  value: "Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt",
++                  value: "Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -38,2 +38,4 @@
+ export const toModelOutput = (output: Output) =>
+-  `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`
++  // 原生工具尚未接入 LSP，写入成功不能被误读为类型检查通过。
++  `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}\n\n` +
++  "LSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety."
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -79,3 +79,5 @@ export const toModelOutput = (output: Output, oldString: string, newString: string) =>
+     ...previewLines(newString, "+"),
+     "```",
++    // 保留原生精确编辑的输出，只明确尚未执行 LSP 检查。
++    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+   ].join("\n")
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -40,4 +40,6 @@ export const toModelOutput = (output: Output) =>
+     ...output.applied.map(
+       (item) => `${item.type === "add" ? "A" : item.type === "delete" ? "D" : "M"} ${item.resource}`,
+     ),
++    // 原生批量修改同样尚无 LSP 结果，不能把操作成功作为诊断通过。
++    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+   ].join("\n")
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -260,4 +260,11 @@
+       // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
+       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
++      // 根据本轮实际工具表提示历史调用的可用性，不另建权限判断或持久化提醒。
++      const available = new Set(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
++      const disabled = toolMaterialization ? [...new Set(context.flatMap(message => message.type === "assistant" ? message.content.flatMap(part => part.type === "tool" && part.provider?.executed !== true ? [part.name] : []) : []))].filter(name => !available.has(name)) : []
++      const notice = disabled.map(name => {
++        const substitutes = name === "apply_patch" ? ["edit", "write"].filter(tool => available.has(tool)) : []
++        return `${name} is not available in this session. Use ${substitutes.length ? substitutes.join(" or ") : "an available tool"} instead.`
++      }).join("\n")
+       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
+       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
+@@ -265,3 +272,4 @@
+       const systemParts = [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
+         toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
++        ...(notice ? [`<system-reminder>${notice}</system-reminder>`] : []),
+         ...(decide ? [DECIDE_PROMPT] : []),
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
@@ -83,10 +158,10 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
          title: output,
 
 
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -688,7 +688,14 @@ function truncateOneLine(text: string, maxChars: number) {
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -788,8 +788,15 @@ function truncateOneLine(text: string, maxChars: number) {
  }
  
  // 引号包裹被压缩的模式字符串，并对其进行转义处理（主要为了呈现给 LLM 看时更清晰）
@@ -99,6 +174,7 @@ diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src
 +  // 防御 undefined / 非 string 输入：TypeScript 类型标注不在运行时强制，
 +  // 压缩管线的调用方在 PowerShell CLIXML 解析等边界路径可能产生 undefined
 +  if (typeof pattern !== "string") return ""
+   // 标签中的引号和控制字符必须转义，避免被误读为日志的真实边界。
    let text = pattern
      .replaceAll("\\", "\\\\")
      .replaceAll("\t", "\\t")
@@ -133,7 +209,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -70,23 +70,37 @@ export const WriteTool = Tool.define(
+@@ -70,23 +70,39 @@ export const WriteTool = Tool.define(
            })
  
            yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
@@ -159,6 +235,7 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
              // 最终内容读取：格式化后重新读取文件，确保 diff 反映实际落盘内容
              const finalSource = yield* Bom.readFile(fs, filepath)
              // diff 生成：使用 createTwoFilesPatch 生成 git diff 格式，trimDiff 清理头部
++            if (exists) {
              metadataDiff = trimDiff(
                createTwoFilesPatch(
                  filepath,
@@ -168,6 +245,7 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
                  normalizeLineEndings(finalSource.text),
                ),
              )
++            }
 +            // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
 +            if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
 +              formattedContent = finalSource.text
@@ -231,8 +309,8 @@ diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/openco
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
 @@ -1,5 +1,5 @@
  import { describe, expect, test } from "bun:test"
--import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "../../src/tool/bash-compress"
-+import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern } from "../../src/tool/bash-compress"
+-import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
++import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern } from "@opencode-ai/core/tool/bash-compress"
  
  // #129：CLIXML 纯块解码与混合块保留
  describe("tool.bash-compress", () => {
@@ -473,9 +551,9 @@ index 0000000000000000000000000000000000000000..4acd04972b978be06813660e5070e68b
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -209,6 +209,51 @@ function isOpenToolPart(part: SessionV1.Part): part is OpenToolPart {
-   // #173：type guard 收窄，避免误写 completed/error
-   return part.type === "tool" && (part.state.status === "pending" || part.state.status === "running")
+@@ -178,6 +178,51 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
+   // They are not pending work and must not trigger an assistant-prefill request.
+   return part.state.status === "error" && part.state.metadata?.interrupted === true
  }
 +// [local-smark] 检查历史消息中是否使用了当前被 disabled 的工具，返回事前提醒文本。
 +// 场景：GPT 模型在历史中用了 apply_patch，切换到 Claude（apply_patch 被 deny）后，

@@ -28,128 +28,87 @@ diff --git a/packages/opencode/src/effect/bridge.ts b/packages/opencode/src/effe
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -2,7 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { PermissionV1 } from "@opencode-ai/core/v1/permission"
- import { Image } from "@/image/image"
- import { SessionV1 } from "@opencode-ai/core/v1/session"
+@@ -6,1 +6,1 @@
 -import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema } from "effect"
 +import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema, Semaphore } from "effect"
- import * as Stream from "effect/Stream"
- import { Agent } from "@/agent/agent"
- import { Config } from "@/config/config"
-@@ -167,6 +167,11 @@ const layer = Layer.effect(
-         hasToolCall: false,
-       }
+@@ -204,1 +204,3 @@
        let aborted = false
-+      // [local-smark] Tool 终态写入许可：串行化 completeToolCall / failToolCall /
-+      // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner，
-+      // 防止上一轮 runner 的 late 终态写入误杀 replacement loop 的新工具状态。
-+      // 不在 permit 内 await Tool Deferred——settleToolCall 的 Deferred.succeed 是同步的
++      // 三条终态写共享许可；只串行读写，不在其中等待工具完成信号。
 +      const toolPermit = Semaphore.makeUnsafe(1)
- 
-       // 这些 milestone 只写 daemon log，不记录 prompt、token 内容、工具参数
-       // 或 provider metadata。phase 字符串是后续排查的稳定连接点：
-@@ -244,6 +249,10 @@ const layer = Layer.effect(
-           attachments?: SessionV1.FilePart[]
-         },
-       ) {
-+        // [local-smark] 终态写入串行化：read-check-write 必须原子，防止 late
-+        // metadata/result 或 cleanup 与正常完成路径竞争覆盖终态
-+        return yield* toolPermit.withPermits(1)(
-+        Effect.gen(function* () {
-         const match = yield* readToolCall(toolCallID)
-         if (!match) return
-         // #139：DB 已终态时仍 settle deferred，避免 LLM 死等
-@@ -278,9 +287,14 @@ const layer = Layer.effect(
-           },
-         })
+@@ -315,2 +317,2 @@
          yield* settleToolCall(toolCallID)
-+        }),
-+        )
-       })
- 
-       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
-+        // [local-smark] 与 completeToolCall 共享同一 permit，三条终态路径唯一 winner
-+        return yield* toolPermit.withPermits(1)(
-+        Effect.gen(function* () {
-         const match = yield* readToolCall(toolCallID)
-         if (!match) return false
-         // #139：非 running 也 settle，防止卡死
-@@ -314,6 +328,8 @@ const layer = Layer.effect(
-         }
+-      })
++      }, toolPermit.withPermits(1))
+@@ -349,3 +351,3 @@
          yield* settleToolCall(toolCallID)
          return true
-+        }),
-+        )
-       })
- 
-       const finishReasoning = Effect.fn("SessionProcessor.finishReasoning")(function* (reasoningID: string) {
-@@ -899,23 +915,33 @@ const layer = Layer.effect(
-           // 合并未刷新的 raw 缓冲到 part，避免中断时丢失已累积输入
-           const pendingRaw = ctx.toolInputBuffer[toolCallID]
-           if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
+-      })
++      }, toolPermit.withPermits(1))
+@@ -904,25 +906,27 @@
+         for (const toolCallID of Object.keys(ctx.toolcalls)) {
+-          const match = yield* readToolCall(toolCallID)
+-          if (!match) continue
+-          const part = match.part
+-          const end = Date.now()
+-          const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+-          // 协调信号唤醒后仍须先提交工具终态；error schema 不保留 state.raw，残余原文存入 metadata。
+-          const pendingRaw = ctx.toolInputBuffer[toolCallID]
 -          yield* session.updatePart({
 -            ...part,
 -            state: {
 -              ...part.state,
--              ...(part.state.status === "pending" && pendingRaw
--                ? { raw: part.state.raw + pendingRaw }
--                : {}),
 -              status: "error",
 -              // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
 -              // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
 -              // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
 -              error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
 -              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
--              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
+-              metadata: { ...(aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata),
+-                ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
+-              },
 -              time: { start: "time" in part.state ? part.state.time.start : end, end },
 -            },
 -          })
-+          // [local-smark] cleanup 终态写入同样过 permit，避免与 replacement loop
-+          // 的正常完成路径并发覆盖；permit 内重读终态并跳过已完成/已失败项，
-+          // 防止 cleanup 抢先写入覆盖 completeToolCall 已落库的 completed 终态
 +          yield* toolPermit.withPermits(1)(
 +            Effect.gen(function* () {
-+              const current = yield* readToolCall(toolCallID)
-+              if (!current) return
-+              if (current.part.state.status !== "running" && current.part.state.status !== "pending") return
++              const match = yield* readToolCall(toolCallID)
++              if (!match) return
++              const part = match.part
++              // 在许可内重读，已获胜的complete/fail不能被cleanup旧快照覆盖。
++              if (part.state.status !== "running" && part.state.status !== "pending") return
++              const end = Date.now()
++              const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
++              const pendingRaw = ctx.toolInputBuffer[toolCallID]
 +              yield* session.updatePart({
-+                ...current.part,
++                ...part,
 +                state: {
-+                  ...current.part.state,
-+                  ...(current.part.state.status === "pending" && pendingRaw
-+                    ? { raw: current.part.state.raw + pendingRaw }
-+                    : {}),
++                  ...part.state,
 +                  status: "error",
-+                  // #153：区分用户中断与流结束未完成，避免误导性的 interrupted 标记
-+                  // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
-+                  // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
 +                  error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
-+                  // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
-+                  metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in current.part.state ? current.part.state.time.start : end)) : metadata,
-+                  time: { start: "time" in current.part.state ? current.part.state.time.start : end, end },
++                  // pending原文放入metadata，普通失败保留进度，中断沿用412耗时与审查信封。
++                  metadata: { ...(aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata),
++                    ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
++                  },
++                  time: { start: "time" in part.state ? part.state.time.start : end, end },
 +                },
 +              })
 +            }),
 +          )
          }
-         ctx.toolcalls = {}
-         ctx.toolInputBuffer = {}
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -53,1 +53,2 @@
--import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types , Semaphore} from "effect"
-+// [local-smark] Deferred 支撑 single-flight cancel：重叠请求 join 同一在飞操作
+@@ -47,1 +47,1 @@
+-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types, Semaphore } from "effect"
 +import { Cause, Deferred, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
-@@ -345,2 +346,3 @@
+@@ -277,2 +277,2 @@
 -    // #173：同 session 并发 cancel 串行，避免双写终态竞态
 -    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
-+    // [local-smark] single-flight cancel：每 session 至多一个在飞操作，重叠 cancel
-+    // join 同一 Deferred 而非排队重执行（见 cancel 内注释）
-+    const cancelFlights = new Map<SessionID, Deferred.Deferred<void>>()
-@@ -357,27 +360,42 @@
--    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
++    // 重叠取消共享同一Exit，不能排队后重新读取replacement runner。
++    const cancelFlights = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
+@@ -289,27 +289,34 @@
+     // #216：复用取消owner递归收尾子会话，保留冻结ID、runner等待与原子结算順序。
+-    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
 -      // #173：每 session 一把信号量，合并并发 cancel
 -      let lock = cancelLocks.get(sessionID)
 -      if (!lock) {
@@ -161,150 +120,234 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 -      yield* lock.withPermits(1)(
 -        Effect.gen(function* () {
 -          yield* Effect.logInfo("cancel", { "session.id": sessionID })
--          // 在中断 runner 前快照待终态化的 assistant 消息 ID，
--          // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀
--          const pendingIds = new Set(
--            (yield* sessions.messages({ sessionID }).pipe(
--              Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
--            )).filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
--          )
+-          // 冻结 ID 在同会话锁内完成，不能在 idle 发布后重新扫描新运行的消息。
+-          // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
+-          const children = yield* sessions.children(sessionID)
+-          const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
+-            .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+-            .map((msg) => msg.info.id)
 -          yield* state.cancel(sessionID)
--          // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
--          // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
--          // #71/#153：cancel 时中止未完成 assistant
--          yield* abortPendingAssistants(sessionID, pendingIds).pipe(Effect.ignore)
+-          yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+-            discard: true,
+-          })
+-          yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
 -        }),
 -      )
 -    })
-+    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
-+      // [local-smark] single-flight：重叠 cancel join 同一在飞操作（Deferred），
-+      // 而非排队重执行——#173 排队信号量会让第二个 cancel 在第一个完成后重新
-+      // 读取 Runner 并中断 replacement loop 的新消息（本提交修复的时序窗口）
-+      const inFlight = cancelFlights.get(sessionID)
-+      if (inFlight) {
-+        yield* Deferred.await(inFlight).pipe(Effect.ignore)
-+        return
-+      }
-+      const flight = yield* Deferred.make<void>()
-+      cancelFlights.set(sessionID, flight)
-+      // [local-smark] onExit 中断安全清理：leader fiber 无论正常完成、失败还是
-+      // 被中断，都必须释放 flight 并唤醒 join 者——泄漏的 Deferred 会让该
-+      // session 后续所有 cancel 永久挂起（源实现的 uninterruptible finalizer 语义）
-+      const exit = yield* Effect.gen(function* () {
-+        yield* Effect.logInfo("cancel", { "session.id": sessionID })
-+        // 在中断 runner 前快照待终态化的 assistant 消息 ID，
-+        // 防止 cancel 后新建的消息（用户输入的新命令）被 abortPendingAssistants 误杀
-+        const pendingIds = new Set(
-+          (yield* sessions.messages({ sessionID }).pipe(
-+            Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
-+          )).filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
-+        )
-+        yield* state.cancel(sessionID)
-+        // 中止待处理的 assistant 消息：标记 AbortedError 并完成 pending/running 工具部件
-+        // Effect.ignore 确保 cancel 不会因子消息中止失败而失败
-+        // #71/#153：cancel 时中止未完成 assistant
-+        yield* abortPendingAssistants(sessionID, pendingIds).pipe(Effect.ignore)
-+      }).pipe(
-+        Effect.onExit((exit) =>
-+          Effect.uninterruptible(
++    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")((sessionID: SessionID) =>
++      Effect.uninterruptibleMask((restore) => {
++        const inFlight = cancelFlights.get(sessionID)
++        if (inFlight) return restore(Deferred.await(inFlight).pipe(Effect.flatMap((exit) => exit)))
++        // 同步分配与登记之间不切让；body和join仍可中断，释放由onExit负责。
++        const flight = Deferred.makeUnsafe<Exit.Exit<void>>()
++        cancelFlights.set(sessionID, flight)
++        return restore(
++          Effect.gen(function* () {
++            yield* Effect.logInfo("cancel", { "session.id": sessionID })
++            // 冻结一次旧ID，idle后不能再扫描replacement消息。
++            // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
++            const children = yield* sessions.children(sessionID)
++            const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
++              .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
++              .map((msg) => msg.info.id)
++            yield* state.cancel(sessionID)
++            yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
++              discard: true,
++            })
++            yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
++          }),
++        ).pipe(
++          Effect.onExit((exit) =>
 +            Effect.gen(function* () {
++              // 成功、缺陷或中断都释放flight，并让joiner重放同一结果。
 +              cancelFlights.delete(sessionID)
-+              // 唤醒 join 的重叠 cancel；join 者走 ignore 路径不重放 exit
-+              yield* Deferred.succeed(flight, undefined).pipe(Effect.ignore)
++              yield* Deferred.succeed(flight, exit)
 +            }),
 +          ),
-+        ),
-+        Effect.exit,
-+      )
-+      if (Exit.isFailure(exit)) yield* Effect.die(exit.cause)
-+    })
++        )
++      }),
++    )
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -4033,3 +4033,86 @@ it.instance(
-     }),
-   30_000,
+@@ -238,1 +238,1 @@
+-function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service> }) {
++function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service>; runState?: Layer.Layer<SessionRunState.Service> }) {
+@@ -245,2 +245,3 @@
+     ...(input?.plugin ? [[Plugin.node, input.plugin] as const] : []),
++    ...(input?.runState ? [[SessionRunState.node, input.runState] as const] : []),
+   ] as const
+@@ -4410,1 +4411,76 @@
  )
 +
-+// [local-smark] 验证重叠 cancel 共享同一个操作：第二个 cancel join 第一个的
-+// Deferred，不会在第一个完成后重新执行 state.cancel 误伤 replacement loop。
-+// 旧 semaphore 实现下，第二个 cancel 排队等待第一个完成，然后重新调用
-+// state.cancel 取消已经启动的 replacement Runner。single-flight 修复后，
-+// 两个 cancel 共享同一 Exit，replacement 安全。
-+// 使用 task 工具挂起控制 cancel 耗时：task.execute 用 Effect.callback 永不 resume，
-+// cancel 的 Fiber.interrupt 等待 Processor cleanup 的 2s settle 超时，
-+// 这段时间内第二个 cancel 能 join 第一个的 Deferred。
-+it.instance(
++// 在真实外层cancel与RunState间固定窗口，不依赖task忽略中断或2秒计时巧合。
++noLLMServer.instance(
 +  "overlapping cancels share single-flight and do not retarget replacement loop",
 +  () =>
 +    Effect.gen(function* () {
-+      const { llm } = yield* useServerConfig(providerCfg)
-+      const prompt = yield* SessionPrompt.Service
-+      const sessions = yield* Session.Service
-+      const status = yield* SessionStatus.Service
-+      const registry = yield* ToolRegistry.Service
-+      const { task } = yield* registry.named()
-+      const chat = yield* sessions.create({ title: "Overlap cancel" })
-+      yield* seed(chat.id)
-+
-+      // 修改 task.execute 使其永不返回（Effect.callback 不调用 resume），
-+      // cancel 时 Processor cleanup 需等待 2s settle 超时才能终态化。
-+      const taskReady = yield* Deferred.make<void>()
-+      const original = task.execute
-+      task.execute = (_args, ctx) =>
-+        Effect.callback<never>((_resume) => {
-+          succeedVoid(taskReady)
-+          return Effect.sync(() => {})
++      const state = yield* SessionRunState.Service
++      const database = yield* Database.Service
++      yield* Effect.forEach([false, true], (failing) => Effect.gen(function* () {
++        const stopped = yield* Deferred.make<void>()
++        const release = yield* Deferred.make<void>()
++        const started = yield* Deferred.make<void>()
++        const nextStarted = yield* Deferred.make<void>()
++        const finish = yield* Deferred.make<void>()
++        const failure = new Error("cancel failure")
++        let cancels = 0
++        let replacementAborted = false
++        const runState = Layer.succeed(SessionRunState.Service, { ...state,
++          cancel: (id) => Effect.gen(function* () {
++            const call = ++cancels
++            yield* state.cancel(id)
++            if (call !== 1) return
++            yield* Deferred.succeed(stopped, undefined)
++            yield* Deferred.await(release)
++            if (failing) return yield* Effect.die(failure)
++          }),
 +        })
-+      yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = original)))
-+
-+      // 让 LLM 正常回复（不含工具调用），然后用 addSubtask 触发 task 工具
-+      yield* llm.push(reply().text("thinking").stop().item())
-+      yield* llm.hang
-+      const msg = yield* user(chat.id, "first")
-+      yield* addSubtask(chat.id, msg.id)
-+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+
-+      // 等待 task 工具开始执行
-+      yield* awaitWithTimeout(Deferred.await(taskReady), "task tool never started", "10 seconds")
-+
-+      // Fork 第一个 cancel——task 工具永不返回，Fiber.interrupt 需等待 2s settle
-+      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
-+
-+      // 等待 session 变 idle（Runner.cancel 已执行 idleIfCurrent，Fiber.interrupt 仍在进行）
-+      yield* pollWithTimeout(
-+        Effect.gen(function* () {
-+          const s = yield* status.get(chat.id)
-+          return s.type === "idle" ? (true as const) : undefined
-+        }),
-+        "session never became idle after first cancel",
-+      )
-+
-+      // 立即提交 replacement 和第二个 cancel
-+      yield* llm.push(reply().text("replacement response").stop().item())
-+      yield* user(chat.id, "second")
-+      const fiber2 = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-+
-+      // 第二个 cancel——single-flight 下 join 第一个的 Deferred，不重新执行 state.cancel
-+      yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
-+
-+      // 等待 replacement loop 完成
-+      const exit2 = yield* Fiber.await(fiber2).pipe(Effect.timeout("15 seconds"))
-+      expect(Exit.isSuccess(exit2 ?? Exit.void)).toBe(true)
-+
-+      // 关键断言：replacement assistant 不应有 AbortedError
-+      const messages = yield* MessageV2.filterCompactedEffect(chat.id)
-+      const assistants = messages.filter((m) => m.info.role === "assistant")
-+      const lastAssistant = assistants.at(-1)
-+      expect(lastAssistant?.info.role).toBe("assistant")
-+      if (lastAssistant?.info.role === "assistant") {
-+        expect(lastAssistant.info.error?.name).not.toBe("MessageAbortedError")
-+      }
-+
-+      // 清理
-+      yield* Fiber.await(fiber).pipe(Effect.timeout("5 seconds"), Effect.ignore)
++        yield* Effect.addFinalizer(() => Effect.all([Deferred.succeed(release, undefined), Deferred.succeed(finish, undefined)], { discard: true }))
++        yield* Effect.gen(function* () {
++          const prompt = yield* SessionPrompt.Service
++          const sessions = yield* Session.Service
++          const chat = yield* sessions.create({ title: "Overlap cancel" })
++          const first = yield* seed(chat.id)
++          const old = yield* MessageV2.get({ sessionID: chat.id, messageID: first.assistant.id })
++          const original = yield* state.ensureRunning(chat.id, Effect.succeed(old), Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))).pipe(Effect.forkChild)
++          yield* Deferred.await(started)
++          const leader = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++          yield* Deferred.await(stopped)
++          // 新运行和消息均在旧取消快照之后创建，重叠join不能重新扫描它们。
++          const replacement = yield* seed(chat.id)
++          const next = yield* MessageV2.get({ sessionID: chat.id, messageID: replacement.assistant.id })
++          const running = yield* state.ensureRunning(chat.id, Effect.succeed(next), Deferred.succeed(nextStarted, undefined).pipe(
++            Effect.andThen(Deferred.await(finish)), Effect.as(next),
++            Effect.onInterrupt(() => Effect.sync(() => { replacementAborted = true })),
++          )).pipe(Effect.forkChild)
++          yield* Deferred.await(nextStarted)
++          const joiner = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++          yield* Effect.yieldNow
++          expect(cancels).toBe(1)
++          yield* Deferred.succeed(release, undefined)
++          const firstExit = yield* Fiber.await(leader)
++          const joinedExit = yield* Fiber.await(joiner)
++          expect(Exit.isFailure(firstExit)).toBe(failing)
++          expect(Exit.isFailure(joinedExit)).toBe(failing)
++          if (Exit.isFailure(firstExit) && Exit.isFailure(joinedExit)) {
++            expect(Cause.squash(firstExit.cause)).toBe(failure)
++            expect(Cause.squash(joinedExit.cause)).toBe(failure)
++          }
++          expect(cancels).toBe(1)
++          expect(replacementAborted).toBe(false)
++          expect(Exit.isFailure(yield* state.assertNotBusy(chat.id).pipe(Effect.exit))).toBe(true)
++          const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: next.info.id })
++          expect(stored.info.role === "assistant" && stored.info.error).toBeUndefined()
++          yield* Deferred.succeed(finish, undefined)
++          expect(Exit.isSuccess(yield* Fiber.await(running))).toBe(true)
++          yield* Fiber.await(original)
++          // 上一flight无论成功或失败都必须释放，后续显式取消仍能独立执行。
++          yield* prompt.cancel(chat.id)
++          expect(cancels).toBe(2)
++        }).pipe(Effect.provide(Layer.fresh(makePrompt({ database: Layer.succeed(Database.Service, database), runState }))))
++      }))
 +    }),
 +  { git: true },
-+  60_000,
++  30_000,
 +)
-+
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -199,4 +199,6 @@
+             }
+             return output
+           }),
++          // Bash自己等待kill/drain并保留partial，不能被runtime抢先中断。
++          item.id !== ShellID.ToolID ? { signal: options.abortSignal } : undefined,
+         )
+@@ -284,6 +286,7 @@
+             if (opts.abortSignal?.aborted) {
+               yield* input.processor.completeToolCall(opts.toolCallId, output)
+             }
+             return output
+           }),
++          { signal: opts.abortSignal },
+         )
+@@ -367,6 +370,7 @@
+             if (opts.abortSignal?.aborted) {
+               yield* input.processor.completeToolCall(opts.toolCallId, output)
+             }
+             return output
+           }),
++          { signal: opts.abortSignal },
+         )
+@@ -449,6 +453,7 @@
+             if (opts.abortSignal?.aborted) {
+               yield* input.processor.completeToolCall(opts.toolCallId, output)
+             }
+             return output
+           }),
++          { signal: opts.abortSignal },
+         )
+@@ -574,4 +579,5 @@
+           return output
+         }),
++        { signal: opts.abortSignal },
+       )
+     tools[key] = item
+diff --git a/packages/opencode/test/session/tools.test.ts b/packages/opencode/test/session/tools.test.ts
+--- a/packages/opencode/test/session/tools.test.ts
++++ b/packages/opencode/test/session/tools.test.ts
+@@ -18,1 +18,1 @@
+-import { Effect, Layer, Schema } from "effect"
++import { Deferred, Effect, Layer, Schema } from "effect"
+@@ -98,2 +98,5 @@
+   Effect.gen(function* () {
++    const entered = yield* Deferred.make<void>()
++    let blocking = false
++    let finalized = false
+     const state: SessionV1.ToolPart = {
+@@ -134,2 +137,7 @@
+-        }),
++        }).pipe(
++          Effect.flatMap((part) => !blocking ? Effect.succeed(part) : Deferred.succeed(entered, undefined).pipe(
++            Effect.andThen(Effect.never),
++            Effect.onInterrupt(() => Effect.sync(() => { finalized = true })),
++          )),
++        ),
+       completeToolCall: () => Effect.void,
+@@ -168,3 +176,14 @@
+     }
++    // 已有metadata用例再走真实非Bash adapter，中断必须到达其Effect finalizer。
++    blocking = true
++    const controller = new AbortController()
++    const pending = Promise.resolve(execute(
++      {},
++      { toolCallId: callID, abortSignal: controller.signal, messages: [] },
++    )).then(() => false, () => true)
++    yield* Deferred.await(entered)
++    controller.abort()
++    expect(yield* Effect.promise(() => pending)).toBe(true)
++    expect(finalized).toBe(true)
+   }),
+ )
+diff --git a/packages/core/src/session/run-coordinator.ts b/packages/core/src/session/run-coordinator.ts
+--- a/packages/core/src/session/run-coordinator.ts
++++ b/packages/core/src/session/run-coordinator.ts
+@@ -97,3 +97,5 @@
+         if (entry?.owner === undefined) return Effect.void
++        // 重叠中断只等待同一owner，不能清掉清理期间新登记的wake。
++        if (entry.stopping) return Fiber.interrupt(entry.owner)
+         entry.stopping = true
+         entry.pendingWake = false
+diff --git a/packages/core/test/session-run-coordinator.test.ts b/packages/core/test/session-run-coordinator.test.ts
+--- a/packages/core/test/session-run-coordinator.test.ts
++++ b/packages/core/test/session-run-coordinator.test.ts
+@@ -275,4 +275,8 @@
+         yield* coordinator.wake("session")
++        // 第二个interrupt发生于同一清理窗口，后来的wake仍须触发唯一后继。
++        const overlap = yield* coordinator.interrupt("session").pipe(Effect.forkChild)
++        yield* Effect.yieldNow
+         yield* Deferred.succeed(cleanupGate, undefined)
+         yield* Fiber.join(interrupt)
++        yield* Fiber.join(overlap)
+         yield* Deferred.await(secondStarted)

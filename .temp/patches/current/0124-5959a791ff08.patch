@@ -62,10 +62,9 @@ diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test
 index cc35077c1a..e8927a98ca 100644
 --- a/packages/tui/test/util/token-accounting.test.ts
 +++ b/packages/tui/test/util/token-accounting.test.ts
-@@ -63,3 +63,47 @@ describe("tokenAccounting", () => {
+@@ -63,2 +63,46 @@ describe("tokenAccounting", () => {
      expect(acc.ratio.input).toBeGreaterThan(1)
    })
- })
 +
 +  // #124：streaming 期间 step-start breakdown 可用
 +  test("breakdown available from step-start during streaming (before step-finish)", () => {
@@ -114,31 +113,14 @@ diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.
 index f0eb8df148..fe549dcdc0 100644
 --- a/packages/schema/src/v1/session.ts
 +++ b/packages/schema/src/v1/session.ts
-@@ -244,6 +244,27 @@ export const StepStartPart = Schema.Struct({
+@@ -244,6 +244,10 @@ export const StepStartPart = Schema.Struct({
    ...partBase,
    type: Schema.Literal("step-start"),
    snapshot: Schema.optional(Schema.String),
-+  // #124：请求发出前的字符/token 快照，供 streaming 展示
-+  // #124：inputTokens 为 upload 时估算，非 provider 最终值
-+  inputChars: Schema.optional(NonNegativeInt),
-+  inputTokens: Schema.optional(NonNegativeInt),
-+  inputBreakdown: Schema.optional(
-+    Schema.Struct({
-+      system: NonNegativeInt,
-+      instructions: NonNegativeInt,
-+      skills: NonNegativeInt,
-+      tools: NonNegativeInt,
-+      messages: Schema.Struct({
-+        userText: NonNegativeInt,
-+        assistantText: NonNegativeInt,
-+        reasoning: NonNegativeInt,
-+        toolInput: NonNegativeInt,
-+        toolOutput: NonNegativeInt,
-+        attachments: NonNegativeInt,
-+        total: NonNegativeInt,
-+      }),
-+    }),
-+  ),
++  // 请求发出前的估算快照与确认点共用细分定义，不建立另一套字符格式。
++  inputChars: optional(NonNegativeInt),
++  inputTokens: optional(NonNegativeInt),
++  inputBreakdown: optional(SessionMessage.InputBreakdown),
  }).annotate({ identifier: "StepStartPart" })
  export type StepStartPart = Types.DeepMutable<Schema.Schema.Type<typeof StepStartPart>>
  
@@ -146,7 +128,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 index 48711aba4e..f361084936 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -461,12 +461,20 @@ const layer = Layer.effect(
+@@ -461,12 +461,17 @@ const layer = Layer.effect(
  
            case "step-start":
              if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
@@ -157,13 +139,10 @@ index 48711aba4e..f361084936 100644
                sessionID: ctx.sessionID,
                snapshot: ctx.snapshot,
                type: "step-start",
-+              // #124：TUI tokenAccounting 读这些字段做 step-start breakdown
-+              inputChars: ctx.inputChars,
-+              inputTokens:
-+                ctx.assistantMessage.tokens.input +
-+                ctx.assistantMessage.tokens.cache.read +
-+                ctx.assistantMessage.tokens.cache.write,
-+              inputBreakdown: ctx.inputBreakdown,
++              // 读取发送前已准备的估算，不能把上一步确认 tokens 冒充本次输入。
++              inputChars: ctx.assistantMessage.inputEstimate?.bodyChars,
++              inputTokens: ctx.assistantMessage.inputEstimate?.input,
++              inputBreakdown: ctx.assistantMessage.inputEstimate?.inputBreakdown,
              })
              return
  

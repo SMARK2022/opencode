@@ -61,9 +61,11 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
 diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test/util/token-accounting.test.ts
 --- a/packages/tui/test/util/token-accounting.test.ts
 +++ b/packages/tui/test/util/token-accounting.test.ts
-@@ -270,3 +270,108 @@
+@@ -347,4 +347,110 @@
+     expect(calibrated.ratio.output).toBe(8)
+     expect(calibrated.request.totalOutput).toBe(320)
    })
- 
++
 +  // #238：in-flight 上传估算在整个正常生命周期内只计一次
 +  test("request total counts the in-flight upload estimate once across the normal lifecycle", () => {
 +    // 正常发送路径会先把 daemon 的 upload estimate 写到 assistant message，

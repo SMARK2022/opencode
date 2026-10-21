@@ -9,59 +9,148 @@ diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/ap
 index 15d125df39..7e44477132 100644
 --- a/packages/app/src/context/global-sync/event-reducer.ts
 +++ b/packages/app/src/context/global-sync/event-reducer.ts
-@@ -204,6 +204,21 @@ export function applyDirectoryEvent(input: {
+@@ -204,6 +204,13 @@ export function applyDirectoryEvent(input: {
        break
      }
      case "message.updated": {
-+      // #98：消息被软隐藏时从 UI store 移除
-+      const _info0 = clean((event.properties as { info: Message }).info)
-+      if ((_info0 as unknown as { hidden?: unknown }).hidden) {
-+        input.setStore(
-+          produce((draft) => {
-+            const messages = draft.message[_info0.sessionID]
-+            if (messages) {
-+              const result = Binary.search(messages, _info0.id, (m) => m.id)
-+              if (result.found) messages.splice(result.index, 1)
-+            }
-+            delete draft.part[_info0.id]
-+          }),
-+        )
+       const info = clean((event.properties as { info: Message }).info)
++      if ((info as unknown as { hidden?: unknown }).hidden) {
++        applyDirectoryEvent({
++          ...input,
++          event: { type: "message.removed", properties: { sessionID: info.sessionID, messageID: info.id } },
++        })
 +        break
 +      }
-       const info = clean((event.properties as { info: Message }).info)
        const messages = input.store.message[info.sessionID]
        if (!messages) {
-@@ -245,6 +260,25 @@ export function applyDirectoryEvent(input: {
+@@ -245,6 +252,13 @@ export function applyDirectoryEvent(input: {
        break
      }
      case "message.part.updated": {
-+      // #98：part 软隐藏时从 UI store 移除
-+      const _part0 = (event.properties as { part: Part }).part
-+      if ((_part0 as unknown as { hidden?: unknown }).hidden) {
-+        const parts = input.store.part[_part0.messageID]
-+        if (!parts) break
-+        const foundAt = Binary.search(parts, _part0.id, (p) => p.id)
-+        if (!foundAt.found) break
-+        input.setStore(
-+          produce((draft) => {
-+            const list = draft.part[_part0.messageID]
-+            if (!list) return
-+            const next = Binary.search(list, _part0.id, (p) => p.id)
-+            if (!next.found) return
-+            list.splice(next.index, 1)
-+            if (list.length === 0) delete draft.part[_part0.messageID]
-+          }),
-+        )
+       const part = (event.properties as { part: Part }).part
++      if ((part as unknown as { hidden?: unknown }).hidden) {
++        applyDirectoryEvent({
++          ...input,
++          event: { type: "message.part.removed", properties: { messageID: part.messageID, partID: part.id } },
++        })
 +        break
 +      }
-       const part = (event.properties as { part: Part }).part
        if (SKIP_PARTS.has(part.type)) break
        input.setStore(
+diff --git a/packages/app/src/context/server-session.ts b/packages/app/src/context/server-session.ts
+--- a/packages/app/src/context/server-session.ts
++++ b/packages/app/src/context/server-session.ts
+@@ -1029,6 +1029,13 @@ export function createServerSession(
+       }
+       case "message.updated": {
+         const info = cleanMessage((event.properties as { info: Message }).info)
++        if ((info as unknown as { hidden?: unknown }).hidden) {
++          apply({
++            type: "message.removed",
++            properties: { sessionID: info.sessionID, messageID: info.id },
++          })
++          return
++        }
+         indexLegacyMessage(info)
+         const load = messageLoads.get(info.sessionID)
+         load?.touchedMessages.add(info.id)
+@@ -1093,6 +1100,13 @@ export function createServerSession(
+       }
+       case "message.part.updated": {
+         const part = (event.properties as { part: Part }).part
++        if ((part as unknown as { hidden?: unknown }).hidden) {
++          apply({
++            type: "message.part.removed",
++            properties: { sessionID: part.sessionID, messageID: part.messageID, partID: part.id },
++          })
++          return
++        }
+         if (SKIP_PARTS.has(part.type)) return
+         const messages = data.message[part.sessionID]
+         const load = messageLoads.get(part.sessionID)
+diff --git a/packages/app/src/context/server-session.test.ts b/packages/app/src/context/server-session.test.ts
+--- a/packages/app/src/context/server-session.test.ts
++++ b/packages/app/src/context/server-session.test.ts
+@@ -679,6 +679,66 @@ describe("server session", () => {
+     expect(store.data.part[kept.id]).toBeUndefined()
+   })
+ 
++  test("keeps soft-hidden content removed across hydration and history pages", async () => {
++    const hydration = Promise.withResolvers<SingleMessageResponse>()
++    const kept = userMessage("message-z")
++    const removed = assistantMessage("message-a", kept.id, { time: { created: 2, completed: 2 } })
++    const part = textPart(kept.id)
++    const removedPart = textPart(removed.id, { id: "removed-part" })
++    const stale = [
++      { info: kept, parts: [part] },
++      { info: removed, parts: [removedPart] },
++    ]
++    const client = rootMessageClient(
++      [response(stale, "older"), response([{ info: removed, parts: [removedPart] }], "older"), response(stale)],
++      [hydration.promise],
++    )
++    const store = createServerSession(client)
++    await store.sync("child")
++    store.optimistic.add({ sessionID: "child", message: kept, parts: [part] })
++    store.optimistic.add({ sessionID: "child", message: removed, parts: [removedPart] })
++    const refreshing = store.sync("child", { force: true })
++    await client.rootRequested(1)
++    store.remember({ ...session("child", "root"), revert: { messageID: kept.id, partID: part.id } })
++
++    for (const item of [part, removedPart]) {
++      const expected = item.text + " live"
++      store.apply({
++        type: "message.part.delta",
++        properties: { sessionID: "child", messageID: item.messageID, partID: item.id, field: "text", delta: " live" },
++      })
++      expect(store.data.part_text_accum_delta[item.id]).toBe(expected)
++    }
++    const hidden = { time: 3, reason: "undo" }
++    store.apply({ type: "message.updated", properties: { info: { ...removed, hidden } } })
++    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: { ...part, hidden } } })
++    store.apply({ type: "session.updated", properties: { info: session("child", "root") } })
++
++    expect(store.get("child")?.revert).toBeUndefined()
++    expect(store.data.message.child).toEqual([kept])
++    expect(store.data.session_message.child?.map((message) => message.id)).toEqual([kept.id])
++    expect(store.data.part[kept.id]).toBeUndefined()
++    expect(store.data.part[removed.id]).toBeUndefined()
++    expect(store.data.part_text_accum_delta[part.id]).toBeUndefined()
++    expect(store.data.part_text_accum_delta[removedPart.id]).toBeUndefined()
++
++    hydration.resolve(singleResponse(kept, [part]))
++    await refreshing
++
++    expect(store.data.message.child).toEqual([kept])
++    expect(store.data.part[kept.id]).toBeUndefined()
++    expect(store.data.part[removed.id]).toBeUndefined()
++
++    await store.history.loadMore("child")
++
++    expect(client.requests).toHaveLength(3)
++    expect(store.data.message.child).toEqual([kept])
++    expect(store.data.part[kept.id]).toBeUndefined()
++    expect(store.data.part[removed.id]).toBeUndefined()
++    expect(store.data.part_text_accum_delta[part.id]).toBeUndefined()
++    expect(store.data.part_text_accum_delta[removedPart.id]).toBeUndefined()
++  })
++
+   test("keeps removal tracking isolated across load generations", async () => {
+     const firstResponse = deferredResponse()
+     const secondResponse = deferredResponse()
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 index 1bea9f52c3..2f039a2ea0 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -43,6 +43,7 @@ interface FetchDecompressionError extends Error {
+@@ -27,6 +27,7 @@
+ import { inArray } from "drizzle-orm"
+ import { lt } from "drizzle-orm"
+ import { or } from "drizzle-orm"
++import { sql } from "drizzle-orm"
+ import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
+ import { ProviderError } from "@/provider/error"
+ import { iife } from "@/util/iife"
+@@ -43,6 +44,7 @@ interface FetchDecompressionError extends Error {
    path: string
  }
  
@@ -69,7 +158,42 @@ index 1bea9f52c3..2f039a2ea0 100644
  export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
  export { isMedia }
  
-@@ -466,7 +467,9 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+@@ -429,18 +431,20 @@
+ export const page = Effect.fn("MessageV2.page")(function* (input: {
+   sessionID: SessionID
+   limit: number
+   before?: string
++  includeHidden?: boolean
+ }) {
+   const { db } = yield* Database.Service
+   const before = input.before ? cursor.decode(input.before) : undefined
+   const where = before
+     ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+     : eq(MessageTable.session_id, input.sessionID)
++  // #98：隐藏消息在 LIMIT 前过滤，保留可见页容量和游标。
+   const rows = yield* db
+     .select()
+     .from(MessageTable)
+-    .where(where)
++    .where(and(where, input.includeHidden ? undefined : sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`))
+     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+     .limit(input.limit + 1)
+     .all()
+     .pipe(Effect.orDie)
+@@ -461,31 +465,37 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+   const more = rows.length > input.limit
+   const slice = more ? rows.slice(0, input.limit) : rows
+-  const items = yield* hydrate(db, slice)
++  // #98：普通列表过滤隐藏部件，审计读取保留完整内容。
++  const items = (yield* hydrate(db, slice)).map((item) =>
++    input.includeHidden ? item : { ...item, parts: item.parts.filter((part) => !part.hidden) },
++  )
+   items.reverse()
+   const tail = slice.at(-1)
+   return {
+     items,
+     more,
+     cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
    }
  })
  
@@ -80,25 +204,29 @@ index 1bea9f52c3..2f039a2ea0 100644
    const size = 50
    return Effect.gen(function* () {
      const result = [] as WithParts[]
-@@ -480,7 +483,12 @@ export function stream(sessionID: SessionID) {
+     let before: string | undefined
+     while (true) {
+-      const next = yield* page({ sessionID, limit: size, before }).pipe(
++      const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden }).pipe(
+         Effect.catchIf(NotFoundError.isInstance, () =>
+           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
+         ),
+       )
        if (next.items.length === 0) break
        for (let i = next.items.length - 1; i >= 0; i--) {
          const item = next.items[i]
 -        if (item) result.push(item)
 +        if (!item) continue
-+        // 默认过滤隐藏消息：撤销操作产生的隐藏记录不进入正常流
-+        if (!opts?.includeHidden && item.info.hidden) continue
-+        // part 级隐藏过滤
-+        if (!opts?.includeHidden) item.parts = item.parts.filter((p) => !p.hidden)
 +        result.push(item)
        }
        if (!next.more || !next.cursor) break
        before = next.cursor
+     }
 diff --git a/packages/opencode/src/session/revert.ts b/packages/opencode/src/session/revert.ts
 index 79fef2cda9..30719d80ed 100644
 --- a/packages/opencode/src/session/revert.ts
 +++ b/packages/opencode/src/session/revert.ts
-@@ -106,7 +111,12 @@ const layer = Layer.effect(
+@@ -106,18 +106,27 @@ const layer = Layer.effect(
        const index = msgs.findIndex((msg) => msg.info.id === messageID)
        const target = index < 0 ? undefined : msgs[index]
        const remove = index < 0 ? [] : msgs.slice(index + (session.revert.partID ? 1 : 0))
@@ -112,6 +240,22 @@ index 79fef2cda9..30719d80ed 100644
 +        })
        }
        if (session.revert.partID && target) {
+         const partID = session.revert.partID
+         const idx = target.parts.findIndex((part) => part.id === partID)
+         if (idx >= 0) {
+           const removeParts = target.parts.slice(idx)
+           target.parts = target.parts.slice(0, idx)
+           for (const part of removeParts) {
+-            yield* sessions.removePart({ sessionID, messageID: target.info.id, partID: part.id })
++            // #98：部件软隐藏保留工具输出。
++            yield* sessions.updatePart({
++              ...part,
++              hidden: { time: Date.now(), reason: "undo" },
++            })
+           }
+         }
+       }
+       yield* sessions.clearRevert(sessionID)
 diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
 index de8c3dc4cb..e1bdddf8b6 100644
 --- a/packages/opencode/src/session/session.ts
@@ -143,8 +287,8 @@ index de8c3dc4cb..e1bdddf8b6 100644
        }
 -      return result.reverse()
 +
-+      // 无 limit：走 MessageV2.stream 默认过滤 hidden
-+      // #98：无 limit 列表必须过滤 hidden，禁止 page 全量回放
++      // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
++      yield* get(input.sessionID)
 +      const newestFirst = yield* MessageV2.stream(input.sessionID).pipe(
 +        Effect.provideService(Database.Service, database),
 +      )
@@ -166,7 +310,70 @@ index d3d7ba7aae..8c54d0e170 100644
    ),
  )
  
-@@ -426,6 +426,44 @@ describe("revert + compact workflow", () => {
+@@ -374,7 +374,7 @@ describe("revert + compact workflow", () => {
+           const u1 = yield* user(sid)
+           const p1 = yield* text(sid, u1.id, "first part")
+           const p2 = yield* tool(sid, u1.id)
+-          yield* text(sid, u1.id, "third part")
++          const p3 = yield* text(sid, u1.id, "third part")
+ 
+           yield* session.setRevert({
+             sessionID: sid,
+@@ -388,8 +388,26 @@ describe("revert + compact workflow", () => {
+           const msgs = yield* session.messages({ sessionID: sid })
+           expect(msgs.length).toBe(1)
+           expect(msgs[0].parts.length).toBe(1)
+           expect(msgs[0].parts[0].id).toBe(p1.id)
+ 
++          // #98：原始读取保留隐藏部件及完整工具输出。
++          const raw = yield* MessageV2.get({ sessionID: sid, messageID: u1.id })
++          expect(raw.info.hidden).toBeUndefined()
++          expect(raw.parts).toEqual([
++            p1,
++            { ...p2, hidden: { time: expect.any(Number), reason: "undo" } },
++            { ...p3, hidden: { time: expect.any(Number), reason: "undo" } },
++          ])
++
++          const page = yield* MessageV2.page({ sessionID: sid, limit: 1 })
++          expect(page.items).toEqual(msgs)
++          expect(page.more).toBe(false)
++          expect(page.cursor).toBeUndefined()
++          expect(yield* session.messages({ sessionID: sid, limit: 1 })).toEqual(msgs)
++          expect(yield* MessageV2.stream(sid, { includeHidden: true })).toEqual([raw])
++          const audit = yield* MessageV2.page({ sessionID: sid, limit: 1, includeHidden: true })
++          expect(audit.items).toEqual([raw])
++
+           const cleared = yield* session.get(sid)
+           expect(cleared.revert).toBeUndefined()
+         }),
+@@ -433,7 +451,26 @@ describe("revert + compact workflow", () => {
+           expect(ids).toContain(a1.id)
+           expect(ids).not.toContain(u2.id)
+           expect(ids).not.toContain(a2.id)
++
++          // #98：隐藏后缀不占页容量，游标指向最旧可见项。
++          const page = yield* MessageV2.page({ sessionID: sid, limit: 1 })
++          expect(page.items.map((msg) => msg.info.id)).toEqual([a1.id])
++          expect(page.more).toBe(true)
++          expect(page.cursor).toBe(MessageV2.cursor.encode({ id: a1.id, time: a1.time.created }))
++
++          const older = yield* MessageV2.page({ sessionID: sid, limit: 1, before: page.cursor })
++          expect(older.items.map((msg) => msg.info.id)).toEqual([u1.id])
++          expect(older.more).toBe(false)
++          expect(older.cursor).toBeUndefined()
++          expect(yield* session.messages({ sessionID: sid, limit: 1 })).toEqual(page.items)
++          expect(yield* session.messages({ sessionID: sid, limit: 2 })).toEqual(msgs)
++
++          const audit = yield* MessageV2.stream(sid, { includeHidden: true })
++          expect(audit.map((msg) => msg.info.id)).toEqual([a2.id, u2.id, a1.id, u1.id])
++          const raw = yield* MessageV2.page({ sessionID: sid, limit: 2, includeHidden: true })
++          expect(raw.items.map((msg) => msg.info.id)).toEqual([u2.id, a2.id])
++          expect(raw.items.every((msg) => msg.info.hidden?.reason === "undo")).toBe(true)
+         }),
+       { git: true },
+     ),
+   )
+@@ -471,6 +508,44 @@ describe("revert + compact workflow", () => {
      ),
    )
  
@@ -256,22 +463,23 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 index d0511c5183..9365a8abdc 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -313,6 +313,24 @@ export const {
+@@ -313,6 +313,25 @@ export const {
          }
  
          case "message.updated": {
-+          // #98：隐藏消息从 TUI store 删除
++          // #98：隐藏消息按 ID 移除，旧快照不能复活。
 +          const info = event.properties.info
 +          if ((info as Record<string, unknown>).hidden) {
++            touchMessage(info.sessionID, info.id)
 +            const messages = store.message[info.sessionID]
 +            if (messages) {
-+              const result = search(messages, info.id, (m) => m.id)
-+              if (result.found) {
++              const index = messages.findIndex((message) => message.id === info.id)
++              if (index !== -1) {
 +                setStore(
 +                  "message",
 +                  info.sessionID,
 +                  produce((draft) => {
-+                    draft.splice(result.index, 1)
++                    draft.splice(index, 1)
 +                  }),
 +                )
 +              }
@@ -281,13 +489,14 @@ index d0511c5183..9365a8abdc 100644
            touchMessage(event.properties.info.sessionID, event.properties.info.id)
            const messages = store.message[event.properties.info.sessionID]
            if (!messages) {
-@@ -368,6 +386,22 @@ export const {
+@@ -368,6 +387,23 @@ export const {
            break
          }
          case "message.part.updated": {
-+          // #98：隐藏 part 从 TUI store 删除
++          // #98：隐藏部件先记入 hydration，再从 store 移除。
 +          const part = event.properties.part
 +          if ((part as Record<string, unknown>).hidden) {
++            touchPart(part.sessionID, part.id)
 +            const parts = store.part[part.messageID]
 +            if (!parts) break
 +            const foundAt = search(parts, part.id, (p) => p.id)
@@ -304,3 +513,92 @@ index d0511c5183..9365a8abdc 100644
            touchPart(event.properties.part.sessionID, event.properties.part.id)
            const parts = store.part[event.properties.part.messageID]
            if (!parts) {
+diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+@@ -539,6 +539,85 @@ test("a message removed during hydration does not regain stale parts", async () => {
+     expect(sync.data.message[sessionID]).toEqual([])
+     expect(sync.data.part[messageID]).toBeUndefined()
+   } finally {
+     app.renderer.destroy()
+   }
+ })
++
++test("hidden messages and parts survive stale session hydration", async () => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  const removed = { ...assistant, id: "msg_a", time: { created: 3, completed: 4 } }
++  const absent = { ...assistant, id: "msg_absent", time: { created: 5, completed: 6 } }
++  const unloaded = { ...assistant, id: "msg_unloaded", time: { created: 7, completed: 8 } }
++  const live = { id: partID, sessionID, messageID, type: "text" as const, text: "visible live content" }
++  const removedPart = { ...live, id: "prt_removed", text: "hidden part" }
++  const absentPart = { ...live, id: "prt_absent", text: "absent part" }
++  const unloadedPart = { ...live, id: "prt_unloaded", messageID: unloaded.id, text: "unloaded part" }
++  const messagePart = { ...live, id: "prt_hidden_message", messageID: removed.id, text: "hidden message part" }
++
++  let resolveMessages!: (response: Response) => void
++  const messages = new Promise<Response>((resolve) => {
++    resolveMessages = resolve
++  })
++  let requested = false
++  const { app, emit, sync } = await mount((url) => {
++    if (url.pathname === `/session/${sessionID}`) return json(session)
++    if (url.pathname === `/session/${sessionID}/message`) {
++      requested = true
++      return messages
++    }
++    if (url.pathname === `/session/${sessionID}/todo` || url.pathname === `/session/${sessionID}/diff`) return json([])
++    return undefined
++  }, tmp.path)
++
++  try {
++    // 先填 store 再发请求；时间与 ID 反序，trace 只能由隐藏事件建立。
++    for (const info of [assistant, removed]) {
++      emit(global({ id: `evt_live_${info.id}`, type: "message.updated", properties: { sessionID, info } }))
++    }
++    for (const part of [live, removedPart, messagePart]) {
++      emit(global({ id: `evt_live_${part.id}`, type: "message.part.updated", properties: {
++        sessionID, time: 2, part,
++      } }))
++    }
++    await wait(() => sync.data.part[removed.id]?.length === 1)
++    expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID, removed.id])
++
++    const hydrate = sync.session.sync(sessionID)
++    await wait(() => requested)
++    const hidden = { time: 9, reason: "undo" as const }
++    for (const info of [{ ...removed, hidden }, { ...absent, hidden }]) {
++      emit(global({ id: `evt_hide_${info.id}`, type: "message.updated", properties: { sessionID, info } }))
++    }
++    for (const part of [{ ...removedPart, hidden }, { ...absentPart, hidden }, { ...unloadedPart, hidden }]) {
++      emit(global({ id: `evt_hide_${part.id}`, type: "message.part.updated", properties: {
++        sessionID, time: 9, part,
++      } }))
++    }
++    // FIFO 标记证明隐藏事件已处理，再放行旧快照。
++    emit(global({ id: "evt_hidden_ready", type: "todo.updated", properties: { sessionID, todos: [] } }))
++    await wait(() => sync.data.todo[sessionID] !== undefined)
++    expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID])
++    expect(sync.data.part[messageID]).toEqual([live])
++
++    resolveMessages(
++      json([
++        { info: assistant, parts: [absentPart, { ...live, text: "" }, removedPart] },
++        { info: removed, parts: [messagePart] },
++        { info: absent, parts: [] },
++        { info: unloaded, parts: [unloadedPart] },
++      ]),
++    )
++    await hydrate
++
++    // 未触碰消息正常接收，已有正文保留；隐藏项和旧部件不得回填。
++    expect(sync.data.message[sessionID].map((message) => message.id)).toEqual([messageID, unloaded.id])
++    expect(sync.data.part[messageID]).toEqual([live])
++    expect(sync.data.part[removed.id]).toBeUndefined()
++    expect(sync.data.part[absent.id]).toBeUndefined()
++    expect(sync.data.part[unloaded.id]).toEqual([])
++  } finally {
++    resolveMessages(json([]))
++    app.renderer.destroy()
++  }
++})

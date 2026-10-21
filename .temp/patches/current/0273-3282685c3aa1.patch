@@ -15,59 +15,57 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 index 849a91e..e14c1cb 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -15,6 +15,7 @@ import { Database } from "@opencode-ai/core/database/database"
+@@ -11,7 +11,9 @@ import { Database } from "@opencode-ai/core/database/database"
  import { ServerLock } from "@/cli/tui/server-lock"
- import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
+ import { EventClients } from "@opencode-ai/server/event-clients"
  import { SessionActivity } from "@/session/activity"
-+import { DisposedReason, Event as ServerEvent } from "@/server/event"
+ import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
++import { GlobalBus } from "@/bus/global"
++import { DisposedReason, Event } from "@/server/event"
  
  Heap.start()
  
-@@ -119,9 +120,9 @@
-       sseClients,
-       sessionActivity: SessionActivity.count(),
-     })
--    // 仅当 token 匹配时删除锁，防止误删不再属于自己的锁
--    await ServerLock.clearIfOwner(lockToken)
-+    // #273：daemon stop 时先广播事件，让 TUI 走正常退出路径
-+    if (reason === DisposedReason.DaemonStop) notifyDaemonStop()
-     // #259：control server 随 daemon 一起关闭——避免端口残留
-     // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
-     controlServer?.stop(true)
-     // #235：disposeAllInstances 与 Server.stop(true) 在 Windows 顺序场景偶发挂起
-@@ -136,9 +137,23 @@
+@@ -65,17 +67,28 @@ if (isDaemon) {
+     const shutdownTimer = setTimeout(() => process.exit(1), 5_000)
+     shutdownTimer.unref?.()
+     if (upgradeTimer) clearTimeout(upgradeTimer)
++    // 主动停机先通知全局订阅；广播失败也计入退出码，不跳过后续清理。
++    const notified = await Promise.allSettled([Promise.resolve().then(() => {
++      if (reason !== DisposedReason.DaemonStop) return
++      GlobalBus.emit("event", {
++        directory: "global",
++        payload: {
++          type: Event.Disposed.type,
++          properties: { reason: DisposedReason.DaemonStop },
++        },
++      })
++    })])
+     // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
+     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
+     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
+     const stopped = await Promise.allSettled([
+       Promise.resolve().then(() => controlServer?.stop(true)),
+       Promise.resolve().then(() => externalServer?.stop(true)),
+       Promise.resolve().then(() => internalServer?.stop(true)),
      ])
-     // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
-     Database.close()
-+    // #273：lock 清理延后到 dispose/stop/Database.close 之后，避免新 daemon 过早接管
-+    await ServerLock.clearIfOwner(lockToken)
-     process.exit(0)
-   }
- 
-+  // #273：daemon stop 时向已连接 TUI 广播 global.disposed 事件
-+  function notifyDaemonStop() {
-+    GlobalBus.emit("event", {
-+      // #273：directory="global" 使事件扇出到所有已连 TUI——不只是发起 stop 的那个
-+      directory: "global",
-+      payload: {
-+        type: ServerEvent.Disposed.type,
-+        properties: { reason: DisposedReason.DaemonStop },
-+      },
-+    })
-+  }
-+
-   // SIGTERM 触发优雅关闭
-   process.on("SIGTERM", () => void gracefulShutdown("signal:SIGTERM"))
- 
-@@ -211,7 +225,7 @@ if (isDaemon) {
-       if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
-         return new Response("not found", { status: 404 })
-       // #259：setTimeout 避免在 fetch handler 内直接关闭——让响应先返回
--      setTimeout(() => void gracefulShutdown("daemon-stop"), 0).unref?.()
-+      setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
-       return Response.json({ ok: true })
-     },
-   })
+-    // 停止监听后才释放发现锁，避免另一个启动方在旧端口尚被占用时替换 owner。
+-    const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
+     const runtime = await Promise.allSettled([AppRuntime.dispose()])
+     // Database Layer 的 finalizer 在 native close 前 checkpoint，监听 scope 与 runtime 均照常释放。
++    // 数据库 scope 关闭后才释放锁，避免替换 owner 过早打开仍被旧进程持有的 SQLite。
++    const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
+     clearTimeout(shutdownTimer)
+-    process.exit(exitCode || ([...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
++    process.exit(exitCode || ([...notified, ...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
+@@ -295,7 +308,7 @@ if (isDaemon) {
+         if (request.method !== "POST" || url.pathname !== ServerLock.CONTROL_SHUTDOWN_PATH)
+           return new Response("not found", { status: 404 })
+         // 先返回停止响应，再进入既有关闭闭包，避免在 handler 内中断响应。
+-        setTimeout(() => void gracefulShutdown(0, "daemon-stop"), 0).unref?.()
++        setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
+         return Response.json({ ok: true })
+       },
+     })
 diff --git a/packages/opencode/src/server/event.ts b/packages/opencode/src/server/event.ts
 index 9bb8a8c..7bac3a9 100644
 --- a/packages/opencode/src/server/event.ts
@@ -76,7 +74,7 @@ index 9bb8a8c..7bac3a9 100644
  import { Schema } from "effect"
  import { ServerEvent } from "@opencode-ai/schema/server-event"
  
-+// #273：daemon stop 时需匿名广播原因，让 TUI 区分"主动关闭"与"意外崩溃"
++// 主动停机与普通 dispose 共用事件，以原因字段通知客户端正常退出。
 +export const DisposedReason = {
 +  DaemonStop: "daemon-stop",
 +} as const
@@ -85,14 +83,13 @@ index 9bb8a8c..7bac3a9 100644
  
  export const InstanceDisposed = Schema.Struct({
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
-index 644735a..1c5fa6d 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -112,6 +112,17 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
+@@ -106,6 +106,17 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
    throw new Error(`Daemon did not start within ${DAEMON_START_TIMEOUT_MS} ms`)
  }
  
-+// #273：读取 SSE 流直到出现指定文本
++// 累积 SSE 分块，避免关闭事件被分帧后漏检；五秒上限由调用方负责。
 +async function readUntil(reader: ReadableStreamDefaultReader<string>, text: string) {
 +  let seen = ""
 +  while (!seen.includes(text)) {
@@ -104,13 +101,13 @@ index 644735a..1c5fa6d 100644
 +}
 +
  describe("daemon lifecycle", () => {
-   // #259：daemon stop 命令测试——从真实 CLI 入口验证完整外部契约
+   // 这些用例启动真实 worker/CLI，保留完整 stop 契约，仅作静态审查。
    test(
-@@ -138,6 +149,45 @@ describe("daemon lifecycle", () => {
+@@ -131,6 +142,49 @@ describe("daemon lifecycle", () => {
      DAEMON_START_TIMEOUT_MS + 10_000,
    )
  
-+  // #273：daemon stop 应在退出前向已连接 TUI 广播事件
++  // 先等待 connected 再调用 stop，确保观察到主动关闭广播；真实启动用例仅作静态审查。
 +  test(
 +    "daemon stop announces shutdown to connected TUI event streams before exit",
 +    async () => {
@@ -120,7 +117,11 @@ index 644735a..1c5fa6d 100644
 +
 +      try {
 +        const ctrl = new AbortController()
-+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
++        // 与 fixture 共用显式认证，401 不能被误判为关闭广播缺失。
++        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, {
++          signal: ctrl.signal,
++          headers: ServerLock.headers(credentials),
++        })
 +        expect(res.ok).toBe(true)
 +        if (!res.body) throw new Error("missing SSE body")
 +        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
@@ -130,7 +131,7 @@ index 644735a..1c5fa6d 100644
 +          expect(first.value).toContain("server.connected")
 +
 +          const stop = runDaemonStop(lockPath)
-+          // #273：期望收到带 daemon-stop 原因的 global.disposed 事件
++          // 同一订阅必须收到 global.disposed 及 daemon-stop 原因，五秒内未收到就失败。
 +          const shutdownEvent = await Promise.race([readUntil(reader, "daemon-stop"), Bun.sleep(5_000).then(() => "timeout")])
 +          expect(shutdownEvent).not.toBe("timeout")
 +          expect(String(shutdownEvent)).toContain("global.disposed")
@@ -142,7 +143,7 @@ index 644735a..1c5fa6d 100644
 +          reader.releaseLock()
 +        }
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill("SIGTERM")
++        if (ServerLock.alive(proc.pid)) proc.kill("SIGTERM")
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
@@ -156,13 +157,21 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 index 444d164..27b87ae 100644
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -306,12 +306,27 @@
-      .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
-    }
+@@ -28,6 +28,7 @@
+ import { useTuiStartup } from "./runtime"
+ import { createSimpleContext } from "./helper"
+ import { useExit } from "./exit"
++import { useEpilogue } from "./epilogue"
+ import { useArgs } from "./args"
+ import { batch, onCleanup, onMount } from "solid-js"
+ import path from "path"
+@@ -363,14 +364,31 @@
+         .finally(() => listingSessions.delete(tracker))
+     }
  
-+    // #273：提前获取 exit，供 global.disposed 事件处理中调用
 +    const exit = useExit()
-+    // #273：标记 daemon stop 已收到，阻止 server.instance.disposed 触发重连
++    const setEpilogue = useEpilogue()
++    // 主动停机先锁定退出状态，后续实例释放通知不能再次 bootstrap。
 +    let daemonStopSeen = false
 +
      event.subscribe((event, { directory, workspace }) => {
@@ -170,24 +179,78 @@ index 444d164..27b87ae 100644
        // #186：delta 自身不 flush，继续积攒同一 16ms 窗口
        if (event.type !== "message.part.delta") flushPartDeltas()
        switch (event.type) {
-+        case "global.disposed":
-+          // #273：仅响应 daemon 主动关闭，其他崩溃走重连
-+          if ((event.properties as { reason?: string }).reason !== "daemon-stop") break
++        case "global.disposed": {
++          // 原始SSE载荷仍按运行时字段识别，普通dispose不触发主动停机路径。
++          const properties: unknown = event.properties
++          if (!properties || typeof properties !== "object" ||
++            !("reason" in properties) || properties.reason !== "daemon-stop") break
 +          daemonStopSeen = true
-+          // #273：直接调用 exit 函数，原因作为参数传递
-+          // #273：void 前缀——exit 触发卸载流程，不阻塞事件循环处理后续帧
-+          void exit("opencode daemon stopped.")
++          // 提示走 epilogue；exit 的 reason 参数会被现有退出 owner 判作错误。
++          setEpilogue("opencode daemon stopped.")
++          exit()
 +          break
++        }
          case "server.instance.disposed":
-+          // #273：daemon stop 已设置退出标志，不再重连
 +          if (daemonStopSeen) break
            void bootstrap()
            break
          case "server.connected":
-@@ -625,6 +640,5 @@
-      pendingPartDeltas = []
-      loggedPartDeltaApplications.clear()
-    })
+           loggedPartDeltaApplications.clear()
+           // #132：SSE 无回放；重连后刷新持久化状态
+@@ -692,8 +710,7 @@
+       loggedPartDeltaApplications.clear()
+     })
  
 -    const exit = useExit()
      const args = useArgs()
+ 
+     // #153：session_status 独立刷新，force sync 与 bootstrap 共用同一入口
+     // #192：快照按 session 建表，供后续增量 update 提供二分查找的排序不变式
+diff --git a/packages/schema/src/server-event.ts b/packages/schema/src/server-event.ts
+--- a/packages/schema/src/server-event.ts
++++ b/packages/schema/src/server-event.ts
+@@ -3,6 +3,9 @@ export * as ServerEvent from "./server-event"
++import { Schema } from "effect"
+ import { Event } from "./event"
++import { optional } from "./schema"
+ 
+ export const Connected = Event.define({ type: "server.connected", schema: {} })
+-export const Disposed = Event.define({ type: "global.disposed", schema: {} })
++// 主动停机原因属于事件 wire 契约，普通 dispose 仍允许空载荷。
++export const Disposed = Event.define({ type: "global.disposed", schema: { reason: optional(Schema.String) } })
+ 
+ export const Definitions = Event.inventory(Connected, Disposed)
+diff --git a/packages/tui/test/fixture/tui-environment.tsx b/packages/tui/test/fixture/tui-environment.tsx
+--- a/packages/tui/test/fixture/tui-environment.tsx
++++ b/packages/tui/test/fixture/tui-environment.tsx
+@@ -6,6 +6,7 @@
+   type TuiPaths,
+ } from "../../src/context/runtime"
+ import type { ParentProps } from "solid-js"
++import { EpilogueProvider } from "../../src/context/epilogue"
+ 
+ export function TestTuiContexts(
+   props: ParentProps<{
+@@ -25,6 +26,9 @@
+       }}
+     >
+       <TuiTerminalEnvironmentProvider value={{ platform: "linux" }}>
+-        <TuiStartupProvider value={{ skipInitialLoading: false }}>{props.children}</TuiStartupProvider>
++        {/* headless环境补齐App已有的提示上下文，不把正常停机提示当退出错误。 */}
++        <EpilogueProvider set={() => {}}>
++          <TuiStartupProvider value={{ skipInitialLoading: false }}>{props.children}</TuiStartupProvider>
++        </EpilogueProvider>
+       </TuiTerminalEnvironmentProvider>
+     </TuiPathsProvider>
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -7514,7 +7514,7 @@
+ export type EventGlobalDisposed = {
+   id: string
+   type: "global.disposed"
+   properties: {
+-    [key: string]: unknown
++    reason?: string
+   }
+ }

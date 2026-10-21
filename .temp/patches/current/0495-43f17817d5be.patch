@@ -766,10 +766,10 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 index 68fbf5e12..2993d9327 100644
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -19,8 +19,133 @@ declare global {
+@@ -18,8 +18,132 @@ declare global {
  }
  
- // 仅供测试使用——通过对象暴露 spawn，便于 spy 拦截同模块内调用
+ // 唯一生产 spawn seam 同时用于注入测试；测试不能另跑一条模拟发现算法。
 +type DaemonProcess = Pick<ReturnType<typeof Bun.spawn>, "pid" | "exited" | "unref" | "kill">
 +type SpawnDaemon = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => DaemonProcess | Promise<DaemonProcess>
 +async function spawnDaemon(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]): Promise<DaemonProcess> {
@@ -834,7 +834,7 @@ index 68fbf5e12..2993d9327 100644
 +      wrapper.kill()
 +    } catch {}
 +    timeout.reject(new Error("Windows daemon wrapper did not publish the worker PID"))
-+  }, 60_000)
++  }, DAEMON_START_TIMEOUT_MS)
 +  const worker = await Promise.race([readWorkerPID(reader), timeout.promise]).finally(() => clearTimeout(timer))
 +  // PID 首行之后继续消费同一 pipe；否则 daemon 日志填满 pipe 会阻塞 worker，--print-logs 也会静默丢失 stdout。
 +  const output = drainWrapperOutput(reader, worker.remainder, opts?.stdout === "inherit")
@@ -896,15 +896,15 @@ index 68fbf5e12..2993d9327 100644
 +}
 +// adapter 经对象属性暴露：测试 spy 替换属性后，同模块调用点立即生效。
  export const DaemonProcess = {
--  spawn: (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, opts),
+-  // Bun 支持 windowsHide；直接启动 worker，不经可见 pwsh 窗口或改变用户弹窗工具。
+-  spawn: (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, { ...opts, windowsHide: true }),
 +  spawn: spawnDaemon as SpawnDaemon,
  }
- // 兼容导出：测试与调用均可使用 _spawn 别名
- export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => DaemonProcess.spawn(cmd, opts)
+ 
 @@ -195,7 +320,7 @@ export async function discoverOrSpawnDaemon(
-       // #71：规范化/剥离 shell 代理后由 NetworkProxy 按请求路由（覆盖 #52 仅转发）
+       // 快照已补齐代理键后再调整，桌面 shell 的旧代理不能冻结 daemon 的系统路由。
        applyProxyEnv(env)
-       // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
+       // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
 -      const proc = deps.spawn([process.execPath, daemonFile], {
 +      const proc = await deps.spawn([process.execPath, daemonFile], {
          // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon。
@@ -973,12 +973,12 @@ index c5e206319..c23608154 100644
 -      yield* Effect.forkScoped(
 -        subscribe(location.directory, [...Ignore.PATTERNS, ...config, ...protecteds(location.directory)]),
 -      )
-+      // #495：订阅就绪必须被等待（fork 会把获取失败静默留在后台 fiber）；失败沿 layer 上抛。
++      // 订阅就绪必须被等待；失败交既有 Location 诊断边界，不能静默留在后台 fiber。
 +      yield* subscribe(location.directory, [...Ignore.PATTERNS, ...config, ...protecteds(location.directory)])
      }
  
      if (location.vcs?.type === "git") {
-@@ -119,15 +122,18 @@ const layer = Layer.effect(
+@@ -119,15 +122,16 @@ const layer = Layer.effect(
          const ignore = (yield* fs.readDirectoryEntries(vcs).pipe(Effect.catch(() => Effect.succeed([])))).flatMap(
            (entry) => (entry.name === "HEAD" ? [] : [entry.name]),
          )
@@ -990,12 +990,9 @@ index c5e206319..c23608154 100644
      return Service.of({})
    }).pipe(
      Effect.catchCause((cause) => {
-+      // acquisition 失败以 defect 上抛到 bootstrap 边界：既不把无 listener 状态缓存成初始化成功，
-+      // 也不向下游 service 错误通道泄漏 ConfigError/TimeoutError（保持 layer 既定错误契约）。
++      // Location 仍可服务 Session；监听失败沿既有诊断降级，不能让辅助 watcher 拖垮整个服务树。
        return Effect.logError("failed to init watcher service", { cause: Cause.pretty(cause) }).pipe(
--        Effect.as(Service.of({})),
-+        Effect.andThen(Effect.failCause(cause)),
-+        Effect.orDie,
+         Effect.as(Service.of({})),
        )
      }),
    ),
@@ -1009,7 +1006,7 @@ index 0a287ea01..fb6f8fb7a 100644
  import fs from "fs/promises"
  import path from "path"
 -import { ConfigProvider, Deferred, Duration, Effect, Fiber, Layer, Option, Stream } from "effect"
-+import { ConfigProvider, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
++import { ConfigProvider, Deferred, Duration, Effect, Exit, Fiber, Layer, Logger, Option, Stream } from "effect"
  import { Config } from "@opencode-ai/core/config"
  import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -1023,12 +1020,13 @@ index 0a287ea01..fb6f8fb7a 100644
  
  type WatcherEvent = { file: string; event: "add" | "change" | "unlink" }
  
-@@ -178,6 +179,28 @@ describeWatcher("Watcher", () => {
+@@ -178,6 +179,31 @@ describeWatcher("Watcher", () => {
      ),
    )
  
-+  it.live("reports native subscription acquisition failure instead of publishing readiness", () =>
++  it.live("reports acquisition failure without disabling the Location", () =>
 +    Effect.gen(function* () {
++      const logs: string[] = []
 +      const tmp = yield* Effect.acquireRelease(
 +        Effect.promise(() => tmpdir()),
 +        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
@@ -1041,11 +1039,13 @@ index 0a287ea01..fb6f8fb7a 100644
 +        // vcs存根只为进入root订阅分支；root在订阅前已被删除，git leg不会参与本用例。
 +        provide(root, { type: "git", store: AbsolutePath.make(path.join(root, ".git")) }),
 +        Effect.scoped,
++        Effect.provide(Logger.layer([Logger.make((entry) => logs.push(String(entry.message)))])),
 +        Effect.exit,
 +      )
-+      // layer 构建即 init：失败以 defect 通道离开 provide，exit 捕获后与源 typed-fail 观察点等价。
-+      // 行为契约只要求acquisition failure沿layer上抛；不耦合Parcel错误字符串或内部重试次数。
-+      expect(Exit.isFailure(result)).toBe(true)
++      // 目标没有独立 init consumer；保留 Location 可用，同时用失败诊断区分真实订阅与降级。
++      // 不绑定 Parcel 错误字符串或重试次数，业务层仍可读取已持久化 Session。
++      expect(Exit.isSuccess(result)).toBe(true)
++      expect(logs.some((message) => message.includes("failed to init watcher service"))).toBe(true)
 +    }),
 +  )
 +
@@ -1063,13 +1063,13 @@ index 0c1575d42..d6a6e3a1e 100644
  import { afterEach, describe, expect, test } from "bun:test"
 -import { mkdir } from "fs/promises"
 +import { mkdir, rename } from "fs/promises"
-+// #495：win32 spawn adapter 测试经 DaemonProcess/_spawn seam 注入（目标 cmd/tui owner）。
-+import { _spawn } from "../../../src/cli/cmd/tui"
++// #495：win32 spawn adapter 测试沿目标唯一 DaemonProcess seam。
++import { DaemonProcess } from "../../../src/cli/cmd/tui"
  import path from "path"
  import { fileURLToPath } from "url"
  import { tmpdir } from "../../fixture/fixture"
 @@ -20,6 +22,13 @@ import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
- import * as Win32Module from "@opencode-ai/tui/terminal-win32"
+ import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
  
  const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
 +
@@ -1079,9 +1079,9 @@ index 0c1575d42..d6a6e3a1e 100644
 +
 +
 +// #495：marker 读取以 published readiness 为准——不依赖调度延迟或 elapsed-time 断言。
- // #259：daemon stop 是用户可见的 CLI 行为，测试必须从真实入口验证
+ // stop 的命令注册和参数解析必须通过真实 CLI 入口保留回归覆盖。
  const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
- 
+ const credentials = { username: "daemon-test", password: "daemon-test-password" }
 @@ -742,6 +751,191 @@ test(
      10_000,
    )
@@ -1133,7 +1133,7 @@ index 0c1575d42..d6a6e3a1e 100644
 +        // 释放协议经 stdin 而非 kill：Dispose 路径也被覆盖，handle 泄漏窗口才被真实关闭。
 +        await holder.stdin.write("release\n")
 +        await holder.stdin.end()
-+        if (ServerLockModule.alive(holder.pid)) holder.kill()
++        if (ServerLock.alive(holder.pid)) holder.kill()
 +        await holder.exited.catch(() => undefined)
 +      }
 +    },
@@ -1164,7 +1164,7 @@ index 0c1575d42..d6a6e3a1e 100644
 +        expect(await worker.exited).toBe(0)
 +      } finally {
 +        reader.releaseLock()
-+        if (ServerLockModule.alive(worker.pid)) worker.kill()
++        if (ServerLock.alive(worker.pid)) worker.kill()
 +        await worker.exited.catch(() => undefined)
 +      }
 +    },
@@ -1186,7 +1186,7 @@ index 0c1575d42..d6a6e3a1e 100644
 +      )
 +      // marker 写在大输出之后，若 adapter 只读取 PID 首行而不持续 drain，本测试会卡在可观察 ready 之前。
 +      // target 来自真实空格路径；marker 位于大段 stdout 之后，同时证明 PID channel 持续 drain 而不会堵住 worker。
-+      const proc = await _spawn([process.execPath, worker], {
++      const proc = await DaemonProcess.spawn([process.execPath, worker], {
 +        env: { ...process.env, DAEMON_SPACE_MARKER: marker },
 +        stdin: "ignore",
 +        stdout: "ignore",
@@ -1232,7 +1232,7 @@ index 0c1575d42..d6a6e3a1e 100644
 +        const { discoverOrSpawnDaemon } = await import(${JSON.stringify(tuiUrl)})
 +        const { url } = await discoverOrSpawnDaemon({} as never)
 +        const ctrl = new AbortController()
-+        const response = await fetch(url + "/global/event", { signal: ctrl.signal })
++        const response = await fetch(url + "/global/event", { headers: ${JSON.stringify(ServerLock.headers(credentials))}, signal: ctrl.signal })
 +        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
 +        await reader.read()
 +        const lock = await Bun.file(process.env.OPENCODE_LOCK_PATH!).json()
@@ -1253,19 +1253,19 @@ index 0c1575d42..d6a6e3a1e 100644
 +        stderr: "pipe",
 +      })
 +      const firstLine = await new Response(launcher.stdout).text()
-+      const lock = JSON.parse(firstLine.trim()) as ServerLockModule.ServerLock
++      const lock = JSON.parse(firstLine.trim()) as ServerLock.ServerLock
 +      expect(await launcher.exited).toBe(0)
 +      try {
 +        // #495：Project 中的同名程序不能参与 wrapper 解析；launcher 退出也不能成为 daemon 生命周期事件。
 +        // 同一 PID/lock 必须继续服务，第二个 TUI 才能复用 owner 而不是发布替代 daemon。
 +        await Bun.sleep(500)
-+        expect(ServerLockModule.alive(lock.pid)).toBe(true)
++        expect(ServerLock.alive(lock.pid)).toBe(true)
 +        // 断言原 lock PID 而非任意 health 响应，防止 replacement daemon 把 parent-exit 回归伪装成成功。
-+        expect(await ServerLockModule.ping(lock.port)).toBe(true)
++        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
 +        expect((await Bun.file(lockPath).json()).pid).toBe(lock.pid)
 +      } finally {
 +        await runDaemonStop(lockPath).catch(() => undefined)
-+        if (ServerLockModule.alive(lock.pid)) process.kill(lock.pid)
++        if (ServerLock.alive(lock.pid)) process.kill(lock.pid)
 +      }
 +    },
 +    DAEMON_START_TIMEOUT_MS + 10_000,
@@ -1274,6 +1274,80 @@ index 0c1575d42..d6a6e3a1e 100644
    test(
      "daemon maintenance control persists and completes a task",
      async () => {
+
+diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
+--- a/packages/opencode/test/cli/tui/thread.test.ts
++++ b/packages/opencode/test/cli/tui/thread.test.ts
+@@ -9,3 +9,3 @@ import { tmpdir } from "../../fixture/fixture"
+-import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
++import { DaemonProcess, TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
+   DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS, status, printDaemonExitHint } from "../../../src/cli/cmd/tui"
+ import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
+@@ -168,3 +168,57 @@ describe("tui thread", () => {
+     // 显式给出本地默认值，保证用例只测试 owner 状态，不误进入 external listener 分支。
+     const localNet = { port: 0, hostname: "127.0.0.1", mdns: false, cors: [] as string[] }
+ 
++    test("awaits asynchronous spawn and releases the election lease on rejection", async () => {
++      let published = false
++      let released = 0
++      let unrefs = 0
++      const acquire: DiscoverDaemonDeps["acquire"] = async () => ({ release: async () => { released++ } }) as never
++      const proc = { pid: FAKE_DAEMON_PID, exited: hangingExited(), unref() { unrefs++ }, kill() { throw new Error("delivered owner must survive") } }
++      // 所有 I/O 均显式注入；异步返回前不发布锁，不能误用 Promise 当作真实进程 handle。
++      const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
++        placement: () => "/tmp/async-daemon.json",
++        read: async () => published ? fakeLock : undefined,
++        acquire,
++        spawn: async () => {
++          await Promise.resolve()
++          published = true
++          return proc
++        },
++      }))
++      expect(result).toEqual({ url: "http://127.0.0.1:9999", fwdPid: FAKE_DAEMON_PID, lockPath: "/tmp/async-daemon.json" })
++      expect(unrefs).toBe(1)
++      if (process.platform === "win32") {
++        // 只替换 native spawn 边界；真实 adapter 读取分块 PID 并持续 drain，整个测试不创建进程。
++        const encoder = new TextEncoder()
++        const stdout = new ReadableStream<Uint8Array>({ start(controller) {
++          controller.enqueue(encoder.encode("99"))
++          controller.enqueue(encoder.encode("999\r\nworker output"))
++          controller.close()
++        } })
++        const wrapper = { pid: 12345, exited: Promise.resolve(0), stdout, unref() { unrefs++ }, kill() {} }
++        const spawn = spyOn(Bun, "spawn").mockReturnValue(wrapper as never)
++        try {
++          const target = "C:\\fake worker\\target.ts"
++          const handle = await DaemonProcess.spawn([process.execPath, target], { env: { ...process.env }, stdout: "ignore" })
++          expect(handle.pid).toBe(FAKE_DAEMON_PID)
++          expect(await handle.exited).toBe(0)
++          expect(stdout.locked).toBe(false)
++          expect(spawn).toHaveBeenCalledWith(expect.any(Array), expect.objectContaining({ windowsHide: true, stdout: "pipe", env: expect.objectContaining({ OPENCODE_DAEMON_TARGET: target }) }))
++          handle.unref()
++          expect(unrefs).toBe(2)
++        } finally {
++          spawn.mockRestore()
++        }
++      }
++
++      // spawn 本身拒绝时也须释放相同选举 lease，不交付替代进程或伪造 URL。
++      const failure = new Error("async spawn rejected")
++      await expect(discoverOrSpawnDaemon(localNet as never, baseDeps({
++        placement: () => "/tmp/async-daemon.json",
++        read: async () => undefined,
++        acquire,
++        spawn: async () => { throw failure },
++      }))).rejects.toBe(failure)
++      expect(released).toBe(2)
++    })
++
+@@ -254,4 +308,5 @@ describe("tui thread", () => {
+               Object.entries(parent).forEach(([key, value]) => {
+-                if (proxyKeys.includes(key) || ["OPENCODE_PROCESS_ROLE", "OPENCODE_LOCK_PATH", "OPENCODE_EXTERNAL_NETWORK", "OPENCODE_PRINT_LOGS"].includes(key)) return
++                // launcher 身份属于本次 spawn 的 owner；其余非代理父键仍须逐项完整转发。
++                if (proxyKeys.includes(key) || ["OPENCODE_PROCESS_ROLE", "OPENCODE_DAEMON_LAUNCHER_PID", "OPENCODE_LOCK_PATH", "OPENCODE_EXTERNAL_NETWORK", "OPENCODE_PRINT_LOGS"].includes(key)) return
+                 expect(env?.[key]).toBe(value)
+               })
 
 diff --git a/packages/opencode/test/cli/tui/maintenance-retry-worker.ts b/packages/opencode/test/cli/tui/maintenance-retry-worker.ts
 new file mode 100644

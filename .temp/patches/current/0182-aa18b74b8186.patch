@@ -6,7 +6,11 @@ Subject: [PATCH] feat: enhance dashboard rendering with new responsive layout
 diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -217,21 +217,187 @@ const dashboardTopTable = (
+@@ -1,2 +1,3 @@
+ 
++import { renderTwoColumn, renderThreeColumn } from "./stats-charts"
+ import { renderCompositionDonut, renderPercentStack, renderStreamStackChart, renderWaterfall, renderHistogram } from "./stats-charts"
+@@ -217,23 +217,206 @@ const dashboardTopTable = (
    return lines
  }
  
@@ -22,12 +26,12 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +
 +// #182：简易 DOW 份额条（Mon-Sun）
 +const renderDayOfWeekShare = (report: StatsReport) => {
-+  // #182：周一到周日桶
++  // #182：按用量发生的本地星期归属，续聊不能搬移此前 token
 +  const dow = Array.from({ length: 7 }, () => 0)
-+  for (const s of report.sessions) {
-+    const d = new Date(s.updated).getUTCDay()
++  for (const day of report.daily) {
++    const d = new Date(day.day).getDay()
 +    const idx = d === 0 ? 6 : d - 1
-+    dow[idx] += s.tokens.total
++    dow[idx] += day.tokens.total
 +  }
 +  const max = Math.max(1, ...dow)
 +  const names = ["M", "T", "W", "T", "F", "S", "S"]
@@ -42,7 +46,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +  // #182：24 小时活跃
 +  const hours = Array.from({ length: 24 }, () => 0)
 +  for (const s of report.sessions) {
-+    hours[new Date(s.updated).getUTCHours()] += 1
++    hours[new Date(s.updated).getHours()] += Math.max(1, s.requests)
 +  }
 +  const max = Math.max(1, ...hours)
 +  const glyphs = hours.map((h) => "·░▒▓█"[Math.min(4, Math.round((h / max) * 4))]).join("")
@@ -51,11 +55,22 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +
 +// #182：日历强度
 +const renderCalendarActivity = (report: StatsReport) => {
-+  // #182：日历用 daily tokens 强度
-+  const vals = report.daily.map((d) => d.tokens.total)
-+  const max = Math.max(1, ...vals, 1)
-+  const row = vals.map((v) => "·░▒▓█"[Math.min(4, Math.round((v / max) * 4))]).join("")
-+  return ["Calendar activity", `  ${row || "(empty)"}`, "  · low  █ high"]
++  // 按本地星期分周显示，长历史不扩成一条无日期的超宽字符带。
++  const max = Math.max(1, ...report.daily.map((day) => day.tokens.total))
++  const rows = ["Calendar activity", "          M T W T F S S"]
++  let week: string[] = []
++  let label = ""
++  for (const day of report.daily) {
++    const weekday = (new Date(day.day).getDay() + 6) % 7
++    if (weekday === 0 && week.length) {
++      rows.push(`  ${label} ${week.join(" ")}`)
++      week = []
++    }
++    if (!week.length) { label = day.label; week = Array(weekday).fill(" ") }
++    week.push("·░▒▓█"[Math.min(4, Math.round((day.tokens.total / max) * 4))])
++  }
++  if (week.length) rows.push(`  ${label} ${week.join(" ")}`)
++  return [...rows, "  · low  █ high"]
 +}
 +
 +// #182：token 组件小多图
@@ -73,15 +88,18 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    ]
 +    return [...lines, ...renderRankBars({ rows })]
 +  }
-+  // #182：sparkline 宽随终端收敛
-+  const width = Math.max(12, Math.min(40, statsContentWidth() - 24))
++  const contentWidth = statsContentWidth()
 +  for (const part of parts) {
 +    // #182：点列为空时用 total 单点序列
 +    const values = part.points.map((p) => p.value)
-+    const peak = Math.max(1, ...values, part.total)
-+    // #182：每序列用自身 peak 归一化 sparkline，避免共享纵轴淹没小分量
++    const peak = Math.max(0, ...(values.length ? values : [part.total]))
++    // 为真实标签和紧凑数值留出空间；窄屏分两行，避免截断组件名或数量级。
++    const label = `  ${part.label.padEnd(12)}`
++    const summary = `total=${formatNumber(part.total)} peak=${formatNumber(peak)}`
++    const available = contentWidth - visibleLength(label) - visibleLength(summary) - 3
++    const width = Math.min(40, Math.max(1, available >= 8 ? available : contentWidth - visibleLength(label) - 1))
 +    const bar = sparkline(values.length ? values : [part.total], width)
-+    lines.push(`  ${part.label.padEnd(12)} ${bar}  total=${part.total} peak=${peak}`)
++    lines.push(...(available >= 8 ? [`${label} ${bar}  ${summary}`] : [`${label} ${bar}`, `    ${summary}`]))
 +  }
 +  return lines
 +}
@@ -139,6 +157,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 -    "",
 -        // #181：providers 表绑定 providerSeries 趋势
 -    ...dashboardTopTable("Top providers", report.providers, report.providerSeries, options, "provider", report.total.tokens.total),
+-    ...renderCallout("daily", "recent"),
+-    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
 +    top ? `Top model ${top.label || top.id} leads tokens.` : "No model usage yet.",
 +    failure.failed > 0
 +      ? `Failed/aborted requests: ${failure.failed} (${failure.rate}%). Inspect stats timeline for bursts.`
@@ -155,10 +175,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +  // #182：分区仪表盘：activity / tokens / cost / tops / sessions / insights
 +  const lines: string[] = [...header(report, "stats dashboard")]
 +  lines.push(...renderSectionDivider("Daily activity"))
-+  // #182：tip 文本 UI 无真实多列 activity，统一纵向堆叠三件套
-+  lines.push(...renderCalendarActivity(report))
-+  lines.push(...renderHourOfDayStrip(report))
-+  lines.push(...renderDayOfWeekShare(report))
++  // 宽屏复用现有多列布局；窄屏保留完整内容，避免固定分栏裁掉日期。
++  const activity = [renderCalendarActivity(report), renderHourOfDayStrip(report), renderDayOfWeekShare(report)]
++  lines.push(...(statsContentWidth() >= 90 ? renderThreeColumn(activity[0], activity[1], activity[2]) : statsContentWidth() >= 64 ? renderTwoColumn(activity[0], [...activity[1], ...activity[2]]) : activity.flat()))
 +  lines.push("")
 +  lines.push(...renderSectionDivider("Token components", "auto-normalized small multiples"))
 +  // #182：组件小多图区
@@ -193,6 +212,12 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +      lines.push(`  ${buckets[i].label.padEnd(8)} ${bar} ${counts[i]}`)
 +    }
 +    const sorted = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total).slice(0, options.limit ?? 5)
++    // 分位数使用完整会话样本，榜单 limit 不能改变长尾统计。
++    const volumes = report.sessions.map((session) => session.tokens.total).sort((a, b) => a - b)
++    const quantile = (q: number) => formatNumber(volumes[Math.min(volumes.length - 1, Math.floor(volumes.length * q))] ?? 0)
++    const share = (count: number) => (100 * volumes.slice(-count).reduce((sum, value) => sum + value, 0) / Math.max(1, report.total.tokens.total)).toFixed(1)
++    lines.push(`  p50=${formatNumber(report.medianTokensPerSession)} p90=${quantile(0.9)} p99=${quantile(0.99)}`)
++    lines.push(`  Heavy-tail top-2=${share(2)}% top-10=${share(10)}%`)
 +    lines.push("  Top sessions by tokens")
 +    for (const s of sorted) {
 +      lines.push(`  ${(s.title || s.id).slice(0, 24).padEnd(24)} ${s.tokens.total}`)
@@ -210,7 +235,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -295,3 +295,56 @@ describe("sparkline aggregation (#181)", () => {
+@@ -295,3 +295,108 @@ describe("sparkline aggregation (#181)", () => {
      expect(sparkline([1, 2, 3], 6).length).toBe(6)
    })
  })
@@ -246,8 +271,11 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +    const text = renderDashboard(report as any, { limit: 5 })
 +    expect(text).toContain("Daily activity")
 +    expect(text).toContain("Token components")
++    expect(text).toMatch(/Input[^\n]*total=100 peak=90/)
 +    expect(text).toContain("Cost & health")
 +    expect(text).toContain("Session size distribution")
++    expect(text).toContain("p90=120.0K p99=120.0K")
++    expect(text).toContain("top-10=")
 +    expect(text).toContain("Top sessions by tokens")
 +    expect(text).toContain("big")
 +    expect(text).toMatch(/cost trend/)
@@ -257,6 +285,55 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +    expect(text).toMatch(/Input\s+[\u2581-\u2588]+/)
 +    expect(text).toContain("Cache hit (%): 25")
 +    expect(text).not.toContain("Model activity rows")
++    for (const columns of [58, 80]) {
++      const previous = process.stdout.columns
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: columns })
++      try {
++        const lines = renderDashboard({ ...report, tokenPartSeries: [{ id: "output", label: "Output + Reasoning", total: 1_000_000, points: [{ day: 1, label: "d1", value: 1_000_000 }] }] }).split("\n")
++        const index = lines.findIndex((line) => line.includes("Output + Reasoning"))
++        expect(index).toBeGreaterThanOrEqual(0)
++        expect(lines[index].length).toBeLessThanOrEqual(columns)
++        expect(lines[index + 1].length).toBeLessThanOrEqual(columns)
++        expect(lines.slice(index, index + 2).join(" ")).toContain("total=1.0M peak=1.0M")
++      } finally {
++        Object.defineProperty(process.stdout, "columns", { configurable: true, value: previous })
++      }
++    }
++  })
++
++  test("keeps cross-day session tokens on local usage weekdays", () => {
++    // #182：同一会话周一、周二各用 100 token，周二续聊不能搬走周一用量
++    const monday = new Date(2026, 3, 27).getTime()
++    const tuesday = new Date(2026, 3, 28).getTime()
++    // 此用例检查日期和权重，固定窄屏使独立行断言不受宽屏多列排版影响。
++    const text = (() => {
++      const width = process.stdout.columns
++      Object.defineProperty(process.stdout, "columns", { configurable: true, value: 58 })
++      try { return renderDashboard({
++      ...report,
++      totalSessions: 1,
++      sessionsWithUsage: 1,
++      dateRange: { earliest: monday, latest: tuesday },
++      daily: [
++        { ...report.daily[0], day: monday, label: "04-27" },
++        { ...report.daily[1], day: tuesday, label: "04-28" },
++      ],
++      sessions: [{ ...report.sessions[0], ...report.total, requests: 100, created: monday, updated: new Date(2026, 3, 28, 9).getTime() }, { ...report.sessions[1], requests: 1, updated: new Date(2026, 3, 28, 15).getTime() }],
++      }) } finally {
++        Object.defineProperty(process.stdout, "columns", { configurable: true, value: width })
++      }
++    })()
++    const lines = text.split("\n")
++    const start = lines.indexOf("Day of week share")
++    expect(start).toBeGreaterThanOrEqual(0)
++    expect(lines.slice(start + 1, start + 8).map((line) => Number(line.split(" ").at(-1)))).toEqual([100, 100, 0, 0, 0, 0, 0])
++    // 日历必须能定位周起点，小时图必须按本地请求量而非会话数计权。
++    const calendar = lines.indexOf("Calendar activity")
++    expect(lines[calendar + 1]).toContain("M T W T F S S")
++    expect(lines[calendar + 2]).toContain("04-27")
++    const hour = lines[lines.indexOf("Hour of day") + 1]
++    expect(hour?.[11]).toBe("█")
++    expect(hour?.[17]).toBe("·")
 +  })
 +
 +  test("abort and error rate comes from report totals", () => {

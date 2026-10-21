@@ -797,7 +797,7 @@ new file mode 100644
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -636,8 +636,45 @@ export const layer = Layer.effect(
+@@ -637,6 +637,43 @@ export const layer = Layer.effect(
  // #227：textOutput 累积所有 text-delta——JSON 回退解析需要完整文本而非首个分片
              let reasoningPart: ReasoningPart | undefined
              // #209：toolParts/toolInput 按 callID 索引——一个 tool-call 的 input-start/delta/end/call 共享同一 callID
@@ -842,8 +842,6 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +              )
 +            })
  
-             yield* Stream.runForEach(
-               // #209：fullStream 聚合 reasoning/text/tool 全部事件——逐事件持久化使子会话 transcript 实时可审计
 @@ -712,7 +749,7 @@ export const layer = Layer.effect(
                  }
                  if (event.type === "tool-input-start") {
@@ -914,7 +912,8 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +                        partID,
 +                      })
 +                    : undefined
-                   const part = yield* session.updatePart({
+-                  const part = yield* session.updatePart({
++                  yield* session.updatePart({
 -                    ...(existing ?? {
 -                      id: PartID.ascending(),
 -                      sessionID: persist.sessionID,
@@ -982,11 +981,12 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
  import { createOpenAI } from "@ai-sdk/openai"
  import { ModelV2 } from "@opencode-ai/core/model"
  import { ProviderV2 } from "@opencode-ai/core/provider"
-@@ -12,6 +12,7 @@ import { Provider } from "../../src/provider/provider"
+@@ -14,7 +14,8 @@ import { Provider } from "../../src/provider/provider"
  import { SessionID } from "../../src/session/schema"
  import { ProjectV2 } from "@opencode-ai/core/project"
  import { Session } from "../../src/session/session"
 +import { MessageV2 } from "../../src/session/message-v2"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
  import { Exit, Option } from "effect"
  import { testEffect } from "../lib/effect"
  import { TestConfig } from "../fixture/config"
@@ -1145,7 +1145,7 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
      updatePart: (part) => {
        parts.push(part)
        return Effect.succeed(part)
-@@ -922,3 +1009,141 @@ function openAIReviewDecisionStream() {
+@@ -922,3 +1009,139 @@ function openAIReviewDecisionStream() {
      .map((event) => `data: ${JSON.stringify(event)}\n\n`)
      .join("")
  }
@@ -1212,7 +1212,7 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +            (block === "completed" && part.state.status === "completed"))
 +        ) {
 +          committed.resolve()
-+          // 事务已经提交；这里模拟 SyncEvent 后续可中断的 convert/publish/return 边界。
++          // 事务已经提交；这里模拟 EventV2 后续可中断的 notify/return 边界。
 +          return yield* Effect.never
 +        }
 +        return part
@@ -1250,10 +1250,8 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 +  return { getPart, updatePart }
 +}
 +
-+// #497：pending-only 流——完整复刻目标 decision 流骨架（created/added/delta/done/completed，
-+// 目标 SDK 需 completed 才发布 tool 事件），但 function-call arguments 为不完整 JSON：
-+// tool-input-start 已发布、Part 已持久化，而 Assessment 永远无法完成——reviewer 停在
-+// 真实中断位置（协议失败转 fallback 前，open tool 由 finalize 闭合）。
++// #497：pending-only 流保留目标 decision 事件骨架及合法 JSON，但参数不满足 Assessment。
++// 目标 SDK 能发布 tool 事件，业务决策仍失败；开放 Part 必须由本 attempt 闭合。
 +function openAIReviewPendingStream() {
 +  return [
 +    { type: "response.created", response: { id: "resp_pending", created_at: 0, model: "gpt-5", service_tier: null } },
@@ -1291,20 +1289,12 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
 --- a/packages/opencode/test/server/httpapi-session.test.ts
 +++ b/packages/opencode/test/server/httpapi-session.test.ts
-@@ -4,10 +4,12 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
- import { SessionV1 } from "@opencode-ai/core/v1/session"
- import { mkdir } from "node:fs/promises"
- import path from "node:path"
--import { Cause, Config, Effect, Exit, Layer } from "effect"
-+import { Cause, Config, Effect, Exit, Fiber, Layer } from "effect"
- import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
+@@ -9,3 +9,5 @@ import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
  import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
  import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 +// #497：ownership 用例经 filterCompactedEffect 读取公共持久化投影。
 +import { MessageV2 } from "@/session/message-v2"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
- import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
- import { Flag } from "@opencode-ai/core/flag/flag"
 @@ -792,6 +794,146 @@ describe("session HttpApi", () => {
      { git: true, config: { formatter: false, lsp: false, share: "disabled" } },
    )

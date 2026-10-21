@@ -520,36 +520,24 @@ new file mode 100644
 diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
 --- a/packages/tui/src/component/dialog-session-list.tsx
 +++ b/packages/tui/src/component/dialog-session-list.tsx
-@@ -103,8 +103,8 @@ export function DialogSessionList() {
-   const [search, setSearch] = createDebouncedSignal("", 150)
-   // #120：sessionID -> 多行用户消息预览（非单行再折词）
-   const [previews, setPreviews] = createSignal<Record<string, string[]>>({})
+@@ -118,2 +118,2 @@ export function DialogSessionList() {
 -  // #544 progressive search 状态：generation 与 Abort 绑定 committed query。
 -  // 单一 generation 计数器拒绝过期写回：每次改词自增，异步回调比对后才可 set 信号。
 +  // #544 progressive search 状态：AbortSignal 是 committed query 的唯一过期事实。
 +  // #561 单轨收敛：改词/清空/卸载都只 abort 当前 controller，不再维护 generation 双轨。
-   const [searchPhase, setSearchPhase] = createSignal<SearchPhase | undefined>()
-   // success complete 只信 scan；error complete 保留 title∪scan（已展示 hits 不抹掉）
-   // terminal 与 phase 分离：phase 驱动 Spinner/文案，terminal 决定 complete 的展示集合来源。
-@@ -112,8 +112,16 @@ export function DialogSessionList() {
-   // title 首屏与 scan 权威流分开存：partial 需要 union 展示，complete 需要单选 scan。
-   const [titleHits, setTitleHits] = createSignal<NonNullable<typeof sync.data.session>>([])
-   const [scanFullHits, setScanFullHits] = createSignal<NonNullable<typeof sync.data.session>>([])
+@@ -127,4 +127,9 @@ export function DialogSessionList() {
 -  let searchGeneration = 0
 +  // #561 disposed 防止 dialog.replace 后旧闭包仍启动 progressive search
 +  let disposed = false
-+  // controller 引用与 disposed 同域：卸载语义集中在一处，不散落到各 async 分支。
    let searchController: AbortController | undefined
+   // 删除后refetch也会更换controller，卸载必须取消最新请求而非只捕获初次搜索。
+-  onCleanup(() => searchController?.abort())
 +  onCleanup(() => {
-+    // 卸载即最终态：置位后任何 startSearch 调用都成为 no-op。
 +    disposed = true
 +    searchController?.abort()
 +    searchController = undefined
 +  })
- 
-   // Hit 形状与 browse 同源（Session.Info）——visibleSessions/options 管道无需分支适配。
-   type SessionHit = (typeof sync.data.session)[number]
-@@ -130,6 +138,7 @@ export function DialogSessionList() {
+@@ -140,6 +145,7 @@ export function DialogSessionList() {
    // #544：POST/手写 GET 都需 directory query，workspace routing 才能定位实例
    function directoryQuery(url: URL) {
      // sync.path.directory 优先：workspace 子目录会话必须路由回其所属实例。
@@ -557,7 +545,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
      const dir = sync.path.directory || sdk.directory
      if (dir) url.searchParams.set("directory", dir)
    }
-@@ -139,11 +148,12 @@ export function DialogSessionList() {
+@@ -149,11 +155,12 @@ export function DialogSessionList() {
     * 1) title-only GET 首屏（子集，可漏跨字段 multi-token）
     * 2) contentDelay 后再串行 POST /session/search/scan
     * 3) complete 权威集合 = scanFullHits，与 list 全条件 top-400 对齐
@@ -566,13 +554,13 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
     */
 -  async function runProgressiveSearch(query: string, generation: number, signal: AbortSignal) {
 +  async function runProgressiveSearch(query: string, signal: AbortSignal) {
-     const scope = sessionListScopeParams()
+     const scope = sessionListScopeParams(query)
      // 起始即 awaiting_first：首个 title 响应到达前列表显示 Searching… 而非 Not Found。
 +    // 首行即清空旧代集合：新代不继承任何上代 hits，避免跨代串味。
      setSearchPhase("awaiting_first")
      setSearchTerminal(undefined)
      setTitleHits([])
-@@ -163,17 +173,23 @@ export function DialogSessionList() {
+@@ -174,17 +181,23 @@ export function DialogSessionList() {
  
        // limit 与 Path B 搜索上限同源：title 子集也被 cap 在 400，partial 展示不会超发。
        const titleRes = await sdk.fetch(titleUrl, { method: "GET", signal })
@@ -603,7 +591,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
        await new Promise<void>((resolve, reject) => {
          const timer = setTimeout(resolve, SESSION_LIST_CONTENT_DELAY_MS)
          const onAbort = () => {
-@@ -183,17 +199,20 @@ export function DialogSessionList() {
+@@ -194,17 +207,20 @@ export function DialogSessionList() {
          if (signal.aborted) return onAbort()
          signal.addEventListener("abort", onAbort, { once: true })
        })
@@ -626,7 +614,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
          directoryQuery(scanUrl)
          const body = {
            // start/scope/path 与 browse 同宇宙：候选窗不得引入第二套 scope 语义。
-@@ -211,22 +230,22 @@ export function DialogSessionList() {
+@@ -223,22 +239,22 @@ export function DialogSessionList() {
            body: JSON.stringify(body),
            signal,
          })
@@ -654,7 +642,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
          // 只累积 full-condition 命中；title overlay 不在此写入
          // append 去重并保序：scan 页本身按 recency 返回，cap 截断即 early-stop 信号。
          scanHits = appendScanHits(scanHits, page.sessions ?? [])
-@@ -237,41 +256,49 @@ export function DialogSessionList() {
+@@ -249,40 +265,49 @@ export function DialogSessionList() {
          cursor = page.nextCursor
        }
  
@@ -689,8 +677,8 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 +  // #561 卸载兜底 abort 由组件级 onCleanup 承担，effect 内不再重复注册。
    createEffect(
      on(
-       () => search(),
-       (query) => {
+       () => ({ query: search(), filter: sync.session.query() }),
+       ({ query }) => {
 -        searchController?.abort()
          if (!query) {
 -          // 清空是显式回 browse：自增 generation 使任何 in-flight 写回立即过期。
@@ -709,14 +697,13 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 -        const generation = ++searchGeneration
 -        const controller = new AbortController()
 -        searchController = controller
--        onCleanup(() => controller.abort())
 -        void runProgressiveSearch(query, generation, controller.signal)
 +        // #561 新 query 立即丢弃旧 hits，避免改词串味
 +        startSearch(query)
        },
      ),
    )
-@@ -333,16 +360,13 @@ export function DialogSessionList() {
+@@ -344,16 +369,13 @@ export function DialogSessionList() {
      () => sync.session.query(),
      (filter) => loadDialogSessionList({ filter, list: (query) => sdk.client.session.list(query) }),
    )
@@ -1244,8 +1231,8 @@ diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/
 diff --git a/packages/opencode/test/server/workspace-routing.test.ts b/packages/opencode/test/server/workspace-routing.test.ts
 --- a/packages/opencode/test/server/workspace-routing.test.ts
 +++ b/packages/opencode/test/server/workspace-routing.test.ts
-@@ -51,6 +51,17 @@ describe("getWorkspaceRouteSessionID", () => {
-     expect(getWorkspaceRouteSessionID(url)).toBeNull()
+@@ -56,6 +56,17 @@ describe("getWorkspaceRouteSessionID", () => {
+     expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/next"))).toBeNull()
    })
  
 +  // /session/preview 与 /session/search/* 均为集合端点，不可当 SessionID

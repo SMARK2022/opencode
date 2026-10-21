@@ -1,3 +1,187 @@
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -1,8 +1,8 @@
+ export * as PermissionReviewer from "./reviewer"
+ 
+ import path from "path"
+-import { LLM, LLMClient } from "@opencode-ai/llm"
+-import { Context, Effect, FileSystem, Layer, Schema } from "effect"
++import { LLM, LLMClient, LLMError, ToolChoice } from "@opencode-ai/llm"
++import { Context, Effect, FileSystem, Layer, Option, Schema } from "effect"
+ import { Config } from "../config"
+ import { ConfigAutoReview } from "../config/auto-review"
+ import { makeLocationNode } from "../effect/app-node"
+@@ -73,17 +73,33 @@
+         entryTruncated: retained.some((entry) => entry.truncated),
+         emptyEntries: rendered.length > visible.length,
+       }, request, input.precheck.reason)
+-      // generateObject 只生成一次结构化裁决；合成输出工具不具备业务执行权限。
+-      const result = yield* LLM.generateObject({
+-        model: selected.model, schema: PermissionReviewerSchema.Assessment,
+-        system: PermissionReviewerPrompt.buildSystemPrompt(tenant), prompt: items.map((item) => item.text).join("\n\n"),
+-      }).pipe(
+-        Effect.provideService(LLMClient.Service, client),
+-        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
+-      )
++      const schema = Schema.toJsonSchemaDocument(PermissionReviewerSchema.Assessment)
++      // 只在reviewer解码边界接受source允许的文本裁决，通用generateObject契约保持严格。
++      const attempt = (index: number, nudged = false): Effect.Effect<PermissionReviewerSchema.Assessment, Failed | LLMError> => Effect.gen(function* () {
++        const response = yield* client.generate(LLM.request({
++          model: selected.model, system: PermissionReviewerPrompt.buildSystemPrompt(tenant),
++          prompt: items.map((item) => item.text).join("\n\n") + (nudged ? "\n\nSubmit a valid decision using the generate_object tool. Keep the supplied evidence and requested action unchanged." : ""),
++          tools: [{ name: "generate_object", description: "Return the structured result by calling this tool.", inputSchema: { ...schema.schema, $defs: schema.definitions } }],
++          toolChoice: ToolChoice.named("generate_object"),
++        }))
++        const call = response.toolCalls.find((call) => call.name === "generate_object")
++        // 存在畸形工具参数时必须重试协议，不能再从附带解释中挑一个允许结果。
++        const decoded = call ? Schema.decodeUnknownOption(PermissionReviewerSchema.Assessment)(call.input) : assessmentFromText(response.text)
++        if (Option.isNone(decoded)) return yield* new Failed({ reason: "reviewer did not return a valid decision" })
++        return decoded.value
++      }).pipe(
++        // 单次超时位于重试内侧；取消保持interruption，绝不能变成批准或补试。
++        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
++        Effect.catchIf((error) => error instanceof Failed || error.reason._tag === "InvalidProviderOutput", (error) => {
++          if (index >= 2) return Effect.fail(error)
++          // 超时保留原提示；协议错误只加一次格式nudge，不重建或扩张授权证据。
++          return attempt(index + 1, nudged || !(error instanceof Failed && error.reason === "auto reviewer timed out"))
++        }),
++      )
++      const result = yield* attempt(0)
+       return {
+-        action: result.object.outcome, reason: result.object.rationale, reviewID: input.reviewID,
+-        risk_level: result.object.risk_level, user_authorization: result.object.user_authorization,
++        action: result.outcome, reason: result.rationale, reviewID: input.reviewID,
++        risk_level: result.risk_level, user_authorization: result.user_authorization,
+       } satisfies PermissionAuto.ReviewDecision
+     }).pipe(Effect.mapError((error) => new Failed({ reason: error instanceof Error ? error.message : String(error) })))
+     // 用户审批回退是显式配置；其他失败由共享 auto 路由拒绝，绝不转换成成功。
+@@ -93,6 +109,32 @@
+   return Service.of({ review })
+ }))
+ 
++function assessmentFromText(text: string) {
++  const json = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
++  const decode = Schema.decodeUnknownOption(PermissionReviewerSchema.Assessment)
++  const direct = Option.flatMap(json(text.trim()), decode)
++  if (Option.isSome(direct)) return direct
++  const start = text.indexOf("{")
++  if (start < 0) return Option.none()
++  // 仅提取第一个完整对象；字符串内括号和转义不参与深度，禁止搜索后续候选。
++  let depth = 0
++  let quoted = false
++  let escaped = false
++  for (let index = start; index < text.length; index++) {
++    const character = text[index]
++    if (quoted) {
++      if (escaped) escaped = false
++      else if (character === "\\") escaped = true
++      else if (character === '"') quoted = false
++      continue
++    }
++    if (character === '"') quoted = true
++    else if (character === "{") depth++
++    else if (character === "}" && --depth === 0) return Option.flatMap(json(text.slice(start, index + 1)), decode)
++  }
++  return Option.none()
++}
++
+ function render(message: SessionMessage.Message) {
+   if (message.type === "synthetic" || message.type === "system") return ""
+   if (message.type === "assistant") return message.content.map((part) => {
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect } from "bun:test"
+ import { Cause, Deferred, Effect, Fiber, Layer, Schema } from "effect"
++import { TestClock } from "effect/testing"
+ import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
+ import { AgentV2 } from "@opencode-ai/core/agent"
+ import { Database } from "@opencode-ai/core/database/database"
+@@ -35,8 +36,11 @@
+ const reviewRequests: LLMRequest[] = []
+ const reviewModels: unknown[] = []
+ let reviewGate: Deferred.Deferred<void> | undefined
+ let reviewStarted: Deferred.Deferred<void> | undefined
++let reviewHangs = 0
++let reviewInterrupted = 0
++let reviewText: string | undefined
+ let malformed = false
+ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
+   prepare: () => Effect.die("unused"),
+   stream: () => { throw new Error("review must not start a Session stream") },
+@@ -44,6 +48,10 @@
+     reviewRequests.push(request)
+     if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
++    if (reviewHangs > 0) {
++      reviewHangs--
++      yield* Effect.never.pipe(Effect.onInterrupt(() => Effect.sync(() => { reviewInterrupted++ })))
++    }
+     if (reviewGate) yield* Deferred.await(reviewGate)
+-    return new LLMResponse({ message: Message.assistant([]), finishReason: "tool-calls", events: malformed ? [] : [
++    return new LLMResponse({ message: Message.assistant(reviewText ?? []), finishReason: reviewText === undefined ? "tool-calls" : "stop", events: reviewText === undefined ? malformed ? [] : [
+       LLMEvent.toolCall({ id: "review", name: "generate_object", input: assessment }),
+-    ] })
++    ] : [LLMEvent.textDelta({ id: "review-text", text: reviewText })] })
+@@ -498,3 +506,44 @@
+     reviewSettings = new Config.Info({})
+   }))
++  it.effect("retries native reviewer timeouts and protocol errors and decodes prose without relaxing policy", () => Effect.gen(function* () {
++    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", timeout_ms: 1000 }) })
++    reviewRequests.length = 0
++    reviewGate = undefined
++    reviewHangs = 1
++    reviewInterrupted = 0
++    reviewText = undefined
++    malformed = false
++    reviewStarted = yield* Deferred.make<void>()
++    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewSettings = new Config.Info({}); reviewHangs = 0; reviewText = undefined; malformed = false; reviewStarted = undefined; reviewGate = undefined }))
++    const service = yield* PermissionV2.Service
++    const input = assertion({ action: "edit", resources: ["src/retry.ts"], metadata: { filepath: "/project/src/retry.ts", diff: "timeout" } })
++    const fiber = yield* service.ask(input).pipe(Effect.forkChild)
++    yield* Deferred.await(reviewStarted)
++    yield* TestClock.adjust("1 second")
++    // 真正中断第一次运输后才补试，超时补试保持相同证据且不添加协议nudge。
++    expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
++    expect(reviewInterrupted).toBe(1)
++    expect(reviewRequests).toHaveLength(2)
++    expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
++    reviewText = "Based on my analysis:\n" + JSON.stringify({ ...assessment, rationale: 'bounded } transfer with "quoted" evidence' })
++    reviewRequests.length = 0
++    expect(yield* service.ask({ ...input, metadata: { ...input.metadata, diff: "prose" } })).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(1)
++    // 同一语义守卫也约束文本裁决，critical不能因JSON兼容被放行。
++    reviewText = "Decision:\n" + JSON.stringify({ ...assessment, risk_level: "critical" })
++    expect(yield* service.ask({ ...input, metadata: { ...input.metadata, diff: "critical prose" } })).toMatchObject({ effect: "deny" })
++    reviewText = undefined
++    malformed = true
++    reviewRequests.length = 0
++    expect(yield* service.ask({ ...input, metadata: { ...input.metadata, diff: "protocol" } })).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(3)
++    expect(JSON.stringify(reviewRequests[0]?.messages)).not.toContain("Submit a valid decision using the generate_object tool")
++    expect(JSON.stringify(reviewRequests[1]?.messages)).toContain("Submit a valid decision using the generate_object tool")
++    // 首个完整对象不符契约时不能继续寻找后面的allow对象。
++    reviewText = 'Preface {"unrelated":true}\n' + JSON.stringify(assessment)
++    reviewRequests.length = 0
++    expect(yield* service.ask({ ...input, metadata: { ...input.metadata, diff: "first object" } })).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(3)
++  }))
+ })
+diff --git a/packages/core/src/config/auto-review.ts b/packages/core/src/config/auto-review.ts
+--- a/packages/core/src/config/auto-review.ts
++++ b/packages/core/src/config/auto-review.ts
+@@ -7,7 +7,8 @@
+ // 控制项独立于权限规则，保留源配置语义而不伪装成工具名。
+ export class Info extends Schema.Class<Info>("Config.AutoReview")({
+   model: Schema.String.pipe(Schema.optional),
+-  timeout_ms: Schema.Number.pipe(Schema.optional),
++  // 与V1相同，单次执行期限不包含后续补试及清理的全部墙钟时间。
++  timeout_ms: Schema.Number.pipe(Schema.optional).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts. Defaults to 90000." }),
+   policy_path: Schema.String.pipe(Schema.optional),
+   policy: Schema.String.pipe(Schema.optional),
+   fallback: Schema.Literals(["deny", "user"]).pipe(Schema.optional),
 diff --git a/docs/reviewer-retry-fix-plan.md b/docs/reviewer-retry-fix-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..0e61bec05d8901f7b3420491eff6e8c60ec4af26
@@ -660,7 +844,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 -              duration: `${autoReview?.timeout_ms ?? 90_000} millis`,
 -              orElse: () => Effect.fail(new ReviewerTimedOut()),
 -            }),
-+          // perAttemptTimeout：timeout_ms 现为单次尝试预算，总最坏 3 倍（1 初始 + 2 重试）
++          // timeout_ms是每次执行预算，共三次尝试；清理开销不构成严格的总墙钟上限。
 +          const perAttemptTimeout = autoReview?.timeout_ms ?? 90_000
 +          // 显式返回注解：递归函数的返回类型无法推断（TS7023/7024）
 +          const reviewerRetry = (attemptNum: number, currentMessages: readonly ModelMessage[], hideProtocolFailure: boolean): Effect.Effect<Schema.Schema.Type<typeof Assessment>, Error> =>
@@ -862,8 +1046,8 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -1326,6 +1326,110 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
-   }),
+@@ -1734,6 +1734,110 @@
+   15_000,
  )
  
 +
@@ -973,7 +1157,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
  // #209：验证 reviewer streaming 持久化真实 reasoning 和 decision tool part
  // #209：端到端测试——mock LLM 返回 reasoning + permission_review_decision tool call，验证子会话持久化了各 part
  it.instance(
-@@ -1558,7 +1662,7 @@ it.instance(
+@@ -1966,7 +2070,7 @@ it.instance(
  )
  
  it.instance(
@@ -981,12 +1165,12 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  "auto permission reviewer fails closed after two malformed protocol retries",
    () =>
      Effect.gen(function* () {
-       // #269：审查器失败后必须确定性拒绝，默认 fallback 为 user 会走 ask 而非 deny
-@@ -1568,9 +1672,11 @@ it.instance(
+       // #269：显式deny锁定协议耗尽的拒绝路径，默认人工回退由权限集成测试覆盖。
+@@ -1979,9 +2083,10 @@ it.instance(
        const chat = yield* sessions.create({ title: "Reviewer protocol retry failure" })
        const command = String.raw`rm "/tmp/file with spaces.txt"`
-       // #227：两次畸形响应使协议重试耗尽——第二次失败后必须确定性拒绝而非放宽为允许
-+      // reviewer 最多 3 次尝试（1 初始 + 2 重试），每次都输出 prose 而非 tool call
+-      // #227：两次畸形响应使协议重试耗尽——第二次失败后必须确定性拒绝而非放宽为允许
++      // 三次畸形响应耗尽初始加两次补试，仍须拒绝而非放宽为允许。
        yield* llm.push(
          reply().text("first malformed reviewer response").stop().item(),
          reply().text("second malformed reviewer response").stop().item(),
@@ -994,7 +1178,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
        )
  
        const exit = yield* permissions
-@@ -1588,8 +1694,8 @@ it.instance(
+@@ -1999,8 +2104,8 @@ it.instance(
        if (!Exit.isFailure(exit)) return
        // #227：协议重试耗尽后必须确定性失败——AutoDeniedError 使调用方只能拒绝，不存在静默放行分支
        expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionV1.AutoDeniedError)
@@ -1013,8 +1197,8 @@ diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/co
    // #196：model 指定 reviewer 使用的模型；timeout_ms 默认 90 秒。
    model: Schema.optional(Schema.String).annotate({ description: "Reviewer model in provider/model form." }),
 -  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer timeout in milliseconds. Defaults to 90000." }),
-+  // #390：timeout_ms 是每次尝试的超时（非总超时）——reviewer 重试 0→3 次后语义已变
-+  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Per-attempt reviewer timeout in milliseconds. Total worst-case is 3x this value (one initial attempt plus two retries). Defaults to 90000." }),
++  // timeout_ms限制单次执行，共1次初始加2次重试，不把清理开销计成执行总界。
++  timeout_ms: Schema.optional(Schema.Number).annotate({ description: "Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Defaults to 90000." }),
    // #196：policy_path 和 policy 追加到默认 tenant policy 之后。
    policy_path: Schema.optional(Schema.String).annotate({ description: "Markdown policy file appended to the default tenant policy." }),
    policy: Schema.optional(Schema.String).annotate({ description: "Inline markdown policy appended to the reviewer policy prompt." }),

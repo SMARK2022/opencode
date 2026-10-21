@@ -208,42 +208,36 @@ diff --git a/docs/plans/opencode-memory-residency-successor.md b/docs/plans/open
 diff --git a/packages/core/src/session/part-view.ts b/packages/core/src/session/part-view.ts
 --- a/packages/core/src/session/part-view.ts
 +++ b/packages/core/src/session/part-view.ts
-@@ -1,16 +1,17 @@
- export * as PartView from "./part-view"
- 
- // TUI viewer 专用纯投影：删除与同 Part 其他字段逐字重复的大字段，减少 wire/store 的重复驻留。
--// 当前唯一覆盖 edit 类工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串）。
--// 完整 SDK、Provider、daemon SummaryCache 都走原数据路径，不经过这里；
--// 不同值、未知工具与非重复字段必须原样保留。
-+// [0625] 当前唯一覆盖内建 edit 工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串，
-+// 全仓库唯一生产者是 tool/edit.ts）。完整 SDK、Provider、daemon SummaryCache 都走原数据路径；
-+// 不同值、未知/第三方工具与非重复字段必须原样保留——按字段形状猜测裁剪属于范围扩大。
- // 归属 core：daemon HTTP 投影（opencode）与 TUI store 投影（tui）共用同一实现，
- // 两包互不依赖，共享 owner 只能在共同依赖 core 中。
- 
- // 结构最小约束：daemon 的 MessageV2.Part 与 TUI 的 SDK Part 共用同一 wire 形状，
--// 但品牌 ID 类型不同；投影只读 type/status/metadata，不改写其余字段。
-+// 但品牌 ID 类型不同；投影只读 type/tool/status/metadata，不改写其余字段。
+@@ -7,3 +7,5 @@
  type Projectable = {
    type: string
 +  tool?: string
++  name?: string
    state?: {
-     status: string
-     metadata?: Record<string, unknown>
-@@ -19,6 +20,8 @@ type Projectable = {
- 
- export function project<T extends Projectable>(part: T): T {
+@@ -17,4 +19,7 @@
    if (part.type !== "tool") return part
-+  // [0625] 只对已证实重复的 edit 生产者投影；未知/第三方工具原样保留。
-+  if (part.tool !== "edit") return part
++  // V1以tool、native以name标识生产者；未知工具不能按字段形状猜测裁剪。
++  const tool = "tool" in part ? part.tool : part.name
++  if (tool !== "edit") return part
    if (part.state?.status !== "completed") return part
-   const metadata = part.state.metadata
-   if (!metadata) return part
+-  const metadata = projectFields(part.state.metadata)
+-  const structured = projectFields(part.state.structured)
++  const metadata = projectFields(part.state.metadata, tool)
++  const structured = projectFields(part.state.structured, tool)
+@@ -25,2 +30,4 @@
+-export function projectFields<T>(fields: T): T {
++export function projectFields<T>(fields: T, tool?: string): T {
++  // 缺工具身份的Success传输保持完整，在持有正式工具对象的HTTP/store边界投影。
++  if (tool !== "edit") return fields
+   if (typeof fields !== "object" || fields === null || !("diff" in fields) || !("filediff" in fields)) return fields
 
 diff --git a/packages/core/test/session/part-view.test.ts b/packages/core/test/session/part-view.test.ts
 --- a/packages/core/test/session/part-view.test.ts
 +++ b/packages/core/test/session/part-view.test.ts
-@@ -38,6 +38,16 @@ describe("PartView.project", () => {
+@@ -35 +35 @@
+-    const native = { type: "tool", state: { status: "completed", structured: part.state.metadata } }
++    const native = { type: "tool", name: "edit", state: { status: "completed", structured: part.state.metadata } }
+@@ -44,6 +44,23 @@ describe("PartView.project", () => {
      expect(PartView.project(part)).toBe(part)
    })
  
@@ -255,6 +249,13 @@ diff --git a/packages/core/test/session/part-view.test.ts b/packages/core/test/s
 +      tool: "third_party_custom",
 +    } as const
 +    expect(PartView.project(custom)).toBe(custom)
++    const native = { type: "tool", name: "third_party_custom", state: { status: "completed", structured: custom.state.metadata } }
++    expect(PartView.project(native)).toBe(native)
++    const unnamed = { type: "tool", state: native.state }
++    expect(PartView.project(unnamed)).toBe(unnamed)
++    expect(PartView.projectFields(custom.state.metadata)).toBe(custom.state.metadata)
++    expect(PartView.projectFields(custom.state.metadata, native.name)).toBe(custom.state.metadata)
++    expect(PartView.projectFields(custom.state.metadata, "edit").filediff).not.toHaveProperty("patch")
 +  })
 +
    test("keeps non-tool, non-completed and metadata-less parts untouched", () => {
@@ -322,7 +323,7 @@ diff --git a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts b/packages/
 +  const { config, restore } = mockTuiRuntime(tmp.path, [[tmp.extra.spec, { onReleased: () => (released = true) }]])
 +  try {
 +    await TuiPluginRuntime.init({ api, config })
-+    await new Promise((resolve) => setTimeout(resolve, 0))
++    await waitForTuiPlugins()
 +    expect(released).toBe(true)
 +    expect(releases).toBe(1)
 +    await TuiPluginRuntime.dispose()
@@ -346,34 +347,24 @@ diff --git a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts b/packages/
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -248,9 +248,13 @@ export const {
+@@ -248,9 +248,9 @@ export const {
      // [0624 正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
      // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
      const partConsumers = new Map<string, number>()
 -    // [0624] 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文；
 -    // 随 Message 窗口淘汰、删除与 Provider cleanup 释放，不保存正文或无限历史。
 -    const releasedTerminalParts = new Set<string>()
-+    // [0625] 已释放终态 Part 的 ID 事实：拒绝迟到的 progress/delta 在无消费者 Session 上重建正文。
-+    // 按 Session→Message→PartID 嵌套归属：被释放的 Part 已不在 store，窗口淘汰/删除边界
-+    // 不能靠 store 反查 ID，必须持有自有轻量归属关系；随淘汰、删除与 Provider cleanup 释放。
++    // 已释放终态ID按Session→Message归属，不靠已释放的store反查，也不保存正文。
++    // 窗口淘汰、删除与Provider退出对称清理，迟到progress/delta不能重建终态正文。
 +    const releasedTerminalParts = new Map<string, Map<string, Set<string>>>()
-+    // [0625] 同 Session 的 sync 请求串行排队：并发取代会让被取代请求“成功返回但没有提交”，
-+    // acquireParts 会把空 store 误当正文就绪。排队后每个 await sync 对应真实执行；跨 Session 仍并行。
-+    const syncChains = new Map<string, Promise<void>>()
      // #132：区分首次 connected 与重连
      let connectedOnce = false
      // #192：重连后 permission/question 快照版本
-@@ -307,8 +311,8 @@ export const {
-     // ID-only 事件（message.removed）走既有 findIndex——不引入第三套定位路径。
-     function releaseMessage(sessionID: string, messageID: string, info?: Message) {
-       dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
+@@ -321,2 +321,2 @@
 -      // [0624] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
 -      for (const part of store.part[messageID] ?? []) releasedTerminalParts.delete(part.id)
 +      // [0625] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
 +      releasedTerminalParts.get(sessionID)?.delete(messageID)
-       const messages = store.message[sessionID]
-       batch(() => {
-         if (messages) {
 @@ -354,19 +358,31 @@ export const {
      // [0624] 释放单个终态 Part：记录 ID 事实、清掉其缓冲 delta、从 store 移除。
      // 正文终值已持久在 DB，重新进入时由 HTTP sync 恢复。
@@ -487,48 +478,6 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            break
          }
  
-@@ -1390,14 +1407,20 @@ export const {
-           return last.time.completed ? "idle" : "working"
-         },
-         async sync(sessionID: string, options?: { force?: boolean }) {
--          // [非 force 去重必须先于任何 token 变更]：加入者在取得在途任务前不得覆盖请求租约，
--          // 否则被加入的任务会在首个 alive() 检查处无提交中止，且其 finally 因 token 不匹配
--          // 跳过 syncingSessions/hydratingSessions/syncTokens 清理——去重表被死条目永久毒化，
--          // 该会话后续非 force sync 全部返回死 promise，正文永不加载。
-+          // [0625] 非 force 去重必须在串行门外：去重返回在途 task 不经过队列，
-+          // 若在门内会立即放行 gate 让后继者绕过在途提交。
-           if (!options?.force) {
-             const syncing = syncingSessions.get(sessionID)
-             if (syncing) return syncing
-           }
-+          // [0625] 同 Session 的请求经串行门排队进入：并发取代会让被取代请求“成功返回但没有提交”，
-+          // acquireParts 会把空 store 误当正文就绪。gate 在本体结束时放行下一个；跨 Session 仍并行。
-+          const previous = syncChains.get(sessionID) ?? Promise.resolve()
-+          let gate!: () => void
-+          const current = previous.catch(() => {}).then(() => new Promise<void>((resolve) => (gate = resolve)))
-+          syncChains.set(sessionID, current)
-+          await previous.catch(() => {})
-+          try {
-           // #132：force 忽略 fullSynced 缓存
-           if (!options?.force && fullSyncedSessions.has(sessionID)) return
-           if (deletedSessionIDs.has(sessionID)) return
-@@ -1554,7 +1577,15 @@ export const {
-             }
-           })
-           syncingSessions.set(sessionID, task)
--          return task
-+          // [0625] gate 必须在提交真正完成后放行：目标 sync 主体在内层 task 闭包中执行，
-+          // 直接 return task 会让 finally 在 task 仍在途时就放行队列——await 到提交完成再返回。
-+          await task
-+          return
-+          } finally {
-+            // [0625] 本体无论提交、早退还是失败都必须放行队列；只有后继者已接管时才保留其队首位置。
-+            gate()
-+            if (syncChains.get(sessionID) === current) syncChains.delete(sessionID)
-+          }
-         },
-         // [0624] 显式正文消费：Task 卡片与插件用它持有 Session 正文，release 后无消费者即释放。
-         // acquire 成功后 await 现有 sync；返回的 release 幂等由调用方/插件 scope 保证。
 @@ -1562,6 +1593,9 @@ export const {
            acquireParts(sessionID)
            try {
@@ -900,50 +849,166 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packag
 +})
 \ No newline at end of file
 
-diff --git a/packages/tui/test/routes/session/residency-contract.test.ts b/packages/tui/test/routes/session/residency-contract.test.ts
---- a/packages/tui/test/routes/session/residency-contract.test.ts
-+++ b/packages/tui/test/routes/session/residency-contract.test.ts
-@@ -46,8 +46,9 @@ describe("session render residency template contracts", () => {
-   })
- 
-   test("Task cards hold child session bodies via acquireParts with cleanup pair", () => {
--    // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，不再以 message[].length 判定。
--    expect(source).toMatch(/onMount\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)[\s\S]{0,600}sync\.session\.acquireParts\(child\)[\s\S]{0,400}onCleanup\(\(\) => \{\s*\n\s*released = true\s*\n\s*release\?\.\(\)/)
-+    // [0625] 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，不再以 message[].length 判定。
-+    // acquisition 在 createEffect 内响应式跟随 metadata.sessionId（onMount 单次取样已返工）。
-+    expect(source).toMatch(/createEffect\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)[\s\S]{0,800}sync\.session\s*\n\s*\.acquireParts\(child\)[\s\S]{0,500}onCleanup\(\(\) => \{\s*\n\s*released = true\s*\n\s*release\?\.\(\)/)
-   })
- 
-   test("interaction state survives content owner rebuild for shell and reasoning", () => {
-@@ -55,3 +56,30 @@ describe("session render residency template contracts", () => {
-     expect(source).toContain('ctx.interaction.get(`reasoning:${props.message.id}:${props.part.id}`)')
+diff --git a/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx b/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -54,3 +54,3 @@
+-const toolPart = (id: string, messageID: string, output: string, contextOutput = output): Part => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
++const toolPart = (id: string, messageID: string, output: string, contextOutput = output) => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
+   state: { status: "completed", input: { command: "fixture" }, output: contextOutput, title: "fixture", metadata: { output }, time: { start: 1, end: 2 } },
+-})
++} satisfies Part)
+@@ -61 +61,2 @@
+-  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 }) {
++  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 },
++  override?: Parameters<typeof createFetch>[0]) {
+@@ -66 +67,3 @@
+-  const calls = createFetch((url) => {
++  const calls = createFetch(async (url, request, init) => {
++    const response = await override?.(url, request, init)
++    if (response) return response
+@@ -386,3 +389,73 @@
+     expect(released(app, "msg_window_assistant_23")).toBe(false)
    })
  })
 +
-+describe("session residency 0625 rework template contracts", () => {
-+  test("task acquisition follows metadata.sessionId reactively after mount", () => {
-+    // [0625] 子 Session ID 在工具执行后才写入 metadata（pending 阶段不存在）；
-+    // acquisition 必须在 createEffect 内响应式读取 props.metadata.sessionId，
-+    // 不能只在 onMount 取样一次——首帧无 ID 的实时卡片会永远缺失工具计数。
-+    expect(source).toMatch(/function Task\(props[\s\S]{0,400}createEffect\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)/)
-+    // acquire 失败静默但不合成：计数回滚在 acquireParts 内完成。
-+    expect(source).toMatch(/acquireParts\(child\)[\s\S]{0,300}\.catch\(\(\) => \{/)
-+  })
++function partUpdatedEvent(id: string, part: Part): GlobalEvent {
++  return { directory, project: "proj_test", payload: { id, type: "message.part.updated", properties: { sessionID: part.sessionID, part, time: Date.now() } } }
++}
 +
-+  test("content version signature includes shell metadata.output", () => {
-+    // Shell 等工具的流式 progress 经 metadata.output 落地而 status 不变；
-+    // 壳化后缺这个签名会让冻结高度落后于持续增长的真实正文。
-+    expect(source).toContain('"metadata" in part.state ? part.state.metadata?.output : undefined')
-+  })
-+
-+  test("mounted growth updates the residency estimate via markMessageDirty", () => {
-+    // 挂载中的正文增长必须同步进容量估算（差额更新），否则流式输出逃出预算。
-+    expect(source).toMatch(/function markMessageDirty\(id: string\)[\s\S]{0,500}residentBytesTotal \+= next - cached/)
-+    // 记账口径统一为 false→true 计入 / true→false 减出，覆盖重测批进出与 stale 清理。
-+    expect(source).toContain("function accountMounted(id: string)")
-+    expect(source).toContain("function accountShelled(id: string)")
-+    // stale 清理必须先减账再删记录（删除后 mounted 不可读）。
-+    expect(source).toMatch(/for \(const id of stale\) \{\s*\n\s*\/\/ \[0625\] 先减账再删记录[\s\S]{0,200}accountShelled\(id\)/)
++test("task card acquires the child session when its id arrives after mount", async () => {
++  const childID = "ses_task_late_child"
++  const info = assistant("msg_task_late", 1)
++  const task = { id: "part_task_late", sessionID: sid, messageID: info.id, type: "tool", callID: "call_task", tool: "task",
++    state: { status: "running", input: { description: "late child" }, metadata: {}, time: { start: 1 } } } satisfies Part
++  const childUser = { ...user("msg_task_late_child_user", 1), sessionID: childID }
++  const childBase = toolPart("part_task_late_child_tool", childUser.id, "hi")
++  const childTool = { ...childBase, sessionID: childID, state: { ...childBase.state, title: "child work" } }
++  await withRenderedSession([info], { [info.id]: [task] }, async (app, emit) => {
++    await waitForFrame(app, (frame) => frame.includes("late child"))
++    expect(app.captureCharFrame().includes("child work")).toBe(false)
++    // 不主动sync或导航：迟到ID必须由Task自身取得正文使用权。
++    emit(partUpdatedEvent("evt_task_late_id", { ...task, state: { ...task.state, metadata: { sessionId: childID } } }))
++    await waitForFrame(app, (frame) => frame.includes("child work"))
++  }, undefined, (url) => {
++    if (url.pathname === `/session/${childID}`) return json({ id: childID, parentID: sid, directory, projectID: "proj_test", slug: childID, version: "1", title: childID, time: { created: 1, updated: 1 } })
++    if (url.pathname === `/session/${childID}/message`) return json([{ info: childUser, parts: [childTool] }])
++    return undefined
 +  })
 +})
-\ No newline at end of file
++
++test("offscreen shell output growth re-measures the frozen height", async () => {
++  const fixture = windowFixture("shellgrow")
++  const target = fixture.messages[1].id
++  // metadata写在state上；running Shell仅接受递增的progressVersion。
++  const shell = { id: "part_shell_grow", sessionID: sid, messageID: target, type: "tool", callID: "call_shell", tool: "bash",
++    state: { status: "running", input: { command: "echo growing" }, metadata: { output: "shellgrow initial", progressVersion: 1 }, time: { start: 1 } } } satisfies Part
++  fixture.parts[target] = [shell]
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
++    await waitForFrame(app, (frame) => frame.includes("shellgrow assistant 23"))
++    const scroll = sessionScrollBox(app, fixture.messages[47].id)
++    await withFakeNow(async (advance) => {
++      advance(AGE)
++      await pumpFrames(app, 8)
++      expect(released(app, target)).toBe(true)
++    })
++    const before = await stableHeight(app, scroll)
++    const heightBefore = messageRoot(app, target).height
++    emit(partUpdatedEvent("evt_shell_grow", { ...shell, state: { ...shell.state, metadata: {
++      output: "shellgrow initial\nsecond added line\nthird added line\nfourth added line", progressVersion: 2,
++    } } }))
++    // status、命令均不变，根高和滚动全长精确+3只能来自metadata正文的高度失效。
++    await waitForFrame(app, () => scroll.scrollHeight === before + 3)
++    expect(messageRoot(app, target).height).toBe(heightBefore + 3)
++  })
++})
++
++test("mounted content growth counts toward the residency byte budget", async () => {
++  const fixture = windowFixture("growth")
++  const target = fixture.messages[1].id
++  const growing = toolPart("part_growth_big", target, "small visible output", "small")
++  fixture.parts[target] = [growing]
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
++    await waitForFrame(app, (frame) => frame.includes("growth assistant 23"))
++    await pumpFrames(app, 3)
++    expect(released(app, "msg_window_user_00")).toBe(false)
++    expect(released(app, target)).toBe(false)
++    // 只增长模型output越过真实64MiB；短metadata输出不把大正文送入renderer。
++    emit(partUpdatedEvent("evt_growth_big", { ...growing, state: { ...growing.state, output: "x".repeat(64 * 1024 * 1024 + 1) } }))
++    // 不推进时钟，也不重挂目标；本轮驱逐必须由挂载中容量差额触发。
++    await waitForFrame(app, () => released(app, "msg_window_user_00"))
++    expect(released(app, "msg_window_user_00")).toBe(true)
++    expect(released(app, "msg_window_assistant_23")).toBe(false)
++  })
++})
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -316,2 +316,2 @@
+-              // TUI存储与native viewer传输共用幂等投影；进程内测试注入也不保留重复patch。
+-              structured: PartView.projectFields(event.data.structured),
++              // Success传输无工具身份保持完整；store已拥有正式name，在这里精确剪edit重复值。
++              structured: PartView.projectFields(event.data.structured, match.name),
+diff --git a/packages/server/src/handlers/event.ts b/packages/server/src/handlers/event.ts
+--- a/packages/server/src/handlers/event.ts
++++ b/packages/server/src/handlers/event.ts
+@@ -9 +9,0 @@
+-import { PartView } from "@opencode-ai/core/session/part-view"
+@@ -13,11 +12,7 @@
+-function eventData(data: unknown, viewer: boolean): Sse.Event {
+-  const encoded = Schema.encodeUnknownSync(OpenCodeEvent)(data)
+-  // 先走正式编码，再投影当前连接的native成功事件；背压、事件身份与完整订阅不变。
+-  const projected = viewer && encoded.type === "session.next.tool.success"
+-    ? { ...encoded, data: { ...encoded.data, structured: PartView.projectFields(encoded.data.structured) } }
+-    : encoded
++function eventData(data: unknown): Sse.Event {
+   return {
+     _tag: "Event",
+     event: "message",
+     id: undefined,
+-    data: JSON.stringify(projected),
++    // Success没有工具名，不按structured形状猜生产者；正式编码和背压保持原路径。
++    data: JSON.stringify(Schema.encodeUnknownSync(OpenCodeEvent)(data)),
+@@ -32,3 +27,2 @@
+-    return handlers.handleRaw("event.subscribe", (ctx) =>
++    return handlers.handleRaw("event.subscribe", () =>
+       Effect.gen(function* () {
+-        const viewer = ctx.request.headers["x-opencode-tui-message-projection"] === "viewer"
+@@ -48 +42 @@
+-        ).pipe(Stream.map((event) => eventData(event, viewer)), Stream.pipeThroughChannel(Sse.encode()))
++        ).pipe(Stream.map(eventData), Stream.pipeThroughChannel(Sse.encode()))
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
+@@ -37,4 +37,2 @@
+-  if (payload.type === "session.next.tool.success") {
+-    const structured = PartView.projectFields(payload.properties.structured)
+-    return { ...event, payload: { ...payload, properties: { ...payload.properties, structured } } }
+-  }
++  // native Success没有工具身份；普通帧和sync副本都保留完整，不增加传输侧状态。
++  if (payload.type === "session.next.tool.success") return event
+@@ -44,3 +42 @@
+-    if (syncEvent.type === EventV2.versionedType("session.next.tool.success", 1)) {
+-      return { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, structured: PartView.projectFields(data.structured) } } } }
+-    }
++    if (syncEvent.type === EventV2.versionedType("session.next.tool.success", 1)) return event
+diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/opencode/test/server/httpapi-event.test.ts
+--- a/packages/opencode/test/server/httpapi-event.test.ts
++++ b/packages/opencode/test/server/httpapi-event.test.ts
+@@ -277,3 +277,3 @@
+-    for (const callID of ["call-a", "call-b"]) {
+-      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, timestamp, callID, name: "edit" })
+-      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, timestamp, callID, tool: "edit", input: { filePath: "a.ts" }, provider: { executed: false } })
++    for (const [callID, tool] of [["call-a", "edit"], ["call-b", "third_party_custom"]]) {
++      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, timestamp, callID, name: tool })
++      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, timestamp, callID, tool, input: { filePath: "a.ts" }, provider: { executed: false } })
+@@ -337,3 +337,3 @@
+-    // viewer仅删重复patch，完整连接、冻结输入与提交结果都保持完整；marker逐字不变。
++    // Success本身缺工具身份，全部连接保留patch；HTTP持有工具对象后才精确裁剪edit。
+     for (const list of [nv, gv.result, gv.syncs]) for (const event of list.slice(0, 2)) {
+-      expect(Schema.decodeUnknownSync(Fields)(event.data).structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
++      expect(Schema.decodeUnknownSync(Fields)(event.data).structured.filediff).toEqual({ file: "a.ts", patch, additions: 64, deletions: 0 })
+@@ -359 +359,2 @@
+-      for (const part of view.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
++      expect(view.content.filter((part) => part.type === "tool").map((part) => part.name)).toEqual(["edit", "third_party_custom"])
++      for (const part of view.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0, ...(part.name === "edit" ? {} : { patch }) })

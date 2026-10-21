@@ -13,19 +13,14 @@ Content-Transfer-Encoding: 8bit
 
 方案 R2 与完整实现均经独立审计通过。四个生产相关文件增删共 127 行；完整 TUI 分区 731 pass、13 skip、0 fail，类型检查通过。
 
-适配说明：布局期位置保持完整重锚（owner 迁移 cmd/tui→tui 与 patches 机制对齐）。fork 经 smark.13 tgz+patchedDependencies 交付 opentui 修改；目标 opentui 为 npm 0.4.5（catalog），同用 bun patchedDependencies 机制——以 patches/@opentui%2Fcore@0.4.5.patch 在 index.bun.js/index.node.js/renderables/ScrollBox.d.ts 上交付同构 preserveVisibleContent/stickyScrollTolerance/updateLayout 覆写（0.4.5 双 bundle 行号平行，基类 updateLayout 位于 chunk-bun-tkm837n2.js，结构与 fork dist 同源）。Session：删除事后锚点恢复（remeasureAnchor/anchorRestorePending/captureRemeasureAnchor/lastMaxScrollTop/contentGrowthKey #212 逐帧归一化 effect），ScrollBox 传 preserveVisibleContent+stickyScrollTolerance=1。测试：scroll-layout.test.ts 原生 renderer 用例逐字移植（0.4.5 具备 createTestRenderer/mockMouse/idle/getSchedulerState 全套 API）；fork session-message-render 两用例依赖 withRenderedSession harness（目标无），按 #506/#520 先例以 residency-contract 模板合同承载。bun.lock/package.json 注册 patch 条目。
+适配说明：实际依赖为smark.13，使用source单index.js及声明文件的布局owner补丁，以URL身份登记。Session移除帧后自动滚动和延迟恢复，保持既有角色spacing/驻留/选择/显式导航；原生与真实Session逐帧测试保留，不再以源码模板替代。目标已无contentGrowthKey，不重建旧机制供删除。
 
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
-@@ -1091,6 +1091,7 @@
-     "pacote@21.5.0": "patches/pacote@21.5.0.patch",
-     "@dnd-kit/dom@0.5.0": "patches/@dnd-kit%2Fdom@0.5.0.patch",
-     "@ai-sdk/openai-compatible@2.0.41": "patches/@ai-sdk%2Fopenai-compatible@2.0.41.patch",
-+    "@opentui/core@0.4.5": "patches/@opentui%2Fcore@0.4.5.patch",
-   },
-   "overrides": {
-     "@ai-sdk/anthropic": "3.0.111",
+@@ -1084 +1084,2 @@
+   "patchedDependencies": {
++    "@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz": "patches/@opentui%2Fcore@0.4.3-smark.13.patch",
 
 diff --git a/docs/plans/tui-scroll-layout-stability.md b/docs/plans/tui-scroll-layout-stability.md
 new file mode 100644
@@ -356,42 +351,14 @@ new file mode 100644
 diff --git a/package.json b/package.json
 --- a/package.json
 +++ b/package.json
-@@ -171,6 +171,7 @@
-     "@ai-sdk/groq@3.0.31": "patches/@ai-sdk%2Fgroq@3.0.31.patch",
-     "@ai-sdk/anthropic@3.0.111": "patches/@ai-sdk%2Fanthropic@3.0.111.patch",
-     "@ai-sdk/amazon-bedrock@4.0.166": "patches/@ai-sdk%2Famazon-bedrock@4.0.166.patch",
--    "@ai-sdk/openai@3.0.88": "patches/@ai-sdk%2Fopenai@3.0.88.patch"
-+    "@ai-sdk/openai@3.0.88": "patches/@ai-sdk%2Fopenai@3.0.88.patch",
-+    "@opentui/core@0.4.5": "patches/@opentui%2Fcore@0.4.5.patch"
-   }
- }
+@@ -158 +158,2 @@
+   "patchedDependencies": {
++    "@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.13/opentui-core-0.4.3-smark.13.tgz": "patches/@opentui%2Fcore@0.4.3-smark.13.patch",
 
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -320,18 +320,9 @@ export function Session() {
-     // 会把回绕后已裁出窗口的边界误判为"无回退"，导致 undo/copy 操作错误内容。
-     return index === -1 ? [] : messages().slice(0, index)
-   }
--  // #212：内容增长信号——跟踪 part 文本/tool-raw 长度（非仅 part 数量），确保 text delta 触发贴底跟随
--  // #212：applyPartDelta 原地修改 part 文本不改 part 数组长度——仅计 part.length 会漏 text delta
--  const contentGrowthKey = createMemo(() => {
--    let total = 0
--    for (const m of messages()) {
--      for (const p of (sync.data.part[m.id] ?? []) as any[]) {
--        if (p.type === "text") total += (p.text ?? "").length
--        else if (p.type === "tool" && p.state?.raw) total += p.state.raw.length
--      }
--    }
--    return total
--  })
-+  // [0628] #212 旧贴底跟随（逐帧内容增长归一化 + 最大滚动位缓存）已删除：
-+  // 它在分批布局尚在进行时用 resize 开始时的旧位置覆盖用户输入后的当前位置。
-+  // 贴底跟随现在由容器的 stickyScrollTolerance 分支在布局前一次性完成。
-   const foregroundTasks = createMemo(() =>
-     sync.data.capabilities.experimentalBackgroundSubagents
-       ? messages().flatMap((message) =>
-@@ -551,8 +542,6 @@ export function Session() {
+@@ -536,8 +536,6 @@ export function Session() {
  
    let seeded = false
    let scroll: ScrollBoxRenderable
@@ -400,18 +367,26 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    let prompt: PromptRef | undefined
    const bind = (r: PromptRef | undefined) => {
      prompt = r
-@@ -568,8 +557,9 @@ export function Session() {
-   // #458：渲染后读取 scroll 位置同步粘底信号；queueMicrotask 避免在渲染帧内写信号。
+@@ -552,18 +550,10 @@ export function Session() {
+   // #212：布局后读取滚动范围，避免文本更新早于原生尺寸刷新。
    function syncSessionViewportStuckToBottom() {
      if (!scroll || scroll.isDestroyed) return
 -    // [0624] renderAfter 的唯一入口：驻留窗口只把 store 写入推迟到 microtask，
 -    // 先调度它不会改变本函数的贴底判定；顺序无关紧要，关键是同一帧驱动两者。
-+    // [0628] 位置保持与贴底由容器在布局前处理（preserveVisibleContent）；
-+    // 此处只调度驻留和发布已经绘制的位置状态。stuckToBottom 的一行容差与
-+    // 容器 stickyScrollTolerance=1 保持同一视觉贴底约定，两者不得各自漂移。
++    // 位置保持与贴底由容器在布局期处理；这里只调度驻留并发布已绘制状态。
      syncMessageResidency()
-     const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
+-    // #212：scrollTop 是滚动偏移；y 是屏幕位置，不能用于贴底判断。
+-    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
+-    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
+-    lastMaxScrollTop = maxScrollTop
+-    // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
+-    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
+-    // 在既有跟随完成后读取真实粘底状态，延后写信号避免改变当前布局帧。
+     const stuckToBottom = scroll.scrollTop >= maxScrollTop - 1
      if (stuckToBottom === untrack(viewportStuckToBottom)) return
+     queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
+   }
 @@ -593,8 +583,6 @@ export function Session() {
    // LRU 与年龄驱逐的唯一时间来源：进入视口（真实渲染）才刷新。无后台计时器，
    // 年龄只在渲染驱动的 pass 中求值（plan §10.3 的授权约束）。
@@ -491,26 +466,6 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
        },
        { defer: true },
      ),
-@@ -1869,19 +1831,6 @@ export function Session() {
-   // 与守卫后的路径 A 承担；dep 变化（真实导航/锚点）仍无条件贴底或锚定（INV-03/04）。
-   createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), () => scheduleSessionOpenScroll(), { defer: true }))
- 
--  // #212：流式内容增长时，若视口原本贴底（一行容差），则跟随到新的底部
--  // #212：OpenTUI sticky scroll 仅从精确最大值跟随；一行偏差时不会自动追尾
--  // #212：终端舍入和滚动条半格绘制可能导致最新行看似脱节，一行容差消除该视觉问题
--  // #212：手动一行上滚后内容未增长时不归一化——用户应能检查上一行直到新内容到达
--  createEffect(on(contentGrowthKey, () => {
--    if (!scroll || scroll.isDestroyed) return
--    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.height)
--    const wasStuckToBottom = scroll.y >= lastMaxScrollTop - 1
--    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
--    lastMaxScrollTop = maxScrollTop
--    if (wasStuckToBottom && maxScrollTopIncreased && scroll.y < maxScrollTop) scroll.scrollTo(maxScrollTop)
--  }))
--
-   return (
-     <LocationProvider location={location()}>
-       <context.Provider
 @@ -1934,6 +1883,12 @@ export function Session() {
                  }}
                  stickyScroll={true}
@@ -529,14 +484,14 @@ diff --git a/packages/tui/test/cli/tui/scroll-layout.test.ts b/packages/tui/test
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/cli/tui/scroll-layout.test.ts
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,192 @@
 +import { expect, test } from "bun:test"
 +import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
 +import { createTestRenderer } from "@opentui/core/testing"
 +
 +async function fixture(preserveVisibleContent = true, wrapped = false) {
 +  // 窄视口保证根列表远大于可见范围，不会因原生边界裁剪掩盖历史位置漂移。
-+  const app = await createTestRenderer({ width: 60, height: 15 })
++  const app = await createTestRenderer({ width: 60, height: 15, useThread: false, footerHeight: 0 })
 +  // 与 Session 同款开关组合：关闭 preserveVisibleContent 的对照由最后一个用例单独覆盖。
 +  const scroll = new ScrollBoxRenderable(app.renderer, {
 +    width: 60, height: 15, preserveVisibleContent,
@@ -558,12 +513,10 @@ new file mode 100644
 +  return { app, scroll, rows }
 +}
 +
-+// 目标适配说明：fork 在 smark.13 自建 dist 上交付本能力；目标 opentui 0.4.5 经
-+// patches/@opentui%2Fcore@0.4.5.patch 以同构 updateLayout 覆写交付，本组用例验证
-+// 打补丁后的真实运行时行为而非类型表面。
++// 当前smark.13由Bun补丁交付布局owner修复，本组观察实际安装依赖的逐帧行为。
 +
 +test("scroll layout preserves the visible message on every growth and shrink frame", async () => {
-+  const app = await createTestRenderer({ width: 60, height: 15 })
++  const app = await createTestRenderer({ width: 60, height: 15, useThread: false, footerHeight: 0 })
 +  // 使用真实容器和文本，避免仅比较高度差公式却遗漏实际绘制顺序。
 +  const options = { width: 60, height: 15, preserveVisibleContent: true }
 +  const scroll = new ScrollBoxRenderable(app.renderer, options)
@@ -701,7 +654,7 @@ new file mode 100644
 +  if (process.env.SCROLL_BENCH !== "1") return
 +  // 同一容器以开关区分基线与修复，避免加载两套 native 模块污染计时。
 +  // 该用例只报告耗时，不把机器负载波动转成普通 CI 的不稳定断言。
-+  // 目标上基线即未打补丁的 0.4.5 原生行为，与 fork 的对照语义一致。
++  // 关闭选项即同一smark.13的原生基线，不加载第二份native模块。
 +  for (let repeat = 0; repeat < 3; repeat++) {
 +    for (const enabled of [false, true]) {
 +      const { app, scroll, rows } = await fixture(enabled)
@@ -725,54 +678,102 @@ new file mode 100644
 +  }
 +}, 30000)
 
-diff --git a/packages/tui/test/routes/session/residency-contract.test.ts b/packages/tui/test/routes/session/residency-contract.test.ts
---- a/packages/tui/test/routes/session/residency-contract.test.ts
-+++ b/packages/tui/test/routes/session/residency-contract.test.ts
-@@ -82,4 +82,31 @@ describe("session residency 0625 rework template contracts", () => {
-     // stale 清理必须先减账再删记录（删除后 mounted 不可读）。
-     expect(source).toMatch(/for \(const id of stale\) \{\s*\n\s*\/\/ \[0625\] 先减账再删记录[\s\S]{0,200}accountShelled\(id\)/)
+diff --git a/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx b/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -350 +350 @@
+-    await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 && anchor.y - scroll.y === 0 })
++    await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 && anchor.y - scroll.y === 0 && released(app, fixture.messages[0].id) })
+@@ -459,3 +459,65 @@
+     expect(released(app, "msg_window_assistant_23")).toBe(false)
    })
--})
-\ No newline at end of file
+ })
++
++test.each([false, true])("session keeps every resize frame stable with released content=%s", async (shelled) => {
++  const fixture = windowFixture("stable")
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
++    await waitForFrame(app, (frame) => frame.includes("stable assistant 23"))
++    const scroll = sessionScrollBox(app, fixture.messages[0].id)
++    if (shelled) await withFakeNow(async (advance) => {
++      advance(AGE)
++      await pumpFrames(app, 8)
++      expect(released(app, fixture.messages[0].id)).toBe(true)
++    })
++    const reader = messageRoot(app, "msg_window_user_20")
++    scroll.scrollBy(reader.y - scroll.viewport.y)
++    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
++    const previousMax = scroll.scrollHeight - scroll.viewport.height
++    const previousTop = scroll.scrollTop
++    // 前方增长必须跨旧剩余到底距离，才能暴露补偿被帧后贴底误覆盖。
++    app.resize(40, 24)
++    let movement = 0
++    for (let frame = 0; frame < 100; frame++) {
++      if (frame === 15) {
++        ctx.keymap.dispatchCommand("session.line.down")
++        movement = 1
++      }
++      await app.renderOnce()
++      await new Promise<void>((resolve) => process.nextTick(resolve))
++      // 每一帧都检查，不等重测结束后才恢复；已经接受的用户位移必须保留。
++      expect(reader.y - scroll.viewport.y).toBe(0 - movement)
++    }
++    expect(scroll.scrollTop - previousTop).toBeGreaterThan(previousMax - previousTop)
++    expect(app.captureCharFrame()).toContain("stable user 20")
++    ctx.keymap.dispatchCommand("session.last")
++    await waitForFrame(app, (frame) => frame.includes("stable assistant 23"))
++  })
 +})
 +
-+describe("session scroll layout 0628 template contracts", () => {
-+  // [0628] fork 的 session-message-render 两用例（released resize 帧稳定 + 选区跨增长保持）
-+  // 依赖 withRenderedSession 全帧 Session harness；目标无该 harness，按 #506/#520 先例
-+  // 以模板合同锁定行为主路径。真实几何行为由 test/cli/tui/scroll-layout.test.ts 在
-+  // 原生 renderer 上直接验证（含同款 preserveVisibleContent/stickyScrollTolerance 容器）；
-+  // 选区跨增长保持由容器保持可见 Message 根不动 + selection pin 几何区间共同承担。
-+  test("session ScrollBox opts into layout-stage position preservation", () => {
-+    // 容器在布局前保持可见内容并带一行贴底容差；两个选项缺一都会回退到
-+    // 旧的事后锚点恢复或无容差追尾。
-+    expect(source).toMatch(/stickyScroll=\{true\}\s*\n\s*stickyStart="bottom"[\s\S]{0,200}preserveVisibleContent=\{true\}[\s\S]{0,200}stickyScrollTolerance=\{1\}/)
-+  })
-+
-+  test("delayed anchor restore and growth normalization are removed", () => {
-+    // 事后位置恢复整体删除：锚点捕获/滞后恢复/贴底归一化（含 #212 contentGrowthKey
-+    // 逐帧跟随）不得回归——它们会在分批布局尚在进行时覆盖用户输入后的位置。
-+    // released（壳化）与 mounted 两条重排路径都由容器统一承载，Session 不再区分。
-+    expect(source).not.toContain("remeasureAnchor")
-+    expect(source).not.toContain("anchorRestorePending")
-+    expect(source).not.toContain("captureRemeasureAnchor")
-+    expect(source).not.toContain("lastMaxScrollTop")
-+    expect(source).not.toContain("contentGrowthKey")
-+    // 贴底信号发布只依赖已绘制几何，不得重建旧的最大值缓存路径。
-+    // 容差必须保持 1：与原生 sticky 的精确最大值跟随兼容，大于 1 会吞多行上滚。
-+    expect(source).toMatch(/function syncSessionViewportStuckToBottom[\s\S]{0,300}syncMessageResidency\(\)/)
++test("session preserves selected text while a preceding message grows", async () => {
++  const fixture = windowFixture("selection")
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
++    await waitForFrame(app, (frame) => frame.includes("selection assistant 23"))
++    const scroll = sessionScrollBox(app, fixture.messages[0].id)
++    const reader = messageRoot(app, "msg_window_user_20")
++    scroll.scrollBy(reader.y - scroll.viewport.y)
++    await waitForFrame(app, () => reader.y - scroll.viewport.y === 0)
++    const lines = app.captureCharFrame().split("\n")
++    const y = lines.findIndex((line) => line.includes("selection user 20"))
++    const x = lines[y].indexOf("selection user 20")
++    await app.mockMouse.pressDown(x, y)
++    await app.mockMouse.moveTo(x + "selection user 20".length, y)
++    await app.mockMouse.release(x + "selection user 20".length, y)
++    const selected = app.renderer.getSelection()?.getSelectedText()
++    // 先证明选区非空，再沿真实Part事件改变前方正文，拒绝undefined对照假绿。
++    expect(selected).toContain("selection user 20")
++    emit(partUpdatedEvent("evt_selection_growth", textPart("part_window_user_00", fixture.messages[0].id, "selection user 00\n" + "extra line\n".repeat(60))))
++    for (let frame = 0; frame < 20; frame++) {
++      await app.renderOnce()
++      await new Promise<void>((resolve) => process.nextTick(resolve))
++      expect(reader.y - scroll.viewport.y).toBe(0)
++      expect(app.renderer.getSelection()?.getSelectedText()).toBe(selected)
++    }
 +  })
 +})
+diff --git a/packages/tui/test/routes/session/session-viewport-follow.test.ts b/packages/tui/test/routes/session/session-viewport-follow.test.ts
+--- a/packages/tui/test/routes/session/session-viewport-follow.test.ts
++++ b/packages/tui/test/routes/session/session-viewport-follow.test.ts
+@@ -21 +21,3 @@
+     stickyStart: "bottom",
++    preserveVisibleContent: true,
++    stickyScrollTolerance: 1,
+@@ -30,2 +32,4 @@
+-    `let lastMaxScrollTop = 0\n${callback}\nreturn syncSessionViewportStuckToBottom`,
+-  )(scroll, untrack, viewportStuckToBottom, setViewportStuckToBottom) as () => void
++    "syncMessageResidency",
++    `${callback}\nreturn syncSessionViewportStuckToBottom`,
++    // 本窄测试只观察生产状态发布与容器跟随；驻留由完整Session harness验证。
++  )(scroll, untrack, viewportStuckToBottom, setViewportStuckToBottom, () => {}) as () => void
 
-diff --git a/patches/@opentui%2Fcore@0.4.5.patch b/patches/@opentui%2Fcore@0.4.5.patch
+diff --git a/patches/@opentui%2Fcore@0.4.3-smark.13.patch b/patches/@opentui%2Fcore@0.4.3-smark.13.patch
 new file mode 100644
 --- /dev/null
-+++ b/patches/@opentui%2Fcore@0.4.5.patch
-@@ -0,0 +1,130 @@
-+diff --git a/index.bun.js b/index.bun.js
-+index 815856bd3..799796bf5 100644
-+--- a/index.bun.js
-++++ b/index.bun.js
-+@@ -11437,6 +11437,8 @@ class ScrollBoxRenderable extends BoxRenderable {
++++ b/patches/@opentui%2Fcore@0.4.3-smark.13.patch
+@@ -0,0 +1,74 @@
++diff --git a/index.js b/index.js
++--- a/index.js
+++++ b/index.js
++@@ -10142,6 +10142,8 @@
 +   _hasManualScroll = false;
 +   _isApplyingStickyScroll = false;
 +   scrollAccel;
@@ -781,9 +782,18 @@ new file mode 100644
 +   get stickyScroll() {
 +     return this._stickyScroll;
 +   }
-+@@ -11471,6 +11473,31 @@ class ScrollBoxRenderable extends BoxRenderable {
-+   get scrollHeight() {
-+     return this.verticalScrollBar.scrollSize;
++@@ -10284,6 +10286,8 @@
++       ...sanitizedRootBoxOptions,
++       ...sanitizedRootOptions
++     });
+++    this.preserveVisibleContent = options.preserveVisibleContent ?? false;
+++    this.stickyScrollTolerance = options.stickyScrollTolerance ?? 0;
++     this.internalId = ScrollBoxRenderable.idCounter++;
++     this._stickyScroll = stickyScroll;
++     this._stickyStart = stickyStart;
++@@ -10360,6 +10364,31 @@
++     };
++     this._ctx.on("selection", this.selectionListener);
 +   }
 ++  updateLayout(deltaTime, renderList = []) {
 ++    if (this.preserveVisibleContent && this.visible) {
@@ -810,77 +820,13 @@ new file mode 100644
 ++    // 在子节点遍历、裁剪和命中区域生成前完成补偿，不留下先错位再恢复的绘制帧。
 ++    super.updateLayout(deltaTime, renderList);
 ++  }
-+   updateStickyState() {
-+     if (!this._stickyScroll) {
-+       this.syncManualScrollState();
-+@@ -11579,6 +11606,8 @@ class ScrollBoxRenderable extends BoxRenderable {
-+       ...sanitizedRootBoxOptions,
-+       ...sanitizedRootOptions
-+     });
-++    this.preserveVisibleContent = options.preserveVisibleContent ?? false;
-++    this.stickyScrollTolerance = options.stickyScrollTolerance ?? 0;
-+     this.internalId = ScrollBoxRenderable.idCounter++;
-+     this._stickyScroll = stickyScroll;
-+     this._stickyStart = stickyStart;
-+diff --git a/index.node.js b/index.node.js
-+index 0ddf03bf6..809bd0372 100644
-+--- a/index.node.js
-++++ b/index.node.js
-+@@ -11436,6 +11436,8 @@ class ScrollBoxRenderable extends BoxRenderable {
-+   _hasManualScroll = false;
-+   _isApplyingStickyScroll = false;
-+   scrollAccel;
-++  preserveVisibleContent = false;
-++  stickyScrollTolerance = 0;
-+   get stickyScroll() {
-+     return this._stickyScroll;
++   onUpdate(deltaTime) {
++     this.handleAutoScroll(deltaTime);
 +   }
-+@@ -11470,6 +11472,31 @@ class ScrollBoxRenderable extends BoxRenderable {
-+   get scrollHeight() {
-+     return this.verticalScrollBar.scrollSize;
-+   }
-++  updateLayout(deltaTime, renderList = []) {
-++    if (this.preserveVisibleContent && this.visible) {
-++      // 必须在采用新布局前读取位置；此时已经包含用户本帧的滚轮和导航位移。
-++      const top = this.scrollTop;
-++      const previousMax = Math.max(0, this.scrollHeight - this.viewport.height);
-++      const child = this.getChildren().find((node) => node.visible && node.y + node.height > this.viewport.y);
-++      const offset = child ? child.y - this.viewport.y : 0;
-++      const sticky = this._stickyScroll && this._stickyStart === "bottom";
-++      // 复用尺寸变化回调更新范围，不能逐帧调用会预约下一帧的 recalculateBarProps。
-++      this.viewport.updateFromLayout();
-++      this.content.updateFromLayout();
-++      const maximum = Math.max(0, this.scrollHeight - this.viewport.height);
-++      // 一行容差只在内容增长时跟随；普通向上滚动一行必须保留其阅读位置。
-++      const follow = sticky && (top >= previousMax ||
-++        maximum > previousMax && top >= previousMax - this.stickyScrollTolerance);
-++      if (follow) {
-++        this.scrollTop = maximum;
-++      } else if (child) {
-++        // 新 Yoga 坐标与旧视口偏移相抵；即使总高度不变，也能消除前方高度重分布。
-++        this.scrollTop = child.yogaNode.getComputedTop() - offset;
-++      }
-++    }
-++    // 在子节点遍历、裁剪和命中区域生成前完成补偿，不留下先错位再恢复的绘制帧。
-++    super.updateLayout(deltaTime, renderList);
-++  }
-+   updateStickyState() {
-+     if (!this._stickyScroll) {
-+       this.syncManualScrollState();
-+@@ -11578,6 +11605,8 @@ class ScrollBoxRenderable extends BoxRenderable {
-+       ...sanitizedRootBoxOptions,
-+       ...sanitizedRootOptions
-+     });
-++    this.preserveVisibleContent = options.preserveVisibleContent ?? false;
-++    this.stickyScrollTolerance = options.stickyScrollTolerance ?? 0;
-+     this.internalId = ScrollBoxRenderable.idCounter++;
-+     this._stickyScroll = stickyScroll;
-+     this._stickyStart = stickyStart;
 +diff --git a/renderables/ScrollBox.d.ts b/renderables/ScrollBox.d.ts
-+index 105387541..59dfe85c0 100644
 +--- a/renderables/ScrollBox.d.ts
 ++++ b/renderables/ScrollBox.d.ts
-+@@ -28,6 +28,8 @@ export interface ScrollBoxOptions extends BoxOptions<ScrollBoxRenderable> {
++@@ -28,6 +28,8 @@
 +     scrollX?: boolean;
 +     scrollY?: boolean;
 +     scrollAcceleration?: ScrollAcceleration;
@@ -889,12 +835,12 @@ new file mode 100644
 +     viewportCulling?: boolean;
 + }
 + export declare class ScrollBoxRenderable extends BoxRenderable {
-+@@ -62,6 +64,8 @@ export declare class ScrollBoxRenderable extends BoxRenderable {
-+     private _hasManualScroll;
++@@ -63,6 +65,8 @@
 +     private _isApplyingStickyScroll;
 +     private scrollAccel;
++     get stickyScroll(): boolean;
 ++    preserveVisibleContent: boolean;
 ++    stickyScrollTolerance: number;
-+     get stickyScroll(): boolean;
 +     set stickyScroll(value: boolean);
 +     get stickyStart(): "bottom" | "top" | "left" | "right" | undefined;
++     set stickyStart(value: "bottom" | "top" | "left" | "right" | undefined);

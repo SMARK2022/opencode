@@ -7,18 +7,16 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 适配：源为 bun.lock 版本回声追平（1.15.9-smark -> 1.15.10-smark，对齐 package.json 权威值）；
-目标谱系同样存在 lock 回声漂移（1.18.38-smark），按同一追平语义落点对齐 1.18.44-smark。
+当前前态的 package.json 与 lock 已同为 1.18.44-smark，保留对齐值并明确以目标包版本为准，不再制造版本漂移。
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
-@@ -565,8 +565,9 @@
-     // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
+@@ -571,7 +571,7 @@
+-    // 版本与 packages/opencode/package.json 保持一致，frozen install 依赖 bun.lock 同步
++    // frozen install 要求与 packages/opencode/package.json 的实际版本同步；已对齐时保留目标值，不回退到源分支版本。
      "packages/opencode": {
        "name": "opencode",
--      "version": "1.18.38-smark",
-+      // #487：lock版本回声追平package.json权威值，frozen install依赖此同步。
-+      "version": "1.18.44-smark",
-       "optionalDependencies": { "sharp": "0.33.5" }, // #59：可选压缩依赖，复用上游既有 0.33.5 解析树
+       "version": "1.18.44-smark",
        "bin": {
          "opencode": "./bin/opencode",
        },

@@ -1,57 +1,25 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2739,10 +2739,12 @@ function BlockTool(props: {
-   const hasPreview = createMemo(() => props.preview !== undefined)
-   // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
-   // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
--  // 常驻，折叠态通过 maxHeight=0 + overflow=hidden 隐藏，而非卸载 DOM 节点。
-+  // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
-+  // 不使用 maxHeight=0 + overflow=hidden：OpenTUI updateFromLayout 中
-+  // Math.max(layout.height, 1) 会将高度 0 强制为 1 行，导致隐藏区域泄漏首行。
-   const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
-   // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
--  // 一旦挂载就不再卸载，后续折叠仅靠布局裁剪隐藏。
-+  // 一旦挂载就不再卸载，后续折叠仅靠 visible=false 隐藏。
-   createEffect(() => {
-     if (!hasPreview() || !collapsed()) setBodyMounted(true)
-   })
-@@ -2795,23 +2797,23 @@ function BlockTool(props: {
-       <Show when={props.autoReview !== false}>
-         <ToolAutoReviewLine />
-       </Show>
--      {/* preview 区：折叠态可见（marginTop=1 撑出间距），展开态用 maxHeight=0 隐藏 */}
-+      {/* preview 区：折叠态 visible=true 可见，展开态 visible=false 隐藏（display:none） */}
-       <Show when={hasPreview()}>
-         <box
-           marginTop={collapsed() ? 1 : 0}
--          maxHeight={collapsed() ? undefined : 0}
--          overflow={collapsed() ? undefined : "hidden"}
-+          visible={collapsed()}
-         >
-           {props.preview}
-         </box>
-       </Show>
--      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 maxHeight=0 隐藏，
-+      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
-           无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
+@@ -2727,9 +2727,9 @@ function BlockTool(props: {
+-      {/* 预览与正文分开挂载，显示状态继续由外层驱动。 */}
+-      <box marginTop={collapsed() ? 1 : 0} maxHeight={collapsed() ? undefined : 0} overflow={collapsed() ? undefined : "hidden"}>
++      {/* visible隐藏整块但不销毁节点，避免零高度仍泄漏首行；状态继续由外层驱动。 */}
++      <box marginTop={collapsed() ? 1 : 0} visible={collapsed()}>
+         {preview()}
+       </box>
        <Show when={bodyMounted()}>
-         <box
-           marginTop={hasPreview() && collapsed() ? 0 : 1}
--          maxHeight={collapsed() ? (hasPreview() ? 0 : previewLines()) : undefined}
--          overflow={collapsed() ? "hidden" : undefined}
-+          visible={!collapsed() || !hasPreview()}
-+          maxHeight={!hasPreview() && collapsed() ? previewLines() : undefined}
-+          overflow={!hasPreview() && collapsed() ? "hidden" : undefined}
-         >
+-        <box marginTop={collapsed() ? 0 : 1} maxHeight={collapsed() ? 0 : undefined} overflow={collapsed() ? "hidden" : undefined}>
++        <box marginTop={collapsed() ? 0 : 1} visible={!collapsed()}>
            {props.children}
          </box>
+       </Show>
 
 
 diff --git a/packages/tui/test/routes/session/block-tool-collapse.test.tsx b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
 --- a/packages/tui/test/routes/session/block-tool-collapse.test.tsx
 +++ b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
-@@ -14,3 +14,4 @@ import { BlockTool } from "../../../src/routes/session"
+@@ -16,3 +16,4 @@ import { BlockTool } from "../../../src/routes/session"
  // 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
  // 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
 -// 修复方式为 preview/body 常驻 + maxHeight 裁剪隐藏，而非 <Show> 分支卸载。
@@ -61,13 +29,15 @@ diff --git a/packages/tui/test/routes/session/block-tool-visible-once.test.tsx b
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/routes/session/block-tool-visible-once.test.tsx
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,80 @@
 +import { expect, test } from "bun:test"
 +import { randomUUID } from "node:crypto"
 +import { mkdir, writeFile } from "node:fs/promises"
 +import { tmpdir } from "node:os"
 +import path from "node:path"
 +import { testRender } from "@opentui/solid"
++import { engine } from "@opentui/core"
++import { createSignal } from "solid-js"
 +import { TuiPathsProvider, TuiStartupProvider } from "../../../src/context/runtime"
 +import { KVProvider } from "../../../src/context/kv"
 +import { TuiConfigProvider } from "../../../src/config"
@@ -83,7 +53,9 @@ new file mode 100644
 +await mkdir(stateDir, { recursive: true })
 +await writeFile(path.join(stateDir, "kv.json"), "{}")
 +
-+function ShellCard(props: { command: string; output: string }) {
++function ShellCard(props: { command: string; output: string; expanded?: boolean }) {
++  const [expanded, setExpanded] = createSignal(props.expanded ?? false)
++  const preview = <text>{`$ ${props.command}`}</text>
 +  return (
 +    <TuiPathsProvider value={{ cwd: "/work", home: "/home/t", state: stateDir, worktree: "/work" }}>
 +      <TuiStartupProvider value={{ skipInitialLoading: true }}>
@@ -93,11 +65,11 @@ new file mode 100644
 +              <RouteProvider>
 +                <BlockTool
 +                  title="bash"
-+                  totalLines={24}
-+                  threshold={20}
-+                  maxLines={10}
-+                  preview={<text>{`$ ${props.command}`}</text>}>
++                  autoReview={false}
++                  onClick={() => setExpanded((value) => !value)}
++                  preview={expanded() ? undefined : preview}>
 +                  <text>{`$ ${props.command}\n${props.output}`}</text>
++                  <text>Click to collapse</text>
 +                </BlockTool>
 +              </RouteProvider>
 +            </ThemeProvider>
@@ -108,31 +80,33 @@ new file mode 100644
 +  )
 +}
 +
-+test("collapsed shell block shows command once", async () => {
-+  const app = await testRender(() => <ShellCard command="echo hello" output={"hello\n"} />, { width: 60, height: 40 })
++test("non-collapsed shell block shows command once", async () => {
++  const app = await testRender(() => <ShellCard command="echo hello" output={"hello\n"} expanded />, { width: 60, height: 40, useThread: false })
 +  try {
 +    await new Promise((resolve) => setTimeout(resolve, 100))
-+    await app.waitForFrame((frame) => frame.includes("Click to expand"))
-+    // 折叠态：preview 可见；body 必须整体隐藏——泄漏首行会让 "$ echo hello" 出现 2 次。
++    await app.waitForFrame((frame) => frame.includes("$ echo hello"))
++    // 无预览的初始展开态也只能显示一次命令。
 +    const rows = app.captureCharFrame().split("\n")
 +    expect(rows.filter((line) => line.includes("$ echo hello")).length).toBe(1)
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
 +  }
 +})
 +
 +test("expanded shell block does not leak preview first row", async () => {
 +  const longOutput = Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n")
-+  const app = await testRender(() => <ShellCard command="echo test" output={longOutput} />, { width: 60, height: 40 })
++  const app = await testRender(() => <ShellCard command="echo test" output={longOutput} />, { width: 60, height: 40, useThread: false })
 +  try {
 +    await new Promise((resolve) => setTimeout(resolve, 100))
 +    await app.waitForFrame((frame) => frame.includes("Click to expand"))
-+    await app.mockMouse.click(10, 5)
++    await app.mockMouse.click(10, app.captureCharFrame().split("\n").findIndex((line) => line.includes("Click to expand")))
 +    await app.waitForFrame((frame) => frame.includes("Click to collapse"))
 +    // 展开态：只有 body 可见；preview 首行泄漏会让 "$ echo test" 出现 2 次。
 +    const rows = app.captureCharFrame().split("\n")
 +    expect(rows.filter((line) => line.includes("$ echo test")).length).toBe(1)
 +  } finally {
 +    app.renderer.destroy()
++    engine.detach()
 +  }
 +})

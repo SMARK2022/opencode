@@ -10,26 +10,27 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index 207fccc..cd29a84 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -53,6 +53,7 @@ import {
+@@ -51,8 +51,9 @@ import {
+   RGBA,
    MouseButton,
-   type MouseEvent as TuiMouseEvent,
+   type MouseEvent,
    type OptimizedBuffer,
 +  type Renderable,
  } from "@opentui/core"
  import { Prompt, type PromptRef } from "../../component/prompt"
  import { drawSmoothScrollbar, type SmoothScrollbarMarker } from "../../util/smooth-scrollbar"
-@@ -2280,21 +2281,43 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
+ import { ConnectionError } from "../../util/connection-error"
+@@ -2270,22 +2271,37 @@ function AutoReviewLine(props: { review: AutoReviewMetadata }) {
+   const [hover, setHover] = createSignal(false)
+   // #209：仅当有 sessionID 时可点击——无子会话的审查不可导航，hover 也不高亮
    const clickable = createMemo(() => Boolean(props.review.sessionID))
-   // #292：提取 openReview——点击行为下沉到 text，box 仅控制布局；event 由 openAutoReviewSession 统一消费
-   const openReview = (evt?: TuiMouseEvent) => openAutoReviewSession(props.review, navigate, renderer, evt)
-+  // #293：这行是 reviewer 子会话入口，不是 transcript 正文。把 mouseup 放在整行 box 上，
-+  // 并关闭内部 text selection，避免 OpenTUI 在不同平台把一次普通点击先解释成
-+  // 文本选择，导致 openAutoReviewSession 只消费事件而不导航。
+   const openReview = (evt: MouseEvent) => openAutoReviewSession(props.review, navigate, renderer, evt)
++  // 审查行是导航入口，关闭文本选择并让整行处理点击，避免普通点击被当成选区。
    return (
      <box
+-      id={`auto-review-${props.review.reviewID}`}
 +      id={autoReviewLineID(props.review)}
        width="100%"
        height={1}
@@ -46,14 +47,10 @@ index 207fccc..cd29a84 100644
    )
  }
  
-+// #293：固定前缀只用于 TUI renderable 查找，reviewID 负责区分同屏多个工具的
-+// reviewer 行；不要把这个 id 当作持久化数据或对外 API。
 +function autoReviewLineID(review: AutoReviewMetadata) {
 +  return `auto-review-${review.reviewID}`
 +}
 +
-+// #293：通过 id 在事件 target 的 renderable 子树中查找真实的 review row，
-+// 供 openAutoReviewFromToolChrome 做精确命中判断，避免退回 root+1 的布局猜测。
 +function autoReviewLineTarget(review: AutoReviewMetadata, target: Renderable | null | undefined) {
 +  const id = autoReviewLineID(review)
 +  for (let item = target; item; item = item.parent) {
@@ -63,143 +60,264 @@ index 207fccc..cd29a84 100644
 +  }
 +}
 +
- // #292：openAutoReviewSession——审查行点击的统一入口，消费事件并导航到 reviewer 子会话
  function openAutoReviewSession(
    review: AutoReviewMetadata | undefined,
-@@ -2323,10 +2346,15 @@ function openAutoReviewFromToolChrome(
-   renderer: ReturnType<typeof useRenderer>,
-   evt: TuiMouseEvent | undefined,
+@@ -2311,8 +2327,11 @@ function openAutoReviewFromToolChrome(
+   evt: MouseEvent | undefined,
  ) {
--  // #292：OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。只在 target 的
--  // 父 renderable 下一行兜底处理；标题行是 parentY，review 行是 parentY + 1，
--  // diff body/expand affordance 更靠后，因此不会扩大成整卡片点击导航。
--  if (!evt?.target?.parent || evt.y !== evt.target.parent.screenY + 1) return false
-+  // #293：OpenTUI 可能把 review 文本行的 mouseup 冒泡给父工具卡。这里不再用
-+  // root + 1 这类布局猜测，因为 BlockTool 的相邻行可能是标题、body 或
-+  // expand affordance；只接受事件命中的 renderable 子树里真实存在的 review row。
+-  // #292：标题会换行且卡片有 padding，兜底只认审查行自身，避免误把标题或正文当成入口。
+-  if (!evt?.target || evt.target.id !== `auto-review-${review?.reviewID}`) return false
++  // 标题换行和 padding 会移动审查行，按稳定 id 查找，避免误中正文。
 +  if (!review?.sessionID || !evt?.target) return false
 +  const row = autoReviewLineTarget(review, evt.target)
-+  // #293：mockMouse 和真实终端鼠标事件传入的是 char frame 的 0-based y；OpenTUI
-+  // renderable.screenY 在当前布局树中是对应行的 1-based 屏幕坐标。先用 id
-+  // 找到真实 review row，再做这个坐标归一化，避免退回 root+1 的布局猜测。
-+  if (!row || evt.y !== row.screenY - 1) return false
++  // OpenTUI 已把终端坐标转成零基；screenY 与鼠标 y 可直接比较。
++  if (!row || evt.y !== row.screenY) return false
    return openAutoReviewSession(review, navigate, renderer, evt)
  }
  
+ // #214：ToolAutoReviewLine——从 context 读取 autoReview 并渲染共享审查状态行
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -1,8 +1,9 @@
+ import { afterEach, describe, expect, test } from "bun:test"
+ import { createRequire } from "node:module"
+-import { createContext, createMemo, createSignal, For, Show, useContext } from "solid-js"
++import { createContext, createEffect, createMemo, createSignal, For, Match, Show, Switch, useContext } from "solid-js"
+ import { BoxRenderable, MouseButton, type ScrollBoxRenderable } from "@opentui/core"
+ import { testRender, type JSX } from "@opentui/solid"
++import stripAnsi from "strip-ansi"
+ import { SplitBorder } from "../../../src/ui/border"
+ import { selectedForeground } from "../../../src/context/theme"
+ import { createTuiPluginApi } from "../../fixture/tui-plugin"
+@@ -22,6 +23,7 @@ import {
+   autoReviewLabel,
+ } from "../../../src/routes/session"
+ import { layoutGroups } from "../../../src/util/layout"
++import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
+ 
+ let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
+ 
+@@ -314,10 +316,15 @@ describe("TUI inline tool wrapping", () => {
+     const names = [
+       "UserMessage",
+       "autoReviewColor",
++      "autoReviewLineID",
++      "autoReviewLineTarget",
+       "AutoReviewLine",
+       "ToolAutoReviewLine",
+       "InlineTool",
+       "BlockTool",
++      "Shell",
++      "previewText",
++      "stringValue",
+       "openAutoReviewSession",
+       "openAutoReviewFromToolChrome",
+     ]
+@@ -353,31 +360,37 @@ describe("TUI inline tool wrapping", () => {
+     const ToolAutoReview = createContext(() => review)
+     const theme = createTuiPluginApi().theme.current
+     const dependencies = {
++      createEffect,
+       createMemo,
+       createSignal,
+       useContext,
+       Show,
+       For,
++      Match,
++      Switch,
+       InlineToolRow,
+       alwaysSeparate,
+       SplitBorder,
+       selectedForeground,
+       MouseButton,
++      collapseToolOutput,
++      stripAnsi,
+       autoReviewLabel,
+       ToolAutoReview,
+       useRenderer: runtime.useRenderer,
+       useTheme: () => ({ theme }),
+       useRoute: () => ({ navigate }),
+-      use: () => ({ sessionID: "ses_render", showTimestamps: () => false }),
++      use: () => ({ sessionID: "ses_render", showTimestamps: () => false, width: 72 }),
++      usePathFormatter: () => ({ format: (value: string) => value }),
+       useLocal: () => ({ agent: { color: () => theme.text } }),
+       useSync: () => ({ data: { permission: {} } }),
+     }
+     const production = new Function(
+       "runtime",
+       "dependencies",
+-      `const {${Object.keys(dependencies).join(",")}} = dependencies;\n${code}\nreturn {UserMessage, InlineTool, BlockTool, openAutoReviewSession, openAutoReviewFromToolChrome};`,
+-    )(runtime, dependencies) as Record<"UserMessage" | "InlineTool" | "BlockTool", (props: Record<string, unknown>) => JSX.Element> &
++      `const {${Object.keys(dependencies).join(",")}} = dependencies;\n${code}\nreturn {UserMessage, InlineTool, BlockTool, Shell, openAutoReviewSession, openAutoReviewFromToolChrome};`,
++    )(runtime, dependencies) as Record<"UserMessage" | "InlineTool" | "BlockTool" | "Shell", (props: Record<string, unknown>) => JSX.Element> &
+       Record<"openAutoReviewSession" | "openAutoReviewFromToolChrome", (...args: unknown[]) => boolean>
+     const Card = kind === "edit" ? production.BlockTool : production.InlineTool
+     await renderFrame(
+       () => (
+@@ -403,17 +416,27 @@ describe("TUI inline tool wrapping", () => {
+     const app = testSetup!
+     const label = autoReviewLabel(review)
+     const point = findVisibleText(app.captureCharFrame().split("\n"), label)
+     expect(point).toBeDefined()
++    const reviewTarget = app.renderer.root.findDescendantById(`auto-review-${review.reviewID}`)
++    expect(reviewTarget).toBeInstanceOf(BoxRenderable)
++    expect(reviewTarget!.height).toBe(1)
++    expect(reviewTarget!.screenY).toBe(point!.y)
++    expect(reviewTarget!.getChildren()[0].selectable).toBe(false)
+     // #292：使用原生零基坐标，先进入标签再点击，避免误中父卡 hitbox。
+     app.renderer.clearSelection()
+     await app.mockMouse.moveTo(point!.x + Math.floor(label.length / 2), point!.y)
+     await app.renderOnce()
+     await app.mockMouse.click(point!.x + Math.floor(label.length / 2), point!.y)
+     expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+     expect(parentClicks).toBe(0)
+     expect(expanded()).toBe(false)
+     if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
+     navigation.length = 0
++    await app.mockMouse.click(reviewTarget!.screenX + reviewTarget!.width - 1, reviewTarget!.screenY)
++    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++    expect(parentClicks).toBe(0)
++    expect(expanded()).toBe(false)
++    navigation.length = 0
+     // 选区消费事件但不导航；无子会话、无 target 或非审查 target 不产生导航。
+     const effects: string[] = []
+-    const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: { id: "unrelated" } }
++    const evt = { preventDefault: () => effects.push("default"), stopPropagation: () => effects.push("bubble"), target: app.renderer.root, y: -1 }
+@@ -429,12 +452,16 @@ describe("TUI inline tool wrapping", () => {
+     expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+     navigation.length = 0
+-    const reviewTarget = app.renderer.root.getChildren()[0].getChildren().find((item) => item.id === `auto-review-${review.reviewID}`)
+-    expect(reviewTarget).toBeInstanceOf(BoxRenderable)
+-    expect(reviewTarget!.height).toBe(1)
+-    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...evt, target: reviewTarget })).toBe(true)
+-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
+-    navigation.length = 0
++    const rowEvent = { ...evt, y: reviewTarget!.screenY }
++    for (const target of [reviewTarget!, reviewTarget!.getChildren()[0], reviewTarget!.parent!]) {
++      expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, target })).toBe(true)
++      expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++      navigation.length = 0
++    }
++    // 相邻行仍属于标题或正文，不能把零基坐标再减一。
++    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, y: reviewTarget!.screenY - 1 })).toBe(false)
++    expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, y: reviewTarget!.screenY + 1 })).toBe(false)
++    expect(navigation).toEqual([])
+     // 标题和正文仍执行父卡动作，审查导航不能扩展成整卡点击。
+     const title = findVisibleText(app.captureCharFrame().split("\n"), kind === "edit" ? "Edit external folder/config.json" : "Read external folder/secret key.txt")
+     expect(title).toBeDefined()
+     app.renderer.clearSelection()
+@@ -454,8 +481,42 @@ describe("TUI inline tool wrapping", () => {
+       expect(navigation).toEqual([])
+       expect(parentClicks).toBe(2)
+     }
+     app.renderer.destroy()
++    // 可见诊断只保留一份，右键模型上下文仍须显示独立的退出状态。
++    if (kind === "edit") {
++      const visible = "fatal: visible root cause"
++      const notice = '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />'
++      await renderFrame(
++        () => (
++          <production.Shell
++            input={{ command: "failed command" }}
++            metadata={{ output: visible }}
++            output={`${visible}\n${notice}`}
++            part={{ tool: "shell", state: { status: "completed" } }}
++          />
++        ),
++        { width: 160, height: 12 },
++      )
++      const shell = testSetup!
++      const diagnostic = findVisibleText(shell.captureCharFrame().split("\n"), visible)
++      expect(diagnostic).toBeDefined()
++      expect(shell.captureCharFrame()).not.toContain('reason="exit"')
++      expect(shell.captureCharFrame()).not.toContain("<bash_high_signal_excerpt>")
++      shell.renderer.clearSelection()
++      await shell.mockMouse.moveTo(diagnostic!.x + 1, diagnostic!.y)
++      await shell.renderOnce()
++      await shell.mockMouse.click(diagnostic!.x + 1, diagnostic!.y, MouseButton.RIGHT)
++      await shell.renderOnce()
++      await shell.renderOnce()
++      const context = shell.captureCharFrame()
++      expect(context).toContain("Model context output")
++      expect(context.split(visible)).toHaveLength(2)
++      expect(context).toContain(notice)
++      expect(context).not.toContain("<bash_high_signal_excerpt>")
++      expect(navigation).toEqual([])
++      shell.renderer.destroy()
++    }
+     let scroll: ScrollBoxRenderable | undefined
+     // 窄屏加载生产 UserMessage，断言真实外框高度和回绕边框，而非复制一个 box。
+     const frame = await renderFrame(
+       () => (
 
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index ce292ce..2c5da74 100644
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -199,7 +199,6 @@ export type DiagnosticSnapshot = {
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -162,12 +162,12 @@ export type DiagnosticSnapshot = {
+   truncatedFrames: number
+ }
+ 
+-// 可见性判断必须读取最终窗口，不能用截断前文本认定错误已经交给模型。
++// 隐藏快照可直接渲染；全流快照仍须传入最终可见窗口，避免重复摘录。
  export type RenderAppendixOptions = {
    durationMs: number           // 命令执行耗时
    exitCode: number | null      // 命令退出码
 -  visibleOutput: string        // 当前对模型可见的已压缩、已截断输出
++  visibleOutput?: string       // 全流快照对应的最终可见窗口
    config?: Partial<CompressionConfig> // 允许传入部分配置覆盖默认
  }
  
-@@ -638,16 +637,12 @@ function terminalRenderCollapsedText(text: string, stable: string) {
-   return stripAnsi(text).replace(/\r/g, "\n").split("\n").filter((line) => line.trim().length > 0).join("\n") !== stable
- }
- 
--// 去掉 ANSI 控制字符。用于判断诊断行是否已出现在可见窗口中，避免颜色码导致重复附录。
-+// #293：去掉 ANSI 控制字符，供压缩和诊断渲染使用；诊断候选只来自隐藏输出，
-+// 不再和可见窗口做重复性判断。
- function stripAnsi(text: string) {
-   return text.replace(ANSI_GLOBAL_RE, "")
- }
- 
--// 将空白差异归一化，降低 tail 截断、终端颜色、格式化空白导致的可见性误判。
--function normalizeVisibleText(text: string) {
--  return stripAnsi(text).replace(/\s+/g, " ").trim()
--}
--
- // 合并传入配置与默认配置
- function configOf(config?: Partial<CompressionConfig>): CompressionConfig {
-   return { ...DEFAULT_COMPRESSION_CONFIG, ...config }
-@@ -2099,28 +2094,6 @@ export class BashDiagnosticCollector {
-   }
- }
- 
--// 检查某个提取出来的错误上下文是否实际上已经存在于给 LLM 可见的输出 (visibleOutput) 当中。
--// 为了防止输出本就很短时还在尾部把错误内容重复打两遍，浪费 token 还会干扰模型。
--function contextAlreadyVisible(ctx: DiagnosticContext, visibleOutput: string, config: CompressionConfig) {
--  const center = ctx.lines.find((line) => line.no === ctx.centerLine)
--  if (!center) return false
--
--  const rawCenter = center.text
--  const truncatedCenter = truncateOneLine(rawCenter, config.diagnosticLineMaxChars)
--  const visibleNorm = normalizeVisibleText(visibleOutput)
--  const rawNorm = normalizeVisibleText(rawCenter)
--  const truncatedNorm = normalizeVisibleText(truncatedCenter)
--  if (!rawNorm && !truncatedNorm) return false
--
--  // 原文匹配优先，归一化匹配兜底，避免 ANSI、空白折叠或诊断行截断造成重复附录。
--  return (
--    visibleOutput.includes(rawCenter) ||
--    visibleOutput.includes(truncatedCenter) ||
--    visibleNorm.includes(rawNorm) ||
--    visibleNorm.includes(truncatedNorm)
--  )
--}
--
- // 将错误上下文集合格式化为字符串，方便追加到最后的 Bash 输出中（增强版：带优先级标签）
- function renderDiagnosticContexts(contexts: DiagnosticContext[], config: CompressionConfig) {
-   const out: string[] = []
-@@ -2168,6 +2141,12 @@ export function normalizePowerShellOutput(text: string) {
-   return changed ? next : text
- }
- 
-+/**
-+ * #293：组装并渲染完整的诊断附录（Appendix），作为 Bash 输出结尾的后缀。
-+ * 调用方只传入最终输出隐藏掉的文本生成的 snapshot；因此这里不和
-+ * visible output 做二次比对，避免诊断摘录与 exit notice 互相推断。
-+ * 优化：只在命令失败或有致命错误时才输出诊断信息，避免成功时的 token 浪费。
-+ */
- export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
-   const config = configOf(options.config)
- 
-@@ -2184,28 +2163,12 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options:
-   }
- 
-   // 优先级排序：first > fatal > recent
--  const priorityContexts: DiagnosticContext[] = []
--  
--  // 添加 first error contexts（最早的错误，通常是 root cause）
--  for (const ctx of snapshot.firstErrorContexts) {
--    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
--      priorityContexts.push(ctx)
--    }
--  }
--  
--  // 添加 fatal contexts（致命错误）
--  for (const ctx of snapshot.fatalContexts) {
--    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
--      priorityContexts.push(ctx)
--    }
--  }
--  
--  // 添加 recent contexts（最近的错误）
--  for (const ctx of snapshot.recentErrorContexts) {
--    if (!contextAlreadyVisible(ctx, options.visibleOutput, config)) {
--      priorityContexts.push(ctx)
--    }
--  }
-+  // #293：调用方只传入隐藏输出的 snapshot，不需要再和 visible output 比对
-+  const priorityContexts = [
-+    ...snapshot.firstErrorContexts,
-+    ...snapshot.fatalContexts,
-+    ...snapshot.recentErrorContexts,
-+  ]
- 
-   // 去重并限制数量
-   const uniqueContexts = Array.from(
+ // 默认配置，支持从环境变量读取进行动态调整
+@@ -1793,10 +1793,12 @@ export function renderDiagnosticAppendix(snapshot: DiagnosticSnapshot, options: RenderAppendixOptions) {
+   // first > fatal > recent；只对隐藏中心去重，最近队列不能覆盖首批标签。
+   const candidates = [...snapshot.firstErrorContexts, ...snapshot.fatalContexts, ...snapshot.recentErrorContexts]
+   const seen = new Set<number>()
+   const hiddenContexts = shouldShowDiagnostics
+     ? candidates.filter((ctx) => {
+-        if (seen.has(ctx.centerLine) || contextAlreadyVisible(ctx, options.visibleOutput, config)) return false
++        // 隐藏快照不再和可见输出比对，全流调用仍按最终窗口过滤。
++        if (seen.has(ctx.centerLine)) return false
++        if (options.visibleOutput !== undefined && contextAlreadyVisible(ctx, options.visibleOutput, config)) return false
+         seen.add(ctx.centerLine)
+         return true
+       }).slice(0, Math.max(0, config.maxDiagnosticContexts))
+     : []
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -268,7 +268,8 @@ const layer = Layer.effectDiscard(
+                   timeout: true,
+                   ...(warnings.length ? { warnings } : {}),
+                   durationMs,
+-                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, visibleOutput: "", config: { enabled } }) ].filter(Boolean).join("\n\n"),
++                  // 超时正文未展示原始流，诊断快照全部来自隐藏输出。
++                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, config: { enabled } }) ].filter(Boolean).join("\n\n"),
+                   diagnosticErrorLikeLines: diagnostic.errorLikeLines,
+                   diagnosticWarningLikeLines: diagnostic.warningLikeLines,
+                   diagnosticDiscardedChars: diagnostic.discardedChars,
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -652,10 +652,12 @@ describe("tool.bash", () => {
+         crossDiagnostic.end()
+         const crossSnapshot = crossDiagnostic.snapshot()
+         expect(JSON.stringify(crossSnapshot)).not.toContain(credential)
+-        const crossAppendix = renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })
++        const crossAppendix = renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1 })
+         expect(crossAppendix).toContain("> 2 | <REDACTED_CREDENTIAL> ERROR: rejected")
+         expect(crossAppendix).not.toContain(credential)
++        // 隐藏快照直接渲染，显式可见窗口仍沿用相同掩码去重。
++        expect(renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "" })).toBe(crossAppendix)
+         expect(renderDiagnosticAppendix(crossSnapshot, { durationMs: 3000, exitCode: 1, visibleOutput: crossMasked.text })).toBe("")
+         // 半径0与多个空白帧使标签完全离开邻域，续接仍受同一个canonical字段/长度门槛约束。
+         for (const label of ["password:", "passwd=", "pwd:", "secret=", "token:", "key=", "api_key:", "api-key=", "apikey:", "password\n:", "api_key\n ="]) {
+           const outside = new BashDiagnosticCollector({ diagnosticContextRadius: 0 })
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 index 92f415f32..fa8c031bd 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -324,11 +324,14 @@ function preview(text: string) {
+@@ -317,11 +317,13 @@ function preview(text: string) {
  
  function tail(text: string, maxLines: number, maxBytes: number) {
    // #283：折叠行末尾换行在压缩前去除，避免重复合并时引入多余空白行
@@ -210,110 +328,96 @@ index 92f415f32..fa8c031bd 100644
      return {
        text,
        cut: false,
-+      // #293：未截断时没有隐藏区；诊断仍走完整 visible 输出
 +      hidden: "",
      }
    }
  
-@@ -349,9 +352,13 @@ function tail(text: string, maxLines: number, maxBytes: number) {
+@@ -342,9 +344,13 @@ function tail(text: string, maxLines: number, maxBytes: number) {
      out.unshift(lines[i])
      bytes += size
    }
 +  const visible = out.join("\n")
-+  // #293：tail 只展示末尾窗口；hidden 是同一个 source 中被窗口丢弃的前缀。
-+  // 后续诊断只扫描这段文本，避免从全量输出再反推“是否已经可见”。
    return {
 -    text: out.join("\n"),
 +    text: visible,
      cut: true,
++    // 隐藏诊断只扫描同一 source 被 tail 丢弃的前缀，避免重复可见错误。
++    // 字符切片沿用最终窗口边界，保留超长行的隐藏部分。
 +    hidden: visible ? source.slice(0, Math.max(0, source.length - visible.length)) : source,
    }
  }
  
-@@ -795,7 +802,12 @@ export const ShellTool = Tool.define(
+@@ -616,7 +622,10 @@ export const ShellTool = Tool.define(
            const file = yield* cygpath(shell, text)
            if (file) return file
          }
 -        return FSUtil.normalizePath(path.resolve(root, FSUtil.windowsPath(text)))
 +        const textPath = FSUtil.windowsPath(text)
-+        // #293：PowerShell drive-relative 路径如 `C:../file` 以该盘符下 shell 当前
-+        // 目录为基准；Node 按进程级盘符 cwd 解析，与命令 cwd 无关，可能请求错误的
-+        // external_directory。权限扫描保持可见命令 cwd 为唯一信任边界，同时保留
-+        // `C:/file` 与 `C:\file` 这类绝对盘符路径。
++        // PowerShell 盘符相对路径按命令 cwd 解析，避免使用进程的盘符 cwd。
++        // 保留 C:/file 与 C:\file 这类绝对路径，权限扫描仍以可见 cwd 为边界。
 +        return FSUtil.normalizePath(path.resolve(root, Shell.ps(shell) ? textPath.replace(/^[A-Za-z]:(?![\\/])/, "") : textPath))
        }
        return path.resolve(root, text)
      })
-@@ -932,7 +944,7 @@ export const ShellTool = Tool.define(
-       })
- 
-       // 压缩诊断收集器：收集流式输出用于诊断分析
--      const diag = new BashDiagnosticCollector()
-+      const hiddenDiag = new BashDiagnosticCollector()
+@@ -746,7 +755,7 @@ export const ShellTool = Tool.define(
+-      // 诊断观察完整流，不能只观察已经丢弃旧块的内存窗口。
++      // 隐藏诊断只采样被窗口驱逐的原始块与 tail 前缀，避免重复可见错误。
+       // V1 采样与最终附录复用同一个开关，保留源逐字 opt-out。
+-      const diag = new BashDiagnosticCollector({ enabled: input.compressOutput })
++      const hiddenDiag = new BashDiagnosticCollector({ enabled: input.compressOutput })
        const started = Date.now()
  
        yield* ctx.metadata({
-@@ -957,8 +969,7 @@ export const ShellTool = Tool.define(
+         metadata: {
+@@ -766,8 +775,6 @@ export const ShellTool = Tool.define(
            // #126：字符串 chunk 写入环形缓冲与截断/落盘逻辑
            const onChunk = (chunk: string) => {
              if (!chunk) return Effect.void
 -            // 收集诊断信息用于压缩后的附录生成
 -            diag.push(chunk)
-+            // #293：诊断只收集被窗口丢弃的 chunk；可见输出不再进入摘录来源
-             // #215：display.push 返回终端屏幕快照，preview 仅做最终长度封顶，CR 覆盖与清行已由渲染器吸收
              const visible = preview(display.push(chunk))
              displayed = true
-@@ -969,6 +980,9 @@ export const ShellTool = Tool.define(
+             const size = Buffer.byteLength(chunk, "utf-8")
+@@ -776,6 +783,7 @@ export const ShellTool = Tool.define(
              while (used > keep && list.length > 1) {
                const item = list.shift()
                if (!item) break
-+              // #293：这些 chunk 已被内存窗口丢弃，最终不会进入模型可见输出。
-+              // 诊断摘录只从隐藏输出生成，避免和 exit notice 或可见输出互相推断。
 +              hiddenDiag.push(item.text)
                used -= item.size
                cut = true
              }
-@@ -1067,13 +1091,19 @@ export const ShellTool = Tool.define(
-       const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
+@@ -867,12 +875,15 @@ export const ShellTool = Tool.define(
+       // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
+       // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
+       const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
 -      diag.end()
-       // #282：截断前先统计 normalize 后全文，notice 的 total 必须是完整输出量
-       const normalizedStats = outputStats(normalized)
--      const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
+-      const diagnostic = diag.snapshot()
+       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
 -      if (end.cut) cut = true
-+      // #293：诊断收集改为隐藏模式，tail 输入跟随压缩开关，被丢弃的前缀进入隐藏诊断
-+      const end = tail(input.compressOutput ? compressed.text : normalized, limits.maxLines, limits.maxBytes)
 +      if (end.cut) {
 +        cut = true
-+        // #293：被 tail 窗口丢弃的前缀进入隐藏诊断
 +        hiddenDiag.push(end.hidden)
 +      }
-       if (!file && (end.cut || compressed.stats.applied)) {
-         // #130：落盘使用 normalize 后的全文
-         file = yield* trunc.write(normalized)
-       }
 +      hiddenDiag.end()
-+      const diagnosticSnapshot = hiddenDiag.snapshot()
- 
-       // #289：空输出检测前移，exit notice 依赖此标志决定是否追加退出码
-       const emptyOutput = end.text.length === 0
-@@ -1100,11 +1119,11 @@ export const ShellTool = Tool.define(
-           output
++      const diagnostic = hiddenDiag.snapshot()
+       // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
+       if (!file && (end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+         file = yield* trunc.write(raw)
        }
  
--      // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
--      const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
--      if (appendix) output += "\n\n" + appendix
--      // #289：metadata.exit 已保存结构化退出码，但 state.metadata 不会作为工具输出回放给模型。
--      // 空输出和缺少诊断摘要的失败输出会让后续模型误判命令状态，所以只追加退出码 notice。
-+      // #293：诊断附录只包含被最终输出窗口丢弃的文本——渲染摘录一定是
-+      // 真正缺失的信号，而不是可见输出的重复。
-+      const diagnosticAppendix = renderDiagnosticAppendix(diagnosticSnapshot, { durationMs: Date.now() - started, exitCode: code })
-+      if (diagnosticAppendix) output += "\n\n" + diagnosticAppendix
-+      // #293：exit notice 只描述进程如何结束；它与隐藏输出诊断互相独立，不能互相抑制。
+@@ -902,8 +913,8 @@ export const ShellTool = Tool.define(
+-      // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
++      // 附录只读取隐藏诊断；采样遗漏的恢复路径仍指向不可变原始归档。
+-      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
++      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, config: { enabled: input.compressOutput } })
+       if (appendix) output += "\n\n" + appendix
+-      // #289：metadata.exit 不进入模型回放，空输出或缺少诊断的失败需补退出码 notice。
++      // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
        // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
        const exitNotice =
          code === null
-@@ -1115,7 +1134,7 @@ export const ShellTool = Tool.define(
+           ? undefined
+@@ -913,7 +924,7 @@ export const ShellTool = Tool.define(
                  reason: "exit",
                  exit_code: code,
                })
@@ -322,22 +426,11 @@ index 92f415f32..fa8c031bd 100644
                ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
                : undefined
        if (exitNotice) meta.push(exitNotice)
-@@ -1141,8 +1160,8 @@ export const ShellTool = Tool.define(
-           ...bashCompressionMetadata(compressed.stats),
-           // 诊断元数据：暴露执行时长和错误/警告行数
-           durationMs: Date.now() - started,
--          diagnosticErrorLikeLines: diag.snapshot().errorLikeLines,
--          diagnosticWarningLikeLines: diag.snapshot().warningLikeLines,
-+          diagnosticErrorLikeLines: diagnosticSnapshot.errorLikeLines,
-+          diagnosticWarningLikeLines: diagnosticSnapshot.warningLikeLines,
-         },
-         output,
-       }
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 index 6eb026c71..884a95f14 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1533,8 +1533,7 @@ describe("tool.shell abort", () => {
+@@ -1804,8 +1804,7 @@ describe("tool.shell abort", () => {
      ),
    )
  
@@ -347,35 +440,28 @@ index 6eb026c71..884a95f14 100644
      runIn(
        projectRoot,
        Effect.gen(function* () {
-@@ -1545,21 +1544,49 @@ describe("tool.shell abort", () => {
-           "process.exit(9)",
-         ].join(";")
-         const command = `${bin} -e ${evalarg(script)}`
--        // #289：诊断场景脚本较慢（2.1s 等待根因行）且触发截断，15s 超时留足余量
-         const result = yield* run({
-           command: PS.has(sh()) ? `& ${command}` : command,
+@@ -1822,14 +1821,41 @@ describe("tool.shell abort", () => {
          })
  
          expect(result.metadata.exit).toBe(9)
 -        // #289：metadata.exit 仍记录真实退出码；模型可见输出里才省略 notice
          expect(result.output).toContain("<bash_high_signal_excerpt>")
 -        expect(result.output).not.toContain('reason="exit"')
-+        // #293：隐藏诊断不再抑制 exit notice——只有真正的空输出才省略退出码
 +        expect(result.output).toContain(
 +          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
 +        )
-+      }),
-+    ),
-+    15_000,
-+  )
-+
+       }),
+     ),
+     15_000,
+   )
+ 
 +  it.live("keeps visible diagnostics out of appendix without suppressing exit notice", () =>
 +    runIn(
 +      projectRoot,
 +      Effect.gen(function* () {
 +        const script = [
 +          "await new Promise((resolve) => setTimeout(resolve, 2100))",
-+          'console.log("fatal: visible root cause")',
++          "console.log(String.fromCharCode(102,97,116,97,108,58,32,118,105,115,105,98,108,101,32,114,111,111,116,32,99,97,117,115,101))",
 +          "process.exit(9)",
 +        ].join(";")
 +        const command = `${bin} -e ${evalarg(script)}`
@@ -385,20 +471,35 @@ index 6eb026c71..884a95f14 100644
 +
 +        expect(result.metadata.exit).toBe(9)
 +        expect(result.output).toContain("fatal: visible root cause")
-+        // #293：诊断摘录只来自最终输出隐藏掉的文本；可见 fatal 行本身不需要再复制到
-+        // <bash_high_signal_excerpt>，但执行状态 notice 仍然独立保留 exit code。
++        // 可见 fatal 不进入隐藏摘录，失败退出码仍需独立回放。
 +        expect(result.output).not.toContain("<bash_high_signal_excerpt>")
 +        expect(result.output).toContain(
 +          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
 +        )
-       }),
-     ),
-     15_000,
-   )
- 
--  it.live("omits exit notice for non-empty successful output", () =>
-+  it.live("omits exit notice for non-empty successful output", () =>
++      }),
++    ),
++    15_000,
++  )
++
+   it.live("omits exit notice for non-empty successful output", () =>
    // #289：非空成功是正常路径，零噪音不加 notice
      runIn(
-       projectRoot,
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -247,9 +247,11 @@
+         // 错误卡的命令行仍可展开错误，独立审查行的鼠标操作必须抵达子会话路由。
+         if (scenario === "error" || scenario === "aborted") {
+-          const x = lines[row + 1].indexOf("auto review")
+-          await app.mockMouse.drag(x, row + 1, x + 6, row + 1)
++          // 审查标签不再可选择；在命令正文上验证拖选不会变成导航。
++          const x = lines[row].indexOf(command)
++          await app.mockMouse.drag(x, row, x + 6, row)
+           expect(route.data).toMatchObject({ type: "session", sessionID })
+           await app.renderOnce()
+-          await app.mockMouse.click(x, row + 1)
++          app.renderer.clearSelection()
++          await clickVisibleText(app, "auto review")
+           expect(route.data).toMatchObject({ type: "session", sessionID: "ses_reviewer_child" })
+         }
 

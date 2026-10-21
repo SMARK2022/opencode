@@ -26,14 +26,13 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 index 128036f..497a11c 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -568,10 +568,15 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
+@@ -568,10 +568,14 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
  })
  
  export function filterCompacted(msgs: Iterable<WithParts>) {
 +  // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
-+  // #204：调用方传入顺序不一（流式 newest-first 或按时序数组），此处归一化把安全边界留在过滤器内部
-+  // #204：MessageID.ascending() 是持久化顺序不变量；依赖调用方顺序会复活 summary 前历史并撑爆下次压缩
-+  const ordered = Array.from(msgs).toSorted((a, b) => b.info.id.localeCompare(a.info.id))
++  // #204：沿用分页的时间/ID顺序；导入消息的ID未必单调，不能覆盖它们真实的创建顺序。
++  const ordered = Array.from(msgs).toSorted((a, b) => b.info.time.created - a.info.time.created || b.info.id.localeCompare(a.info.id))
    const result = [] as WithParts[]
    const completed = new Set<string>()
    let retain: MessageID | undefined
@@ -47,7 +46,7 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 index 9bb688a..fef1719 100644
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -1660,3 +1660,107 @@ describe("session.message-v2.latest", () => {
+@@ -1660,3 +1660,119 @@ describe("session.message-v2.latest", () => {
     expect(state.tasks[0]).toMatchObject({ type: "subtask", prompt: "inspect" })
    })
  })
@@ -153,5 +152,17 @@ index 9bb688a..fef1719 100644
 +        continueUser,
 +      ]).map((message) => message.info.id),
 +    ).toStrictEqual(expected)
++    // 导入summary的ID可以较小，仍应按创建时间找到同一压缩边界。
++    const importedID = MessageID.make("msg_filter_000")
++    const importedSummary = {
++      ...summaryAssistant,
++      info: { ...summaryAssistant.info, id: importedID },
++      parts: summaryAssistant.parts.map((part) => ({ ...part, messageID: importedID })),
++    }
++    const history = [oldUser, oldAssistant, tailUser, tailAssistant, compactionUser, importedSummary, continueUser].map((message, index) => ({
++      ...message, info: { ...message.info, time: { ...message.info.time, created: index + 1 } },
++    }))
++    expect(MessageV2.filterCompacted(history).map((message) => message.info.id)).toStrictEqual([COMPACTION_USER, importedID, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER])
++    expect(MessageV2.filterCompacted(history.toReversed()).map((message) => message.info.id)).toStrictEqual([COMPACTION_USER, importedID, TAIL_USER, TAIL_ASSISTANT, CONTINUE_USER])
 +  })
 +})

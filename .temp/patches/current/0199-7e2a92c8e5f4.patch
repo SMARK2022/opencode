@@ -3,6 +3,285 @@ From: SMARK <3222301373@qq.com>
 Date: Fri, 22 May 2026 23:42:03 +0800
 Subject: [PATCH] feat(permission): wire auto review into permission flow
 
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -12,1 +12,8 @@
+ import { PermissionSaved } from "./permission/saved"
++import { Config } from "./config"
++import { ConfigAutoReview } from "./config/auto-review"
++import { PermissionAuto } from "./permission/auto"
++import { PermissionReviewer } from "./permission/reviewer"
++import { PermissionV1 } from "./v1/permission"
++import { SessionID } from "@opencode-ai/schema/session-id"
++import { SessionMessage } from "./session/message"
+@@ -66,3 +71,6 @@
+ export class BlockedError extends Schema.TaggedErrorClass<BlockedError>()("PermissionV2.BlockedError", {
+   rules: Permission.Ruleset,
+-}) {}
++  reason: Schema.String.pipe(Schema.optional),
++}) {
++  override get message() { return this.reason ?? "This tool call was blocked by configured permissions." }
++}
+@@ -117,1 +125,5 @@
+     const pending = new Map<ID, Pending>()
++    const config = yield* Config.Service
++    const reviewer = yield* PermissionReviewer.Service
++    const cache = new Map<string, Set<string>>()
++    const circuits = new Map<string, { consecutive: number; recent: boolean[]; triggered: boolean }>()
+@@ -159,5 +173,55 @@
+       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+-      // 后续自动裁决接线前保留人工审批，不能把尚未解析的 auto 当成 allow。
+-      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") || effects.includes("auto") ? "ask" : "allow"
+-      return { effect, rules: all }
++      const resources = input.resources.filter((_, index) => effects[index] === "auto")
++      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
++      if (effect === "deny" || resources.length === 0) return { effect, rules: all }
++      const entries = yield* config.entries()
++      const options = entries.flatMap((entry) => entry.type === "document" && entry.info.auto_review ? [entry.info.auto_review] : [])
++        .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})
++      const recorded = input.source?.type === "tool" ? yield* sessions.message(SessionMessage.ID.make(input.source.messageID)) : undefined
++      const tool = recorded?.sessionID === input.sessionID && recorded.message.type === "assistant"
++        ? recorded.message.content.find((part) => part.type === "tool" && part.id === input.source?.callID) : undefined
++      // 审查读取已经记录的工具输入，不提前读取尚未获准访问的目标文件。
++      const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata }
++      const key = JSON.stringify([input.action, resources, metadata, input.agent, all, options, Config.latest(entries, "approvals_reviewer")])
++      const known = cache.get(input.sessionID) ?? new Set<string>()
++      cache.set(input.sessionID, known)
++      const state = circuits.get(input.sessionID) ?? { consecutive: 0, recent: [], triggered: false }
++      circuits.set(input.sessionID, state)
++      const record = (denied: boolean) => {
++        state.consecutive = denied ? state.consecutive + 1 : 0
++        state.recent.push(denied)
++        if (state.recent.length > Math.max(1, Math.floor(options.recent_denial_window ?? 50))) state.recent.shift()
++      }
++      if (known.has(key)) {
++        record(false)
++        return { effect, rules: all }
++      }
++      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict }, {
++        review: (request) => reviewer.review({ ...request, sessionID: input.sessionID }),
++      })
++      const sessionID = SessionID.make(input.sessionID)
++      // 使用既有兼容事件记录审查，不能冒充用户的 once/always 批准。
++      if (decision.source === "reviewer") {
++        const reviewID = "reviewID" in decision ? decision.reviewID : undefined
++        if (reviewID) yield* events.publish(PermissionV1.Event.ReviewCompleted, {
++          sessionID, reviewID, outcome: decision.action, rationale: decision.reason,
++        })
++        else yield* events.publish(PermissionV1.Event.ReviewFailed, { sessionID, reviewID: "unknown", reason: decision.reason })
++      }
++      if (decision.action === "deny") {
++        if (decision.source === "reviewer") {
++          record(true)
++          const recent = state.recent.filter(Boolean).length
++          if (!state.triggered && (state.consecutive >= Math.max(1, options.max_consecutive_denials ?? 3) || recent >= Math.max(1, options.max_recent_denials ?? 10))) {
++            state.triggered = true
++            yield* events.publish(PermissionV1.Event.CircuitBroken, { sessionID, consecutive: state.consecutive, recent })
++          }
++        }
++        return { effect: "deny" as const, rules: all, reason: `Auto permission preflight rejected this tool call: ${decision.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.` }
++      }
++      if (decision.action === "ask") return { effect: "ask" as const, rules: all }
++      record(false)
++      if (decision.source === "reviewer") known.add(key)
++      // 自动批准不覆盖请求中另一个仍为 ask 的资源。
++      return { effect, rules: all }
+     })
+@@ -200,4 +271,5 @@
+-          const result = yield* evaluateInput(input)
++          const result = yield* restore(evaluateInput(input))
+           if (result.effect === "deny") {
+             return yield* new BlockedError({
+               rules: relevant(input, result.rules),
++              reason: "reason" in result ? result.reason : undefined,
+@@ -310,1 +382,1 @@
+-  deps: [EventV2.node, Location.node, AgentV2.node, SessionStore.node, PermissionSaved.node],
++  deps: [EventV2.node, Location.node, AgentV2.node, SessionStore.node, PermissionSaved.node, Config.node, PermissionReviewer.node],
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -219,4 +219,5 @@
+                   ...LocationMutation.externalDirectoryPermission(external),
+                   sessionID: context.sessionID,
+                   agent: context.agent,
++                  metadata: { command: input.command, cwd: target.canonical, shell },
+                   source,
+@@ -230,5 +231,6 @@
+                 resources: [input.command],
+                 save: [input.command],
+                 sessionID: context.sessionID,
+                 agent: context.agent,
++                metadata: { command: input.command, cwd: target.canonical, shell },
+                 source,
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -144,4 +144,5 @@
+                       sessionID: context.sessionID,
+                       agent: context.agent,
++                      metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
+                       source: permissionSource,
+                     }),
+@@ -156,4 +157,5 @@
+                     sessionID: context.sessionID,
+                     agent: context.agent,
++                    metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
+                     source: permissionSource,
+                   }),
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -9,1 +9,8 @@
+ import { PermissionV2 } from "@opencode-ai/core/permission"
++import { Config } from "@opencode-ai/core/config"
++import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
++import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
++import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
++import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
++import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
++import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
+@@ -22,1 +29,22 @@
++let reviewSettings = new Config.Info({})
++let assessment: typeof PermissionReviewerSchema.Assessment.Type = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
++const reviewRequests: LLMRequest[] = []
++let reviewGate: Deferred.Deferred<void> | undefined
++let reviewStarted: Deferred.Deferred<void> | undefined
++let malformed = false
++const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
++  prepare: () => Effect.die("unused"),
++  stream: () => { throw new Error("review must not start a Session stream") },
++  generate: (request) => Effect.gen(function* () {
++    reviewRequests.push(request)
++    if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
++    if (reviewGate) yield* Deferred.await(reviewGate)
++    return new LLMResponse({ message: Message.assistant([]), finishReason: "tool-calls", events: malformed ? [] : [
++      LLMEvent.toolCall({ id: "review", name: "generate_object", input: assessment }),
++    ] })
++  }),
++}))
++const reviewModel = SessionRunnerModel.layerWith(() => Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route })))
++const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
++
+ const current = Layer.succeed(
+@@ -36,1 +64,4 @@
+-    [[Location.node, current]],
++    [[Location.node, current], [Config.node, reviewConfig],
++      // 只替换模型与运输边界；Permission、reviewer、Schema 和事件仍使用真实实现。
++      [SessionRunnerModel.node, reviewModel], [LayerNodePlatform.llmClient, reviewClient],
++    ],
+@@ -315,1 +346,72 @@
++  it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
++    reviewSettings = new Config.Info({})
++    reviewRequests.length = 0
++    malformed = false
++    reviewGate = undefined
++    reviewStarted = undefined
++    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
++    const service = yield* PermissionV2.Service
++    const sessions = yield* SessionStore.Service
++    const before = yield* sessions.context(SessionV2.ID.make("ses_test"))
++    // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
++    expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
++    const pending = yield* service.ask(assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." } }))
++    expect(pending.effect).toBe("ask")
++    yield* service.reply({ requestID: pending.id, reply: "once" })
++    expect(reviewRequests).toHaveLength(0)
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
++    // 危险组合不等待模型，也不会产生可被用户误批准的 pending。
++    const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)
++    expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
++    expect(denied.message).toContain("Do not retry the same outcome")
++    expect(reviewRequests).toHaveLength(0)
++    const edit = assertion({ action: "edit", resources: ["src/a.ts"], metadata: { filepath: "/project/src/a.ts", diff: "-old\n+new" } })
++    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
++    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(1)
++    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("generate_object")
++    expect(JSON.stringify(reviewRequests[0]?.tools)).not.toContain('"bash"')
++    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("-old")
++    // 同一路径的新编辑计划不能复用旧裁决；另一个 Session 也不能共享审批。
++    expect(yield* service.ask({ ...edit, metadata: { ...edit.metadata, diff: "-old\n+other" } })).toMatchObject({ effect: "allow" })
++    const database = yield* Database.Service
++    yield* database.db.insert(SessionTable).values({ id: SessionV2.ID.make("ses_other"), project_id: Project.ID.global, slug: "other", directory: "/project", title: "other", version: "test", agent: "test" }).run().pipe(Effect.orDie)
++    expect(yield* service.ask({ ...edit, sessionID: SessionV2.ID.make("ses_other") })).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(3)
++    yield* setRules([{ action: "edit", resource: "*", effect: "deny" }])
++    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(3)
++    yield* setRules([{ action: "edit", resource: "*", effect: "auto" }, { action: "edit", resource: "manual", effect: "ask" }])
++    const mixed = yield* service.ask({ ...edit, resources: ["src/a.ts", "manual"] })
++    expect(mixed.effect).toBe("ask")
++    yield* service.reply({ requestID: mixed.id, reply: "reject" })
++    expect(yield* service.list()).toEqual([])
++    // strict 强制只读操作也审查；结构错误按配置分别拒绝或交回人工。
++    yield* setRules([{ action: "*", resource: "*", effect: "auto" }])
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
++    expect(yield* service.ask(assertion({ action: "bash", resources: ["git status"], metadata: { command: "git status" } }))).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(5)
++    malformed = true
++    expect(yield* service.ask(edit)).toMatchObject({ effect: "deny" })
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ fallback: "user" }) })
++    const fallback = yield* service.ask(edit)
++    expect(fallback.effect).toBe("ask")
++    yield* service.reply({ requestID: fallback.id, reply: "reject" })
++    malformed = false
++    assessment = { ...assessment, outcome: "allow", risk_level: "critical" }
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
++    expect(yield* service.ask({ ...edit, metadata: { diff: "critical" } })).toMatchObject({ effect: "deny" })
++    assessment = { ...assessment, risk_level: "low" }
++    // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
++    reviewGate = yield* Deferred.make<void>()
++    reviewStarted = yield* Deferred.make<void>()
++    const fiber = yield* service.assert({ ...edit, metadata: { diff: "cancel" } }).pipe(Effect.forkScoped)
++    yield* Deferred.await(reviewStarted)
++    yield* Fiber.interrupt(fiber)
++    reviewGate = undefined
++    reviewStarted = undefined
++    expect(yield* service.list()).toEqual([])
++    expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
++    reviewSettings = new Config.Info({})
++  }))
+ })
+diff --git a/packages/schema/src/event-manifest.ts b/packages/schema/src/event-manifest.ts
+--- a/packages/schema/src/event-manifest.ts
++++ b/packages/schema/src/event-manifest.ts
+@@ -58,4 +58,8 @@
+   ...foundationDefinitions,
+   ...featureDefinitions,
+   ...SessionTodo.Event.Definitions,
++  // 两种运行时共用的审查观察事件属于过渡协议；旧 Asked/Replied 仍只进入兼容清单。
++  PermissionV1.Event.ReviewCompleted,
++  PermissionV1.Event.ReviewFailed,
++  PermissionV1.Event.CircuitBroken,
+ )
+diff --git a/packages/protocol/test/permission-event.test.ts b/packages/protocol/test/permission-event.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/protocol/test/permission-event.test.ts
+@@ -0,0 +1,22 @@
++import { expect, test } from "bun:test"
++import { Event } from "@opencode-ai/schema/event"
++import { EventManifest } from "@opencode-ai/schema/event-manifest"
++import { PermissionV1 } from "@opencode-ai/schema/permission-v1"
++import { SessionID } from "@opencode-ai/schema/session-id"
++import { Schema } from "effect"
++import { OpenCodeEvent } from "../src/groups/event"
++
++test("shared permission review events preserve the native event stream", () => {
++  const events = [
++    { id: Event.ID.create(), type: "permission.review.completed", data: { sessionID: SessionID.make("ses_test"), reviewID: "review", outcome: "allow", rationale: "bounded action" } },
++    { id: Event.ID.create(), type: "permission.review.failed", data: { sessionID: SessionID.make("ses_test"), reviewID: "review", reason: "provider unavailable" } },
++    { id: Event.ID.create(), type: "permission.review.circuit_broken", data: { sessionID: SessionID.make("ses_test"), consecutive: 3, recent: 3 } },
++    { id: Event.ID.create(), type: "server.connected", data: {} },
++  ] as const
++  // 与 SSE handler 使用同一编码器；任一观察事件不匹配都会阻止后续帧交付。
++  const encoded = events.map((event) => Schema.encodeUnknownSync(OpenCodeEvent)(event))
++  expect(encoded.map((event) => event.type)).toEqual(events.map((event) => event.type))
++  expect(Schema.decodeUnknownSync(OpenCodeEvent)(encoded[0])).toEqual(events[0])
++  // 双端共享规范对象，不另造同名 Schema 来通过编码。
++  expect(EventManifest.ServerDefinitions.find((event) => event.type === "permission.review.completed")).toBe(PermissionV1.Event.ReviewCompleted)
++})
 diff --git a/packages/core/src/v1/permission.ts b/packages/core/src/v1/permission.ts
 index c289196c18..664b6cd16f 100644
 --- a/packages/core/src/v1/permission.ts

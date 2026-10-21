@@ -559,10 +559,8 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
 --- a/packages/opencode/src/session/llm/request.ts
 +++ b/packages/opencode/src/session/llm/request.ts
-@@ -222,7 +222,11 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
+@@ -228,5 +228,9 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
      input.tools,
-     // ToolSelection.enabled 过滤被 UI 禁用的工具，控制模型可见性
-     // 三层过滤：用户显式禁用、权限分组禁用、UI 工具选择禁用，任一命中即排除
 -    (_, k) => input.user.tools?.[k] !== false && !disabled.has(k) && ToolSelection.enabled(k, input.permission),
 +    // #568：内部 Tool 必须绕过 user.tools 与 Permission.disabled 两个用户禁用源，供
 +    // experimental_repairToolCall 保留注册；用户可配置 Tool 仍执行原有三项权限条件。
@@ -572,6 +570,15 @@ diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/sr
    )
  }
  
+
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -122,2 +122,3 @@
+   // 估算和唯一 stream 共享最终工具定义，不重建权限或 Schema。
+-  const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })
++  // 内部repair保留执行注册，但与SDK的activeTools一致，不向模型广告invalid。
++  const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools).filter((tool) => tool.name !== "invalid")] })
 
 diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
 --- a/packages/core/src/storage/cold-storage.ts
@@ -719,15 +726,16 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      (args.operation === "cleanup" && args.delete)
    if (!taskBacked) throw new ValidationError({ message: "Maintenance task contains an immediate operation" })
    if (
-@@ -3270,7 +3328,10 @@ export async function maintain(
+@@ -3268,7 +3326,11 @@ export async function maintain(
    try {
      if (request.operation === "verify") {
        // repair task 复用同步 verify 的完整 owner/payload/state 快照，禁止维护第二套 payload-only verdict。
--      const report = db.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" })
-+      const report = db.transaction(
+-      const report = await run(() => db.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" }))
++      // 形状修复仍在既有连接预约和写事务内，checkpoint不得观察未提交状态。
++      const report = await run(() => db.transaction(
 +        (db) => verifyWith(db, { repair: request.repair, repairToolInput: request.repairToolInput === true }),
 +        { behavior: "immediate" },
-+      )
++      ))
        // repaired mismatch 不算失败；无法修复的 owner/missing/frame 类别才进入 task.failed。
        const failed = report.corruptOwners + report.missingPayloads + report.corruptPayloads
        task.processed = report.checkedOwners + report.checkedPayloads
@@ -1011,6 +1019,17 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
    provideTmpdirServer(
      ({ dir, llm }) =>
 
+diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/opencode/test/session/llm-native.test.ts
+--- a/packages/opencode/test/session/llm-native.test.ts
++++ b/packages/opencode/test/session/llm-native.test.ts
+@@ -573,1 +573,3 @@
+           expect(new Headers(request.model.route.defaults.headers).get("user-agent")).toBe("configured-agent")
++          // 执行表保留内部repair，而广告仅排除invalid，不能连带裁掉其他内部协议工具。
++          expect(request.tools.map((tool) => tool.name)).toEqual(["lookup", "StructuredOutput", "_noop"])
+@@ -588,1 +590,1 @@
+-        tools: { lookup },
++        tools: { lookup, invalid: lookup, StructuredOutput: lookup, _noop: lookup },
+
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
@@ -1069,7 +1088,7 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
  // #493：cold owner/payload 计数 helper——与生产 ColdStorage 共用 TxOrDb 形态直查投影表。
  function coldOwnerCount(sync: ColdStorage.TxOrDb, sessionIDs: string[]) {
    const allowed = new Set(sessionIDs)
-@@ -625,6 +673,58 @@ describe.serial("ColdStorage", () => {
+@@ -625,6 +673,75 @@ describe.serial("ColdStorage", () => {
      }),
    )
  
@@ -1091,6 +1110,23 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +      const row = useDb(sync, (db) => db.select().from(PartTable).where(eq(PartTable.id, partID)).get())
 +      expect(row?.data.type === "tool" ? row.data.state.input : undefined).toEqual({})
 +      expect(() => ColdStorage.status(sync)).not.toThrow()
++      // 同一坏行经真实task-backed入口再修复，锁定参数持久化与显式写授权。
++      const repairPartID = yield* seedMalformedToolPart(sessions, session, "{another bad json")
++      const prepared = ColdStorage.prepareMaintenance(ColdStorage.parseMaintenanceRequest({ operation: "verify", repairToolInput: true, batchSize: 50 }))
++      if (prepared.type !== "task") throw new Error("Expected tool input repair task")
++      expect(ColdStorage.parseMaintenanceTask(prepared.task).args).toMatchObject({ operation: "verify", repair: false, repairToolInput: true })
++      const database = yield* Database.Service
++      const result = yield* Effect.promise(() => ColdStorage.maintain(sync, prepared, {
++        lease: { assertOwned() {} },
++        checkpoint: async () => {},
++        // 使用现有同连接预约，避免同步测试client掩盖维护事务的实际执行边界。
++        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
++      }))
++      expect(result.type === "task" ? result.task.status : undefined).toBe("completed")
++      const repaired = sync.select().from(PartTable).where(eq(PartTable.id, repairPartID)).get()
++      expect(repaired?.data.type === "tool" ? repaired.data.state.input : undefined).toEqual({})
++      expect(repaired?.time_updated).toBe(1)
++      expect(ColdStorage.verify(sync, { repair: false, repairToolInput: true }).toolInputFixed).toBe(0)
 +      yield* sessions.remove(session.id)
 +    }),
 +  )

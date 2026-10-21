@@ -1,7 +1,7 @@
 diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
-new file mode 160000
-index 0000000000000000000000000000000000000000..d78e57cba18e59d351c698b735cc61bb0a342046
---- /dev/null
+index f4de5136bf122ba450a26887b27e1f3fbfa51f6d..d78e57cba18e59d351c698b735cc61bb0a342046 160000
+--- a/thirdparty/chatgpt-browser-agent
 +++ b/thirdparty/chatgpt-browser-agent
-@@ -0,0 +1 @@
+@@ -1 +1 @@
+-Subproject commit f4de5136bf122ba450a26887b27e1f3fbfa51f6d
 +Subproject commit d78e57cba18e59d351c698b735cc61bb0a342046

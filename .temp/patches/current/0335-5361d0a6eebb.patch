@@ -103,18 +103,4 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
        - name: Upload release assets with retry
 
 
-diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
---- a/packages/opencode/script/build.ts
-+++ b/packages/opencode/script/build.ts
-@@ -20,6 +20,10 @@ process.chdir(dir)
- 
- // CI（build-opencode.yml）的触发路径需覆盖本脚本构建的全部 workspace 依赖包，
- // 否则 core/plugin/sdk/ui 变更不会触发 CLI 重建，release 产物会滞后于源码。
-+// release 工作流先由 fetch-depth:0 的完整历史生成 release-notes.md（PREV_TAG 定位、
-+// 版本 bump commit 分两节统计新增与积累），再 Create or update GitHub Release 挂载
-+// notes 与 checksums 资产；build.ts 产出的各平台产物是 notes 中资产清单的来源，
-+// 三者共同保证发布说明与实际构建产物一一对应。
- const generated = await import("./generate.ts")
- 
- import { Script } from "@opencode-ai/script"
 

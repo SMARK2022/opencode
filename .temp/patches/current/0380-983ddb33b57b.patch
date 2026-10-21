@@ -16,17 +16,14 @@ client 侧加 4000 字符预检（跳过 status-only 更新，避免误拦 Pause
 diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
 --- a/packages/tui/src/component/dialog-goal.tsx
 +++ b/packages/tui/src/component/dialog-goal.tsx
-@@ -6,6 +6,10 @@
+@@ -5,6 +5,7 @@
+ import { useSDK } from "../context/sdk"
  import { useToast } from "../ui/toast"
  import { createMemo } from "solid-js"
++import { MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
  
-+// 与 packages/opencode/src/session/goal.ts 的 MAX_OBJECTIVE_CHARS（4000）对齐：
-+// tui 不依赖 server 包内部模块，本地常量保持同一上限，两处需同步修改
-+const MAX_OBJECTIVE_CHARS = 4000
-+
  // [local-smark] goal 管理 dialog
  // SDK 未重新生成 goalSet/goalClear 方法，直接用 sdk.fetch 调用 HTTP 端点
- // POST/DELETE 需手动设置 directory query param（sdk.fetch 的 rewrite 仅处理 GET/HEAD）
 @@ -33,6 +37,16 @@
  
    // POST /session/:id/goal — 设置或更新 goal
@@ -91,20 +88,21 @@ index 4192bc2af098cbd0d9765404abed2a7bd5967e4a..f0991a15a9a772a43627dec7ef071c6d
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -10,5 +10,6 @@
- import { SessionShare } from "@/share/session"
- import { Session } from "@/session/session"
- import { SessionGoal } from "@/session/goal"
-+import { GoalApiError } from "../groups/session"
- import { MessageV2 } from "@/session/message-v2"
- import { SessionRequestUsage } from "@/session/request-usage"
+@@ -33,6 +33,7 @@
+   CommandPayload,
+   DiffQuery,
+   ForkPayload,
++  GoalApiError,
+   GoalSetPayload,
+   InitPayload,
+   ListQuery,
 @@ -534,8 +534,14 @@
        objective: ctx.payload.objective,
        status: ctx.payload.status,
        tokenBudget: ctx.payload.tokenBudget,
--    }).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
+-    })).pipe(Effect.catchTag("GoalError", () => Effect.fail(new HttpApiError.BadRequest({}))))
 -    // [local-smark] GoalError→400 映射保持错误面契约：校验失败不伪装成 5xx
-+    }).pipe(
++    })).pipe(
 +      // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
 +      // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
 +      // 校验失败仍映射为 4xx，保持错误面契约：不伪装成 5xx
@@ -115,18 +113,45 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
      return { goal }
    })
  
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
-@@ -10,7 +10,7 @@
+diff --git a/packages/schema/src/session-goal.ts b/packages/schema/src/session-goal.ts
+--- a/packages/schema/src/session-goal.ts
++++ b/packages/schema/src/session-goal.ts
+@@ -3,6 +3,9 @@
+ import { define, inventory } from "./event"
+ import { optional } from "./schema"
+ import { SessionID } from "./session-id"
  
- // #364：goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
- // 防止超长 objective 污染上下文或触发 provider 请求体过大
--const MAX_OBJECTIVE_CHARS = 4000
++// 客户端预检与服务端校验共用静态上限，不能从界面导入持久化服务层。
 +export const MAX_OBJECTIVE_CHARS = 4000
++
+ // [local-smark] goal 状态机：active 为唯一续跑态；paused/complete/blocked 均为停止态，
+ // 由 tool 或用户显式切换——loop 不自动迁移状态，避免与用户意图冲突。
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
+--- a/packages/core/src/session/goal.ts
++++ b/packages/core/src/session/goal.ts
+@@ -3,7 +3,7 @@
+ import { Database } from "../database/database"
+ import { SessionID } from "@opencode-ai/schema/session-id"
+ import { SessionGoalTable } from "./goal.sql"
+-import { Goal, Status, Event } from "@opencode-ai/schema/session-goal"
++import { Goal, Status, Event, MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
+ import { eq } from "drizzle-orm"
+ import { Effect, Layer, Context, Schema, Option } from "effect"
+ import { EventV2 } from "../event"
+@@ -11,12 +11,8 @@
  
+-// #364：goal objective 最大字符数，与 Codex 的 4000 字符限制对齐，
+-// 防止超长 objective 污染上下文或触发 provider 请求体过大
+-const MAX_OBJECTIVE_CHARS = 4000
+-
  // #364：goal 状态：只有 active 会触发自动续跑；
  // paused/blocked/complete 均为停止态，loop 正常退出不续跑
+ // V1 与原生 runner 共用同一行状态，不增加第二套目标或预算状态机。
+-export { Status, Goal, Event }
++export { Status, Goal, Event, MAX_OBJECTIVE_CHARS }
+ 
+ export interface SetInput {
+   // objective 缺省时仅更新 status/budget，要求已有 goal 存在
 diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
 new file mode 100644
 --- /dev/null

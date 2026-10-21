@@ -9,15 +9,14 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 index 2f039a2ea0..a2dd0bfddd 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -427,6 +427,8 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
+@@ -432,6 +432,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
    sessionID: SessionID
    limit: number
    before?: string
-+  // #106：includeHidden 默认 false，page 层过滤隐藏消息/part
-+  includeHidden?: boolean
++  // 显式审计读取保留隐藏内容，普通分页在 LIMIT 前筛选可见消息。
+   includeHidden?: boolean
  }) {
    const { db } = yield* Database.Service
-   const before = input.before ? cursor.decode(input.before) : undefined
 @@ -448,7 +450,8 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
        .where(eq(SessionTable.id, input.sessionID))
        .get()
@@ -28,33 +27,6 @@ index 2f039a2ea0..a2dd0bfddd 100644
      return {
        items: [] as WithParts[],
        more: false,
-@@ -459,6 +462,16 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
-   const slice = more ? rows.slice(0, input.limit) : rows
-   const items = yield* hydrate(db, slice)
-   items.reverse()
-+  // #106：默认剔除 hidden 消息与 part；includeHidden=true 时原样返回
-+  if (!input.includeHidden) {
-+    for (let i = items.length - 1; i >= 0; i--) {
-+      if (items[i].info.hidden) {
-+        items.splice(i, 1)
-+        continue
-+      }
-+      items[i].parts = items[i].parts.filter((p) => !p.hidden)
-+    }
-+  }
-   const tail = slice.at(-1)
-   return {
-     items,
-@@ -475,7 +488,8 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean })
-     const result = [] as WithParts[]
-     let before: string | undefined
-     while (true) {
--      const next = yield* page({ sessionID, limit: size, before }).pipe(
-+      // #106：page 全量拉页，由 stream 的 opts.includeHidden 决定过滤
-+      const next = yield* page({ sessionID, limit: size, before, includeHidden: true }).pipe(
-         Effect.catchIf(NotFoundError.isInstance, () =>
-           Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
-         ),
 @@ -519,7 +533,8 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
      .where(and(eq(MessageTable.id, input.messageID), eq(MessageTable.session_id, input.sessionID)))
      .get()
@@ -69,7 +41,7 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 index e1bdddf8b6..d3b095e8b2 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
-@@ -829,14 +829,15 @@ const layer: Layer.Layer<
+@@ -777,14 +777,12 @@ const layer: Layer.Layer<
  
      const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
        if (input.limit) {
@@ -83,9 +55,6 @@ index e1bdddf8b6..d3b095e8b2 100644
 +        )).items
        }
  
-+      // #106：stream 会吞掉 page 的 NotFound；无 limit 路径先 get 校验 session 存在
-+      yield* get(input.sessionID)
-+
-       // 无 limit：走 MessageV2.stream 默认过滤 hidden
-       // #98：无 limit 列表必须过滤 hidden，禁止 page 全量回放
+       // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
+       yield* get(input.sessionID)
        const newestFirst = yield* MessageV2.stream(input.sessionID).pipe(

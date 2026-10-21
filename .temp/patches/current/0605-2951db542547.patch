@@ -633,15 +633,16 @@ new file mode 100644
 diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
 --- a/packages/opencode/src/config/tui.ts
 +++ b/packages/opencode/src/config/tui.ts
-@@ -22,6 +22,7 @@ import { Filesystem } from "@/util/filesystem"
+@@ -22,6 +22,8 @@
  import { ConfigVariable } from "@/config/variable"
  import { Npm } from "@opencode-ai/core/npm"
  import { FormatError, FormatUnknownError } from "@/cli/error"
 +import type { VoiceTranscriber } from "@opencode-ai/tui/prompt-voice-input"
++import { ConfigV2Compat } from "./v2-compat"
  import { TuiConfig } from "@opencode-ai/tui/config"
  
  export const Info = TuiConfig.Info
-@@ -87,9 +88,11 @@ const DefaultVoiceTranscriber = {
+@@ -87,9 +89,14 @@
    args: ["transcribe-file", "--file", "{file}", "--json"],
  }
  
@@ -653,7 +654,11 @@ diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/
 -function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber | undefined {
 +function voiceTranscriberFromMcpConfig(input: unknown, cwd: string, source: VoiceTranscriberSource): VoiceTranscriber | undefined {
    if (!isRecord(input) || !isRecord(input.mcp)) return
-   for (const [key, server] of Object.entries(input.mcp)) {
+-  for (const [key, server] of Object.entries(input.mcp)) {
++  // 只降低MCP结构，复用上游servers/disabled与flat优先级；auth仍按原文件位置读取。
++  const lowered = ConfigV2Compat.lower({ mcp: input.mcp }, source.filepath).value
++  if (!isRecord(lowered) || !isRecord(lowered.mcp)) return
++  for (const [key, server] of Object.entries(lowered.mcp)) {
      // 只复用名称明确包含 chatgpt 的 MCP 配置，避免把其它本地 MCP server 误当成语音后端。
 @@ -105,12 +108,14 @@ function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTransc
      if (!mcpServer || !command[0]) continue
@@ -754,15 +759,14 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
 --- a/packages/tui/src/prompt-voice-input.ts
 +++ b/packages/tui/src/prompt-voice-input.ts
 @@ -1,6 +1,7 @@
- import { spawn } from "node:child_process"
+ import spawn from "cross-spawn"
  import { which } from "@opencode-ai/core/util/which"
  import path from "path"
 +import { takeVoiceAuthNotice, transcribeDirect, type VoiceAuthRuntime } from "./util/voice-auth"
  
  export const VOICE_FILE_PLACEHOLDER = "{file}"
  // 四次完整daemon/HTTP预算加1/2/4秒退避和30秒清理余量；具体错误仍会提前返回。
-@@ -10,11 +11,23 @@ export const VOICE_TRANSCRIBE_TIMEOUT_MS = 1_237_000
- // 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
+@@ -10,10 +11,22 @@
  export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
  
 -export type VoiceTranscriber = {
@@ -798,7 +802,7 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
          } catch (error) {
            if (stopGeneration !== generation) return
            input.onError?.(error instanceof Error ? error.message : String(error))
-@@ -157,25 +173,46 @@ export async function transcribeVoiceFile(input: {
+@@ -156,25 +172,46 @@
    file: string
    transcriber: VoiceTranscriber
    timeout?: number
@@ -843,14 +847,14 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
    // 录音路径只替换 argv 项，绝不拼进 shell 字符串；空格、重定向符、管道、变量和分号都保持字面量。
    // 这个边界保证临时录音文件名不能变成命令语法，也不会触发 shell expansion。
    // AbortSignal.any 合并外部取消信号和兜底超时；任一触发都终止 transcriber CLI。
-   // 用户取消只终止transcriber父进程（tui 私有 runProcess 仅以 signal 杀父）；daemon/browser独立维护profile，不能被Windows进程树强杀连带结束。
+   // transcriber拥有的daemon/browser自行维护生命周期，取消不得连带递归终止后代。
    const timeoutSignal = AbortSignal.timeout(input.timeout ?? VOICE_TRANSCRIBE_TIMEOUT_MS)
 -  const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, input.file))], {
 +  const result = await runProcess([command, ...args.map((arg) => arg.replaceAll(VOICE_FILE_PLACEHOLDER, file))], {
      abort: input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal,
    })
    // stderr 优先展示外部转写器自己的诊断；没有 stderr 时才落回退出码。
-@@ -188,13 +225,20 @@ export async function transcribeVoiceFile(input: {
+@@ -187,13 +224,20 @@
  }
  
  async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
@@ -875,7 +879,7 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
      // 这里仅检查 argv[0] 是否可执行，不解释 args、不走 shell；缺失时在录音前失败，避免用户说完后才看到 spawn ENOENT。
      throw new Error(
        `Voice transcriber command not found: ${command}. Configure tui.voice.transcriber or enable a local ChatGPT MCP server.`,
-@@ -213,6 +257,14 @@ async function validateVoiceTranscriber(transcriber: VoiceTranscriber) {
+@@ -212,6 +256,14 @@
    }
  }
  
@@ -895,11 +899,11 @@ diff --git a/packages/tui/src/util/voice-auth.ts b/packages/tui/src/util/voice-a
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/util/voice-auth.ts
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,391 @@
 +import fs from "node:fs/promises"
-+import { spawn } from "node:child_process"
++import spawn from "cross-spawn"
 +import path from "path"
-+import { applyEdits, modify, parse, type FormattingOptions } from "jsonc-parser"
++import { applyEdits, modify, parse, type FormattingOptions, type ParseError } from "jsonc-parser"
 +import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 +import { isRecord } from "./record"
 +// type-only：voice-auth 需要 direct 变体形状，但不引入 prompt-voice-input 的运行时依赖，避免循环。
@@ -941,14 +945,17 @@ new file mode 100644
 +  }
 +  let data: unknown
 +  try {
-+    // tui 包没有 opencode 的 ConfigParse：jsonc-parser 的 parse 容忍注释/尾逗号，
-+    // 解析失败（残缺 JSON）按"无凭据"降级，与配置侧告警职责分离。
-+    data = parse(text)
++    // 与ConfigParse一致地容忍注释/尾逗号，但不能将带语法错误的部分对象当有效凭据。
++    const errors: ParseError[] = []
++    data = parse(text, errors, { allowTrailingComma: true })
++    if (errors.length) return undefined
 +  } catch {
 +    return undefined
 +  }
-+  if (!isRecord(data) || !isRecord(data.mcp) || !isRecord(data.mcp[key])) return undefined
-+  return parseVoiceAuth(data.mcp[key].auth)
++  if (!isRecord(data) || !isRecord(data.mcp)) return undefined
++  const servers = Object.hasOwn(data.mcp, key) ? data.mcp : isRecord(data.mcp.servers) ? data.mcp.servers : data.mcp
++  if (!isRecord(servers[key])) return undefined
++  return parseVoiceAuth(servers[key].auth)
 +}
 +
 +function parseVoiceAuth(input: unknown): VoiceAuth | undefined {
@@ -966,9 +973,11 @@ new file mode 100644
 +
 +export async function writeVoiceAuth(config: string, key: string, auth: VoiceAuth): Promise<void> {
 +  const text = await fs.readFile(config, "utf8")
-+  // 定点替换 mcp.<key>.auth：与 `opencode mcp add` 写 mcp.<name> 相同的注释保真机制；
-+  // 注意 mcp add 会整体替换 mcp.<name> 并移除 auth 子节点，那是用户主动重注册语义，这里不做防御。
-+  const edits = modify(text, ["mcp", key, "auth"], auth, { formattingOptions: formatting })
++  // 定点替换auth保持注释；mcp add主动重注册会移除auth，这里不额外防御用户操作。
++  // 定位真实raw节点而非lower产物：flat同名项优先，不能把native凭据写成旁边的新条目。
++  const data: unknown = parse(text)
++  const nested = isRecord(data) && isRecord(data.mcp) && !Object.hasOwn(data.mcp, key) && isRecord(data.mcp.servers)
++  const edits = modify(text, nested ? ["mcp", "servers", key, "auth"] : ["mcp", key, "auth"], auth, { formattingOptions: formatting })
 +  const next = applyEdits(text, edits)
 +  // 临时文件名含 PID+时间戳：两个 opencode 实例同时收割不会写同一个 tmp 互相覆盖。
 +  const temp = `${config}.tmp-${process.pid}-${Date.now()}`
@@ -1246,27 +1255,42 @@ new file mode 100644
 +  return text
 +}
 +
-+// harvest 的 spawn 封装：与 prompt-voice-input 的 runProcess 同款语义（收集 stdio+abort 信号），
-+// 收割预算由调用方的 AbortSignal.any 承担。
-+// signal 终止只杀父进程、不做 SIGKILL 升级：agent daemon/browser 独立维护 profile，
-+// 由 CLI ownership 自行收敛（与 transcribe-file 相同的 killTree:false 约定），进程树强杀会连带破坏登录态。
++// 收割与既有TUI入口同样使用cross-spawn及close结算；预算由外层signal承担。
++// source的一秒升级只针对本调用父进程，不能递归终止独立daemon/browser。
 +function runHarvestProcess(
 +  commandArgs: string[],
 +  options: { abort: AbortSignal },
 +): Promise<{ code: number; stdout: Buffer; stderr: Buffer }> {
 +  return new Promise((resolve, reject) => {
++    options.abort.throwIfAborted()
 +    const child = spawn(commandArgs[0], commandArgs.slice(1), {
 +      stdio: ["ignore", "pipe", "pipe"],
-+      signal: options.abort,
++      windowsHide: process.platform === "win32",
 +    })
 +    const stdout: Buffer[] = []
 +    const stderr: Buffer[] = []
 +    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
 +    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
++    let escalation: ReturnType<typeof setTimeout> | undefined
++    const abort = () => {
++      if (child.exitCode !== null || child.signalCode !== null) return
++      child.kill("SIGTERM")
++      escalation = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL") }, 1_000)
++      escalation.unref()
++    }
++    options.abort.addEventListener("abort", abort, { once: true })
++    if (options.abort.aborted) abort()
 +    child.on("error", reject)
-+    child.on("close", (code) => resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }))
++    child.on("close", (code) => {
++      clearTimeout(escalation)
++      options.abort.removeEventListener("abort", abort)
++      if (options.abort.aborted) return reject(options.abort.reason)
++      resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) })
++    })
 +  })
 +}
++
++export * as VoiceAuth from "./voice-auth"
 
 diff --git a/packages/tui/src/config/index.tsx b/packages/tui/src/config/index.tsx
 --- a/packages/tui/src/config/index.tsx
@@ -1332,27 +1356,37 @@ diff --git a/packages/tui/package.json b/packages/tui/package.json
      "./logo": "./src/logo.ts",
      "./ui/dialog": "./src/ui/dialog.tsx",
      "./ui/spinner": "./src/ui/spinner.ts",
-@@ -59,6 +61,7 @@
+@@ -61,6 +63,7 @@
      "diff": "catalog:",
      "effect": "catalog:",
      "fuzzysort": "catalog:",
+     "gray-matter": "4.0.3",
 +    "jsonc-parser": "3.3.1",
      "open": "10.1.2",
      "opentui-spinner": "catalog:",
-     "remeda": "catalog:",
+
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -967,5 +967,6 @@
+         "diff": "catalog:",
+         "effect": "catalog:",
+         "fuzzysort": "catalog:",
+         "gray-matter": "4.0.3",
++        "jsonc-parser": "3.3.1",
+         "open": "10.1.2",
 
 diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -1,6 +1,7 @@
- import * as PromptVoiceInput from "../../src/prompt-voice-input"
+@@ -1,5 +1,6 @@
  import { describe, expect, test } from "bun:test"
  import fs from "node:fs/promises"
 +import os from "node:os"
  import path from "path"
  import { createRoot, createSignal } from "solid-js"
  import { tmpdir } from "../fixture/fixture"
-@@ -12,7 +13,9 @@ import {
+@@ -11,7 +12,9 @@
    voiceHintVisible,
    type VoiceRecorderHandle,
    type VoiceTranscriber,
@@ -1362,7 +1396,7 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
  // createRefreshClock 是录音计时器走数的基础设施（主 Prompt 的 now 信号由它驱动）
  import { createRefreshClock } from "../../src/util/signal"
  
-@@ -868,6 +871,139 @@ describe("prompt voice input", () => {
+@@ -908,6 +911,139 @@
      },
      240_000,
    )
@@ -1507,7 +1541,7 @@ diff --git a/packages/tui/test/util/voice-auth.test.ts b/packages/tui/test/util/
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/util/voice-auth.test.ts
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,487 @@
 +import { describe, expect, test } from "bun:test"
 +import path from "path"
 +import { tmpdir } from "../fixture/fixture"
@@ -1593,6 +1627,9 @@ new file mode 100644
 +
 +    const broken = path.join(tmp.path, "broken.json")
 +    await Bun.write(broken, "{ not json")
++    expect(await readVoiceAuth(broken, "chatgpt")).toBeUndefined()
++    // jsonc-parser会返回部分对象：完整auth后面的语法错误也必须按source合同拒绝。
++    await Bun.write(broken, JSON.stringify({ mcp: { chatgpt: { auth } } }) + " trailing")
 +    expect(await readVoiceAuth(broken, "chatgpt")).toBeUndefined()
 +
 +    expect(await readVoiceAuth(path.join(tmp.path, "absent.json"), "chatgpt")).toBeUndefined()
@@ -1720,7 +1757,8 @@ new file mode 100644
 +      cookies: [{ name: "oai-did", value: "did-9", expires: -1 }],
 +      fetchedAt: "2026-09-06T01:00:00Z",
 +    })
-+    await Bun.write(script, `process.stdout.write(${JSON.stringify(payload)})`)
++    const invoked = path.join(tmp.path, "invoked")
++    await Bun.write(script, `require('fs').writeFileSync(${JSON.stringify(invoked)}, '1'); process.stdout.write(${JSON.stringify(payload)})`)
 +    const direct: VoiceTranscriberDirect = {
 +      type: "chatgpt-direct",
 +      config,
@@ -1730,6 +1768,9 @@ new file mode 100644
 +      scope: "user",
 +      transcriber: { command: "unused", args: [] },
 +    }
++    // 已取消时不能spawn；只观察本fixture写出的marker，不调用真实agent或浏览器。
++    await expect(ensureVoiceCredential(direct, { signal: AbortSignal.abort(new Error("cancelled harvest")), runtime: { now: () => now } })).rejects.toThrow("cancelled harvest")
++    expect(await Bun.file(invoked).exists()).toBe(false)
 +    const auth = await ensureVoiceCredential(direct, { runtime: { now: () => now } })
 +    expect(auth.access_token).toBe("harvested-token")
 +    // CDP 会话 cookie expires=-1 归一为 0
@@ -1992,7 +2033,7 @@ new file mode 100644
 diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts
-@@ -3,10 +3,12 @@ import path from "path"
+@@ -3,10 +3,15 @@
  import { pathToFileURL } from "url"
  import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -2002,6 +2043,9 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
  import { Global } from "@opencode-ai/core/global"
  import { Config } from "@/config/config"
 +import { ConfigParse } from "@/config/parse"
++import { ConfigV2Compat } from "@/config/v2-compat"
++import { readVoiceAuth, writeVoiceAuth } from "@opencode-ai/tui/util/voice-auth"
++import { isRecord } from "@opencode-ai/tui/util/record"
  import { ConfigPlugin } from "@/config/plugin"
  import { CurrentWorkingDirectory } from "@/config/tui-cwd"
  import { TuiConfig } from "../../src/config/tui"
@@ -2087,7 +2131,7 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
      }),
    ),
  )
-@@ -678,7 +683,63 @@ it.instance("does not infer the voice transcriber from unrelated local MCP serve
+@@ -678,7 +686,77 @@
        })
  
        const config = yield* getTuiConfig(test.directory)
@@ -2127,9 +2171,7 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
 +  ),
 +)
 +
-+// INV-08：auth 节点是 mcp 条目的未知嵌套字段，不得破坏 opencode 的 MCP schema 解码
-+//（Effect decode 剥离未知嵌套字段，顶层未知键检查不受影响）。这是凭据内嵌配置文件的前提；
-+// 写入方 voice-auth 位于 tui 包，这里直接用 jsonc+modify 的等价结构验证 schema 侧不可见性。
++// INV-08：实际写入auth后再经过MCP lower/schema和真实TUI推导，覆盖两种布局及disabled优先级。
 +it.instance("keeps the voice auth node invisible to the mcp config schema", () =>
 +  withCleanState(
 +    Effect.gen(function* () {
@@ -2142,13 +2184,29 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
 +        fetched_at: "2026-09-06T00:00:00Z",
 +        cookies: { "oai-did": { value: "did-1", expires: 0 } },
 +      }
-+      yield* fs.writeJson(config, { mcp: { chatgpt: { type: "local", command: ["node", "mcp-server.js"], auth: authNode } } })
-+      const text = yield* fs.readFileStringSafe(config).pipe(Effect.orElseSucceed(() => ""))
-+      const data = ConfigParse.jsonc(text ?? "{}", config)
-+      const server = (data as { mcp: { chatgpt: unknown } }).mcp.chatgpt
-+      const decoded = ConfigParse.schema(ConfigMCPV1.Info, server, config)
-+      expect(decoded.type).toBe("local")
-+      expect("auth" in decoded).toBe(false)
++      const agentDir = path.join(test.directory, "tools", "chatgpt-agent")
++      yield* fs.writeWithDirs(path.join(agentDir, "chatgpt.js"), "")
++      const server = { type: "local", command: [process.execPath, path.join(agentDir, "mcp-server.js")] }
++      for (const item of [
++        { mcp: { chatgpt: server }, enabled: true },
++        { mcp: { servers: { chatgpt: server } }, enabled: true },
++        { mcp: { chatgpt: { ...server, disabled: true } }, enabled: false },
++        { mcp: { servers: { chatgpt: { ...server, disabled: true } } }, enabled: false },
++        { mcp: { chatgpt: server, servers: { chatgpt: { ...server, disabled: true } } }, enabled: true },
++      ]) {
++        yield* fs.writeJson(config, { mcp: item.mcp })
++        yield* Effect.promise(() => writeVoiceAuth(config, "chatgpt", authNode))
++        expect(yield* Effect.promise(() => readVoiceAuth(config, "chatgpt"))).toEqual(authNode)
++        const text = yield* fs.readFileStringSafe(config)
++        const lowered = ConfigV2Compat.lower(ConfigParse.jsonc(text ?? "{}", config)).value
++        if (!isRecord(lowered) || !isRecord(lowered.mcp)) throw new Error("expected lowered MCP config")
++        const decoded = ConfigParse.schema(ConfigMCPV1.Info, lowered.mcp.chatgpt, config)
++        expect(decoded.type).toBe("local")
++        expect("auth" in decoded).toBe(false)
++        const resolved = yield* getTuiConfig(test.directory)
++        expect(resolved.voice?.transcriber?.type === "chatgpt-direct").toBe(item.enabled)
++        if (item.enabled) expect(resolved.voice?.transcriber).toMatchObject({ config, key: "chatgpt", scope: "project", script: path.join(agentDir, "chatgpt.js") })
++      }
      }),
    ),
  )

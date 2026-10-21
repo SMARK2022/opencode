@@ -1,10 +1,8 @@
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -196,7 +196,11 @@ export async function discoverOrSpawnDaemon(
-       applyProxyEnv(env)
-       // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
-       const proc = deps.spawn([process.execPath, daemonFile], {
+@@ -210,3 +210,7 @@ export async function discoverOrSpawnDaemon(
+         const proc = deps.spawn([process.execPath, daemonFile], {
 -        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon
 +        // #139：Unix 下 detached，避免 TUI 进程组 SIGINT 带走共享 daemon。
 +        // Windows 不能用 detached:true（Bun #31603：子进程被 job object 绑定，
@@ -12,8 +10,6 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 +        // 调用 FreeConsole 实现（见 worker.ts win32DetachConsole）：worker 脱离
 +        // 共享 console 后，CTRL_C_EVENT 不再送达，等价 Unix detached 进程组。
          detached: process.platform !== "win32",
-         env: {
-           ...env,
 
 
 diff --git a/packages/tui/src/terminal-win32.ts b/packages/tui/src/terminal-win32.ts
@@ -77,15 +73,12 @@ diff --git a/packages/tui/src/terminal-win32.ts b/packages/tui/src/terminal-win3
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -16,6 +16,7 @@ import { ServerLock } from "@/cli/tui/server-lock"
- import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
- import { SessionActivity } from "@/session/activity"
- import { DisposedReason, Event as ServerEvent } from "@/server/event"
+@@ -16,3 +16,4 @@
+ import { DisposedReason, Event } from "@/server/event"
 +import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
  
  Heap.start()
- 
-@@ -80,6 +81,15 @@ if (isDaemon) {
+@@ -34,4 +35,13 @@ if (isDaemon) {
    const log = {
      info: (message: string, fields: Record<string, unknown> = {}) => console.log(`[daemon] ${message}`, fields),
    }
@@ -98,30 +91,25 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +  // 送达 worker（等价 Unix detached 进程组）。必须在 HTTP server 启动前调用；
 +  // --print-logs 调试模式保留 console 以便 stderr 日志输出（有意降级）。
 +  if (!printLogs) win32DetachConsole()
-   // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
-   // #71：锁可见后再预热，避免 npm/代理冷启动拖死 TUI 60s 健康等待（覆盖 #56 预监听预热）
-   // #235：内部回环服务器先于锁写入——launcher 健康轮询依赖锁中端口
+   // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
 
 
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -15,6 +15,7 @@ import path from "path"
- import { fileURLToPath } from "url"
- import { tmpdir } from "../../fixture/fixture"
- import * as ServerLockModule from "../../../src/cli/tui/server-lock"
-+import * as Win32Module from "@opencode-ai/tui/terminal-win32"
+@@ -17,3 +17,4 @@
+ import { ServerLock } from "../../../src/cli/tui/server-lock"
++import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
  
  const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
- // #259：daemon stop 是用户可见的 CLI 行为，测试必须从真实入口验证
-@@ -578,6 +579,58 @@ describe("daemon lifecycle", () => {
+@@ -396,6 +397,59 @@ describe("daemon lifecycle", () => {
      },
      DAEMON_START_TIMEOUT_MS + 5_000,
    )
-+  test("win32DetachConsole is a no-op on non-Windows platforms", () => {
++  test.skipIf(process.platform === "win32")("win32DetachConsole is a no-op on non-Windows platforms", () => {
 +    // win32DetachConsole 在非 win32 平台必须静默返回，不抛错、不依赖 kernel32。
 +    // 这是跨平台安全边界：worker.ts 无条件 import win32 模块，函数内自检平台。
-+    expect(() => Win32Module.win32DetachConsole()).not.toThrow()
++    expect(() => win32DetachConsole()).not.toThrow()
 +  })
 +
 +  test(
@@ -141,11 +129,11 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +      const { proc, lock } = await spawnDaemon(lockPath, { OPENCODE_DAEMON_IDLE_TIMEOUT_MS: "30000" })
 +
 +      try {
-+        const health = await fetch(`http://127.0.0.1:${lock.port}/global/health`)
++        const health = await fetch(`http://127.0.0.1:${lock.port}/global/health`, { headers: ServerLock.headers(credentials) })
 +        expect(health.ok).toBe(true)
 +
 +        const ctrl = new AbortController()
-+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal })
++        const res = await fetch(`http://127.0.0.1:${lock.port}/global/event`, { signal: ctrl.signal, headers: ServerLock.headers(credentials) })
 +        expect(res.ok).toBe(true)
 +        if (!res.body) throw new Error("missing SSE body")
 +        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
@@ -159,18 +147,19 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 +
 +        if (!lock.controlPort) throw new Error("missing control port")
 +        const status = await fetch(
-+          `http://127.0.0.1:${lock.controlPort}${ServerLockModule.CONTROL_STATUS_PATH}`,
-+          { headers: { [ServerLockModule.CONTROL_TOKEN_HEADER]: lock.token } },
++          `http://127.0.0.1:${lock.controlPort}${ServerLock.CONTROL_STATUS_PATH}`,
++          { headers: { [ServerLock.CONTROL_TOKEN_HEADER]: lock.token } },
 +        )
 +        expect(status.ok).toBe(true)
 +      } finally {
-+        if (ServerLockModule.alive(proc.pid)) proc.kill()
++        if (ServerLock.alive(proc.pid)) proc.kill()
 +        await proc.exited.catch(() => undefined)
 +      }
 +    },
++    DAEMON_START_TIMEOUT_MS + 10_000,
 +  )
 +
-   // #173：短 idle 超时 + SSE 断开后守护进程应退出并清锁
+ 
    test(
-     "daemon exits after the last SSE client disconnects",
+     "SIGTERM triggers graceful shutdown and clears the lock file",
 

@@ -1044,16 +1044,16 @@ diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -298,6 +298,8 @@ for (const item of targets) {
-   await $`mkdir -p dist/${name}/bin`
- 
+@@ -294,1 +294,3 @@ for (const item of targets) {
    const workerPath = "./src/cli/tui/worker.ts"
-+  // #558：voice Worker 是独立 entrypoint——TUI 已迁 packages/tui，跨包以 workspace 相对路径引用源文件。
-+  const voiceWorkerPath = "../tui/src/prompt-voice-recorder-worker.ts"
-   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
-   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
- 
-@@ -329,6 +331,8 @@ for (const item of targets) {
++  // 编译资源使用稳定的虚拟入口名；跨包源码路径不能拼入bunfs根，否则..会越出资源目录。
++  const voiceWorkerPath = "opencode-voice-recorder-worker.ts"
+@@ -318,2 +320,4 @@ for (const item of targets) {
+     files: {
++      // 复用已有虚拟模块机制，源码仍由tui owner维护；编译后无需访问checkout。
++      [voiceWorkerPath]: await Bun.file(path.resolve(dir, "../tui/src/prompt-voice-recorder-worker.ts")).text(),
+       [treeSitterWorkerPath]: treeSitterWorker,
+@@ -329,6 +333,8 @@ for (const item of targets) {
      entrypoints: [
        "./src/index.ts",
        workerPath,
@@ -1062,7 +1062,7 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
        treeSitterWorkerPath,
        ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
        // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
-@@ -339,6 +343,8 @@ for (const item of targets) {
+@@ -339,6 +345,8 @@ for (const item of targets) {
        OPENCODE_VERSION: `'${Script.version}'`,
        OPENCODE_MODELS_DEV: generated.modelsData,
        OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
@@ -1071,7 +1071,7 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
        OPENCODE_WORKER_PATH: workerPath,
        OPENCODE_CHANNEL: `'${Script.channel}'`,
        OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
-@@ -376,6 +382,22 @@ for (const item of targets) {
+@@ -376,6 +384,22 @@ for (const item of targets) {
          throw new Error(stderr.trim() || `version smoke exited ${exitCode} without output`)
        }
        console.log(`Smoke test passed: ${versionOutput}`)
@@ -1086,8 +1086,8 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 +        new Response(voiceSmoke.stdout).text(),
 +        new Response(voiceSmoke.stderr).text(),
 +      ])
-+        // #558：marker 必须逐字匹配——多余 stdout 说明 Worker 入口被污染。
-+    if (voiceExit !== 0 || voiceStdout.trim() !== "voice-worker-probe-ok") {
++      // marker 必须逐字匹配，多余stdout也不能冒充Worker入口成功。
++      if (voiceExit !== 0 || voiceStdout.trim() !== "voice-worker-probe-ok") {
 +        throw new Error(voiceStderr.trim() || `voice worker smoke exited ${voiceExit} without marker`)
 +      }
 +      console.log("Voice worker smoke test passed")
@@ -1098,47 +1098,41 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
 --- a/packages/opencode/src/index.ts
 +++ b/packages/opencode/src/index.ts
-@@ -38,6 +38,27 @@ if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
-   await import("./cli/tui/worker")
-   await new Promise<never>(() => {})
+@@ -39,3 +39,25 @@ if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
  }
-+// #558：voice Worker compiled smoke——build.ts 以 OPENCODE_PROCESS_ROLE=voice-smoke spawn 本入口，
-+// probe ack + 10s 超时 race 后打印固定 marker（stdout 须恰为 voice-worker-probe-ok）。
++// 独立诊断角色复用生产地址解析，不能进入CLI或native录音路径。
 +if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
 +  const { voiceWorkerPath } = await import("../../tui/src/prompt-voice-recorder")
 +  const worker = new Worker(voiceWorkerPath(), { ref: true })
++  const acknowledged = Promise.withResolvers<void>()
++  const closed = Promise.withResolvers<void>()
++  const timeout = Bun.sleep(10_000).then(() => {
++    throw new Error("Compiled voice Worker probe timed out")
++  })
++  worker.onmessage = (event) => { if (event.data?.type === "probe") acknowledged.resolve() }
++  worker.onerror = (event) => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
++  worker.addEventListener("close", () => closed.resolve(), { once: true })
++  worker.postMessage({ type: "probe" })
 +  try {
-+    const ack = new Promise<void>((resolve) => {
-+      worker.onmessage = (event: MessageEvent) => {
-+        if ((event.data as { type?: string }).type === "probe") resolve()
-+      }
-+    })
-+    worker.postMessage({ type: "probe" })
-+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("voice worker probe timeout")), 10_000))
-+    await Promise.race([ack, timeout])
-+    // #558：probe 成功即退出——不进入 CLI/yargs 主路径。
-+    console.log("voice-worker-probe-ok")
-+    process.exit(0)
++    // ack证明入口运行，close证明线程退出；两者完成才允许报告成功。
++    await Promise.race([Promise.all([acknowledged.promise, closed.promise]), timeout])
++    process.stdout.write("voice-worker-probe-ok\n")
 +  } finally {
 +    worker.terminate()
 +  }
++  process.exit(0)
 +}
  
  const args = hideBin(process.argv)
- 
 
 diff --git a/packages/opencode/src/server/shared/workspace-routing.ts b/packages/opencode/src/server/shared/workspace-routing.ts
 --- a/packages/opencode/src/server/shared/workspace-routing.ts
 +++ b/packages/opencode/src/server/shared/workspace-routing.ts
-@@ -22,6 +22,8 @@ export function getWorkspaceRouteSessionID(url: URL) {
-   // [local-smark] /session/preview 是批量预览端点，路径中无 :sessionID，
-   // 不能让 SessionID.make("preview") 触发品牌校验异常
-   if (url.pathname === "/session/preview") return null
-+  // #558：/session/search/* 是 collection route——无 :sessionID，SessionID.make("search") 同样会品牌 die→500。
+@@ -27,2 +27,2 @@ export function getWorkspaceRouteSessionID(url: URL) {
+-  // search是列表端点路径而非Session ID，必须在品牌解析前排除。
+-  if (url.pathname === "/session/search/scan") return null
++  // 整个search子树均是集合路由，不能把search解析成带品牌的Session ID。
 +  if (url.pathname.startsWith("/session/search/")) return null
- 
-   const id =
-     url.pathname.match(/^\/session\/([^/]+)(?:\/|$)/)?.[1] ??
 
 diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
@@ -1694,55 +1688,34 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/opencode/test/cli/db-maintenance.test.ts
 --- a/packages/opencode/test/cli/db-maintenance.test.ts
 +++ b/packages/opencode/test/cli/db-maintenance.test.ts
-@@ -117,6 +117,31 @@ async function runCli(root: string, args: string[]) {
-   ])
-   return { exitCode, stdout, stderr }
- }
-+
-+// #558：流式读 stderr 至 marker（20s 上限）——分类测试只观察自己 owned 的输出，
-+// 观测即 kill，不等进程退出/Agent run，避免被无关输出污染。
-+async function runCliUntilStderr(root: string, args: string[], marker: string) {
-+  const proc = Bun.spawn([process.execPath, INDEX_TS, ...args], {
-+    env: isolatedEnv(root),
-+    ...PIPE_OPTIONS,
-+    windowsHide: process.platform === "win32",
-+  })
-+  try {
-+    const reader = proc.stderr.getReader()
-+    const decoder = new TextDecoder()
-+    let seen = ""
-+    const deadline = Date.now() + 20_000
-+    while (Date.now() < deadline) {
-+      const chunk = await reader.read()
-+      if (chunk.done) break
-+      seen += decoder.decode(chunk.value, { stream: true })
-+      if (seen.includes(marker)) return { observed: true, seen }
-+    }
-+    return { observed: false, seen }
-+  } finally {
-+    proc.kill()
-+  }
-+}
- function answerPrompt(proc: IPty, prompt: string, answer: "y" | "n") {
-   let answered = false
-   // 只应答首个匹配 prompt；后续 reclaim 等待由各自用例单独控制，避免双写 stdin。
-@@ -161,6 +186,16 @@ describe("database maintenance CLI", () => {
+@@ -1,1 +1,3 @@
+ import { describe, expect, test } from "bun:test"
++import yargs from "yargs"
++import { RunCommand } from "../../src/cli/cmd/run"
+@@ -161,6 +163,16 @@ describe("database maintenance CLI", () => {
        }
      }
    }, 90_000)
 +
-+  // #558（D1）：分类测试只观察自己 owned 的输出——流式读 stderr 到首个 machine 字段即 kill，
-+  // 不等进程退出/Agent run，避免无关运行消息污染分类断言（migration marker 仅在 schema 升级时出现，
-+  // 目标 fresh db 无 migration 输出，改用 db status 恒定的 pageSize 字段作为 owned marker）。
-+  test("does not classify a run message containing db status", async () => {
-+    await using tmp = await tmpdir()
-+    const result = await runCliUntilStderr(tmp.path, ["db", "status"], '"pageSize"')
-+    // marker 命中即证明维护入口进入自身输出路径；分类器不得把 db status 行当作 run message。
-+    expect(result.observed).toBe(true)
-+  }, 90_000)
++  // 目标已移除旧首跑迁移提示；直接使用实际命令定义验证正文归属，不进入Agent handler。
++  test("does not classify a run message containing db status as a database command", () => {
++    const selected: string[] = []
++    const parsed = yargs(["run", "db", "status"])
++      .command({ ...RunCommand, handler: () => { selected.push("run") } })
++      .parseSync()
++    expect(selected).toEqual(["run"])
++    expect(parsed.message).toEqual(["db", "status"])
++  })
    // progress 只观察已提交 checkpoint，测试不预设总量、百分比或内部 batch 次数。
    ptyInteractive("reports committed compression progress in an interactive terminal", async () => {
      await using tmp = await tmpdir({ init: seedColdParts })
+
+diff --git a/packages/opencode/test/server/workspace-routing.test.ts b/packages/opencode/test/server/workspace-routing.test.ts
+--- a/packages/opencode/test/server/workspace-routing.test.ts
++++ b/packages/opencode/test/server/workspace-routing.test.ts
+@@ -55,1 +55,2 @@
+     expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/scan"))).toBeNull()
++    expect(getWorkspaceRouteSessionID(new URL("http://localhost/session/search/next"))).toBeNull()
 
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts

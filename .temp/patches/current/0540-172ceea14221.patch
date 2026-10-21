@@ -15,7 +15,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index 4a61d4905..7a4f1ca97 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -513,6 +513,16 @@ async function writeDeadLease(leaseDir: string, taskID: string, dbPath: string,
+@@ -515,6 +515,16 @@ async function writeDeadLease(leaseDir: string, taskID: string, dbPath: string,
    )
  }
  
@@ -32,25 +32,25 @@ index 4a61d4905..7a4f1ca97 100644
  
  // #539：recovery 段：blocked-1 → continue → lease-release → release → completed；返回可发 start 的 lock。
  // 与主 lifecycle 用例共享同一握手，避免 Force A/B 复制第三套 recovery 时序。
-@@ -523,7 +533,7 @@ async function recoverStageWorkerToIdle(
+@@ -525,7 +535,7 @@ async function recoverStageWorkerToIdle(
    taskID: string,
  ) {
    expect(await readUntil(reader, "rename-blocked-1", 30_000)).toContain("rename-blocked-1")
 -  await proc.stdin.write("continue\n")
 +  await stageWorkerStdin(proc).write("continue\n")
    expect(await readUntil(reader, "lease-release-blocked", 30_000)).toContain("lease-release-blocked")
-   let lock: ServerLockModule.ServerLock | undefined
+   let lock: ServerLock.ServerLock | undefined
    const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-@@ -533,7 +543,7 @@ async function recoverStageWorkerToIdle(
+@@ -535,7 +545,7 @@ async function recoverStageWorkerToIdle(
    }
    if (!lock?.controlPort) throw new Error("daemon lock missing")
-   const terminal = controlRequest(lock, `${ServerLockModule.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
+   const terminal = controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${taskID}`)
 -  await proc.stdin.write("release\n")
 +  await stageWorkerStdin(proc).write("release\n")
    expect((await terminal).status).toBe(200)
    return lock
  }
-@@ -2206,7 +2216,7 @@ test(
+@@ -2193,7 +2203,7 @@ test(
          // recovery 尚未取得 lease 时不得先发布可接受 shutdown/start 的 daemon owner。
          expect(await Bun.file(lockPath).exists()).toBe(false)
          // 第一个 gate 放行后 recovery 才能拿 lease；终态 checkpoint 先于 lease release 到达。
@@ -58,17 +58,17 @@ index 4a61d4905..7a4f1ca97 100644
 +        await stageWorkerStdin(proc).write("continue\n")
          expect(await readUntil(reader, "lease-release-blocked")).toContain("lease-release-blocked")
          // lock 只在 recovery 已取得 lease 并登记 activeMaintenance 后才允许对外发布。
-         let lock: ServerLockModule.ServerLock | undefined
-@@ -2231,7 +2241,7 @@ test(
-         const busy = await controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+         let lock: ServerLock.ServerLock | undefined
+@@ -2218,7 +2228,7 @@ test(
+         const busy = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
          expect(busy.status).toBe(409)
          // 释放 lease 后 terminal 与 conditional shutdown 才能依次成功，禁止 CLI retry workaround。
 -        await proc.stdin.write("release\n")
 +        await stageWorkerStdin(proc).write("release\n")
          expect(await terminal).toMatchObject({ status: 200, body: { status: "completed" } })
-         const conditional = () => controlRequest(lock, `${ServerLockModule.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+         const conditional = () => controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
          const waitIdle = async (taskID: string) => {
-@@ -2258,7 +2268,7 @@ test(
+@@ -2245,7 +2255,7 @@ test(
          expect((await conditional()).status).toBe(409)
          // 同一 chunk 预置 start/resume 两个 gate token，避免 Windows pipe 的第三次小写入延迟。
          // #539：预缓冲使 blocked-3 的 gate 在 marker 写出后立即放行，故禁止对 blocked-3 做 HTTP-without-marker 竞态。

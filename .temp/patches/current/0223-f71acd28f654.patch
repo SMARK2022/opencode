@@ -17,17 +17,20 @@ index f0a84c844c..c5d9253352 100644
          await ask(context, "edit", args)
          return {
            output: await call("/notebook/edit", args, context, 30_000),
-@@ -188,6 +194,10 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-         reason: z.string().optional().describe("Brief description of why this operation is being performed, shown to the user."),
-       },
-       execute: async (args, context) => {
-+        // #223：env 包含 configure/restart/save 等会改变 VS Code/Jupyter 状态的操作；
-+        // 即使 info 偏只读，也保持工具级权限和 agent 配置中的 vscode_notebook_env
-+        // 完全一致，避免新增 operation 级配置面。
+@@ -185,5 +191,9 @@
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/env", args, context, 120_000),
+-        metadata: { endpoint: "/notebook/env", operation: args.operation },
+-      }),
++      execute: async (args, context) => {
++        // 环境操作沿用工具级权限，审批拒绝时不进入桥接调用；保留操作元数据与选核超时。
 +        await ask(context, "vscode_notebook_env", args)
-         // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
-         const timeout = 120_000
-         return {
++        return {
++          output: await call("/notebook/env", args, context, 120_000),
++          metadata: { endpoint: "/notebook/env", operation: args.operation },
++        }
++      },
+     }),
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 new file mode 100644
 index 0000000000..7af6e6361f

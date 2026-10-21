@@ -99,7 +99,39 @@ diff --git a/packages/llm/src/protocols/gemini.ts b/packages/llm/src/protocols/g
 diff --git a/packages/llm/src/protocols/openai-responses.ts b/packages/llm/src/protocols/openai-responses.ts
 --- a/packages/llm/src/protocols/openai-responses.ts
 +++ b/packages/llm/src/protocols/openai-responses.ts
-@@ -383,15 +383,22 @@
+@@ -100,7 +100,7 @@
+ type OpenAIResponsesReasoningInput = {
+   type: "reasoning"
+-  id: string
++  id?: string
+   summary: Array<{ type: "summary_text"; text: string }>
+   encrypted_content?: string | null
+ }
+ type OpenAIResponsesReasoningReplay = Omit<OpenAIResponsesReasoningInput, "id">
+@@ -285,17 +285,19 @@
+ const lowerReasoning = (part: ReasoningPart): OpenAIResponsesReasoningInput | undefined => {
+   const openai = part.providerMetadata?.openai
+-  if (!ProviderShared.isRecord(openai) || typeof openai.itemId !== "string" || openai.itemId.length === 0)
+-    return undefined
++  if (!ProviderShared.isRecord(openai)) return undefined
++  const id = typeof openai.itemId === "string" && openai.itemId.length > 0 ? openai.itemId : undefined
++  // 跨模型投影已去源ID；字符串blob仍是完整续接凭据，不能只因缺ID丢弃它。
++  if (!id && typeof openai.reasoningEncryptedContent !== "string") return undefined
+   const encryptedContent =
+     typeof openai.reasoningEncryptedContent === "string"
+       ? openai.reasoningEncryptedContent
+       : openai.reasoningEncryptedContent === null
+         ? null
+         : undefined
+   return {
+     type: "reasoning",
+-    id: openai.itemId,
++    id,
+     summary: part.text.length > 0 ? [{ type: "summary_text", text: part.text }] : [],
+     encrypted_content: encryptedContent,
+   }
+ }
+@@ -383,15 +385,27 @@
            continue
          }
          if (part.type === "reasoning") {
@@ -115,6 +147,11 @@ diff --git a/packages/llm/src/protocols/openai-responses.ts b/packages/llm/src/p
 +          // 带 itemId 的同链回放保留上游 item_reference 与 join-then-filter 契约
 +          //（store:false 无加密状态的丢弃由上游用例锁定，不做逐 part 降级）。
 +          flushText()
++          if (reasoning.id === undefined) {
++            // 无ID的外部item只能发送完整状态；store:true也不能转成源服务器引用。
++            input.push({ type: reasoning.type, summary: reasoning.summary, encrypted_content: reasoning.encrypted_content })
++            continue
++          }
            if (store !== false) {
              if (!reasoningReferences.has(reasoning.id)) input.push({ type: "item_reference", id: reasoning.id })
              reasoningReferences.add(reasoning.id)
@@ -150,7 +187,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
            msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
          )
        ) {
-@@ -725,11 +735,11 @@
+@@ -702,11 +712,11 @@
            }
          }
          if (part.type === "reasoning") {
@@ -163,20 +200,20 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
                })
              continue
            }
-@@ -736,14 +746,25 @@
+@@ -713,14 +723,26 @@
 +          // #464：reasoning 的 providerMetadata 同样经 providerMeta 过滤 primitive 内部标记。
-+          const providerMetadata = providerMeta(part.metadata)
+           const providerMetadata = providerMeta(part.metadata)
 +          // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
++          // 只在投影副本去掉源ID；持久原件和同模型store引用均保持原样。
 +          const replayMetadata = differentModel
 +            ? replaysForeignOpenAIReasoning && providerMetadata?.openai
-+              ? { openai: providerMetadata.openai }
++              ? { openai: Object.fromEntries(Object.entries(providerMetadata.openai).filter(([key]) => key !== "itemId")) }
 +              : undefined
 +            : providerMetadata
            assistantMessage.parts.push({
              type: "reasoning",
              text: part.text,
--            // #464：reasoning 的 providerMetadata 同样经 providerMeta 过滤 primitive 内部标记。
--            ...(providerMeta(part.metadata) ? { providerMetadata: providerMeta(part.metadata)! } : {}),
+-            ...(providerMetadata ? { providerMetadata } : {}),
 +            ...(differentModel && !replaysForeignOpenAIReasoning
 +              ? {}
 +              : replayMetadata
@@ -194,7 +231,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
 --- a/packages/core/src/session/runner/to-llm-message.ts
 +++ b/packages/core/src/session/runner/to-llm-message.ts
-@@ -73,24 +73,39 @@
+@@ -73,24 +73,41 @@
    const reuseProviderMetadata = sameModel && message.error === undefined
    const content = message.content.flatMap((item): ContentPart[] => {
      if (item.type === "text") return [{ type: "text", text: item.text }]
@@ -231,9 +268,11 @@ diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/
 +      if (!replaysForeignReasoning && !replaysForeignOpenAIReasoning)
 +        return item.text.length > 0 ? [{ type: "text", text: item.text }] : []
 +      // GPT 回放只允许携带 OpenAI 加密续接状态；Anthropic/Bedrock 源签名不能跨越该边界。
++      // 失败轮次不具备续接资格；克隆过滤源ID不修改持久历史或同模型引用。
 +      const replayMetadata =
++        message.error === undefined &&
 +        replaysForeignOpenAIReasoning && item.providerMetadata?.openai
-+          ? { openai: item.providerMetadata.openai }
++          ? { openai: Object.fromEntries(Object.entries(item.providerMetadata.openai).filter(([key]) => key !== "itemId")) }
 +          : undefined
 +      return [{ type: "reasoning", text: item.text, providerMetadata: replayMetadata }]
 +    }
@@ -246,6 +285,24 @@ diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/
      return result ? [call, result] : [call]
    })
    const meaningful = content.filter((part) => {
+diff --git a/packages/opencode/src/session/llm/native-request.ts b/packages/opencode/src/session/llm/native-request.ts
+--- a/packages/opencode/src/session/llm/native-request.ts
++++ b/packages/opencode/src/session/llm/native-request.ts
+@@ -111,7 +111,13 @@
+       Message.make({
+         role: message.role,
+         content: content(message.content),
+-        native: isRecord(message.providerOptions) ? { providerOptions: message.providerOptions } : undefined,
++        native: isRecord(message.providerOptions)
++          ? {
++              // compatible lowerer消费消息级字段；保留原选项，不把任意namespace展开到wire。
++              providerOptions: message.providerOptions,
++              openaiCompatible: message.providerOptions.openaiCompatible,
++            }
++          : undefined,
+       }),
+     ]
+   })
 diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
 --- a/packages/llm/test/provider/anthropic-messages.test.ts
 +++ b/packages/llm/test/provider/anthropic-messages.test.ts
@@ -339,7 +396,7 @@ diff --git a/packages/llm/test/provider/gemini.test.ts b/packages/llm/test/provi
 diff --git a/packages/llm/test/provider/openai-responses.test.ts b/packages/llm/test/provider/openai-responses.test.ts
 --- a/packages/llm/test/provider/openai-responses.test.ts
 +++ b/packages/llm/test/provider/openai-responses.test.ts
-@@ -1329,12 +1329,74 @@
+@@ -1329,12 +1329,91 @@
      }),
    )
  
@@ -402,6 +459,23 @@ diff --git a/packages/llm/test/provider/openai-responses.test.ts b/packages/llm/
 +          encrypted_content: "encrypted-state",
 +        },
 +      ])
++      // 投影剥离ID后仍能回放；显式store与空摘要都不能丢失加密凭据。
++      for (const store of [false, true]) {
++        for (const text of ["foreign summary", ""]) {
++          const withoutID = yield* LLMClient.prepare<OpenAIResponses.OpenAIResponsesBody>(
++            LLM.request({
++              model,
++              providerOptions: { openai: { store } },
++              messages: [Message.assistant({ type: "reasoning", text, providerMetadata: { openai: { reasoningEncryptedContent: "encrypted-state" } } })],
++            }),
++          )
++          expect(withoutID.body.input).toEqual([{
++            type: "reasoning",
++            summary: text ? [{ type: "summary_text", text }] : [],
++            encrypted_content: "encrypted-state",
++          }])
++        }
++      }
 +    }),
 +  )
 +
@@ -494,20 +568,20 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 +    ]
 +
 +    // adapter 边界接收 providerOptions，Session 持久化的 MessageV2 Part 仍保留原 metadata 形态。
-+    // GPT Responses 在模型切换时保留不透明的续接状态；目标 transform 在无状态模式下
-+    // 剥离源 response 的服务端 itemId，只保留加密续接凭据，且对任意 provider 名称一视同仁。
-+    expect(ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, {})).toStrictEqual([
++    // 跨模型投影先剥离源ID；即使请求显式store:true也不能生成外部item_reference。
++    // stateless与空摘要在协议测试配对覆盖，两个provider名称不改变加密回放资格。
++    expect(ProviderTransform.message(await MessageV2.toModelMessages(input, gpt), gpt, { store: true })).toStrictEqual([
 +      {
 +        role: "assistant",
 +        // 加密续接状态是 Responses 无状态续跑的唯一凭据，必须完整保留。
-+        providerOptions: undefined,
++        ...(targetProvider === "openai" ? {} : { providerOptions: undefined }),
 +        content: [
 +          {
 +            type: "reasoning",
 +            text: "foreign summary",
 +            providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
 +          },
-+          { type: "text", text: "answer", providerOptions: undefined },
++          { type: "text", text: "answer", ...(targetProvider === "openai" ? {} : { providerOptions: undefined }) },
 +        ],
 +      },
 +    ])
@@ -522,6 +596,60 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
          info: userInfo(userID),
          parts: [
            {
+diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/opencode/test/session/llm-native.test.ts
+--- a/packages/opencode/test/session/llm-native.test.ts
++++ b/packages/opencode/test/session/llm-native.test.ts
+@@ -9,6 +9,7 @@
+ import { LLMNativeRuntime } from "@/session/llm/native-runtime"
+ import type { Provider } from "@/provider/provider"
++import { ProviderTransform } from "@/provider/transform"
+ 
+ import { OAUTH_DUMMY_KEY } from "@/auth"
+ import { testEffect } from "../lib/effect"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+@@ -696,6 +697,42 @@
+     }),
+   )
+ 
++  it.effect("preserves transformed reasoning through native request preparation", () =>
++    Effect.gen(function* () {
++      const compatible: Provider.Model = {
++        ...baseModel,
++        id: ModelV2.ID.make("kimi-k2"),
++        api: { ...baseModel.api, id: "kimi-k2", npm: "@ai-sdk/openai-compatible" },
++        capabilities: { ...baseModel.capabilities, interleaved: { field: "reasoning_content" } },
++      }
++      const history: ModelMessage[] = [{ role: "assistant", content: [
++        { type: "reasoning", text: "thinking" }, { type: "text", text: "answer" },
++      ] }]
++      // 必须经过生产transform再适配，直接喂reasoning part会绕开消息级字段丢失。
++      const prepared = yield* prepareNativeRequest({
++        model: compatible, apiKey: "test-key",
++        messages: ProviderTransform.message(history, compatible, {}),
++      })
++      expect(prepared.body).toMatchObject({
++        messages: [{ role: "assistant", content: "answer", reasoning_content: "thinking" }],
++      })
++      for (const store of [false, true]) {
++        const encrypted: ModelMessage[] = [{ role: "assistant", content: [{
++          type: "reasoning", text: "", providerOptions: { openai: { reasoningEncryptedContent: "encrypted-state" } },
++        }] }]
++        // 没有可见摘要也须穿过同一transform/adapter，凭据不能被降级为空文本。
++        yield* expectOpenAIResponsesRequest({
++          history: ProviderTransform.message(encrypted, baseModel, { store }),
++          providerOptions: { openai: { store } },
++          expectedBody: {
++            input: [{ type: "reasoning", summary: [], encrypted_content: "encrypted-state" }],
++            store,
++          },
++        })
++      }
++    }),
++  )
++
+   it.effect("preserves encrypted OpenAI reasoning state through native request lowering", () =>
+     expectOpenAIResponsesRequest({
+       history: [
 diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
 --- a/packages/core/test/session-runner-message.test.ts
 +++ b/packages/core/test/session-runner-message.test.ts
@@ -529,8 +657,8 @@ diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/t
  import { describe, expect, test } from "bun:test"
  import { Message, Model } from "@opencode-ai/llm"
  import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
-+import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
-+import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
++import { OpenAICompatibleChat } from "@opencode-ai/llm/protocols/openai-compatible-chat"
++import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
  import { ModelV2 } from "@opencode-ai/core/model"
  import { ProviderV2 } from "@opencode-ai/core/provider"
  import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -540,7 +668,7 @@ diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/t
  import { DateTime } from "effect"
  
  const created = DateTime.makeUnsafe(0)
-@@ -498,4 +500,111 @@
+@@ -498,4 +500,112 @@
        },
      ])
    })
@@ -581,7 +709,7 @@ diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/t
 +    ])
 +  })
 +
-+  test("replays encrypted GPT reasoning across providers within the gpt family", () => {
++  test.each([false, true])("replays encrypted GPT reasoning across providers (failed=%s)", (failed) => {
 +    const gpt = Model.make({ id: "gpt-5.5", provider: "openai", route: OpenAIResponses.route })
 +    const messages = toLLMMessages(
 +      [
@@ -589,6 +717,7 @@ diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/t
 +          id: id("assistant-gpt-reasoning"),
 +          type: "assistant",
 +          agent: "build",
++          error: failed ? { type: "unknown", message: "Provider turn interrupted" } : undefined,
 +          // 源与目标都是 GPT 家族，但 provider 不同；加密续接状态仍可回放。
 +          model: { id: ModelV2.ID.make("gpt-6-astra"), providerID: ProviderV2.ID.make("smark-codex") },
 +          content: [
@@ -614,7 +743,7 @@ diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/t
 +      {
 +        type: "reasoning",
 +        text: "foreign summary",
-+        providerMetadata: { openai: { itemId: "rs_foreign", reasoningEncryptedContent: "encrypted-state" } },
++        providerMetadata: failed ? undefined : { openai: { reasoningEncryptedContent: "encrypted-state" } },
 +      },
 +      { type: "text", text: "answer" },
 +    ])

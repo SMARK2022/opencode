@@ -20,10 +20,10 @@ config --get/remote -v/tag -l 等),裸 git config 无参数时放行为 general�
 GIT_UNSAFE_GLOBAL 从 gitSafe 提取为模块级常量共用,消除重复。
 
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index 6a8f56eb7..dc7ce99b3 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -1038,9 +1038,28 @@ function pythonRemovesFile(tokens: string[]) {
    return RE_C_PYTHON_FILE_REMOVE_CALL.test(tokens[tokens.findIndex((item) => item === "-c") + 1] ?? "")
  }

@@ -501,58 +501,30 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index 39f1b49e3..0e52c387c 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -1133,9 +1133,8 @@ export const ShellTool = Tool.define(
-       const limits = yield* trunc.limits()
-       const keep = limits.maxBytes * 2
-       let full = ""
--      // #215：display/displayed 提升至外层完成作用域，供最终元数据读取终端屏幕与渲染标记
-+      // #215：display 提升至外层完成作用域，供最终元数据读取终端屏幕
-       let display!: ReturnType<typeof createTerminalDisplay>
+@@ -576,4 +576,3 @@ export const ShellTool = Tool.define(
+       // #215：屏幕独立于原始环形缓冲和写盘，先渲染再交给 Tool.wrap 消毒。
+       const display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
 -      let displayed = false
        const list: Chunk[] = []
-       let used = 0
-       let file = ""
-@@ -1194,7 +1193,6 @@ export const ShellTool = Tool.define(
+@@ -644,5 +643,4 @@ export const ShellTool = Tool.define(
+           const onChunk = (chunk: string) => {
              if (!chunk) return Effect.void
-             // #215：display.push 返回终端屏幕快照，preview 仅做最终长度封顶，CR 覆盖与清行已由渲染器吸收
              const visible = preview(display.push(chunk))
 -            displayed = true
              const size = Buffer.byteLength(chunk, "utf-8")
-             // #215：原始环形缓冲仍独立累积喂给模型输出，显示快照不替代也不截断原始字节流
-             list.push({ text: chunk, size })
-@@ -1247,8 +1245,6 @@ export const ShellTool = Tool.define(
-           const decoder = createAutoTextDecoder({ encoding: input.encoding })
-           // #215：用 createTerminalDisplay 替代 preview(last+chunk)，CR 进度与清行重绘不泄漏控制字节
-           display = createTerminalDisplay({ maxLines: limits.maxLines, maxChars: MAX_METADATA_LENGTH })
--          displayed = false
--          // #215：displayed 标记是否曾有 chunk 渲染过，用于区分“静默命令回退压缩输出”与“清屏后空屏”
- 
-           // #291：将 forkScoped 赋值给 output 变量，以便后续 Fiber.join 等待流消费完成
-           const output = yield* Effect.forkScoped(
-@@ -1404,8 +1400,10 @@ export const ShellTool = Tool.define(
+@@ -816,4 +814,7 @@ export const ShellTool = Tool.define(
        if (shellNotice) {
          output += "\n\n" + shellNotice
        }
--      // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
--      const displayOutput = preview(display.value())
-+      // #536：用户面板只承载最终终端屏幕；preview 仅做最终长度封顶，不再回退压缩输出。
++      // 用户面板只取最终终端画面，不能用模型notice或诊断回填空屏幕。
 +      const displayText = display.value()
-+      // #536：空屏幕的精确占位符取代旧方言——静默命令与清屏后空屏统一为 "(no output)"。
 +      const userOutput = displayText.length > 0 ? preview(displayText) : "(no output)"
  
-       // [local-smark] typecheck error flag：对已知验证命令（typecheck/tsc/test/lint），
-       // 检测 error pattern 并设置 hasErrors flag，帮助模型识别验证失败。
-@@ -1427,8 +1425,8 @@ export const ShellTool = Tool.define(
-           // UI rendering. The `output` field returned alongside this metadata is
-           // intentionally left on the existing raw/compressed/truncated path so
-           // right-click "model context output" and provider input stay unchanged.
--          // #215：仅当从未渲染过 chunk 时回退到压缩输出，避免静默命令丢失与已渲染命令泄漏控制字节冲突
--          output: displayed ? displayOutput : preview(output),
+@@ -836,2 +837,2 @@ export const ShellTool = Tool.define(
+-          // #215：清屏后的空字符串也是有效快照，仅无输出命令沿用原回退。
+-          output: displayed ? preview(display.value()) : preview(output),
 +          // #536：metadata.output 是用户面板唯一事实——终端屏幕或精确占位符，不携带模型侧 notice。
 +          output: userOutput,
-           exit: code,
-           truncated: cut,
-           ...((cut || compressed.stats.applied) && file ? { outputPath: file } : {}),
 
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index abd1a4e5e..a48867b35 100644
@@ -588,7 +560,7 @@ index abd1a4e5e..a48867b35 100644
        yield* run.assertNotBusy(chat.id)
      }),
    { config: cfg },
-@@ -3602,6 +3625,9 @@ unixNoLLMServer(
+@@ -3948,6 +3971,9 @@ cancel persists aborted shell result when shell ignores TERM
            const tool = completedTool(exit.value.parts)
            if (tool) {
              expect(tool.state.output).toContain('reason="user_abort"')

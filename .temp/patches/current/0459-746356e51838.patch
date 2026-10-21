@@ -8,67 +8,49 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E9=87=8D=E6=9E=84=20BlockTool=20?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-融合适配：owner 已在 packages/tui（0457 迁移）；保留 #111 collapseArmed 门控（目标更强契约），
-canCollapse 信号+effect → 同步 collapsible memo（首帧前判定）；三处引用与结构测试同步迁移。
-diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
---- a/packages/tui/src/routes/session/index.tsx
-+++ b/packages/tui/src/routes/session/index.tsx
-@@ -2756,17 +2756,14 @@
-   const threshold = createMemo(() => props.threshold ?? 20)
-   const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
--  // 字符阈值与行阈值同权判定——两个预算任一超限即可武装折叠。
--  // #111：canCollapse 只升不降
--  const [canCollapse, setCanCollapse] = createSignal(false)
--  createEffect(() => {
--    if (!collapseArmed()) return
--    if (canCollapse()) return
--    if (previewLines() > 0 && ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold())) {
--      setCanCollapse(true)
--    }
--  })
-+  // #459：折叠资格改为同步 memo——effect 方案会让大 diff 先挂载一次再被预览替换，
-+  // 首帧仍付出完整 DiffRenderable/tree-sitter 成本；同步判定在首次渲染前生效。
-+  // 字符阈值与行阈值同权判定——两个预算任一超限即可折叠（#457）。
-+  const collapsible = createMemo(() => {
-+    if (!collapseArmed()) return false
-+    if (previewLines() <= 0) return false
-+    return (props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()
-+  })
-   const [expanded, setExpanded] = createSignal(false)
--  // 目标以 canCollapse() 承担上游 collapsible() 的语义——统一收敛为 collapsed memo，
--  // 让下方 JSX 与上游保持同构引用。
--  const collapsed = createMemo(() => canCollapse() && !expanded())
-+  // #459：collapsed 直接消费 collapsible——与上游同构，无需 canCollapse 信号中转。
-+  const collapsed = createMemo(() => collapsible() && !expanded())
-   const hasPreview = createMemo(() => props.preview !== undefined)
-@@ -2796,3 +2793,3 @@
-       borderColor={props.contextView ? theme.info : theme.background}
--      onMouseOver={() => (props.onClick || props.onRightClick || canCollapse()) && setHover(true)}
-+      onMouseOver={() => (props.onClick || props.onRightClick || collapsible()) && setHover(true)}
-       onMouseOut={() => setHover(false)}
-@@ -2810,3 +2806,3 @@
-         // #111：仅内置折叠武装时切换 expanded
--        if (canCollapse()) setExpanded((prev) => !prev)
-+        if (collapsible()) setExpanded((prev) => !prev)
-         props.onClick?.()
-@@ -2854,3 +2849,3 @@
-       </Show>
--      <Show when={canCollapse()}>
-+      <Show when={collapsible()}>
-         <box marginTop={1}>
+融合适配：同步 preview memo 和 bodyMounted 初值已在真实 BlockTool 承载首帧延迟挂载。
+保留目标单一 owner 与展开后 renderable 常驻，适配源测试并验证真实正文挂载次数。
 diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
 --- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
 +++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
-@@ -61,2 +61,11 @@
+@@ -57,3 +57,13 @@
+     expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
    })
 +
-+  // #459：折叠资格在首次渲染前同步判定——信号+effect 方案会让大 diff 挂载后才降级
++  // 首帧从实际 preview 同步决定正文挂载，不恢复已移除的内置折叠状态。
 +  test("BlockTool decides collapse eligibility before mounting previews", () => {
 +    const start = sessionSource.indexOf("function BlockTool(")
 +    const end = sessionSource.indexOf("function Shell(")
 +    const blockToolSource = sessionSource.slice(start, end)
-+    expect(blockToolSource).toContain("const collapsible = createMemo")
++    expect(blockToolSource).toContain("const collapsed = createMemo(() => props.preview !== undefined)")
++    expect(blockToolSource).toContain("createSignal(!collapsed())")
 +    expect(blockToolSource).not.toContain("setCanCollapse")
 +  })
  })
-\ No newline at end of file
+diff --git a/packages/tui/test/routes/session/block-tool-collapse.test.tsx b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
+--- a/packages/tui/test/routes/session/block-tool-collapse.test.tsx
++++ b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
+@@ -26,2 +26,8 @@
+   const output = Array.from({ length: 24 }, (_, index) => `source line ${index + 1}`).join("\n")
++  // 组件边界记录真实挂载次数，不能把折叠后隐藏误当成首帧未挂载。
++  let bodyMounts = 0
++  function Body() {
++    bodyMounts++
++    return <text>{output}</text>
++  }
+ 
+@@ -43,1 +49,1 @@
+-                    <text>{output}</text>
++                    <Body />
+@@ -70,1 +76,2 @@
+     expect(frame).not.toContain("source line 24")
++    expect(bodyMounts).toBe(0)
+@@ -75,1 +82,2 @@
+     expect(frame).toContain("source line 24")
++    expect(bodyMounts).toBe(1)
+@@ -80,1 +88,2 @@
+     expect(frame).not.toContain("source line 24")
++    expect(bodyMounts).toBe(1)
+@@ -86,1 +95,2 @@
+     expect(frame).toContain("source line 24")
++    expect(bodyMounts).toBe(1)

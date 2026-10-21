@@ -1,3 +1,10 @@
+diff --git a/thirdparty/chatgpt-browser-agent b/thirdparty/chatgpt-browser-agent
+index eb86999257fe0725315b08979e645c5cdcee1903..f4de5136bf122ba450a26887b27e1f3fbfa51f6d 160000
+--- a/thirdparty/chatgpt-browser-agent
++++ b/thirdparty/chatgpt-browser-agent
+@@ -1 +1 @@
+-Subproject commit eb86999257fe0725315b08979e645c5cdcee1903
++Subproject commit f4de5136bf122ba450a26887b27e1f3fbfa51f6d
 diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
 --- a/packages/tui/src/prompt-voice-input.ts
 +++ b/packages/tui/src/prompt-voice-input.ts
@@ -98,8 +105,35 @@ diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-vo
    })
    // stderr 优先展示外部转写器自己的诊断；没有 stderr 时才落回退出码。
    if (result.code !== 0) throw new Error(result.stderr.toString().trim() || `Voice transcriber exited with code ${result.code}`)
-
-
+@@ -234,12 +253,26 @@ function runProcess(
+   return new Promise((resolve, reject) => {
++    options.abort.throwIfAborted()
+     const child = spawn(commandArgs[0], commandArgs.slice(1), {
+       stdio: ["ignore", "pipe", "pipe"],
+-      signal: options.abort,
++      windowsHide: process.platform === "win32",
+     })
+     const stdout: Buffer[] = []
+     const stderr: Buffer[] = []
+     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk))
+     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk))
++    // 脚本转写器可能通过cmd再启动Node；必须在父进程退出前清理本次进程树。
++    const abort = () => {
++      if (child.exitCode !== null || child.signalCode !== null) return
++      if (process.platform === "win32" && child.pid)
++        spawn.sync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" })
++      child.kill("SIGTERM")
++    }
++    options.abort.addEventListener("abort", abort, { once: true })
++    if (options.abort.aborted) abort()
+     child.on("error", reject)
+-    child.on("close", (code) => resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) }))
++    child.on("close", (code) => {
++      options.abort.removeEventListener("abort", abort)
++      if (options.abort.aborted) return reject(options.abort.reason)
++      resolve({ code: code ?? 1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) })
++    })
+   })
 diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/process.ts
 --- a/packages/opencode/src/util/process.ts
 +++ b/packages/opencode/src/util/process.ts
@@ -135,7 +169,7 @@ diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/
 diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -425,4 +425,77 @@ describe("prompt voice input", () => {
+@@ -425,4 +425,110 @@ describe("prompt voice input", () => {
      expect(startCount).toBe(2)
      expect(controller.status()).toEqual({ type: "recording", startedAt: 1_000 })
    })
@@ -212,6 +246,39 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 +    expect(errors).toEqual([])
 +    expect(controller.status()).toEqual({ type: "idle" })
 +  })
++
++  // 通过真实cmd入口创建隔离Node后代，取消后必须确认后代退出，而不是只观察UI状态。
++  test.skipIf(process.platform !== "win32" || !Bun.which("node"))("cancels a Windows transcriber process tree", async () => {
++    await using tmp = await tmpdir()
++    const node = Bun.which("node")!
++    const pidFile = path.join(tmp.path, "child.pid")
++    const script = path.join(tmp.path, "transcriber.cjs")
++    const command = path.join(tmp.path, "transcriber.cmd")
++    const abort = new AbortController()
++    let pid = 0
++    await Bun.write(script, 'const {spawn}=require("child_process"); const fs=require("fs"); const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}); child.unref(); fs.writeFileSync(process.argv[2],String(child.pid)); setInterval(()=>{},1000)')
++    await Bun.write(command, `@echo off\r\n"${node}" "${script}" "${pidFile}" %*\r\n`)
++    const pending = transcribeVoiceFile({ file: "voice.wav", transcriber: { command, args: ["{file}"] }, signal: abort.signal }).catch((error: unknown) => error)
++    try {
++      const ready = Date.now() + 5_000
++      while (!(await Bun.file(pidFile).exists()) && Date.now() < ready) await Bun.sleep(20)
++      pid = Number(await Bun.file(pidFile).text())
++      expect(pid).toBeGreaterThan(0)
++      abort.abort()
++      expect(await pending).toBeInstanceOf(Error)
++      const running = () => {
++        try { process.kill(pid, 0); return true } catch { return false }
++      }
++      const stopped = Date.now() + 2_000
++      while (running() && Date.now() < stopped) await Bun.sleep(20)
++      expect(running()).toBe(false)
++    } finally {
++      abort.abort()
++      await pending
++      // 只清理本用例创建并记录的PID，失败也不能留下无限计时的子进程。
++      if (pid > 0) await Bun.spawn(["taskkill", "/pid", String(pid), "/T", "/F"], { windowsHide: true, stdout: "ignore", stderr: "ignore" }).exited
++    }
++  }, 15_000)
  })
 \ No newline at end of file
 

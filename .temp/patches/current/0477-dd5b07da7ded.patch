@@ -9,7 +9,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 适配：summary.ts 类型为 SessionV1.WithParts、layer 依赖 events/config、node 架构替代
 defaultLayer（A2 拆为 toWorktreeRel 注释 + node deps 去 Snapshot.node 两处）；write.ts
-目标已吸收源①（formatted 新文件分支），仅补源②（未格式化新文件 else-if）；race 测试
+按真实嵌套同时补齐格式化及未格式化的新文件 diff；race 测试
 重锚 140/176（无 description 参数、SessionV1.ToolPart）；summary-tool-diff 测试 env
 group 显式补 Snapshot.node（SessionSummary deps 移除后 track() 需独立供给）。
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
@@ -104,13 +104,25 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
-@@ -104,1 +104,5 @@
+@@ -100,8 +100,16 @@
+             )
+-            }
++            } else {
++              // 格式化新文件的diff必须取最终落盘文本，不能漏记或回用格式化前内容。
++              metadataDiff = trimDiff(
++                createTwoFilesPatch(filepath, filepath, "", normalizeLineEndings(finalSource.text)),
++              )
++            }
+             // 仅在格式化确实改变了内容时设置，避免无谓的 input 覆盖
+             if (formatted && normalizeLineEndings(finalSource.text) !== normalizeLineEndings(contentNew)) {
+               formattedContent = finalSource.text
+             }
 -          }
 +          } else if (!exists) {
-+            // #477：新文件且未格式化：用写入前算好的 diff（""→contentNew），
-+            // git 兜底移除后这是新文件入工具流的唯一路径。
++            // 未格式化的新文件复用写前diff；该分支属于外层最终内容判断。
 +            metadataDiff = diff
 +          }
+           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
 diff --git a/packages/opencode/test/session/snapshot-tool-race.test.ts b/packages/opencode/test/session/snapshot-tool-race.test.ts
 --- a/packages/opencode/test/session/snapshot-tool-race.test.ts
 +++ b/packages/opencode/test/session/snapshot-tool-race.test.ts

@@ -23,9 +23,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
  import path from "path"
  import { SessionPath } from "@opencode-ai/core/session/path"
  // #132：会话 path 规范化
-@@ -146,6 +147,103 @@ export const {
-     const fullSyncedSessions = new Set<string>()
-     // #132：区分首次 connected 与重连
+@@ -154,1 +155,94 @@ export const {
      let connectedOnce = false
 +    // #186：同一 part/field 的相邻 delta 在 16ms 窗内合并，压低 Solid store 抖动
 +    // #186：队列与 timer 均局部于 SyncProvider，不泄漏到 SDK 订阅层
@@ -81,15 +79,11 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +        event.properties.messageID,
 +        produce((draft) => {
 +          const part = draft[result.index]
-+          // #157：pending tool 的 raw 在 state 下，不能走顶层 part[field]
-+          if (
-+            part.type === "tool" &&
-+            part.state?.status === "pending" &&
-+            event.properties.field === "raw"
-+          ) {
-+            // #157：与 processor tool-input-delta field:"raw" 对齐
-+            const state = part.state as { raw?: string }
-+            state.raw = (state.raw ?? "") + event.properties.delta
++          // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
++          if (event.properties.field === "raw") {
++            if (part.type === "tool" && part.state.status === "pending")
++              part.state.raw += event.properties.delta
++            // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
 +            return
 +          }
 +          const field = event.properties.field as keyof typeof part
@@ -124,9 +118,6 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +      pendingPartDeltaTimer = setTimeout(flushPartDeltas, 16)
 +    }
 +
-     const syncingSessions = new Map<string, Promise<void>>()
-     const hydratingSessions = new Map<string, { messages: Set<string>; parts: Set<string> }>()
-     const touchMessage = (sessionID: string, messageID: string) => {
 @@ -179,6 +277,9 @@ export const {
      }
  
@@ -137,7 +128,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
        switch (event.type) {
          case "server.instance.disposed":
            void bootstrap()
-@@ -445,32 +546,9 @@ export const {
+@@ -514,28 +608,9 @@ export const {
          }
  
          case "message.part.delta": {
@@ -151,15 +142,11 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 -            event.properties.messageID,
 -            produce((draft) => {
 -              const part = draft[result.index]
--              // #157：pending tool 的 raw 在 state 下，不能走顶层 part[field]
--              if (
--                part.type === "tool" &&
--                part.state?.status === "pending" &&
--                event.properties.field === "raw"
--              ) {
--                // #157：与 processor tool-input-delta field:"raw" 对齐
--                const state = part.state as { raw?: string }
--                state.raw = (state.raw ?? "") + event.properties.delta
+-              // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
+-              if (event.properties.field === "raw") {
+-                if (part.type === "tool" && part.state.status === "pending")
+-                  part.state.raw += event.properties.delta
+-                // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
 -                return
 -              }
 -              const field = event.properties.field as keyof typeof part
@@ -190,9 +177,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
-@@ -1,8 +1,8 @@
- /** @jsxImportSource @opentui/solid */
- import { describe, expect, test } from "bun:test"
+@@ -6,6 +6,6 @@
  import { tmpdir } from "../../../fixture/fixture"
 -import { mount, wait } from "./sync-fixture"
 -import type { GlobalEvent } from "@opencode-ai/sdk/v2"

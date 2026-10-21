@@ -8,148 +8,165 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=20BlockTool=20?=
  =?UTF-8?q?=E5=AE=B9=E6=8A=98=E5=8F=A0?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
-融合适配：owner 迁移 packages/tui；#109 已移除 BlockTool 根 gap（该源 hunk 语义已满足，记录跳过）；
-字符预算/shellPreviewText/五处 totalChars 全量落位；0449 的 preview join 断言同步迁移到新口径。
+融合适配：保留目标 preview 驱动的唯一折叠 owner、Unicode 安全裁剪和宽度预算。
+源 800 字符阈值落在实际预览/overflow 路径；Shell 命令和输出统一计入预算，diff 保留合法 hunk 预览。
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2136,9 +2136,15 @@
- }
--function previewText(input: string, maxLines: number) {
--  // #144：按行切分，不截断半行字符
--  const rows = input.split("\n")
--  if (rows.length <= maxLines) return input
--  // #144：截断时追加省略提示
--  return rows.slice(0, maxLines).join("\n") + "\n…"
--}
-+// #457：单行超长（如 bun --eval 大内联脚本）在终端按宽度折行成多个视觉行，
-+// 仅按换行计数会漏判；预览统一追加字符预算，命令+输出一起裁。
+@@ -2137,6 +2137,8 @@
+ // #144：折叠预览沿用现有行数与字符预算，避免长单行绕过限幅
+-
+-function previewText(input: string, maxLines: number, maxChars: number) {
++// 长单行也会占满终端；800 是字符上界，窄屏仍沿用更小的宽度预算。
 +const DEFAULT_BLOCK_CHAR_THRESHOLD = 800
 +
 +function previewText(input: string, maxLines: number, maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD) {
-+  const lines = input.split("\n")
-+  const lineLimited = lines.length > maxLines
-+  const text = lineLimited ? lines.slice(0, maxLines).join("\n") : input
-+  const charLimited = text.length > maxChars
-+  if (!lineLimited && !charLimited) return input
-+  const preview = charLimited ? text.slice(0, maxChars).trimEnd() : text
-+  return preview ? [preview, "…"].join("\n") : "…"
-+}
- 
-@@ -2222,3 +2228,5 @@
-           threshold={20}
--          totalLines={output().split(String.fromCharCode(10)).length}
-+          totalLines={output().split(String.fromCharCode(10)).length}
-+          totalChars={output().length}
-+          // 行数之外补充字符计数：长单行折行场景由字符预算兜底。
-           // #144：通用工具折叠预览
-@@ -2710,4 +2718,7 @@
-   threshold?: number
-+  // #457：字符预算契约——单行超长内容按字符数武装折叠
-+  totalChars?: number
-+  charThreshold?: number
-   totalLines?: number
-   // #144：可选预览节点；折叠时优先于 maxHeight 裁切 children
-   preview?: JSX.Element
-@@ -2730,3 +2741,5 @@
-   const previewLines = createMemo(() => props.maxLines ?? 10)
-   const threshold = createMemo(() => props.threshold ?? 20)
-+  const charThreshold = createMemo(() => props.charThreshold ?? DEFAULT_BLOCK_CHAR_THRESHOLD)
-+  // 字符阈值与行阈值同权判定——两个预算任一超限即可武装折叠。
-   // #111：canCollapse 只升不降
-@@ -2736,4 +2749,4 @@
-     if (canCollapse()) return
--    if (previewLines() > 0 && (props.totalLines ?? 0) > threshold()) {
-+    if (previewLines() > 0 && ((props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold())) {
-       setCanCollapse(true)
-     }
-@@ -2872,3 +2885,10 @@
-     if (expanded() || !shellCanCollapse()) return output()
-     return collapsed().output
+   // #144：复用 Unicode 安全的 collapseToolOutput，宽度变化仍驱动原预算。
+-  return collapseToolOutput(input, maxLines, maxChars).output
++  return collapseToolOutput(input, maxLines, Math.min(maxChars, DEFAULT_BLOCK_CHAR_THRESHOLD)).output
+ }
+@@ -2157,5 +2159,5 @@
+-  const collapsed = createMemo(() => collapseToolOutput(output(), 20, maxChars() * 2))
++  const collapsed = createMemo(() => collapseToolOutput(output(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)))
+   const limited = createMemo(() => {
+     if (expanded() || !collapsed().overflow) return output()
+-    return collapseToolOutput(output(), maxLines, maxChars()).output
++    return previewText(output(), maxLines, maxChars())
    })
-+
-+  // #457：命令与输出合成一个预览文本——totalLines/totalChars/preview 共用同一口径，
-+  // 避免行计数只看输出、字符计数只看命令的分裂判定。
+@@ -2778,10 +2780,14 @@
+   const [expanded, setExpanded] = createSignal(false)
+-  // 命令占一行，空闲预览按总行数 10/20 与字符预算判断；运行及模型上下文视图保持完整。
++  // 命令和非空输出共用同一文本；空输出不添加分隔行，长命令不能绕过折叠。
 +  const shellPreviewText = createMemo(() => {
 +    if (!output()) return `$ ${stringValue(props.input.command) ?? ""}`
 +    return [`$ ${stringValue(props.input.command) ?? ""}`, "", output()].join("\n")
 +  })
-@@ -2909,10 +2929,11 @@
-           threshold={20}
--          totalLines={output().split(String.fromCharCode(10)).length}
-+          totalLines={shellPreviewText().split("\n").length}
-+          totalChars={shellPreviewText().length}
-           // #144：Shell 折叠预览前 10 行
--          preview={
--            shellCanCollapse() && !showContextOutput() ? (
--              // #214：Shell 预览仅含命令和输出——审查状态行由 BlockTool 共享 slot 渲染，折叠时也可见
--              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, "", previewText(output(), 10)].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
--            ) : undefined
--          }
-+          preview={
-+            shellCanCollapse() && !showContextOutput() ? (
-+              // #457：预览文本改为 previewText(shellPreviewText(), 10)——空行分隔语义由 memo 承载
-+              <text fg={theme.text}>{previewText(shellPreviewText(), 10)}</text>
-+            ) : undefined
-+          }
-         >
-@@ -3059,3 +3080,4 @@
-           // #144：武装 canCollapse 使 preview 可达
-           totalLines={countLines(diff() ?? "")}
-+          totalChars={(diff() ?? "").length}
-           // #154：折叠预览改为真实 DiffRenderable 输出；previewDiff 按行预算截断
-@@ -3086,3 +3108,4 @@
-           // #144：武装 canCollapse 使 preview 可达
-           totalLines={countLines(code())}
-+          totalChars={code().length}
-           preview={writeCanCollapse() ? <text fg={theme.text}>{previewText(code(), 10)}</text> : undefined}
-@@ -3467,3 +3490,4 @@
-           // #144：武装 canCollapse 使 preview 可达
-           totalLines={countLines(stringValue(props.metadata.diff) ?? stringValue(props.input.oldString) ?? "")}
-+          totalChars={diffContent().length}
-           // #154：折叠预览独立挂载短 diff，避免旧 maxHeight 裁剪路径把滚轮事件
-@@ -3575,3 +3599,4 @@
-           threshold={20}
-           totalLines={countLines(file.patch ?? "")}
-+                totalChars={(file.patch ?? "").length}
+   const maxLines = 10
+   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+   const collapsed = createMemo(() => {
+-    if (isRunning() || showContextOutput()) return { output: output(), overflow: false }
+-    return collapseToolOutput(output(), 19, maxChars() * 2)
++    if (isRunning() || showContextOutput()) return { output: shellPreviewText(), overflow: false }
++    return collapseToolOutput(shellPreviewText(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD))
+   })
+   // #111：外置 collapseToolOutput 主路径 sticky（Shell 唯一折叠 owner）
+   const [shellCanCollapse, setShellCanCollapse] = createSignal(false)
+@@ -2792,4 +2798,4 @@
+   const limited = createMemo(() => {
+-    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return output()
+-    return collapseToolOutput(output(), maxLines - 1, (maxLines - 1) * Math.max(20, ctx.width - 6)).output
++    if (isRunning() || showContextOutput() || expanded() || !shellCanCollapse()) return shellPreviewText()
++    return previewText(shellPreviewText(), maxLines, maxChars())
+   })
+@@ -2828,8 +2834,7 @@
+-          // #144：命令前缀保留；输出预览复用含命令占位的现有 limited 预算。
++          // 折叠判定和可见预览共用命令/输出预算，运行及模型上下文视图仍完整展示。
            preview={
+             shellCanCollapse() && !expanded() && !isRunning() && !showContextOutput() ? (
+-              // 保留现有预览预算；非空输出才加入分隔行，空输出不制造额外空白。
+-              <text fg={theme.text}>{[`$ ${stringValue(props.input.command) ?? ""}`, limited() ? "" : undefined, limited() ? previewText(limited(), 10, maxChars()) : undefined].filter((x): x is string => x !== undefined).join(String.fromCharCode(10))}</text>
++              <text fg={theme.text}>{limited()}</text>
+             ) : undefined
+           }
+         >
+@@ -2839,5 +2844,5 @@
+             </Show>
+             <Show when={output()}>
+-              <text fg={theme.text}>{limited()}</text>
++              <text fg={theme.text}>{output()}</text>
+             </Show>
+             <Show when={shellCanCollapse()}>
+@@ -2927,1 +2932,1 @@
+-  const collapsed = createMemo(() => collapseToolOutput(code(), 20, maxChars() * 2))
++  const collapsed = createMemo(() => collapseToolOutput(code(), 20, Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)))
+@@ -2934,4 +2939,4 @@
+   const limited = createMemo(() => {
+     if (expanded() || !writeCanCollapse()) return code()
+-    return collapseToolOutput(code(), maxLines, maxChars()).output
++    return previewText(code(), maxLines, maxChars())
+   })
+@@ -2960,1 +2965,2 @@
+-  const diffOverflow = createMemo(() => diffStats().total > 20)
++  // 字符超限只决定是否折叠，预览仍保留合法 hunk，展开正文不截断。
++  const diffOverflow = createMemo(() => diffStats().total > 20 || (diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
+@@ -3355,1 +3361,2 @@
+-  const overflow = createMemo(() => stats().total > 20)
++  // 与 Write 共享字符门槛，少量超长行也能进入现有 DiffPreview。
++  const overflow = createMemo(() => stats().total > 20 || diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD)
+@@ -3459,1 +3466,2 @@
+-            const patchOverflow = createMemo(() => patchLines().length > 20)
++            // 每文件沿用独立展开状态，字符门槛不改变 add/delete/move 语义。
++            const patchOverflow = createMemo(() => patchLines().length > 20 || (file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD)
 diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
 --- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
 +++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
-@@ -25,5 +50,6 @@
-     const shellBody = sessionSource.slice(shellStart, shellStart + 6000)
-     expect(shellBody).toContain("gap={1}")
-     // 折叠预览的 join 数组必须显式承载空行元素，filter 只剔除 undefined 不剔除空串。
--    expect(shellBody).toContain(`"", previewText(output(), 10)]`)
-+    // #457：预览口径迁入 shellPreviewText（命令+输出合成文本），空行分隔语义不变。
-+    expect(shellBody).toContain('"", output()].join("\\n")')
-   })
-@@ -26,1 +52,27 @@
+@@ -24,5 +24,28 @@
+-    // 折叠预览的 join 数组必须显式承载空行元素，filter 只剔除 undefined 不剔除空串。
+-    expect(shellBody).toContain(`limited() ? "" : undefined`)
+-    expect(shellBody).toContain(`filter((x): x is string => x !== undefined)`)
++    // 合成文本仅在存在输出时插入空行，展开态仍由原 gap 承担间距。
++    expect(shellBody).toContain('if (!output()) return `$ ${stringValue(props.input.command) ?? ""}`')
++    expect(shellBody).toContain('[`$ ${stringValue(props.input.command) ?? ""}`, "", output()].join("\\n")')
++  })
 +
-+  // #457：以下三项继承源 session-integration.test 的结构断言（测试宿主随 owner 迁移至 TUI 包）
 +  test("BlockTool uses one vertical spacing strategy", () => {
-+    const start = sessionSource.indexOf("function BlockTool(")
-+    const end = sessionSource.indexOf("function Shell(")
-+    const blockToolSource = sessionSource.slice(start, end)
++    const blockToolSource = sessionSource.slice(sessionSource.indexOf("function BlockTool("), sessionSource.indexOf("function Shell("))
 +    expect(blockToolSource).toContain("marginTop={1}")
 +    expect(blockToolSource).not.toContain("gap={1}")
 +  })
 +
 +  test("BlockTool can collapse long wrapped single-line content", () => {
++    // 源 totalChars 契约由目标 preview owner 承担，不恢复第二套折叠状态。
 +    expect(sessionSource).toContain("DEFAULT_BLOCK_CHAR_THRESHOLD = 800")
 +    expect(sessionSource).toContain("maxChars = DEFAULT_BLOCK_CHAR_THRESHOLD")
-+    expect(sessionSource).toContain("totalChars?: number")
-+    expect(sessionSource).toContain("charThreshold")
-+    expect(sessionSource).toContain("(props.totalChars ?? 0) > charThreshold()")
++    expect(sessionSource).toContain("Math.min(maxChars() * 2, DEFAULT_BLOCK_CHAR_THRESHOLD)")
++    expect(sessionSource).toContain('diffContent().length > DEFAULT_BLOCK_CHAR_THRESHOLD')
++    expect(sessionSource).toContain('(file.patch ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
++    expect(sessionSource).toContain('(diff() ?? "").length > DEFAULT_BLOCK_CHAR_THRESHOLD')
 +  })
 +
 +  test("Shell counts command and output characters for collapse", () => {
-+    const start = sessionSource.indexOf("function Shell(")
-+    const end = sessionSource.indexOf("function DiffView(")
-+    const shellSource = sessionSource.slice(start, end)
++    const shellSource = sessionSource.slice(sessionSource.indexOf("function Shell("), sessionSource.indexOf("function DiffView("))
 +    expect(shellSource).toContain("shellPreviewText")
-+    expect(shellSource).toContain("totalChars={shellPreviewText().length}")
-+    expect(shellSource).toContain("previewText(shellPreviewText(), 10)")
-+  })
++    expect(shellSource).toContain("collapseToolOutput(shellPreviewText(), 20,")
++    expect(shellSource).toContain("previewText(shellPreviewText(), maxLines, maxChars())")
+   })
  })
-\ No newline at end of file
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -360,1 +360,4 @@
+-    const compiled = compiler.transformSync(functions.join("\n"), {
++    // 编译实际模块常量，不能在 fixture 另写一套字符预算。
++    const budget = source.match(/^const DEFAULT_BLOCK_CHAR_THRESHOLD = \d+$/m)?.[0]
++    expect(budget).toBeDefined()
++    const compiled = compiler.transformSync([budget, ...functions].join("\n"), {
+@@ -548,2 +551,28 @@
+       shell.renderer.destroy()
++      // 空输出的大内联命令必须可展开；真实组件的点击不能只由字符串断言代替。
++      await renderFrame(
++        () => <production.Shell input={{ command: `echo ${"x".repeat(1100)} TAIL` }} metadata={{ output: "" }} part={{ tool: "shell", state: { status: "completed" } }} />,
++        { width: 72, height: 32 },
++      )
++      const longShell = testSetup!
++      const collapsedCommand = longShell.captureCharFrame()
++      expect(collapsedCommand).toContain("Click to expand")
++      expect(collapsedCommand).not.toContain("TAIL")
++      const commandPoint = findVisibleText(collapsedCommand.split("\n"), "$ echo")
++      expect(commandPoint).toBeDefined()
++      longShell.renderer.clearSelection()
++      await longShell.mockMouse.moveTo(commandPoint!.x + 1, commandPoint!.y)
++      await longShell.renderOnce()
++      await longShell.mockMouse.click(commandPoint!.x + 1, commandPoint!.y)
++      await longShell.renderOnce()
++      await longShell.renderOnce()
++      expect(longShell.captureCharFrame().replace(/[┃\s]/g, "")).toContain("TAIL")
++      expect(longShell.captureCharFrame()).toContain("Click to collapse")
++      longShell.renderer.clearSelection()
++      await longShell.mockMouse.click(commandPoint!.x + 1, commandPoint!.y)
++      await longShell.renderOnce()
++      await longShell.renderOnce()
++      expect(longShell.captureCharFrame()).not.toContain("TAIL")
++      expect(longShell.captureCharFrame()).toContain("Click to expand")
++      longShell.renderer.destroy()
+     }

@@ -91,7 +91,7 @@ new file mode 100644
 +<!-- 「步骤 1：准备基础环境」：顺序执行环境准备；postinstall 非零必须当硬失败 -->
 +确保系统中已安装必要的工具：
 +```bash
-+<!-- bash：POSIX/WSL + Unix 路径 -->
++# bash：POSIX/WSL + Unix 路径
 +sudo apt update
 +sudo apt install -y curl unzip zip build-essential rsync file dpkg-dev
 +# 安装 Bun (推荐 1.3.13 或以上版本)
@@ -199,7 +199,7 @@ new file mode 100644
 +你无需进入 WSL 的命令行环境，直接在 Windows 中通过 PowerShell 调用该脚本即可：
 +
 +```powershell
-+<!-- powershell：仅 Windows 主机 -->
++# powershell：仅 Windows 主机
 +wsl bash /mnt/f/ML/PythonAIProject/Claude-Code/wsl_build.sh
 +```
 +
@@ -273,7 +273,7 @@ new file mode 100644
 +<!-- 「1. Type Check」：.vscodeignore 排除 test/fixtures -->
 +
 +```powershell
-+<!-- powershell：仅 Windows 主机 -->
++# powershell：仅 Windows 主机
 +bun run check-types
 +```
 +

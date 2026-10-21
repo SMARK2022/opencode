@@ -90,14 +90,12 @@ new file mode 100644
 diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/src/cli/tui/server-lock.ts
 --- a/packages/opencode/src/cli/tui/server-lock.ts
 +++ b/packages/opencode/src/cli/tui/server-lock.ts
-@@ -309,12 +309,19 @@ export async function reconcileMaintenanceTask(taskID: string, dbPath = Database
+@@ -351,12 +351,17 @@ export async function reconcileMaintenanceTask(taskID: string, dbPath = Database
      return task
    }
  
-+  // owner 缺失/死亡只证明此刻无 live lease；runner 的 terminal checkpoint 严格早于
-+  // lease release（同进程顺序 await），owner 消失 ⇒ completed/failed 已持久可见。
-+  // 595：重读避免把首读与 owner 检查之间落地的 terminal 状态覆写成 interrupted——
-+  // 空库快完成任务的毫秒级 straddle 竞态曾以 ~17-30% 概率摧毁 Linux CLI 观察者。
++  // 正常完成先写terminal checkpoint再释放lease；重读避免首读running覆写刚提交的终态。
++  // 崩溃或checkpoint失败仍可能无终态，仅把重读后仍活跃的最新副本降级，保留其cursor/计数。
 +  const settled = await readMaintenanceTask(taskID, dbPath)
 +  if (!settled || (settled.status !== "queued" && settled.status !== "running")) return settled
 +
@@ -118,14 +116,13 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
 --- a/packages/core/test/ripgrep.test.ts
 +++ b/packages/core/test/ripgrep.test.ts
-@@ -123,7 +123,13 @@ describe("Ripgrep", () => {
+@@ -123,7 +123,12 @@ describe("Ripgrep", () => {
        Effect.promise(() => tmpdir()),
        (tmp) =>
          Effect.gen(function* () {
 -          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "large.txt"), "x".repeat(4 * 1024 * 1024)))
-+          // #595：512×1MB——4MB 单文件在 Apple Silicon memmem 吞吐下可 <1ms 扫完（CI 实测
-+          // timedOut=undefined）；512MB 即使按 100GB/s 理论上限也 ≥5ms，且 512 <
-+          // MAX_SEARCH_FILES=5000，不会触发 broad-scope 预过滤。
++          // source的32MiB语料仍出现1ms内完成；目标原4MiB更弱，扩为512×1MiB保留真实超时断言。
++          // 512不越5000候选上限，但仍会预扫；扩容增加扫描成本，不承诺定时器绝无迟调度。
 +          const chunk = `${"x".repeat(63)}\n`.repeat(16 * 1024)
 +          for (let i = 0; i < 512; i++) {
 +            yield* Effect.promise(() => Bun.write(path.join(tmp.path, `large-${i}.txt`), chunk))

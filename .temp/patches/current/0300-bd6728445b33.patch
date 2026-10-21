@@ -1,3 +1,51 @@
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -265,6 +265,44 @@
+   },
+ )
+ 
++// 复用真实Session夹具，分别验证自动压缩标题及没有普通用户正文时的滚动条标记。
++test.each(["label", "scrollbar"] as const)("compaction boundary is rendered: %s", async (scenario) => {
++  const user: UserMessage = {
++    id: "msg_compaction", sessionID, role: "user", time: { created: 1 },
++    agent: "build", model: { providerID: "provider", modelID: "model" },
++  }
++  const assistant: AssistantMessage = {
++    id: "msg_compaction_summary", sessionID, role: "assistant", parentID: user.id,
++    time: { created: 2, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const compaction: Part = {
++    id: "part_compaction", sessionID, messageID: user.id, type: "compaction", auto: true,
++  }
++  const summary: Part = {
++    id: "part_compaction_summary", sessionID, messageID: assistant.id, type: "text",
++    text: scenario === "scrollbar" ? `${"content after compaction ".repeat(500)}SCROLL_BOTTOM` : "Compacted summary",
++  }
++  await withRenderedReview([{ info: user, parts: [compaction] }, { info: assistant, parts: [summary] }], async (app) => {
++    const expected = scenario === "scrollbar" ? "SCROLL_BOTTOM" : "Auto Compaction"
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes(expected)) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    await app.renderOnce()
++    await app.renderOnce()
++    if (scenario === "label") {
++      expect(app.captureCharFrame()).toContain("Auto Compaction")
++      return
++    }
++    // 没有普通用户正文，右侧半格标记只能来自压缩边界，不能由普通prompt标记代替。
++    const rows = app.captureCharFrame().split("\n")
++    expect(rows.some((row) => /[▀▄]/.test(row.slice(-4)))).toBe(true)
++  }, { width: 100, height: scenario === "scrollbar" ? 14 : 30 })
++})
++
+ // 与原回归一样经过正文delta和Markdown布局，而非仅调用滚动计算函数。
+ test("session follows streamed text from a one-row bottom gap", async () => {
+   const message: AssistantMessage = {
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index 338ec61..ef28fda 100644
 --- a/packages/tui/src/routes/session/index.tsx

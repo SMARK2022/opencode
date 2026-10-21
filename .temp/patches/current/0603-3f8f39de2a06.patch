@@ -8,13 +8,13 @@ Subject: [PATCH] =?UTF-8?q?feat(permission):=20reviewer=20=E6=99=AE?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 
-适配说明：两 hunk 语义逐字落地，仅注释前缀重锚——目标 596 适配版注释带 "596 " 前缀（源 preimage 无前缀），603 注释块独立于 596 注释块（源结构保持）。
+适配说明：普通软凝练全文迁入Core共享system契约，efficiently接现有协议分流尾项；V1保持重导出。仅提示词引导，不增加硬token限或重试状态，599超时提示仍独立。既有纯prompt用例覆盖两协议与普通/超时文本分界。
 
 
-diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/opencode/src/permission/reviewer/prompt.ts
---- a/packages/opencode/src/permission/reviewer/prompt.ts
-+++ b/packages/opencode/src/permission/reviewer/prompt.ts
-@@ -40,14 +40,21 @@ Use this tool input schema for every decision, including low-risk allows:
+diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
+--- a/packages/core/src/permission/reviewer/prompt.ts
++++ b/packages/core/src/permission/reviewer/prompt.ts
+@@ -42,6 +42,10 @@
    "user_authorization": "unknown" | "low" | "medium" | "high",
    "outcome": "allow" | "deny",
    "rationale": string
@@ -23,18 +23,32 @@ diff --git a/packages/opencode/src/permission/reviewer/prompt.ts b/packages/open
 +
 +Work efficiently: this is a bounded judgment, not an open-ended analysis. Identify the user's intent, the action's concrete risk, and the matching policy rule — then decide. Do not re-derive the transcript, re-check alternatives repeatedly, or stall in 'wait, but…' loops. Keep rationale to one or two sentences.`
 +
-+// [local-smark] 603 普通模式软凝练（对齐 Codex guardian 首次即 Low effort 的提示词等价物）：
-+// 无硬字数锚——NovaSky 证据表明强约束在最难任务上欠思考退化；内容清单（意图/风险/
-+// 规则）+ 反打转针对实测 15k 字符循环形态；rationale 一两句约束与 Codex policy_template
-+// "one concise sentence" 对齐。硬预算（600 词）仍仅由超时重试的 TIME_BUDGET 分层承担。
- 
- // [local-smark] 596 决策入口尾指令（R-REQ-3b）：长混乱 transcript 会把小模型漂移成
- // 「反问/自认无法执行」（生产 DB 失败现场 6/6 attempt 同形）；planned action JSON
- // 之后紧跟一条祈使指令，把漂移形态重新映射回结构化决策路径。
- const DECISION_DIRECTIVE_USER_ITEM = {
-   type: "text" as const,
--  text: "Decide now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
-+  text: "Decide efficiently now and submit exactly one permission_review_decision call. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to \"unknown\", with rationale.",
- }
++// 普通首轮只给软凝练引导，600词时间提示仍仅由超时补试追加，不新增provider硬限。
  
  // #198：模板替换而非拼接——保证策略在模板的正确位置，而非附加在末尾可能被忽略
+@@ -73,4 +77,4 @@
+     {
+       type: "text",
+-      text: `Decide now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need; no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
++      text: `Decide efficiently now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need; no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
+     },
+diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
+--- a/packages/opencode/test/permission/reviewer-prompt.test.ts
++++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
+@@ -85,3 +85,11 @@
+     expect(prompt).toContain('"risk_level": "low" | "medium" | "high" | "critical"')
+     expect(prompt).toContain('"outcome": "allow" | "deny"')
++    // 两协议的普通首轮都有软引导，不能提前混入超时才生效的字数提示。
++    for (const protocol of ["json", "tool"] as const) {
++      const text = PermissionReviewerPrompt.buildSystemPrompt("", protocol)
++      expect(text).toContain("Work efficiently: this is a bounded judgment")
++      expect(text).toContain("Keep rationale to one or two sentences.")
++      expect(text).not.toContain("Time advisory")
++      expect(text).not.toContain("600 words")
++    }
+   })
+@@ -141,3 +149,4 @@
+     expect(last).toContain("permission_review_decision")
++    expect(last).toContain("Decide efficiently now")
+     expect(last).toContain("insufficient evidence")
+     expect(last).toContain("do not ask questions")

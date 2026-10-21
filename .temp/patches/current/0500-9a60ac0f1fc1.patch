@@ -3846,15 +3846,14 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      ) {
        throw new ValidationError({ message: "Maintenance task owner cursor ID is invalid" })
      }
-@@ -1799,6 +3027,14 @@ function pageCount(db: TxOrDb) {
+@@ -1799,6 +3027,13 @@ function pageCount(db: TxOrDb) {
    return isRecord(row) && typeof row.page_count === "number" ? row.page_count : 0
  }
  
 +function pragmaNumber(db: TxOrDb, name: "page_size" | "page_count" | "freelist_count") {
-+  // #493/#0500：$client 仅存在于基础 Db；与 pageCount 同源，经调用方传入的同步客户端读取。
-+  const client = (db as Db).$client
-+  if (!client) return 0
-+  const row: unknown = client.query(`PRAGMA ${name}`).get()
++  // 固定 PRAGMA 走 Drizzle 公共执行面，Bun/Node 原生驱动差异不进入维护算法。
++  const row: unknown = name === "page_size" ? db.get(sql`PRAGMA page_size`)
++    : name === "page_count" ? db.get(sql`PRAGMA page_count`) : db.get(sql`PRAGMA freelist_count`)
 +  return isRecord(row) && typeof row[name] === "number" ? row[name] : 0
 +}
 +
@@ -3889,7 +3888,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    if (lastID) conditions.push(gt(PartTable.id, PartID.make(lastID)))
    if (request.sessionID) conditions.push(eq(PartTable.session_id, request.sessionID))
    return db
-@@ -1856,17 +3098,40 @@ function nextPartRows(
+@@ -1856,18 +3098,41 @@ function nextPartRows(
      .all()
  }
  
@@ -3932,10 +3931,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    runtime: MaintenanceRuntime = { checkpoint: async () => {} },
  ): Promise<MaintenanceResult> {
 +  // #0500：daemon 与 offline CLI 共用此执行器，channel 差异只存在于外层锁和结果传输。
-   if (prepared.type === "immediate") {
+   const run = runtime.run ?? (async <A>(body: () => A) => body())
+   if (prepared.type === "immediate") return run(() => {
      if (prepared.request.operation === "status") return { type: "status", report: status(db) }
      if (prepared.request.operation === "verify") return { type: "verify", report: verify(db, prepared.request) }
-@@ -1875,35 +3140,40 @@ export async function maintain(db: TxOrDb,
+@@ -1875,34 +3140,38 @@ export async function maintain(db: TxOrDb,
        throw new ValidationError({ message: "vacuum requires confirm=true" })
      }
      if (!prepared.request.confirm) throw new ValidationError({ message: "vacuum requires confirm=true" })
@@ -3943,12 +3943,9 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      if (!runtime.lease) throw new ValidationError({ message: "vacuum requires a maintenance lease" })
      runtime.lease.assertOwned()
      const pagesBefore = pageCount(db)
-     const vacuumClient = (db as Db).$client
--    if (vacuumClient) vacuumClient.run("VACUUM")
-+    if (!vacuumClient) return { type: "vacuum", pagesBefore, pagesAfter: pageCount(db) }
-+    vacuumClient.run("VACUUM")
+     db.run(sql`VACUUM`)
 +    // #0500：checkpoint 位于同一显式 vacuum operation 内，普通 status/compress 不获得额外阻塞写入。
-+    const checkpoint: unknown = vacuumClient.query("PRAGMA wal_checkpoint(TRUNCATE)").get()
++    const checkpoint: unknown = db.get(sql`PRAGMA wal_checkpoint(TRUNCATE)`)
 +    // VACUUM 在 WAL 模式可留下接近主库大小的 frame；busy/nonempty 结果不能被报告为物理整理完成。
 +    // SQLite 在没有 WAL 能力时返回 log=-1/checkpointed=-1，这与零 frame 同样是 terminal success。
 +    if (
@@ -3963,7 +3960,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +    }
 +    // #0500：page report 只有在 WAL 结果验证后返回，调用方不会看到“成功 JSON + 双倍磁盘占用”。
      return { type: "vacuum", pagesBefore, pagesAfter: pageCount(db) }
-   }
+   })
  
    const preparedTask = taskRequest(prepared, runtime)
    const task = structuredClone(preparedTask.task)
@@ -3997,7 +3994,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    try {
 +    if (request.operation === "verify") {
 +      // repair task 复用同步 verify 的完整 owner/payload/state 快照，禁止维护第二套 payload-only verdict。
-+      const report = db.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" })
++      const report = await run(() => db.transaction((db) => verifyWith(db, request.repair), { behavior: "immediate" }))
 +      // repaired mismatch 不算失败；无法修复的 owner/missing/frame 类别才进入 task.failed。
 +      const failed = report.corruptOwners + report.missingPayloads + report.corruptPayloads
 +      task.processed = report.checkedOwners + report.checkedPayloads
@@ -4016,7 +4013,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
          if (!cursor || !("owner" in cursor)) throw new ValidationError({ message: "Invalid owner maintenance cursor" })
          if (cursor.owner === "message") {
 +          // #0500：Message 完成后才转到 Part，固定 owner cursor 顺序避免恢复时跨表遗漏。
-           const outcome = db.transaction(
+           const outcome = await run(() => db.transaction(
              (db) => {
                const rows = cold
 @@ -1935,13 +3219,14 @@ export async function maintain(db: TxOrDb,
@@ -4038,7 +4035,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
                  empty: false as const,
 @@ -1955,6 +3240,7 @@ export async function maintain(db: TxOrDb,
              { behavior: "immediate" },
-           )
+           ))
            if (outcome.empty) {
 +            // 阶段切换也持久 checkpoint，崩溃恢复不会重新解释上一表的结束位置。
              task.cursor = { owner: "part", lastID: "" }
@@ -4050,7 +4047,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
            task.compressedBytes += outcome.compressedBytes
 -        } else {
 +        } else if (cursor.owner === "part") {
-           const outcome = db.transaction(
+           const outcome = await run(() => db.transaction(
              (db) => {
                const rows = cold
 @@ -1972,13 +3258,14 @@ export async function maintain(db: TxOrDb,
@@ -4073,7 +4070,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 @@ -1991,6 +3278,12 @@ export async function maintain(db: TxOrDb,
              },
              { behavior: "immediate" },
-           )
+           ))
 +          if (outcome.empty && cold) {
 +            // expand 最后清 summary refs，完整降级结束后不残留 maintenance pointers。
 +            task.cursor = { owner: "session-summary", lastID: "" }
@@ -4089,7 +4086,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
            }
 +        } else {
 +          if (!cold) throw new ValidationError({ message: "Compress task cannot enter the summary expand stage" })
-+          const outcome = db.transaction(
++          const outcome = await run(() => db.transaction(
 +            (db) => {
 +              const rows = nextSummaryRows(db, request, cursor.lastID, request.batchSize)
 +              if (rows.length === 0) return { empty: true as const }
@@ -4104,7 +4101,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +              }
 +            },
 +            { behavior: "immediate" },
-+          )
++          ))
 +          if (outcome.empty) done = true
 +          else {
 +            task.cursor = outcome.cursor
@@ -4527,7 +4524,7 @@ diff --git a/packages/core/src/session/projector.ts b/packages/core/src/session/
 +
  function run(db: DatabaseService, event: SessionEvent.Event) {
    return Effect.gen(function* () {
-     const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
+     const ledger = SessionRequestUsage.make(db)
 @@ -285,17 +302,35 @@ const layer = Layer.effectDiscard(
          const id = event.data.info.id
          const sessionID = event.data.info.sessionID
@@ -4713,7 +4710,7 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
            \`summary_deletions\` integer,
            \`summary_files\` integer,
            \`summary_diffs\` text,
-+          \`summary_ref\` text,
++          \`summary_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
 +          \`summary_cursor\` text,
 +          \`summary_initialized\` integer DEFAULT 0 NOT NULL,
 +          \`summary_init_dirty\` integer DEFAULT 0 NOT NULL,
@@ -4731,6 +4728,15 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
      })
    },
 
+diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
+--- a/packages/core/src/database/migration.gen.ts
++++ b/packages/core/src/database/migration.gen.ts
+@@ -50,4 +50,5 @@
+     // #493：cold_storage 表 + message/part.cold_ref 引用列
+     import("./migration/20260717035626_cold_storage"),
++    import("./migration/20260930100000_cold_storage_pack_v2"),
+   ])
+ ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
 diff --git a/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts b/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts
 new file mode 100644
 --- /dev/null
@@ -4780,8 +4786,8 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  import { Database } from "@opencode-ai/core/database/database"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { NotFoundError } from "@/storage/storage"
--import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm"
-+import { and, desc, eq, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
+-import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm"
++import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
  import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 +// #0500：boundary-first 读取的权威——compaction 边界决定 hydrate 范围，message-v2 不得自行扫描 marker。
 +import { CompactionBoundary } from "@opencode-ai/core/session/compaction-boundary"
@@ -4887,40 +4893,36 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  // #493：Session.getPart 与批量 hydrate 共享同一 row decoder，避免 direct read 绕过 cold projection。
  export const decodeMessageRow = info
  export const decodePartRow = part
-@@ -230,13 +308,16 @@ const older = (row: Cursor) =>
-   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
- 
- function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
+@@ -231,11 +308,13 @@ const older = (row: Cursor) =>
+ function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (typeof MessageTable.$inferSelect)[]) {
 +  // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
 +  // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
    // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
 -  // 任一 payload corruption 使整个 hydrate 抛错，禁止同一 page 混合完整对象与占位对象。
 +  // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
-   const restoredRows = ColdStorage.thawMessageRows(sync, rows)
-   const ids = restoredRows.map((row) => row.id)
-   const partByMessage = new Map<string, Part[]>()
    return Effect.gen(function* () {
+     const restoredRows = yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, rows))
+     const ids = restoredRows.map((row) => row.id)
+     const partByMessage = new Map<string, Part[]>()
      if (ids.length > 0) {
-+      // #0500：只按选中 Message IDs 查询 children，范围外 archive 不进入 JS 或持久预热。
        const partRows = yield* db
          .select()
          .from(PartTable)
-@@ -244,6 +325,8 @@ function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (
+@@ -243,7 +325,9 @@ function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (
          .orderBy(PartTable.message_id, PartTable.id)
          .all()
          .pipe(Effect.orDie)
 +      // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
 +      // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
-       const restoredParts = ColdStorage.thawPartRows(sync, partRows)
+       const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, partRows))
        for (const row of restoredParts) {
          const next = partFromRestored(row)
-@@ -253,6 +336,9 @@ function hydrate(db: Database.Interface["db"], sync: ColdStorage.TxOrDb, rows: (
+         const list = partByMessage.get(row.message_id)
+@@ -253,6 +336,7 @@ function hydrate(db: Database.Interface["db"], sync: Database.Interface["sync"], rows: (
        }
      }
  
-+    // #0500：持久 thaw 在返回前完成，前端不会收到临时 lazy proxy。
-+    // restoredRows 保持原 page 顺序，child Map 不改变 newest/oldest 语义。
-+    // 因此持久预热副作用与本次返回 transcript 的范围严格一致。
++    // 持久 thaw 在返回前完成并保留 page/child 顺序，不对范围外历史产生预热副作用。
      return restoredRows.map((row) => ({
        info: infoFromRestored(row),
        parts: partByMessage.get(row.id) ?? [],
@@ -4962,25 +4964,13 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  // #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
  // messageID 是 exclusive fork point；Part 按 session+message_id 范围选择，避免超上限的 IN 参数。
  export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
-@@ -740,16 +857,17 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionI
-   return { messages, parts }
- }
- 
--// #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
--export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean }) {
-+// #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取；fromMessageID 供 boundary-first 起点裁剪。
-+export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
-   // includeHidden 默认 false：正常流不返回被撤销隐藏的消息和 part
-   const size = 50
+@@ -735,8 +857,9 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
    return Effect.gen(function* () {
      const result = [] as WithParts[]
      let before: string | undefined
      while (true) {
--      // #106：page 全量拉页，由 stream 的 opts.includeHidden 决定过滤
--      const next = yield* page({ sessionID, limit: size, before, includeHidden: true }).pipe(
-+      // #106：page 全量拉页，由 stream 的 opts.includeHidden 决定过滤；
-+      // #0500：fromMessageID 透传 page 的 gte 裁剪——boundary 前的归档 head 不进入 JS。
-+      const next = yield* page({ sessionID, limit: size, before, includeHidden: true, fromMessageID: opts?.fromMessageID }).pipe(
++      // 已有 page 以 persisted time/ID 锚定边界，同时在 SQL 保留 hidden 过滤和范围外不预热。
+       const next = yield* page({ sessionID, limit: size, before, includeHidden: opts?.includeHidden, fromMessageID: opts?.fromMessageID }).pipe(
          Effect.catchIf(NotFoundError.isInstance, () =>
            Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
          ),
@@ -4992,8 +4982,8 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +  // 有 tail 时从原始 retained turn 开始读取，再由 filterCompacted 恢复 provider 顺序。
    // #205：压缩恢复需要 hidden 结构锚点作为边界；visible() 会从返回的 prompt 窗口剔除它们
 -  return filterCompacted(yield* stream(sessionID, { includeHidden: true }))
-+  const { sync } = yield* Database.Service
-+  const boundary = CompactionBoundary.latest(sync, sessionID)
++  const database = yield* Database.Service
++  const boundary = yield* Database.withSync(database, (sync) => CompactionBoundary.latest(sync, sessionID))
 +  const cutoff = boundary?.tailStartID ?? boundary?.markerID
 +  return filterCompacted(yield* stream(sessionID, { includeHidden: true, fromMessageID: cutoff }))
  })
@@ -5003,15 +4993,6 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -10,6 +10,8 @@ import { SessionID, MessageID, PartID } from "./schema"
- import { MessageV2 } from "./message-v2"
- import { SessionRequestUsage } from "./request-usage"
- import { SessionRevert } from "./revert"
-+// #0500：abortPendingAssistants 改为按 pending ID 定点 get；NotFoundError 是正常的并发消失路径。
-+import { NotFoundError } from "@/storage/storage"
- import { Session } from "./session"
- import { Agent } from "../agent/agent"
- import { Provider } from "@/provider/provider"
 @@ -91,7 +93,8 @@ function isDecideAgent(agent: Agent.Info) {
  
  // 过长 thinking 只保留首尾，避免 decide 上下文被推理占满
@@ -5022,65 +5003,21 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
    const turns = Array.from(messages)
      .flatMap((message) => {
        // technical wrapper 的 goalTurnID 只表达 lineage，不是新的 canonical source；
-@@ -376,18 +379,13 @@ const layer = Layer.effect(
-       const exit = yield* Effect.gen(function* () {
-         yield* Effect.logInfo("cancel", { "session.id": sessionID })
-         // #482：所有 cancel 归属都从同一同步快照推导。
--        const messages = yield* sessions.messages({ sessionID }).pipe(
--          Effect.catch(() => Effect.succeed([] as SessionV1.WithParts[])),
--        )
--        const parentIDs = new Set(
--          messages.flatMap((message) => (message.info.role === "assistant" ? [message.info.parentID] : [])),
--        )
--        const pendingIds = new Set(
--          messages.filter((m) => m.info.role === "assistant" && !m.info.time.completed).map((m) => m.info.id),
--        )
--        const orphanIDs = messages.flatMap((message) =>
--          message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [],
-+        // #0500：cancelSnapshot 只读 hot 字段——已完成 assistant 的冷 Tool history 不被扫描预热。
-+        const snapshot = yield* MessageV2.cancelSnapshot(sessionID).pipe(
-+          Effect.provideService(Database.Service, database),
-         )
-+        const pendingIds = new Set(snapshot.pendingAssistantIDs)
-+        const orphanIDs = snapshot.orphanUserIDs
-+        // orphan集合在cancel前冻结，后续replacement prompt不会被旧取消操作误标为aborted。
-         yield* state.cancel(sessionID)
-         yield* abortPendingAssistants(sessionID, pendingIds).pipe(Effect.ignore)
-         // #482：cancel 前 queued 的无 assistant 回复的 user 请求需要终态化；
-@@ -420,18 +418,23 @@ const layer = Layer.effect(
-     })
- 
-     // #216：显式类型标注使 abortPendingAssistants 可在 abortChildren 中递归自引用
--    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<string>) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<string>) {
-+    const abortPendingAssistants: (sessionID: SessionID, pendingIds?: Set<MessageID>) => Effect.Effect<void, Session.NotFound> = Effect.fn("SessionPrompt.abortPendingAssistants")(function* (sessionID: SessionID, pendingIds?: Set<MessageID>) {
-       // #153：cancel 必须覆盖全部可见未完成 assistant，而非仅 findMessage 命中的第一条
--      // sessions.messages 返回 chronological 顺序且默认过滤 hidden，取消只需覆盖可见项
--      const visible = yield* sessions.messages({ sessionID })
--      // 只终态化 cancel 开始前已存在的消息，不触碰 cancel 后新建的消息
--      const pending = visible.filter(
--        (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
--          msg.info.role === "assistant" &&
--          !msg.info.time.completed &&
--          // pendingIds 存在时只收 cancel 前已存在的消息，防止误杀 cancel 后新建的命令
--          (!pendingIds || pendingIds.has(msg.info.id)),
-+      // #0500：快照只含 hot 定位；每个 pending assistant 定点 get，未完成才终态化，
-+      // 已完成 assistant 的冷 Tool history 不进入本次取消扫描。
-+      const ids = pendingIds ?? new Set(
-+        (yield* MessageV2.cancelSnapshot(sessionID).pipe(Effect.provideService(Database.Service, database))).pendingAssistantIDs,
-       )
-+      const pending = [] as (SessionV1.WithParts & { info: SessionV1.Assistant })[]
-+      for (const id of ids) {
-+        const msg = yield* MessageV2.get({ sessionID, messageID: id }).pipe(
-+          Effect.provideService(Database.Service, database),
-+          Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)),
-+        )
-+        if (!msg || msg.info.role !== "assistant") continue
-+        if (msg.info.time.completed) continue
-+        pending.push(msg as SessionV1.WithParts & { info: SessionV1.Assistant })
-+      }
-       // #216：递归中止子会话——auto-review 创建的 permission-reviewer 子会话也需终态化
-       // 子会话递归时不传 pendingIds——子会话无用户输入竞态
-       const abortChildren = Effect.forEach(yield* sessions.children(sessionID), (child) => abortPendingAssistants(child.id), {
+@@ -336,10 +337,10 @@ const layer = Layer.effect(
+             const children = yield* sessions.children(sessionID)
+             // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
+-            const messages = yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([])))
+-            const parentIDs = new Set(messages.flatMap((message) => message.info.role === "assistant" ? [message.info.parentID] : []))
+-            const pending = messages.filter((message) => message.info.role === "assistant" && !message.info.time.completed).map((message) => message.info.id)
+-            const orphanIDs = messages.flatMap((message) => message.info.role === "user" && !parentIDs.has(message.info.id) ? [message.info.id] : [])
++            // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
++            const snapshot = yield* MessageV2.cancelSnapshot(sessionID).pipe(Effect.provideService(Database.Service, database))
++            const pending = snapshot.pendingAssistantIDs
++            const orphanIDs = snapshot.orphanUserIDs
+             yield* state.cancel(sessionID)
+             yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+               discard: true,
+             })
 @@ -1637,14 +1640,10 @@ const layer = Layer.effect(
  
            // Goal continuity 来自未裁剪的持久化 Message chronology；provider window 会因 Compaction
@@ -5103,15 +5040,6 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
-@@ -6,6 +6,8 @@ import { Session } from "./session"
- import { SessionID, MessageID, PartID } from "./schema"
- import { Provider } from "@/provider/provider"
- import { MessageV2 } from "./message-v2"
-+// #0500：prune 经 boundary-first 读取需要就地 provide Database.Service。
-+import { Database } from "@opencode-ai/core/database/database"
- // #194：改用 TokenEstimate 统一上传估算
- import { TokenEstimate } from "@/token/estimate"
- import { SessionProcessor } from "./processor"
 @@ -747,15 +749,21 @@ const layer = Layer.effect(
  
      // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
@@ -5138,15 +5066,6 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
  
        let total = 0
        let pruned = 0
-@@ -1262,6 +1270,8 @@ export const node = LayerNode.make({
-     Provider.node,
-     EventV2Bridge.node,
-     RuntimeFlags.node,
-+    // #0500：prune 的 boundary-first 读取需要 Database.Service。
-+    Database.node,
-   ],
- })
- 
 
 diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/src/session/summary-cache.ts
 new file mode 100644
@@ -5605,9 +5524,9 @@ new file mode 100644
 +  sessionID: SessionID
 +  storage: Storage.Interface
 +}) {
-+  // #0500：目标同步事务经 Database.Service 的 sync 客户端——与 cold-storage 的 TxOrDb 同源。
-+  const { sync } = yield* Database.Service
-+  const claim = yield* Effect.sync(() =>
++  // 初始化 claim 与后续提交分别预约同一连接，镜像读取不持有 SQL 预约。
++  const database = yield* Database.Service
++  const claim = yield* Database.withSync(database, (sync) =>
 +    sync.transaction((db) => claimInitialization(db, input.sessionID), { behavior: "immediate" }),
 +  )
 +  if (claim.type === "initialized") return undefined
@@ -5626,7 +5545,7 @@ new file mode 100644
 +  const ctx = yield* InstanceState.context
 +  const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
 +
-+  return yield* Effect.sync(() =>
++  return yield* Database.withSync(database, (sync) =>
 +    sync.transaction(
 +      (db) => {
 +        // 外部 I/O 后必须在同一 immediate transaction 重读 claim；并发 initializer 已提交时直接采用 DB authority。
@@ -5766,15 +5685,15 @@ new file mode 100644
 +  }
 +  const ctx = yield* InstanceState.context
 +  const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
-+  const { sync } = yield* Database.Service
-+  return yield* Effect.sync(() =>
++  const database = yield* Database.Service
++  return yield* Database.withSync(database, (sync) =>
 +    sync.transaction((db) => prepareDeltaState(db, input, base), { behavior: "immediate" }),
 +  )
 +})
 +
 +export const commit = Effect.fn("SummaryCache.commit")(function* (input: PreparedDelta) {
-+  const { sync } = yield* Database.Service
-+  return yield* Effect.sync(() =>
++  const database = yield* Database.Service
++  return yield* Database.withSync(database, (sync) =>
 +    sync.transaction(
 +      (db) =>
 +        input.type === "unchanged"
@@ -5800,8 +5719,8 @@ new file mode 100644
 +  const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
 +  // corruption 沿 Effect defect 失败，不能以空数组覆盖仍可修复的 owner。
 +  // ref、codec 和 cursor 均封装在后端，调用方无需判断 aggregate 的冷热状态。
-+  const { sync } = yield* Database.Service
-+  return yield* Effect.sync(() =>
++  const database = yield* Database.Service
++  return yield* Database.withSync(database, (sync) =>
 +    // 同步 transaction 不跨网络/文件 I/O，持锁只覆盖 SQLite 与 summary zstd decode。
 +    sync.transaction(
 +      (db) => {
@@ -6345,9 +6264,12 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
 diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -1,4 +1,3 @@
+@@ -1,7 +1,6 @@
 -// #180：SQL 会话预过滤 + 工具事件单遍生成
- import { Effect } from "effect"
+ import { DateTime, Effect, Schema } from "effect"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
+ import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+ import { MessageID } from "@/session/schema"
  import { Session } from "@/session/session"
  // #174：assistant 表优先费用
 @@ -8,15 +7,15 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
@@ -6366,11 +6288,11 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  // #483：Project 身份读取——project group 的 label/path 来自存储行，不再用裸 ID 展示
  import { ProjectTable } from "@opencode-ai/core/project/sql"
 -import type { SessionID } from "@/session/schema"
-+import type { MessageID, SessionID } from "@/session/schema"
++import type { SessionID } from "@/session/schema"
  
  // #174：MICROS 定义存库到显示的换算
  // #174：费用以微美元存库，显示只除一次 1e6
-@@ -562,6 +561,49 @@ const statusCounts = (status: string, requests: number) => ({
+@@ -562,6 +561,50 @@ const statusCounts = (status: string, requests: number) => ({
  // #174：aggregateSession 生成只读 StatsReport 快照
  
  // #176：工具上下文事件（按 assistant 时刻归因）
@@ -6392,7 +6314,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +      role: "assistant"
 +      providerID: string
 +      modelID: string
-+      agent: string
++      parentID?: MessageID
++      agent?: string
 +      cost: number
 +      tokens: TokenTotals
 +      parts: StatsPart[]
@@ -6420,10 +6343,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  type ToolUsageEvent = {
    time: number
    sessionID: SessionID
-@@ -658,46 +700,26 @@ const addToolCall = (map: Map<string, ToolCallAttribution>, call: ToolCallAttrib
+@@ -658,32 +700,9 @@ const addToolCall = (map: Map<string, ToolCallAttribution>, call: ToolCallAttrib
  
- // #176：tip ToolPart 状态机上的输入字符
- // #176：pending 用 raw，其余序列化 input
+-// #176：tip ToolPart 状态机上的输入字符
+-// #176：pending 用 raw，其余序列化 input
 -const toolInputChars = (part: { state: { status: string; raw?: string; input?: unknown } }) => {
 -  if (part.state.status === "pending") return (part.state.raw ?? "").length
 -  try {
@@ -6446,11 +6369,11 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 -}
 -
 -// #483：pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时
--const toolDuration = (part: { state: any }) => {
+-const toolDuration = (part: { state: { status: string; time?: { start: number; end?: number } } }) => {
 -  if (part.state.status !== "completed" && part.state.status !== "error") return 0
 -  const time = part.state.time
 -  if (!time) return 0
--  return Math.max(0, time.end - time.start)
+-  return Math.max(0, (time.end ?? time.start) - time.start)
 +// #0500：pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时。
 +// start/end 来自 cold 投影与 hot state.time 的同值拷贝。
 +const toolDuration = (part: StatsToolPart) => {
@@ -6459,25 +6382,6 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +  return Math.max(0, part.end - part.start)
  }
  
- // #176：截至 time 的各工具 IO 字符（用于上下文归因权重）
- // #176：时间截点前工具 IO 权重
--const toolCharsByName = (messages: any[], time: number) => {
-+const toolCharsByName = (messages: StatsMessage[], time: number) => {
-   const result = new Map<string, { inputChars: number; outputChars: number }>()
-   for (const message of messages) {
--    if (message.info.time.created > time) continue
-+    if (message.time > time) continue
-     for (const part of message.parts) {
-       if (part.type !== "tool" || !part.tool) continue
-       const item = result.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
--      item.inputChars += toolInputChars(part)
--      item.outputChars += toolOutputChars(part)
-+      // #0500：字符标量来自 cold 投影——与 v1 decode、hot 计算共用 ColdStorage 公式。
-+      item.inputChars += part.inputChars
-+      item.outputChars += part.outputChars
-       result.set(part.tool, item)
-     }
-   }
 @@ -752,57 +774,20 @@ const addComponents = (target: InputComponentTotals, value: InputComponentTotals
  
  // #176：step-finish 上的 input 侧 token（含 cache）
@@ -6535,45 +6439,88 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  const toolEventsFromAssistant = (input: {
    // #176：兼容 Session.WithParts，不绑死 tokens 形状
 -  message: any
--  visibleMessages: any[]
 +  message: StatsMessage | undefined
-+  visibleMessages: StatsMessage[]
+   chars: Map<string, { inputChars: number; outputChars: number }>
    event: {
      time: number
      sessionID: SessionID
-@@ -818,7 +803,7 @@ const toolEventsFromAssistant = (input: {
-   // #176：组件 token 来自 step-finish.inputBreakdown，而非整包 assistant tokens
-   // #176：优先 breakdown 组件而非整包 tokens
-   const components = componentsFromAssistant(input.message)
--  const chars = toolCharsByName(input.visibleMessages, input.message.info.time.created)
-+  const chars = toolCharsByName(input.visibleMessages, input.message.time)
-   const inputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.inputChars, 0)
-   const outputTotal = Array.from(chars.values()).reduce((sum, item) => sum + item.outputChars, 0)
-   return Array.from(chars.entries())
-@@ -846,8 +831,8 @@ const toolEventsFromAssistant = (input: {
- // #180：单遍扫描 assistants，避免每条消息重复 toolCharsByName
- // #180：批量种子入口，语义同逐条但可扩展单遍优化
+@@ -835,22 +831,22 @@ const toolEventsFromAssistant = (input: {
  const toolEventsFromAssistants = (
 -  assistants: Array<{ message: any; event: any }>,
 -  visibleMessages: any[],
 +  assistants: Array<{ message: StatsMessage | undefined; event: { time: number; sessionID: SessionID; projectID: string; providerID: string; modelID: string; source: string; agent: string; status: string } }>,
 +  visibleMessages: StatsMessage[],
  ) => {
-   // #176：批量入口复用归因公式
+-  const ordered = assistants.filter((item) => item.message).toSorted((a, b) => a.message.info.time.created - b.message.info.time.created)
+-  const messages = visibleMessages.toSorted((a, b) => a.info.time.created - b.info.time.created)
++  const ordered = assistants.filter((item): item is typeof item & { message: StatsMessage } => !!item.message).toSorted((a, b) => a.message.time - b.message.time)
++  const messages = visibleMessages.toSorted((a, b) => a.time - b.time)
+   const chars = new Map<string, { inputChars: number; outputChars: number }>()
    const events: ToolUsageEvent[] = []
-@@ -857,24 +842,149 @@ const toolEventsFromAssistants = (
+   let index = 0
+   // 时间游标只消费每条历史工具一次，保留“创建时间不晚于助手”的原归因边界。
+   for (const item of ordered) {
+-    while (index < messages.length && messages[index].info.time.created <= item.message.info.time.created) {
++    while (index < messages.length && messages[index].time <= item.message.time) {
+       for (const part of messages[index].parts) {
+         if (part.type !== "tool" || !part.tool) continue
+         const weight = chars.get(part.tool) ?? { inputChars: 0, outputChars: 0 }
+-        weight.inputChars += toolInputChars(part)
+-        weight.outputChars += toolOutputChars(part)
++        weight.inputChars += part.inputChars
++        weight.outputChars += part.outputChars
+         chars.set(part.tool, weight)
+       }
+       index++
+     }
+     events.push(...toolEventsFromAssistant({ message: item.message, chars, event: item.event }))
+@@ -857,58 +842,187 @@ const toolEventsFromAssistants = (
    return events
  }
  
 -const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (session: Session.Info, cutoff: number) {
 -  const svc = yield* Session.Service
--  const messages = yield* svc
+-  const legacyMessages = yield* svc
 -    .messages({ sessionID: session.id })
 -    .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
--  const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
 -  const { db } = yield* Database.Service
 -  const requestUsageRows = yield* db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all().pipe(Effect.orDie)
 -  const assistantUsageRows = yield* db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
+-  const legacyIDs = new Set(legacyMessages.map((message) => String(message.info.id)))
+-  const projected = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, session.id)).all().pipe(Effect.orDie)
+-  // 两种历史共享账本，但原生工具只在 session_message；同 ID 的迁移投影不能重复计数。
+-  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user")).map((row) => {
+-    const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
+-    const assistant = message.type === "assistant" ? message : undefined
+-    const estimate = assistant?.inputEstimate
+-    return {
+-      info: {
+-        id: MessageID.make(row.id), role: assistant ? "assistant" as const : "user" as const,
+-        time: { created: row.time_created }, tokens: assistant?.tokens ?? emptyTokens(), cost: assistant?.cost ?? 0,
+-        // 精确账本关联用于既有去重；无记录时不猜测相邻请求或模型。
+-        parentID: assistantUsageRows.find((usage) => usage.assistant_message_id === MessageID.make(row.id))?.request_id,
+-        modelID: assistant?.model.id, providerID: assistant?.model.providerID,
+-      },
+-      parts: [
+-        ...(assistant?.content ?? []).flatMap((part) => part.type !== "tool" ? [] : [{
+-          type: "tool" as const, tool: part.name, state: {
+-            status: part.state.status, input: part.state.input,
+-            // 原生时间经Schema解码为DateTime，在此统一成旧投影的毫秒契约。
+-            time: {
+-              start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
+-              end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
+-            },
+-            raw: typeof part.state.input === "string" ? part.state.input : undefined,
+-            output: part.state.status === "completed" ? part.state.content.filter((item) => item.type === "text").map((item) => item.text).join("\n") : undefined,
+-            error: part.state.status === "error" ? part.state.error.message : undefined,
+-            attachments: part.state.status === "completed" ? part.state.content.flatMap((item) => item.type === "file" ? [{ url: item.uri }] : []) : [],
+-          },
+-        }]),
+-        ...(estimate?.confirmed ? [{ type: "step-finish" as const, tokens: assistant?.tokens, inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown }] : []),
+-      ],
+-    }
+-  })
+-  const visibleMessages = [...legacyMessages, ...nativeMessages].filter((message) => includeTime(cutoff, message.info.time.created))
 +// #0500：json_extract 的 NULL/类型漂移统一收敛为有限数值，防止 NaN 坐标进入图表。
 +const finiteStat = (value: number | undefined) => (typeof value === "number" && Number.isFinite(value) ? value : 0)
 +
@@ -6581,8 +6528,8 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +// Message SELECT 明确排除 user summary.diffs；Part 只读取 Tool/StepFinish，避免把无关 archive 搬入 JS。
 +const loadStatsRows = (sessionIDs: SessionID[]) =>
 +  Effect.gen(function* () {
-+    const { sync } = yield* Database.Service
-+    return yield* Effect.sync((): StatsRows => {
++    const database = yield* Database.Service
++    return yield* Database.withSync(database, (sync): StatsRows => {
 +      // 2000-ID chunk 与 maintenance 上限一致，并绕开 SQLite variable 数量限制。
 +      const batches = sessionIDs.flatMap((_, index) =>
 +        index % ColdStorage.DEFAULT_BATCH_SIZE === 0
@@ -6597,6 +6544,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +            sessionID: MessageTable.session_id,
 +            time: MessageTable.time_created,
 +            role: sql<string>`json_extract(${MessageTable.data}, '$.role')`,
++            parentID: sql<string | null>`json_extract(${MessageTable.data}, '$.parentID')`,
 +            providerID: sql<string | null>`json_extract(${MessageTable.data}, '$.providerID')`,
 +            modelID: sql<string | null>`json_extract(${MessageTable.data}, '$.modelID')`,
 +            agent: sql<string | null>`json_extract(${MessageTable.data}, '$.agent')`,
@@ -6667,6 +6615,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +          providerID: row.providerID,
 +          modelID: row.modelID,
 +          agent: row.agent,
++          ...(row.parentID ? { parentID: MessageID.make(row.parentID) } : {}),
 +          cost: finiteStat(row.cost ?? undefined),
 +          tokens: normalizeTokens({
 +            input: finiteStat(row.tokensInput ?? undefined),
@@ -6699,6 +6648,42 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +          append(assistants, row.session_id, row)
 +        }
 +      }
++      // 原生历史不参与 legacy 冷存储；沿既有解码与精确账本关联转成同一内部统计标量。
++      const legacyIDs = new Set(messageRows.map((row) => String(row.id)))
++      for (const batch of batches) {
++        const projected = sync.select().from(SessionMessageTable).where(inArray(SessionMessageTable.session_id, batch)).all()
++        for (const row of projected) {
++          if (legacyIDs.has(row.id) || (row.type !== "assistant" && row.type !== "user")) continue
++          const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
++          const id = MessageID.make(row.id)
++          if (message.type !== "assistant") {
++            append(messages, row.session_id, { id, time: row.time_created, role: "user", parts: [] })
++            continue
++          }
++          const parts: StatsPart[] = message.content.flatMap((part): StatsToolPart[] => {
++            if (part.type !== "tool") return []
++            const state = part.state
++            return [{ version: 1, type: "tool", tool: part.name, status: state.status,
++              inputChars: state.status === "pending" ? (typeof state.input === "string" ? state.input.length : 0) : JSON.stringify(state.input ?? {}).length,
++              outputChars: state.status === "completed"
++                ? state.content.filter((item) => item.type === "text").map((item) => item.text).join("\n").length + state.content.reduce((sum, item) => sum + (item.type === "file" ? item.uri.length : 0), 0)
++                : state.status === "error" ? state.error.message.length : 0,
++              start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
++              end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
++            }]
++          })
++          const estimate = message.inputEstimate
++          const step = estimate?.confirmed ? ColdStorage.projectPartStats({ type: "step-finish", reason: "stop",
++            tokens: normalizeTokens(message.tokens ?? emptyTokens()), cost: message.cost ?? 0, inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown }) : undefined
++          if (step?.type === "step-finish") parts.push(step)
++          // 同 ID 投影只保留一份；parent 仍从精确账本取得，混合历史不会按相邻时间猜测归属。
++          append(messages, row.session_id, { id, time: row.time_created, role: "assistant", parts,
++            providerID: message.model.providerID, modelID: message.model.id, tokens: normalizeTokens(message.tokens ?? emptyTokens()), cost: message.cost ?? 0,
++            parentID: assistants.get(row.session_id)?.find((usage) => usage.assistant_message_id === id)?.request_id,
++          })
++        }
++      }
++      for (const rows of messages.values()) rows.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id))
 +      return { messages, requests, assistants } satisfies StatsRows
 +    })
 +  })
@@ -6766,30 +6751,29 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
        const assistantEvents = assistantRows.map((row) => {
          const request = requestsByID.get(row.request_id)
          return {
-@@ -1008,16 +1120,17 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-     }
-   } else {
-     // #176：无 request_usage 时走 legacy 消息路径
-+    // #0500：仅无 RequestUsage 的 legacy Session 才采用 Assistant Message totals。
-     for (const message of visibleMessages) {
--      if (message.info.role !== "assistant") continue
--      const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
-+      if (message.role !== "assistant") continue
-+      const tokens = message.tokens
-       const event = {
--        time: message.info.time.created,
-+        time: message.time,
-         sessionID: session.id,
--        providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
--        modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
-+        providerID: message.providerID,
-+        modelID: message.modelID,
-         tokens,
--        cost: message.info.cost ?? 0,
-+        cost: message.cost,
-         requests: 0,
-         assistantCalls: 1,
-         // #176：legacy 路径无 usage 行，结局计量取零基、组件取消息实况
+@@ -1054,15 +1120,15 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows) => {
+   for (const message of visibleMessages) {
+-    if (message.info.role !== "assistant") continue
+-    if (tracked.has(message.info.id) || (message.info.parentID && fallbackRequests.has(message.info.parentID))) continue
+-    const tokens = normalizeTokens(message.info.tokens ?? emptyTokens())
++    if (message.role !== "assistant") continue
++    if (tracked.has(message.id) || (message.parentID && fallbackRequests.has(message.parentID))) continue
++    const tokens = message.tokens
+     const event = {
+-      time: message.info.time.created,
++      time: message.time,
+       sessionID: session.id,
+-      providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
+-      modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
++      providerID: message.providerID,
++      modelID: message.modelID,
+       tokens,
+-      cost: message.info.cost ?? 0,
++      cost: message.cost,
+       requests: 0,
+       assistantCalls: 1,
+       // #176：补入的历史助手没有账本明细，组件取消息实况、请求结局计量保持零基。
+       components: componentsFromAssistant(message),
 @@ -1041,8 +1154,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
        const item = getToolUsage(toolUsage, part.tool)
        // #176：工具调用次数 +1
@@ -6811,26 +6795,25 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
          // #180：先收集 assistant 种子再统一生成事件
      const seeds = assistantRows.map((row) => {
        const request = requestsByID.get(row.request_id)
-@@ -1076,15 +1190,15 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-   } else {
-         // #180：legacy 路径同样先收集再单遍
-     const seeds = visibleMessages
--      .filter((message) => message.info.role === "assistant")
-+      .filter((message) => message.role === "assistant")
-       .map((message) => ({
-         message,
-         event: {
--          time: message.info.time.created,
-+          time: message.time,
-           sessionID: session.id,
-           projectID: session.projectID,
--          providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
--          modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
-+          providerID: message.providerID,
-+          modelID: message.modelID,
-           source: "legacy-message",
-           agent: session.agent ?? "unknown",
-           status: "completed",
+@@ -1120,14 +1190,14 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows) => {
+   // #176：工具上下文沿用同一助手覆盖集合，混合历史只补未入账消息。
+   const seeds = visibleMessages
+-    .filter((message) => message.info.role === "assistant" && !tracked.has(message.info.id) && !(message.info.parentID && fallbackRequests.has(message.info.parentID)))
++    .filter((message): message is Extract<StatsMessage, { role: "assistant" }> => message.role === "assistant" && !tracked.has(message.id) && !(message.parentID && fallbackRequests.has(message.parentID)))
+     .map((message) => ({
+       message,
+       event: {
+-        time: message.info.time.created,
++        time: message.time,
+         sessionID: session.id,
+         projectID: session.projectID,
+-        providerID: (message.info as { providerID?: string }).providerID ?? "unknown",
+-        modelID: (message.info as { modelID?: string }).modelID ?? "unknown",
++        providerID: message.providerID,
++        modelID: message.modelID,
+         source: "legacy-message",
+         agent: session.agent ?? "unknown",
+         status: "completed",
 @@ -1101,8 +1215,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
      event.status = event.status ?? "completed"
    }
@@ -6864,11 +6847,12 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
-@@ -1,20 +1,92 @@
+@@ -1,20 +1,93 @@
  import { describe, expect } from "bun:test"
 -import { Effect, Exit } from "effect"
 +import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 +import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { SessionProjector } from "@opencode-ai/core/session/projector"
  // #493：ColdStorage 直测走 core 运行时——读路径断言经 MessageV2 业务 seam，写路径经真实 projector。
@@ -6890,12 +6874,12 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +// #0500：v2 pack 行为块引入 summary/stats 测试面（路径按目标布局适配）。
 +import { SessionSummary } from "@/session/summary"
 +import { aggregateStats } from "@/cli/cmd/stats-data"
-+import { TestInstance } from "../fixture/fixture"
++import { TestInstance, tmpdirScoped } from "../fixture/fixture"
 +import type { SessionID } from "@/session/schema"
 +import path from "path"
  
 -const it = testEffect(LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node])))
-+const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node]))
++const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node, CrossSpawnSpawner.node]))
 +const it = testEffect(coldLayer)
 +// #0500：HTTP seam 用例与 Server.Default 共享 memoMap 实例——pub/sub 与 handler 必须同源。
 +const sharedIt = testEffectShared(Layer.mergeAll(coldLayer, httpApiLayer))
@@ -7009,7 +6993,93 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
        expect(coldOwnerCount(sync, [session.id])).toBe(1)
        yield* sessions.remove(session.id)
      }),
-@@ -1339,3 +1422,1000 @@ describe.serial("ColdStorage", () => {
+@@ -976,10 +1059,15 @@ describe.serial("ColdStorage", () => {
+       expect(ColdStorage.freezeOwner(sync, { type: "part", id: partID, now: Date.now() }).type).toBe("frozen")
+       const beforeVerify = ColdStorage.verify(sync, { repair: false }).refCountMismatches
+-      const hash = useDb(sync, 
++      const owner = useDb(sync,
+         (db) =>
+-          db.select({ hash: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, partID)).get()?.hash,
++          db
++            .select({ hash: PartTable.cold_ref, key: PartTable.cold_key })
++            .from(PartTable)
++            .where(eq(PartTable.id, partID))
++            .get(),
+       )
+-      if (!hash) throw new Error("Expected a cold ref for verify test")
++      if (!owner?.hash || !owner.key) throw new Error("Expected a packed cold owner for verify test")
++      const hash = owner.hash
+       useDb(sync, (db) =>
+         db.update(ColdStorageTable).set({ ref_count: 99 }).where(eq(ColdStorageTable.hash, hash)).run(),
+       )
+@@ -987,6 +1075,58 @@ describe.serial("ColdStorage", () => {
+       expect(ColdStorage.verify(sync, { repair: true }).repaired).toBeGreaterThanOrEqual(1)
+       expect(ColdStorage.verify(sync, { repair: false }).refCountMismatches).toBe(beforeVerify)
+ 
++      const database = yield* Database.Service
++      const runtime = { lease: { assertOwned() {} }, checkpoint: async () => {}, run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)) }
++      // 合法 frame 搭配不存在的随机 entry key，区分完整 owner verify 与旧 payload-only task。
++      useDb(sync, (db) =>
++        db.update(PartTable).set({ cold_key: Buffer.alloc(32, 0xa5) }).where(eq(PartTable.id, partID)).run(),
++      )
++      const verifyTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
++      if (verifyTask.type !== "task") throw new Error("Expected task-backed repair")
++      const verified = yield* Effect.promise(() =>
++        ColdStorage.maintain(sync, verifyTask, runtime),
++      )
++      if (verified.type !== "task") throw new Error("Expected task result for repair")
++      // repair 不可修 key；task 必须报告 corruption，不能因 payload hash 正常而 completed/failed=0。
++      expect(verified.task.failed).toBeGreaterThan(0)
++      useDb(sync, (db) =>
++        db.update(PartTable).set({ cold_key: owner.key }).where(eq(PartTable.id, partID)).run(),
++      )
++
++      const baselineOwners = ColdStorage.verify(sync, { repair: false }).corruptOwners
++      // dirty 没有 claimed cursor 是非法状态；repair 只能报告，不能猜测清 bit 或制造 cursor。
++      useDb(sync, (db) =>
++        db
++          .update(SessionTable)
++          .set({ summary_init_dirty: true })
++          .where(eq(SessionTable.id, session.id))
++          .run(),
++      )
++      const summaryTask = ColdStorage.prepareMaintenance({ operation: "verify", repair: true, batchSize: 50 })
++      if (summaryTask.type !== "task") throw new Error("Expected task-backed summary repair")
++      const summaryVerified = yield* Effect.promise(() =>
++        ColdStorage.maintain(sync, summaryTask, runtime),
++      )
++      if (summaryVerified.type !== "task") throw new Error("Expected task result for summary repair")
++      expect(summaryVerified.task.failed).toBeGreaterThan(0)
++      expect(ColdStorage.verify(sync, { repair: false }).corruptOwners).toBe(baselineOwners + 1)
++      expect(
++        useDb(sync, (db) =>
++          db
++            .select({ dirty: SessionTable.summary_init_dirty })
++            .from(SessionTable)
++            .where(eq(SessionTable.id, session.id))
++            .get()?.dirty,
++        ),
++      ).toBe(true)
++      useDb(sync, (db) =>
++        db
++          .update(SessionTable)
++          .set({ summary_init_dirty: false })
++          .where(eq(SessionTable.id, session.id))
++          .run(),
++      )
++
+       const expanded = ColdStorage.expand(sync, { sessionID: session.id, all: false })
+       expect(expanded.expanded).toBe(1)
+       expect(coldOwnerCount(sync, [session.id])).toBe(0)
+@@ -1072,6 +1212,6 @@ describe.serial("ColdStorage", () => {
+       if (!hash) throw new Error("Expected a cleanup hash")
+       // 手工清除 owner 模拟外部 SQL/crash 遗留的 orphan；正常删除路径不会制造此状态。
+-      useDb(sync, (db) => db.update(PartTable).set({ cold_ref: null }).where(eq(PartTable.id, partID)).run())
++      useDb(sync, (db) => db.update(PartTable).set({ cold_ref: null, cold_key: null, cold_stats: null }).where(eq(PartTable.id, partID)).run())
+ 
+       const preview = ColdStorage.cleanup(sync, { delete: false })
+       expect(preview.candidates).toBeGreaterThanOrEqual(1)
+@@ -1339,3 +1422,1006 @@ describe.serial("ColdStorage", () => {
      }),
    )
  })
@@ -7987,26 +8057,32 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
 +  // fixture 使用真实 SQLite 文件与公开 maintenance dispatcher，不 mock checkpoint 或文件长度。
 +  it.instance("truncates WAL before explicit vacuum reports success", () =>
 +    Effect.gen(function* () {
-+      const sessions = yield* SessionNs.Service
-+      const { sync } = yield* Database.Service
-+      yield* sessions.create({ title: "vacuum WAL checkpoint" })
++      const directory = yield* tmpdirScoped()
++      return yield* Effect.gen(function* () {
++      const database = yield* Database.Service
++      const { sync } = database
++      sync.run(sql`CREATE TABLE vacuum_fixture(value blob)`)
++      sync.run(sql`INSERT INTO vacuum_fixture VALUES(zeroblob(65536))`)
++      const filename = sync.get<{ file: string }>(sql`PRAGMA database_list`).file
++      expect(filename).toBe(path.join(directory, "wal.sqlite"))
++      expect(Bun.file(`${filename}-wal`).size).toBeGreaterThan(0)
 +      // confirm=true 与 lease 同时提供，覆盖 production 对破坏性物理操作的双重授权门禁。
 +      // 本测试不执行自动 vacuum，只有显式 operation 才拥有 checkpoint/truncate 副作用。
 +      const result = yield* Effect.promise(() =>
 +        ColdStorage.maintain(sync, ColdStorage.prepareMaintenance({ operation: "vacuum", confirm: true }), {
 +          lease: { assertOwned() {} },
 +          checkpoint: async () => {},
++          run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
 +        }),
 +      )
 +      // maintenance dispatcher 仍返回原有 vacuum report，前端/CLI contract 没有新增字段。
 +      expect(result.type).toBe("vacuum")
 +      // 文件大小在 command 返回后读取，确保断言观察的是 terminal 状态而非并发 checkpoint 中间态。
-+      // current-scale 1.35 GB temp-copy gate另行证明同一逻辑在真实 WAL 模式清零大文件。
-+      const wal = Bun.file(`${Database.path()}-wal`)
-+      // WAL 不存在和零字节都视为成功，兼容 SQLite fixture 选择 DELETE/内存 journal 的情况。
-+      // 非零 WAL 直接失败，避免只看 pageCount 而忽略磁盘上第二份数据库。
-+      // checkpoint busy 时 production hard-fail，不能以测试环境通常无 reader 为理由吞掉失败。
++      // 只验证当前独立 fixture 文件，不将 source 历史大库体积作为本轮结果。
++      const wal = Bun.file(`${filename}-wal`)
++      // 已证明同一文件在命令前存在非空 WAL，返回后必须清零，不能误查 preload 的 :memory: 路径。
 +      expect(yield* Effect.promise(async () => ((await wal.exists()) ? wal.size : 0))).toBe(0)
++      }).pipe(Effect.provide(Layer.fresh(Database.layerFromPath(path.join(directory, "wal.sqlite")))))
 +    }),
 +  )
 +})

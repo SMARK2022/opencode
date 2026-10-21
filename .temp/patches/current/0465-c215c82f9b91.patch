@@ -29,3 +29,12 @@ diff --git a/README.md b/README.md
 -OPENCODE_VERSION=1.18.43 curl -fsSL https://opencode.ai/install | bash
 +OPENCODE_VERSION=1.18.44 curl -fsSL https://opencode.ai/install | bash
  
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -572,4 +572,4 @@
+     "packages/opencode": {
+       "name": "opencode",
+-      "version": "1.18.43-smark",
++      "version": "1.18.44-smark",
+       "bin": {

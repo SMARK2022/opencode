@@ -536,32 +536,27 @@ index ff76d1f4c..5265284e4 100644
  
  // #364：goal 类型定义（SDK 未重新生成前使用内联类型）
  // 字段与 src/session/goal.ts 的 Goal schema 对齐
-@@ -465,7 +467,12 @@ export const {
- 
+@@ -490,6 +492,6 @@ export const {
      function listSessions() {
-       return sdk.client.session
--        .list({ start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() })
-+        .list({
-+          // #529：半年 lookback + browse 1600（与 util/session-list-params 常量同源）
-+          start: Date.now() - SESSION_LIST_LOOKBACK_MS,
-+          limit: SESSION_LIST_BROWSE_LIMIT,
-+          ...sessionListQuery(),
-+        })
-         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
-     }
- 
+       const tracker = new Map<string, SessionTrace>()
+       listingSessions.add(tracker)
+-      const query = { start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() }
++      const query = { start: Date.now() - SESSION_LIST_LOOKBACK_MS, limit: SESSION_LIST_BROWSE_LIMIT, ...sessionListQuery() }
+       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
+       const projectID = project.project()
 
 diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
 index 3c41109bd..bae4467f2 100644
 --- a/packages/tui/src/component/dialog-session-list.tsx
 +++ b/packages/tui/src/component/dialog-session-list.tsx
-@@ -18,6 +18,12 @@ import { errorMessage } from "../util/error"
+@@ -18,6 +18,13 @@ import { errorMessage } from "../util/error"
  import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
  import { useCommandShortcut } from "../keymap"
  import { useEvent } from "../context/event"
 +import {
 +  resolveSessionListSource,
 +  sessionListEmptyLabel,
++  SESSION_LIST_BROWSE_LIMIT,
 +  SESSION_LIST_LOOKBACK_MS,
 +  SESSION_LIST_SEARCH_LIMIT,
 +} from "../util/session-list-params"
@@ -576,10 +571,10 @@ index 3c41109bd..bae4467f2 100644
 -    ...(search ? { start: Date.now() - 90 * 24 * 60 * 60 * 1000 } : {}),
 -        limit: 100,
 +    // #306：仅搜索限制时间窗；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
-+    // #529：搜索窗口 90d→半年、limit 100→400，与 sync 后台缓存同源（util/session-list-params）。
++    // #529：搜索与后台缓存共享半年窗；搜索400、默认浏览1600，仍保留浏览无start。
 +    ...(search
 +      ? { start: Date.now() - SESSION_LIST_LOOKBACK_MS, limit: SESSION_LIST_SEARCH_LIMIT }
-+      : { limit: 100 }),
++      : { limit: SESSION_LIST_BROWSE_LIMIT }),
      ...(search ? { search } : {}),
      ...input.filter,
    }
@@ -605,7 +600,7 @@ index 3c41109bd..bae4467f2 100644
 +  // extra 与服务端同词法（分词 + AND）：注入行与返回集的命中口径不因来源不同而分叉
 +  return [
 +    ...input.result,
-+    ...input.extra.filter((session) => tokens.every((token) => session.title.toLowerCase().includes(token))),
++    ...input.extra.filter((session) => tokens.every((token) => matchesDialogSessionSearch(session, token))),
 +  ].filter((session) => !input.deleted.has(session.id))
 +  // 注：deleted 排除对两源一致生效——会话删除后服务端缓存与本地注入都不再出现
 +}
@@ -638,7 +633,7 @@ index 3c41109bd..bae4467f2 100644
 -    const query = search().trim().toLowerCase()
 -    return [...result.map((session) => synced.get(session.id) ?? session), ...extra]
 -      .filter((session) => !deleted().has(session.id))
--      .filter((session) => !query || session.title.toLowerCase().includes(query))
+-      .filter((session) => matchesDialogSessionSearch(session, query, searchResults()))
 +    // #529：服务端结果直通；extra（当前会话+置顶）经 visibleSessions 按 token 过滤注入
 +    return visibleSessions({
 +      result: result.map((session) => synced.get(session.id) ?? session),
@@ -734,14 +729,21 @@ diff --git a/packages/tui/test/component/dialog-session-list.test.ts b/packages/
 index 4422e43c5..216e113f0 100644
 --- a/packages/tui/test/component/dialog-session-list.test.ts
 +++ b/packages/tui/test/component/dialog-session-list.test.ts
-@@ -1,5 +1,5 @@
+@@ -1,4 +1,4 @@
  import { describe, expect, test } from "bun:test"
--import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/component/dialog-session-list"
-+import { createDialogSessionListQuery, loadDialogSessionList, visibleSessions } from "../../src/component/dialog-session-list"
+-import { createDialogSessionListQuery, loadDialogSessionList, matchesDialogSessionSearch } from "../../src/component/dialog-session-list"
++import { createDialogSessionListQuery, loadDialogSessionList, matchesDialogSessionSearch, visibleSessions } from "../../src/component/dialog-session-list"
  
  describe("dialog session list", () => {
-   test("requests root sessions for the default browse list", () => {
-@@ -15,8 +15,8 @@ describe("dialog session list", () => {
+@@ -14,6 +14,6 @@ describe("dialog session list", () => {
+     // #306：精确匹配无 start 的浏览请求，防止搜索窗口泄漏到历史浏览。
+     expect(createDialogSessionListQuery({ filter: { path: "packages/tui" } })).toEqual({
+       roots: true,
+-      limit: 100,
++      limit: 1600,
+       path: "packages/tui",
+     })
+@@ -23,8 +23,8 @@ describe("dialog session list", () => {
      expect(createDialogSessionListQuery({ search: " deploy ", filter: { scope: "project" } })).toEqual({
        roots: true,
        start: expect.any(Number),

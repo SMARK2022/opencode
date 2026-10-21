@@ -58,7 +58,7 @@ index 4d0d61ddf2..5539ea6064 100644
 +// #113：兼容 Session.isDefaultTitle 导出名
 +export { isDefaultTitle }
  
- type SessionRow = typeof SessionTable.$inferSelect
+ type SessionRow = typeof SessionTable.$inferSelect & { request?: RequestUsage }
  
 @@ -520,7 +514,7 @@ const layer: Layer.Layer<
          path: input.path,

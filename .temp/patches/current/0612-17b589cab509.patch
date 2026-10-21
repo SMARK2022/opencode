@@ -364,14 +364,13 @@ diff --git a/packages/tui/src/context/theme.tsx b/packages/tui/src/context/theme
 diff --git a/packages/tui/test/cli/tui/dialog-prompt.test.tsx b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
 --- a/packages/tui/test/cli/tui/dialog-prompt.test.tsx
 +++ b/packages/tui/test/cli/tui/dialog-prompt.test.tsx
-@@ -241,3 +241,84 @@ test("DialogPrompt voice status call site selects compact profile", async () =>
+@@ -241,3 +241,83 @@ test("DialogPrompt voice status call site selects compact profile", async () =>
    const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/ui/dialog-prompt.tsx")).text()
    expect(source).toMatch(/voiceInputStatusText\([\s\S]*?compact:\s*true/)
  })
 +
-+// 主题样式退休（R18）：ThemeProvider 切换主题时旧 syntax pair 必须在 idle 边界销毁，
-+// 当前 pair 保持可读；renderer 销毁时最后一对也必须释放，防止 native registry 句柄泄漏。
-+// 适配目标：动态 import 取 useTheme，TestTuiContexts+KVProvider 提供主题初始化依赖。
++// 主题切换后旧pair须在idle边界销毁，当前pair保持可读，退出再释放最后一对。
++// TestTuiContexts与KVProvider提供真实初始化依赖，不以固定sleep假定ready。
 +test("ThemeProvider releases superseded and current syntax styles", async () => {
 +  await using tmp = await tmpdir()
 +  const state = path.join(tmp.path, "state")
@@ -449,3 +448,18 @@ diff --git a/packages/tui/test/cli/tui/dialog-prompt.test.tsx b/packages/tui/tes
 +    app.renderer.destroy()
 +  }
 +})
+diff --git a/script/upgrade-opentui.ts b/script/upgrade-opentui.ts
+--- a/script/upgrade-opentui.ts
++++ b/script/upgrade-opentui.ts
+@@ -41,3 +41,3 @@
+-// 同一SMARK发布族共用完整native闭包，.4等后续发布不能误入registry清理分支。
+-const release = !snapshot && /^0\.4\.3-smark\.\d+$/.test(ver) ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
++// 维护入口接受通用smark发布形状，版本取catalog/release；普通registry与snapshot仍保留。
++const release = !snapshot && /^\d+\.\d+\.\d+-smark\.\d+$/.test(ver) ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
+ // 仅映射 source 已发布的完整 family；普通 registry/snapshot 继续沿目标既有入口维护。
+diff --git a/packages/opencode/test/script/upgrade-opentui.test.ts b/packages/opencode/test/script/upgrade-opentui.test.ts
+--- a/packages/opencode/test/script/upgrade-opentui.test.ts
++++ b/packages/opencode/test/script/upgrade-opentui.test.ts
+@@ -7,1 +7,1 @@
+-test.each(["0.4.3-smark.1", "0.4.3-smark.2", "0.4.3-smark.4", "0.4.3-smark.5", "0.4.3-smark.6", "0.4.3-smark.7", "0.4.3-smark.8"])("upgrade-opentui preserves release %s and thirdparty boundary", async (version) => {
++test.each(["0.4.3-smark.1", "0.4.3-smark.2", "0.4.3-smark.4", "0.4.3-smark.5", "0.4.3-smark.6", "0.4.3-smark.7", "0.4.3-smark.8", "0.4.3-smark.10"])("upgrade-opentui preserves release %s and thirdparty boundary", async (version) => {

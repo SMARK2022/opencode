@@ -704,7 +704,7 @@ diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/
 +++ b/packages/opencode/src/ide/vscode-bridge.ts
 @@ -252,7 +252,11 @@ export async function callBridge(input: CallInput): Promise<unknown> {
  
- // 实际执行桥接调用的函数：从 callBridge 提取，由队列调度
+ // 发现、鉴权、期限和错误传播仍由原调用路径承担。
  async function callBridgeOnce(input: CallInput): Promise<unknown> {
 -  await assertExistingLocalFilePath(input.filePath)
 +  input.signal?.throwIfAborted()
@@ -728,7 +728,7 @@ diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/
 diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
 --- a/packages/opencode/test/ide/vscode-bridge.test.ts
 +++ b/packages/opencode/test/ide/vscode-bridge.test.ts
-@@ -19,6 +19,89 @@ afterEach(async () => {
+@@ -19,6 +19,91 @@ afterEach(async () => {
  // 测试套件：VS Code 桥接发现和解析功能
  // 测试意图：验证桥接发现逻辑正确处理过期、PID 失效和健康检查失败的注册条目
  describe("vscode bridge discovery", () => {
@@ -739,14 +739,14 @@ diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencod
 +    await fs.writeFile(entry, `
 +      import assert from "node:assert/strict";
 +      import { subscribe } from "node:diagnostics_channel";
-+      import { startBridge, closeBridge } from ${JSON.stringify(path.resolve(import.meta.dir, "../../../../sdks/vscode/src/bridge.ts"))};
++      import { activateBridge, closeBridge } from ${JSON.stringify(path.resolve(import.meta.dir, "../../../../sdks/vscode/src/bridge.ts"))};
 +      import { workspace, started, release, executions } from "vscode";
 +      // 客户端abort返回不代表服务端已收到断开，使用Node公开HTTP事件同步。
 +      const disconnected = Promise.withResolvers();
 +      subscribe('http.server.request.start',({request,response})=>{
 +        if(request.url==='/notebook/run')response.once('close',()=>disconnected.resolve());
 +      });
-+      const server = await startBridge({ appendLine() {} });
++      const server = await activateBridge({ appendLine() {} });
 +      const abortRun = new AbortController(), abortEdit = new AbortController();
 +      const post = (route, body, signal) => fetch('http://127.0.0.1:'+server.port+'/notebook/'+route, {
 +        method:'POST', headers:{Authorization:'Bearer '+server.token,'Content-Type':'application/json'},
@@ -776,6 +776,7 @@ diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencod
 +        const uri = value => ({ fsPath:value, scheme:'file',fragment:value.split('#')[1]||'',toString(){return value} });
 +        export const env={appName:'test'}, extensions={getExtension(){}};
 +        export const NotebookCellKind={Code:2,Markup:1}, EndOfLine={LF:1,CRLF:2};
++        export const Uri={file:uri,parse:uri,joinPath:(base,...parts)=>uri([base.fsPath,...parts].join('/'))};
 +        export class NotebookRange { constructor(start,end){this.start=start;this.end=end} }
 +        export class NotebookCellData { constructor(kind,value,languageId){Object.assign(this,{kind,value,languageId})} }
 +        export class WorkspaceEdit { set(uri,edits){this.edits=edits} }
@@ -794,9 +795,10 @@ diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencod
 +        export const started=Promise.withResolvers(),release=Promise.withResolvers(); export let executions=0;
 +        export const commands={async getCommands(){return['notebook.cell.execute']},async executeCommand(command,args){
 +          executions++;started.resolve();await release.promise;
-+          const cell=cells[args.ranges[0].start];cell.executionSummary={success:true};
++          const cell=cells[args.ranges[0].start];cell.executionSummary={success:true};notebook.version++;
 +          for(const fn of listeners)fn({notebook,cellChanges:[{cell,executionSummary:cell.executionSummary}]});
 +        }};
++        export default {env,extensions,NotebookCellKind,EndOfLine,Uri,NotebookRange,NotebookCellData,WorkspaceEdit,NotebookEdit,workspace,window,commands};
 +      ` }))
 +    } }] })
 +    expect(build.success).toBe(true)
@@ -839,7 +841,7 @@ diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencod
 diff --git a/packages/opencode/test/mcp/oauth-auto-connect.test.ts b/packages/opencode/test/mcp/oauth-auto-connect.test.ts
 --- a/packages/opencode/test/mcp/oauth-auto-connect.test.ts
 +++ b/packages/opencode/test/mcp/oauth-auto-connect.test.ts
-@@ -131,19 +131,31 @@ function serveOAuthMcp(options: OAuthMcpOptions = {}) {
+@@ -131,19 +131,26 @@ function serveOAuthMcp(options: OAuthMcpOptions = {}) {
    )
  }
  
@@ -851,10 +853,7 @@ diff --git a/packages/opencode/test/mcp/oauth-auto-connect.test.ts b/packages/op
 +  ...(oauth ? { oauth } : {}),
  })
  
-+// 固定19876可能被Windows系统保留；由OS分配真实可绑定端口，不改生产默认值。
-+// 预占-释放拿到可绑定端口后，经 config 的 oauth.redirectUri 传给 MCP OAuth 链路。
-+// [0633] Windows 保留端口区间可能覆盖 19876：预占-释放拿到 OS 实际可绑定端口，
-+// [0633] 经 config oauth.redirectUri 传给回调监听，生产默认值保持不变。
++// OS分配可绑定端口，经config.redirectUri传给真实回调链，避开Windows固定端口保留区。
 +const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
 +const redirectUri = `http://127.0.0.1:${reservation.port}/mcp/oauth/callback`
 +// [0633] 立即释放端口：后续 MCP OAuth 回调服务器以相同端口真实监听。
@@ -867,21 +866,10 @@ diff --git a/packages/opencode/test/mcp/oauth-auto-connect.test.ts b/packages/op
      const server = yield* serveOAuthMcp()
      const mcp = yield* MCP.Service
 -    const result = yield* mcp.add("test-oauth", remote(server.url))
-+// [0633] 所有真实 OAuth 用例统一走 OS 分配端口：Windows 保留端口区间
-+// [0633] 因机器而异，固定端口的测试在部分 CI runner 上必然监听失败。
 +    const result = yield* mcp.add("test-oauth", remote(server.url, true, { redirectUri }))
  
      expect((result.status as Record<string, { status: string }>)["test-oauth"]).toEqual({ status: "needs_auth" })
    }),
-@@ -204,6 +216,8 @@ mcpTest.instance("pending provider does not expose or overwrite existing credent
- mcpTest.instance("failed reauthentication preserves existing credentials", () =>
-   Effect.gen(function* () {
-     yield* stopOAuthCallback
-+    // 实例结束时释放真实监听端口，避免污染后续OAuth用例。
-+    yield* Effect.addFinalizer(() => Effect.promise(() => McpOAuthCallback.stop()))
-     const server = yield* serveOAuthMcp()
-     const mcp = yield* MCP.Service
-     const auth = yield* McpAuth.Service
 @@ -211,7 +225,7 @@ mcpTest.instance("failed reauthentication preserves existing credentials", () =>
  
      yield* auth.updateClientInfo(name, { clientId: "dynamic-client", clientSecret: "dynamic-secret" }, server.url)
@@ -891,14 +879,6 @@ diff --git a/packages/opencode/test/mcp/oauth-auto-connect.test.ts b/packages/op
      expect((yield* mcp.startAuth(name)).authorizationUrl).toContain("/authorize")
  
      expect(yield* mcp.finishAuth(name, "invalid-code")).toEqual({
-@@ -225,7 +239,6 @@ mcpTest.instance("failed reauthentication preserves existing credentials", () =>
-     })
-   }),
- )
--
- mcpTest.instance("successful reauthentication commits replacement credentials", () =>
-   Effect.gen(function* () {
-     yield* stopOAuthCallback
 @@ -236,7 +249,7 @@ mcpTest.instance("successful reauthentication commits replacement credentials",
  
      yield* auth.updateClientInfo(name, { clientId: "old-client" }, server.url)
@@ -930,12 +910,11 @@ diff --git a/packages/opencode/test/mcp/oauth-auto-connect.test.ts b/packages/op
 diff --git a/packages/opencode/test/mcp/oauth-browser.test.ts b/packages/opencode/test/mcp/oauth-browser.test.ts
 --- a/packages/opencode/test/mcp/oauth-browser.test.ts
 +++ b/packages/opencode/test/mcp/oauth-browser.test.ts
-@@ -123,6 +123,12 @@ const serveOAuthMcp = Effect.acquireRelease(
+@@ -123,6 +123,11 @@ const serveOAuthMcp = Effect.acquireRelease(
    (server) => Effect.promise(server.close),
  )
  
 +// OS分配的端口避开本机保留区，仍走真正的callback监听与关闭流程。
-+// [0633] 同 auto-connect：端口由 OS 分配，回调监听走真实启动/关闭流程。
 +const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
 +const redirectUri = `http://127.0.0.1:${reservation.port}/mcp/oauth/callback`
 +await reservation.stop(true)
@@ -957,7 +936,8 @@ diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts 
 --- a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
 +++ b/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts
 @@ -1,12 +1,15 @@
- import { beforeEach, expect, mock, spyOn, test } from "bun:test"
+-import { beforeEach, expect, mock, test } from "bun:test"
++import { beforeEach, expect, mock, test } from "bun:test"
 +import { tmpdir } from "../fixture/fixture"
  
  const NotebookCellKind = { Markup: 1, Code: 2 } as const
@@ -972,14 +952,14 @@ diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts 
  // The fake VS Code command registry intentionally separates public commands
  // (`getCommands(true)`) from the full extension-host surface (`getCommands(false)`).
  // Jupyter contributes some commands as hidden/internal commands, so this fixture
-@@ -33,6 +36,7 @@ const textListeners = new Set<(event: { document: NotebookCell["document"] }) =>
- // `vscode` module. The fake owns only stable API surface used by notebook tools;
- // it intentionally avoids reaching into private helper functions.
- mock.module("vscode", () => ({
+@@ -31,6 +34,7 @@ const textListeners = new Set<(event: { document: NotebookCell["document"] }) =>
+ // 仅替换VS Code公开API以调用真实处理器，不启动扩展或内核，也不直接测试私有辅助函数。
+ const vscode = {
 +  env: { appName: "Notebook test" },
    NotebookCellKind,
    EndOfLine,
    ConfigurationTarget: { Global: 1 },
+   NotebookRange: class {
 @@ -72,7 +76,7 @@ mock.module("vscode", () => ({
      workspaceFolders: [{ uri: createUri("/tmp") }],
      fs: {
@@ -1017,7 +997,7 @@ diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts 
    activeNotebook = createNotebook()
    vscodeMock.workspace.notebookDocuments = [activeNotebook]
    vscodeMock.window.activeNotebookEditor = undefined
-@@ -166,6 +171,91 @@ beforeEach(() => {
+@@ -166,6 +171,90 @@ beforeEach(() => {
    extensionLookup = new Map()
    notebookListeners.clear()
    textListeners.clear()
@@ -1026,7 +1006,6 @@ diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts 
 +
 +test("summary never reports failed or unknown execution as successful", async () => {
 +  // 从真实执行字段构造失败，避免测试复刻展示字符串的判定错误。
-+// [0633] 从真实执行字段构造失败：复刻展示字符串会让测试与实现共用同一错误。
 +  activeNotebook.cellAt(1).executionSummary = { success: false }
 +  expect((await notebookSummary(notebookPath)).summary).toContain('status="1 failed"')
 +  activeNotebook.cellAt(1).executionSummary = { executionOrder: 1 }
@@ -1138,14 +1117,22 @@ diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts 
    // 移除 kernelspec metadata，模拟完全未配置的 notebook
    ;(activeNotebook as { metadata: Record<string, unknown> }).metadata = {}
    // 安装 Jupyter 扩展但 getKernel 返回 undefined（无活跃 kernel）
-@@ -564,8 +666,8 @@ test("run returns no-active-kernel when no kernel and no kernelspec metadata", a
+@@ -555,12 +657,12 @@ test("run permits native cold start without metadata or an active kernel", a
    const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
    const data = result.data as Record<string, unknown>
  
 -  expect(data.noActiveKernel).toBe(true)
+-  // 未执行结果仍须满足既有响应契约，不能让TUI从缺失字段推成完成。
+-  expect(data.completed).toBe(false)
+-  expect(data.cells).toEqual([])
+-  await expectHeader(result, "Run")
 -  expect(result.summary).toContain("configure")
 +  expect(data.completed).toBe(true)
 +  expect(data.noActiveKernel).toBeUndefined()
++  // 假API验证原生命令被准入，不把该测试称为真实内核冷启动。
++  expect(data.cells).toHaveLength(1)
++  await expectHeader(result, "Run")
++  expect(executedCommands).toContain("notebook.cell.execute")
  })
  
  test("run proceeds when kernel not started but kernelspec metadata exists", async () => {
@@ -1165,7 +1152,13 @@ diff --git a/packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts 
  test("run timeout message guides agent to env stop and env info", async () => {
    // 设置极短超时，模拟 cell 执行不完成
    // 默认 mock 的 executeSelectedCell 会立即触发 listener 完成执行，
-@@ -788,7 +899,7 @@ function executeSelectedCell() {
+@@ -779,11 +890,13 @@ function executeSelectedCell() {
+   const index = vscodeMock.window.activeNotebookEditor?.selection.start ?? 0
+   const cell = activeNotebook.cellAt(index)
+   cell.executionSummary = { executionOrder: ++executionOrder, success: true, timing: { startTime: 10, endTime: 12 } }
++  // 原生执行摘要事件属于新文档版本，不能用旧版本事件绕过运行等待器。
++  activeNotebook.version++
+   for (const listener of notebookListeners) listener({ notebook: activeNotebook, cellChanges: [{ cell, executionSummary: cell.executionSummary }] })
  }
  
  type UriLike = { fsPath: string; fragment: string; scheme: string; toString(): string }
@@ -1189,13 +1182,12 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
        })),
      {
        config: () => ({
-@@ -1274,7 +1274,9 @@ describe("session.llm.stream", () => {
+@@ -1274,7 +1274,8 @@ describe("session.llm.stream", () => {
            "stalled-openai-compatible": {
              npm: "@ai-sdk/openai-compatible",
              name: "Stalled Provider",
 -            options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 25 },
 +            // 本例验证首chunk后的停流；给真实HTTP建连留余量，避免先命中headers前超时。
-+// [0633] 25ms 在 Windows 上先命中 headers 前超时：停流断言需要真实建连余量。
 +            options: { apiKey: "[redacted]", baseURL: `${state.server!.url.origin}/v1`, chunkTimeout: 1000 },
              models: {
                "gpt-test": {
@@ -1204,332 +1196,241 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -115,6 +115,13 @@ export async function startBridge(output: { appendLine(value: string): void }):
-     const url = new URL(request.url ?? "/", `http://${BRIDGE_HOST}`)
-     output.appendLine(`[bridge] ${request.method} ${url.pathname}`)
- 
-+    // 正常finish后的close不是取消；只有响应未完成的断开才终止请求。
+@@ -122,6 +122,11 @@ async function startBridge(output: { appendLine(value: string): void }):
+   const httpServer = http.createServer(async (request, response) => {
 +    const controller = new AbortController()
++    // 正常finish后的close不算断开，未完成响应的请求才取消调度。
 +    response.once("close", () => {
-+// [0633] 正常 finish 后的 close 不是断开：只有响应未完成才终止请求。
 +      if (!response.writableFinished) controller.abort(new Error("Notebook request disconnected"))
 +    })
-+
      try {
-       // Health check — no auth required
-       // health 无 token：供 discover 廉价探测
-@@ -147,9 +154,23 @@ export async function startBridge(output: { appendLine(value: string): void }):
-         const filePath = stringProp(body, "filePath") ?? url.pathname
-       // 0399 source 语义：只读路由（summary/source/output 等）不加锁直行，
-       // 避免与同文档写操作互相阻塞（长 run 期间 agent 无法检查 notebook 状态）。
--      const result = READONLY_ROUTES.has(url.pathname)
--        ? await routeRequest(url.pathname, body, output)
--        : await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
-+      // [0633] handler 在获得队列执行权后检查取消，防止过期写入；控制面
-+      // （env stop/info）必须能到达正在运行的文档，不能等待 run 持有的执行锁。
-+// [0633] 队列执行权获取后再校验取消：入队到出队之间的断开同样不得写入。
-+// [0633] routeRequest 接收 signal 让长 run 在断开时能中途停止消费后续 cell。
-+      const handler = () => {
-+        // 在获得队列执行权后检查，而非只在入队时检查，防止过期写入。
-+// [0633] throwIfAborted 而非手动检查：保留原生 AbortError 语义与堆栈。
-+        controller.signal.throwIfAborted()
-+        return routeRequest(url.pathname, body, output, controller.signal)
-+      }
-+      // 控制面必须能到达正在运行的文档，不能等待run持有的执行锁。
-+// [0633] stop/info 是控制面：到达正在运行的文档比排队更优先，
-+// [0633] 等待 run 持有的执行锁会让 agent 永远无法中断一次长执行。
-+      const control = url.pathname === "/notebook/env" && (body.operation === "stop" || body.operation === "info")
-+      const result = READONLY_ROUTES.has(url.pathname) || control
-+        ? await handler()
-+        : await withFileLock(filePath, handler)
-         if (result !== undefined) return writeJson(response, 200, result)
+       if (!safeLocalRequest(request)) {
+         return writeJson(response, 403, { ok: false, error: "Forbidden" })
        }
- 
-@@ -206,6 +227,7 @@ async function routeRequest(
+       const url = new URL(request.url ?? "/", `http://${BRIDGE_HOST}`)
+@@ -153,7 +158,7 @@ async function startBridge(output: { appendLine(value: string): void }):
+       if (!isRecord(body)) {
+         return writeJson(response, 400, { ok: false, error: "Expected JSON object body" })
+       }
+-      const result = await routeRequest(request.method ?? "", url.pathname, body, output)
++      const result = await routeRequest(request.method ?? "", url.pathname, body, output, controller.signal)
+       // notebook 处理器只返回结果，不能自行结束 response；HTTP owner 在此统一决定成功状态与序列化。
+       if (result !== undefined) {
+         return writeJson(response, 200, result)
+@@ -217,6 +222,7 @@ async function routeRequest(
    pathname: string,
-   body: Record<string, unknown>,
+   body: unknown,
    output: { appendLine(value: string): void },
 +  signal: AbortSignal,
  ) {
-   // body 已在锁内读入：此处只做路径分发，禁止二次 readJson
-   switch (pathname) {
-@@ -216,10 +238,10 @@ async function routeRequest(
-       return await notebookSource(body)
+   if (method !== "POST" || !(NOTEBOOK_ROUTES.has(pathname) || LSP_ROUTES.has(pathname))) return undefined
+   // undefined 是未匹配路由的判别值，不能被 HTTP 层序列化成成功的空结果。
+@@ -231,6 +237,8 @@ async function routeRequest(
+   if (!filePath && pathname !== "/lsp/diagnostics" && pathname !== "/lsp/workspace-symbol") throw new Error("filePath is required")
  
-     case "/notebook/run":
--      return await runNotebook(body)
-+      return await runNotebook(body, signal)
+   const handler = async () => {
++    // 在唯一队列授予执行权后再检查，入队期间断开的编辑不能迟到写入。
++    signal.throwIfAborted()
+     switch (pathname) {
+       case "/notebook/env":
+         return await notebookEnv(body)
+@@ -242,10 +250,10 @@ async function routeRequest(
+         return await notebookSource(body)
  
-     case "/notebook/edit":
--      return await editNotebook(body)
-+      return await editNotebook(body, signal)
+       case "/notebook/run":
+-        return await runNotebook(body)
++        return await runNotebook(body, signal)
  
-     case "/notebook/output":
-     case "/notebook/cell-output": {
+       case "/notebook/edit":
+-        return await editNotebook(body)
++        return await editNotebook(body, signal)
+ 
+       case "/notebook/output":
+       case "/notebook/cell-output": {
+@@ -279,5 +287,7 @@ async function routeRequest(
+   // 只旁路source列出的四类读取；其余变更继续复用原文档锁。
+-  return await (READONLY_ROUTES.has(pathname) ? handler() : withFileLock(filePath, handler))
++  // stop/info必须能到达长run占用的文档；变更仍由同一文档锁串行。
++  const control = pathname === "/notebook/env" && (body.operation === "stop" || body.operation === "info")
++  return await (READONLY_ROUTES.has(pathname) || control ? handler() : withFileLock(filePath, handler))
+ }
+ 
+ function authorized(request: http.IncomingMessage, url: URL, token: string) {
 
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
 --- a/sdks/vscode/src/notebook/edit.ts
 +++ b/sdks/vscode/src/notebook/edit.ts
-@@ -42,10 +42,14 @@ const AFTER_SOURCE_PREVIEW_MAX_CHARS = 4 * 1024
- 
- // 编辑入口：根据 editType 分发到对应处理函数，filePath 和 editType 为必填参数
- // 入口只做 editType 分派：range/字符串细节下沉到 handler，避免第二套入口
+@@ -39,9 +39,11 @@ const AFTER_SOURCE_PREVIEW_MAX_CHARS = 4 * 1024
 -export async function editNotebook(input: Record<string, unknown>) {
 +export async function editNotebook(input: Record<string, unknown>, signal?: AbortSignal) {
    const filePath = stringProp(input, "filePath")
+   // 编辑的新契约要求明确文档，缺失路径不能沿 resolve 的只读缺省规则选中活动文件。
    if (!filePath) throw new Error("filePath is required")
    const notebook = await resolveNotebook(filePath)
-+  // 打开文档是异步边界；之后的修改构造到applyEdit之间没有异步等待。
-+// [0633] 打开文档是异步边界：其后的修改构造到 applyEdit 之间无异步等待，
-+// [0633] 此处是断开检查的最后安全点。
++  // 打开文档是异步边界，返回后先检查断开，再构造实际编辑。
 +  signal?.throwIfAborted()
    const editType = stringProp(input, "editType")
-   // 非法 editType 抛出错误：防止未定义操作导致 notebook 损坏
- if (!editType || !EDIT_TYPES.has(editType)) {
-@@ -228,6 +232,14 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
+   if (!editType || !EDIT_TYPES.has(editType)) {
+     throw new Error(`Invalid editType: ${editType ?? "<missing>"}. Expected one of: insert, edit, delete.`)
+   }
+@@ -228,6 +232,12 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
      return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
    }
  
-+// [0633] 幂等块位于 typeChange 分支之后：language-only 的 kind/语言变更仍走替换
-+// [0633] 路径（返回新 cellId），只有同语言同 kind 的纯幂等请求才直接返回。
 +  // 源码字段省略才是语言幂等操作；显式空字符串仍代表清空源码。
 +  if (language !== undefined && input.oldCode === undefined && input.newCode === undefined) {
 +    const source = targetCell.document.getText()
-+    return compactEditResult(notebook, { applied: true, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, kind: cellTypeLabel(targetCell.kind), language, sourcePreview: source, beforeSource: source, afterSource: source })
++    return compactEditResult(notebook, { applied: true, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language, sourcePreview: source, beforeSource: source, afterSource: source })
 +  }
 +
-   // 有 oldCode 时禁止 silent full-replace，强制 newCode 配对
    if (oldCodeRaw) {
      const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
+     // 提供非空 oldCode 就必须配对 newCode，不能退回整格覆盖。
 
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -7,27 +7,14 @@ import { extensionState, extensionInfo, stringProp, quoteForSummary, uriFromInpu
- import { resolveNotebook } from "./resolve"
- import { notebookHeader, runtimeLabel } from "./format"
+@@ -2,7 +2,7 @@
+  * vscode_notebook_env 提供 info/configure/restart/save 环境操作。
+  *
+  * 运行时来源：Jupyter 稳定 API 的 api.kernels.getKernel(notebook.uri)，
+- * Python 信息由该内核的 executeCode 探针取得。
++ * 仅读取语言与状态，不向用户内核注入执行探针。
+  *
+  * 元数据来源：保存的 .ipynb 中 metadata.kernelspec / metadata.language_info。
+  *
+@@ -16,14 +16,9 @@
+ import { notebookHeader } from "./format"
  
 -type KernelOutputItem = { mime: string; data: Uint8Array }
 -type KernelOutput = { items: KernelOutputItem[] }
+-
  interface KernelLike {
    readonly language: string
+   // 稳定 API 的 status 可缺省，不能从 notebook 的保存状态补成 idle。
    readonly status?: string
+-  // 探针消费异步内核输出流，CancellationToken 的所有权留在探针调用内。
 -  executeCode(code: string, token: vscode.CancellationToken): AsyncIterable<KernelOutput>
  }
- type JupyterLike = { kernels?: { getKernel?(uri: vscode.Uri): Promise<KernelLike | undefined> } }
+ 
+ type JupyterLike = {
+@@ -36,21 +31,8 @@
  type ActiveRuntime = {
    language: string
    kernelStatus: string
+-  // R 等非 Python 内核仍返回 base，不能用主机 Python 信息填充这个字段。
 -  python?: {
 -    version: string | null
 -    executable: string | null
 -    prefix: string | null
+-    // basePrefix 与 prefix 分列，展示虚拟环境时不能把其基底解释器路径抹掉。
 -    basePrefix: string | null
 -    condaDefaultEnv: string | null
 -    virtualEnv: string | null
+-    // envName 是探针推导的显示标签，不能作为后续内核选择或解释器定位键。
 -    envName: string | null
 -    platform: string | null
 -  }
  }
- type SavedMetadata = {
-   kernelDisplayName: string | null
-@@ -56,21 +43,17 @@ type ConfigureProbe = {
-   configured: boolean
-   kernelLanguage?: string
-   kernelStatus?: string
--  probeSucceeded?: boolean
--  probeError?: string
--  probeDurationMs?: number
-   elapsedMs: number
- }
- const PYTHON_ID = "ms-python.python"
  
- // probe 30s 避免慢内核误判无活动内核
- // probe 30s：慢内核下过短会误判 no-active-kernel
+ type SavedMetadata = {
+   // display_name 与 name 都保留，用户标签不替代 kernelspec 的机器标识。
+   kernelDisplayName: string | null
+@@ -62,7 +44,5 @@
+-// 三十秒到期只发送协作取消，finally 仍负责释放本次探针的 token 和计时器。
 -const PROBE_TIMEOUT_MS = 30_000
  // selectKernel 打开内核选择器 UI 后可能无限期阻塞等待用户交互。
  // 客户端 120s 超时会直接中止操作，agent 无法获得有用信息。
  // 服务端在 15s 内超时并返回 selection-requested，让 agent 继续工作。
  const SELECT_KERNEL_TIMEOUT_MS = 15_000
  const decoder = new TextDecoder("utf-8")
- const JUPYTER_ID = "ms-toolsai.jupyter"
- // 固定公开命令，不依赖 vscode.lm.invokeTool
- const RESTART_CMD = "jupyter.restartkernel"
-@@ -134,9 +117,8 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string)
+@@ -122,8 +102,7 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string)
        `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
        activeRuntime
-         // 不把 saved metadata 当 runtime fallback
--        ? "Runtime source: active kernel (api.kernels.getKernel + executeCode probe)."
-+        ? "Runtime source: active kernel status."
-         : "Runtime source: none. Jupyter public API only exposes kernels that have been started by executing at least one code cell.",
+-        ? "运行时来源：通过 api.kernels.getKernel 与 executeCode 查询实际活动的 Jupyter 内核进程。"
++        ? "运行时来源：公开API可见的活动内核状态。"
+         : "运行时来源：无；Jupyter 稳定 API 仅暴露至少执行过一个代码格后启动的内核。",
 -      activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
        reason ? `Reason: ${reason}` : undefined,
      ].filter(Boolean).join("\n"),
      data: {
-@@ -147,7 +129,6 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string)
-       saved_metadata: savedMetadata,
-       extensions: { python: extensionInfo("ms-python.python"), jupyter: extensionInfo(JUPYTER_ID) },
+@@ -139,8 +118,6 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string)
+         jupyter: extensionInfo("ms-toolsai.jupyter"),
+       },
      },
--    note: "Runtime is probed from the active kernel process; saved metadata is reported separately and is not treated as runtime fallback.",
+-    note:
+-      "运行时通过实际内核进程探测；保存的元数据单独报告，不作为运行时回退。",
    }
  }
  
-@@ -261,7 +242,7 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
-       // data.status 与 summary Status 行必须同值
-       status: "configured",
-       // pre configured 短路文案
--      summary: "Notebook already has an active kernel — runtime probe via executeCode succeeded.",
-+      summary: "Notebook has an active kernel.",
-       data: {
-         notebook: notebookMeta,
-         jupyter: jupyterInfo,
-@@ -377,16 +358,14 @@ async function configureNotebook(notebook: vscode.NotebookDocument, reason?: str
-       configured: preCheck.configured,
-       kernelLanguage: preCheck.kernelLanguage,
-       kernelStatus: preCheck.kernelStatus,
--      probeDurationMs: preCheck.probeDurationMs,
-+      elapsedMs: preCheck.elapsedMs,
-     },
-     postSelect: {
-       hasKernel: postProbe.hasKernel,
-       configured: postProbe.configured,
-       kernelLanguage: postProbe.kernelLanguage,
-       kernelStatus: postProbe.kernelStatus,
--      probeSucceeded: postProbe.probeSucceeded,
--      probeError: postProbe.probeError,
--      probeDurationMs: postProbe.probeDurationMs,
-+      elapsedMs: postProbe.elapsedMs,
-     },
-   }
-   commandInfo.selectKernelExecuteSucceeded = selectKernelAccepted
-@@ -436,7 +415,7 @@ function resolveConfigureStatus(
-   if (postProbeConfigured) {
-     return {
-       status: "configured",
--      statusSummary: "Kernel is active — runtime probe via executeCode succeeded after selection.",
-+      statusSummary: "Kernel is active.",
-     }
-   }
-   // accepted 且未 probe 成功：selected，首 cell 才起核
-@@ -530,35 +509,29 @@ function configureResult(input: {
-     },
-     // 明确不做内部 API 探测
-     // note 声明能力边界：无内部 controller 访问
--    note: "Public-API configure. Uses api.kernels.getKernel + executeCode to confirm kernel readiness. Cannot access Jupyter internal controllerRegistration/kernelProvider.",
+@@ -292,21 +269,19 @@ function configureResult(input: {
+     ran: true,
+     summary: [...envSummaryHeader(input.notebook, "configure", input.status), input.summary, guidance, input.reason ? `Reason: ${input.reason}` : undefined].filter(Boolean).join("\n"),
+     data: { path: input.path, operation: "configure", reason: input.reason, status: input.status, ...input.data },
+-    note: "Public-API configure. Uses api.kernels.getKernel and the existing Python executeCode probe; no internal controllerRegistration/kernelProvider access.",
    }
  }
  
-+/**
-+ * Reads kernel status through the Jupyter public API.
-+ */
-+// [0633] 获取失败保留原始错误向上传播：吞错会让未知状态被解释成已就绪。
-+// [0633] hasKernel/configured 同源于一次读取，不再有探测成功/失败二态。
- async function probeConfigureRuntime(uri: vscode.Uri, label?: string): Promise<ConfigureProbe> {
--  // probe 复用 getActiveRuntime 公开 API，不读内部 controller
+ async function probeConfigureRuntime(uri: vscode.Uri) {
    const startedAt = Date.now()
-   const result: ConfigureProbe = { hasKernel: false, configured: false, elapsedMs: 0 }
--  try {
--    const runtime = await getActiveRuntime(uri)
--    result.elapsedMs = Date.now() - startedAt
--    result.probeDurationMs = result.elapsedMs
--    if (!runtime) {
--      result.hasKernel = false
--      return result
--    }
--    result.hasKernel = true
--    result.kernelLanguage = runtime.language
--    result.kernelStatus = runtime.kernelStatus
--    result.probeSucceeded = true
--    // 有 runtime 即 configured：public API 已确认活动核
--    result.configured = true
--  } catch (error) {
--    result.elapsedMs = Date.now() - startedAt
--    result.probeDurationMs = result.elapsedMs
--    result.probeError = error instanceof Error ? error.message : String(error)
--  }
--  // label 仅诊断占位，不影响 probe 语义
--  void label
-+
-+  // 获取失败必须保留原始错误；未知状态不能被后续流程解释成已就绪。
-+// [0633] 单次读取即结果：没有重试/轮询——kernel 只在首次执行时启动，
-+// [0633] 轮询无法观察到该事件，只会拖慢 configure 响应。
-+  const runtime = await getActiveRuntime(uri)
-+  result.elapsedMs = Date.now() - startedAt
-+  result.hasKernel = runtime !== null
-+  result.configured = runtime !== null
-+  result.kernelLanguage = runtime?.language
-+  result.kernelStatus = runtime?.kernelStatus
-+
-+  void label // caller may inject a label for diagnostic tracing
-   return result
- }
- 
-@@ -583,6 +556,8 @@ function isPythonNotebookLike(notebook: vscode.NotebookDocument) {
-   return { result: false, heuristic: "none" as const }
- }
- 
-+// [0633] restart 语义收缩：只请求、不验证、不改设置——三件事都曾有正确性
-+// [0633] 缺陷（设置恢复错作用域/旧 kernel 假阳性/命令静默吞错）。
- async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
-   const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
-   const startedAt = Date.now()
-@@ -617,11 +592,21 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
-       data: { path: primaryPath, operation: "restart", reason, restartCommandFound: false, durationMs: Date.now() - startedAt },
-     }
+   const runtime = await getActiveRuntime(uri)
+-  // info 容忍 Python 探针失败并保留 base；configure 不能据此宣称探针就绪。
+-  const configured = Boolean(runtime && (runtime.language.toLowerCase() !== "python" || runtime.python))
++  // 读取失败原样传播；可见性代表已关联内核，冷启动仍由首格原生命令负责。
++  const configured = runtime !== null
+   return {
+     hasKernel: Boolean(runtime),
+     configured,
+     kernelLanguage: runtime?.language,
+     kernelStatus: runtime?.kernelStatus,
+-    probeSucceeded: runtime?.language.toLowerCase() === "python" ? Boolean(runtime.python) : undefined,
+-    probeDurationMs: Date.now() - startedAt,
++    elapsedMs: Date.now() - startedAt,
    }
+ }
+@@ -341,27 +316,31 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
 -  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
--  const original = config.get(CONFIG_KEY)
--  // 仅当原 askForKernelRestart=true 才临时关闭并 finally 恢复
++  // effective值可能来自文档作用域，写回Global既不能恢复原作用域，也会覆盖并发修改。
++  const config = vscode.workspace.getConfiguration(CONFIG_SECTION, notebook.uri)
+   const original = config.get<boolean>(CONFIG_KEY)
+-  // 仅临时关闭已启用的确认，finally 恢复用户设置。
 -  const needsRestore = original === true
 -  if (needsRestore) await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
-+  // effective值不等于Global原值，临时写设置无法正确恢复作用域或并发修改。
-+// [0633] effective 值可能来自 workspace/folder 作用域：写回 Global 无法恢复原作用域，
-+// [0633] 且并发修改期间恢复会覆盖用户手动变更——改为不请求重启直接返回。
-+  const config = vscode.workspace.getConfiguration(CONFIG_SECTION, notebook.uri)
-+  const original = config.get<boolean>(CONFIG_KEY)
-+// [0633] 用户开启了重启确认时不代答：静默改设置重启等于越过用户决策。
++  // 尊重用户确认策略，不代答或暂时改写设置；显式请求未发送。
 +  if (original === true) {
 +    return {
 +      ran: false,
 +      summary: [...envSummaryHeader(notebook, "restart", "confirmation-required"), "Jupyter requires restart confirmation; no restart was requested and no settings were changed."].join("\n"),
-+// [0633] 命令返回≠重启完成：可访问的旧 kernel 是假阳性证据，恒报未验证。
 +      data: { path: primaryPath, operation: "restart", requested: false, verified: false, reason },
 +    }
 +  }
-+
    try {
-     // 显式 notebookUri，避免重启错绑 active 编辑器
+     // Jupyter 命令内部可能吞错，返回值只表示 requested。
      await vscode.commands.executeCommand(RESTART_CMD, { notebookEditor: { notebookUri: notebook.uri } })
-@@ -630,16 +615,15 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
-       summary: [
-         // #234：restart 请求成功后 target=runtime 的 status=requested——实际生效由后续 env info 确认
-         ...envSummaryHeader(notebook, "restart", "requested"),
--        "Kernel restart requested. All runtime state should be cleared.",
-+        "Kernel restart requested; completion and state clearing have not been verified.",
-         reason ? `Reason: ${reason}` : undefined,
-       ]
-         .filter(Boolean)
-         .join("\n"),
+     return {
+       ran: true,
+-      summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested. All runtime state should be cleared.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
++      summary: [...envSummaryHeader(notebook, "restart", "requested"), "Kernel restart requested; completion and state clearing have not been verified.", "Rerun setup or import cells before running dependent cells.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
        data: {
          path: primaryPath, operation: "restart", reason, requested: true,
--        // 轻量级验证：只检查 kernel 是否仍可访问（不调 executeCode 避免 30s 延迟）。
--        // jupyter.restartkernel 内部 .catch(noop) 吞错误，不验证则不知道是否成功。
+-        askForKernelRestartOriginal: original, askForKernelRestartSuppressed: needsRestore,
+-        // 只观察公开内核可访问性，不执行探针，也不把它升级为重启成功证据。
 -        verified: await isKernelAccessible(notebook.uri),
-+        // 上游命令可在实际重启结束前返回；可访问的旧kernel不能作为验证。
++        askForKernelRestartOriginal: original,
++        // 可访问的旧内核不能证明已完成重启，保留requested而不虚报verified。
 +        verified: false,
          durationMs: Date.now() - startedAt,
        },
      }
-@@ -653,8 +637,6 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
-       ].join("\n"),
-       data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt },
-     }
+   } catch (error) {
+     const message = error instanceof Error ? error.message : String(error)
+     return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), `Kernel restart invocation failed: ${message}.`].join("\n"), data: { path: primaryPath, operation: "restart", reason, error: message, durationMs: Date.now() - startedAt } }
 -  } finally {
 -    if (needsRestore) await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
    }
  }
  
-@@ -662,21 +644,7 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
+@@ -369,21 +348,7 @@ async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?:
  // stop — interrupt kernel, halt the currently executing cell
  // ===========================================================================
  
@@ -1552,65 +1453,61 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
  async function stopNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
    const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
    const startedAt = Date.now()
-@@ -946,84 +913,22 @@ async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, time
- 
- 
- 
-+// [0633] 读取语义替代探测语义：configure 的 readiness 判定不再向用户 kernel
-+// [0633] 注入执行代码（executeCode 会触发独立授权弹窗且污染 kernel 状态），
-+// [0633] 公开 API 的 kernel 可见性就是就绪信号，冷启动交给原生执行入口。
+@@ -645,88 +629,12 @@ async function waitForDirtyStateToSettle(notebook: vscode.NotebookDocument, time
++// 只读公开内核状态；不注入代码、不吞查询错误，也不从保存元数据合成运行时。
  async function getActiveRuntime(uri: vscode.Uri): Promise<ActiveRuntime | null> {
 -  try {
--    // 查找 Jupyter 扩展：通过 ID 匹配 ms-toolsai.jupyter
+-    // 扩展缺失是无运行时证据，不能从 Python 扩展的安装状态猜出 Jupyter 内核。
 -    const ext = vscode.extensions.getExtension("ms-toolsai.jupyter")
 -    if (!ext) return null
 -
--    // 获取 Jupyter API：如果扩展未激活则先激活
+-    // 激活是源码本轮显式探测路径的副作用，只为读取此扩展自己的稳定 API。
 -    const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
 -    const kernel = await api?.kernels?.getKernel?.(uri)
+-    // getKernel 不创建关联，未找到内核时不从盘上 kernelspec 合成 activeRuntime。
 -    if (!kernel) return null
 -
 -    const base: ActiveRuntime = {
 -      language: kernel.language,
+-      // unknown 表示 API 没提供状态，不能把探针结束当成内核 idle 的证据。
 -      kernelStatus: kernel.status ?? "unknown",
 -    }
 -
+-    // 只给 Python 内核提交 Python 代码，其它语言的活动状态仍保留在 base。
 -    if (kernel.language.toLowerCase() !== "python") return base
 -
+-    // Python 探针失败只缺少详细环境字段，已找到的内核语言与状态不被改写成磁盘声明。
 -    const python = await probePythonRuntime(kernel).catch(() => null)
 -    return python ? { ...base, python } : base
 -  } catch {
+-    // 扩展激活或内核查询失败保持 env 的容错报告，不启动其它执行入口重试。
 -    return null
 -  }
 +  const ext = vscode.extensions.getExtension(JUPYTER_ID)
 +  if (!ext) return null
-+  // 状态读取不能向用户kernel注入变量，也不能触发executeCode的独立授权。
 +  const api = (ext.isActive ? ext.exports : await ext.activate()) as JupyterLike | undefined
-+// [0633] 状态读取只经公开 API：注入执行代码需要独立授权且会污染用户 kernel。
 +  const kernel = await api?.kernels?.getKernel?.(uri)
 +  return kernel ? { language: kernel.language, kernelStatus: kernel.status ?? "unknown" } : null
  }
  
- // 探测 Python 环境：执行 Python 代码获取版本、路径和 conda 环境信息
- // 探测 Python 环境：执行 sys.version、sys.executable 等命令
- // 探测活动内核真实 runtime；saved metadata 不能代替 active kernel
--// 对活动内核 executeCode 探测真实 Python/conda，失败则降级无 python 字段
--// 对活动内核 executeCode 探测真实 Python/conda；失败则省略 python 字段
 -async function probePythonRuntime(kernel: KernelLike): Promise<ActiveRuntime["python"]> {
 -  const code = `
 -import os, sys, json, platform
 -conda_env = os.environ.get("CONDA_DEFAULT_ENV")
 -virtual_env = os.environ.get("VIRTUAL_ENV")
 -env_name = conda_env
+-# 环境标签优先取内核进程的 conda 声明，其次才从激活的虚拟环境路径提取。
 -if not env_name and virtual_env:
 -    env_name = os.path.basename(virtual_env)
 -if not env_name:
+-    # 解释器路径只补显示名称，不把这个推断回写进保存的 kernelspec。
 -    parts = (sys.executable or "").replace("\\\\", "/").split("/")
 -    if "envs" in parts and parts.index("envs") + 1 < len(parts):
 -        env_name = parts[parts.index("envs") + 1]
 -    else:
 -        env_name = os.path.basename(os.path.dirname(sys.executable or "")) or None
 -print("__OPENCODE_RUNTIME_PROBE_START__")
+-# 标记界定本次探针的 JSON，避免内核已有输出或启动横幅混入环境对象。
 -print(json.dumps({
 -    "version": platform.python_version(),
 -    "executable": sys.executable,
@@ -1626,32 +1523,37 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 -
 -  const cts = new vscode.CancellationTokenSource()
 -  const timer = setTimeout(() => cts.cancel(), PROBE_TIMEOUT_MS)
+-  // 按输出顺序积累文本，不能让并发拼接打乱 JSON 或起止标记。
 -  const chunks: string[] = []
 -
 -  try {
 -    for await (const output of kernel.executeCode(code, cts.token)) {
 -      for (const item of output.items) {
 -        const text = decoder.decode(item.data)
+-        // 内核错误 MIME 拒绝本次探针，不能把 traceback 中的花括号当成有效环境 JSON。
 -        if (isErrorMime(item.mime)) throw new Error(text)
+-        // 图片及其它二进制表示不参与 JSON 提取，只有文本 MIME 进入 chunks。
 -        if (isReadableMime(item.mime)) chunks.push(text)
 -      }
 -    }
 -  } finally {
 -    clearTimeout(timer)
+-    // 成功、内核错误和取消都走同一释放路径，已完成探针不能继续持有取消源。
 -    cts.dispose()
 -  }
 -
 -  return JSON.parse(extractProbeJson(chunks.join("\n")))
 -}
 -
- // 读取保存的元数据：从 .ipynb 文件中读取 kernelspec 和 language_info
- // 读取保存的元数据：从 .ipynb 文件的 metadata 字段读取
- // 仅读盘 metadata：与 probe 分离，文件声明≠在线内核
-@@ -1053,11 +958,7 @@ async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata
+ async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata | null> {
+   try {
+     // 盘上 .ipynb 读取保留源 file-scheme 约束，不把远程 URI 的 fsPath 当本地文件。
+@@ -754,12 +662,7 @@ async function readSavedNotebookMetadata(uri: vscode.Uri): Promise<SavedMetadata
  }
  
  function formatActiveRuntime(runtime: ActiveRuntime) {
 -  const p = runtime.python
+-  // 没有 Python 详情仍展示真实内核语言与状态，不能显示一个猜测的解释器版本。
 -  if (!p) return `${runtime.language} kernelStatus=${runtime.kernelStatus}`
 -  const env = p.envName ?? runtime.language
 -  const version = p.version ? `${runtime.language} ${p.version}` : runtime.language
@@ -1660,7 +1562,7 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
  }
  
  function formatSavedMetadata(meta: SavedMetadata | null) {
-@@ -1068,35 +969,3 @@ function formatSavedMetadata(meta: SavedMetadata | null) {
+@@ -771,37 +673,3 @@ function formatSavedMetadata(meta: SavedMetadata | null) {
      : meta.language ?? "unknown"
    return `${kernel} (${language}), kernelspec.name=${meta.kernelName ?? "unknown"}`
  }
@@ -1685,12 +1587,14 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 -  const start = text.indexOf(startMarker)
 -  const end = text.indexOf(endMarker)
 -
+-  // 起止标记必须有序，截出的 JSON 仍由 JSON.parse 验证，不能以找到标记宣称探针成功。
 -  const body = start >= 0 && end > start
 -    ? text.slice(start + startMarker.length, end)
 -    : text
 -
 -  const jsonStart = body.indexOf("{")
 -  const jsonEnd = body.lastIndexOf("}")
+-  // 没有完整花括号区间时保留真实探针诊断，禁止返回一个空对象冒充环境信息。
 -  if (jsonStart < 0 || jsonEnd < jsonStart) {
 -    throw new Error(`Runtime probe returned no JSON: ${text.slice(0, 500)}`)
 -  }
@@ -1700,200 +1604,151 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 diff --git a/sdks/vscode/src/notebook/output.ts b/sdks/vscode/src/notebook/output.ts
 --- a/sdks/vscode/src/notebook/output.ts
 +++ b/sdks/vscode/src/notebook/output.ts
-@@ -6,7 +6,7 @@
-  * Primary input: `cellId` (Copilot-style #VSC-xxxxxxxx).
-  */
- import * as vscode from "vscode"
--import * as path from "node:path"
-+import { createHash } from "node:crypto"
- import { quoteForSummary } from "../util"
- import {
-   existingOuts,
-@@ -121,7 +121,9 @@ function outputItemText(item: vscode.NotebookCellOutputItem) {
- // ---------------------------------------------------------------------------
- 
- // 写入 artifact 文件：将输出保存到缓存目录
+@@ -128,6 +128,6 @@ function outputItemText(item: vscode.NotebookCellOutputItem) {
 -async function writeArtifact(
-+// [0633] 产物键含 notebook 身份与 cellId：同名 notebook 重跑不得覆盖已交给
-+// [0633] 调用者的旧产物字节。
 +export async function writeArtifact(
    notebook: vscode.NotebookDocument,
    cell: vscode.NotebookCell,
    item: vscode.NotebookCellOutputItem,
-@@ -132,10 +134,12 @@ async function writeArtifact(
-   await vscode.workspace.fs.createDirectory(root)
-   const filename =
-     [
--      path.basename(notebook.uri.fsPath || "untitled", path.extname(notebook.uri.fsPath || "untitled")),
-+      // URI已进入摘要，不再拼接原文件名，避免合法长文档名使产物超过单段长度上限。
-       `cell-${cell.index}`,
-       `output-${outputIndex}`,
-       `item-${itemIndex}`,
-+      // URI隔离同名文档，内容身份使重跑不会覆盖先前已返回的路径。
-+      createHash("sha256").update(notebook.uri.toString()).update("\0").update(item.data).digest("hex"),
-     ].join("-") + extensionForMime(item.mime)
-   const uri = vscode.Uri.joinPath(root, filename)
-   await vscode.workspace.fs.writeFile(uri, item.data)
+   outputIndex: number,
+   itemIndex: number,
 
 diff --git a/sdks/vscode/src/notebook/run.ts b/sdks/vscode/src/notebook/run.ts
 --- a/sdks/vscode/src/notebook/run.ts
 +++ b/sdks/vscode/src/notebook/run.ts
-@@ -33,7 +33,9 @@ import { serializeNotebookOutputItem } from "./output"
-  */
- // 运行 notebook：执行 cell 或 cell 范围，返回每个 cell 的执行结果和输出
- // 顺序执行：任一 cell 失败立即停止，避免污染后续内核状态
+@@ -27,6 +27,7 @@
 -export async function runNotebook(input: Record<string, unknown>) {
 +export async function runNotebook(input: Record<string, unknown>, signal?: AbortSignal) {
-+// [0633] 每个 cell 执行前都检查断开：过期请求不得继续调度后续 cell。
 +  signal?.throwIfAborted()
-   // filePath/cellId 必填：禁止静默落到 active notebook 或猜目标
    const filePath = stringProp(input, "filePath")
    if (!filePath) throw new Error("filePath is required")
-@@ -48,32 +50,10 @@ export async function runNotebook(input: Record<string, unknown>) {
-     )
-   }
- 
--  // 执行前检查 kernel 是否可用。configure 的 "selected" 状态下 getKernel 返回 undefined
--  // 是正常的（kernel 已选定但未启动），此时 kernelspec metadata 存在，预检应放行。
--  // 只在"既无活跃 kernel 又无 kernelspec metadata"时才阻断，引导 agent 先 configure。
+   const type = input.type
+   // 显式非字符串、null 或未知类型仍按原严格边界拒绝，不能被 stringProp 隐去。
+   if (type !== undefined && type !== "cell" && type !== "range") throw new Error(`Invalid run type: ${String(type)}. Expected one of: cell, range.`)
+@@ -57,23 +58,4 @@ export async function runNotebook(input: Record<string, unknown>) {
+-  // 预检不执行探针；等待后仍由下方既有身份校验检查已保留的目标格。
 -  const jupyterExt = vscode.extensions.getExtension("ms-toolsai.jupyter")
--  if (jupyterExt) {
+-  if (jupyterExt && cells.some((cell) => cell.kind === vscode.NotebookCellKind.Code)) {
 -    if (!jupyterExt.isActive) await jupyterExt.activate()
 -    const jupApi = jupyterExt.exports as { kernels?: { getKernel?(uri: vscode.Uri): Promise<unknown> } } | undefined
 -    const kernel = await jupApi?.kernels?.getKernel?.(notebook.uri)
--    if (!kernel) {
--      const meta = notebook.metadata as Record<string, unknown>
--      const hasKernelspec = meta && typeof meta === "object" &&
--        (meta.kernelspec !== undefined || meta.language_info !== undefined)
--      if (!hasKernelspec) {
--        return {
--          ran: false,
--          summary: "No active kernel and no kernelspec metadata. Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
--          data: {
--            path: notebook.uri.fsPath || notebook.uri.toString(),
--            noActiveKernel: true,
--          },
--        }
+-    const meta = notebook.metadata as Record<string, unknown>
+-    const hasKernelspec = meta && typeof meta === "object" && (meta.kernelspec !== undefined || meta.language_info !== undefined)
+-    if (!kernel && !hasKernelspec) {
+-      // 复用现有Run格式，未执行必须保留completed=false及空cells，不能显示为完成。
+-      const result = await compactRunResult(notebook, describeRunTarget(cells), false, cells, [])
+-      return {
+-        ...result,
+-        ran: false,
+-        summary: result.summary + "\nNo active kernel and no kernelspec metadata. Call vscode_notebook_env with operation=configure to select a kernel first, then retry.",
+-        data: { ...result.data, noActiveKernel: true },
 -      }
--      // kernelspec 存在但 kernel 未启动：继续执行，notebook.cell.execute 会启动 kernel
 -    }
 -  }
 -
-+// [0633] 删除 jupyter 预检：metadata 不能证明运行时可用（serializer 会自动补
-+// [0633] language_info），getKernel 无值也可能只是未启动——原生执行入口自己
-+// [0633] 完成冷启动，预检只制造假阴性阻断。
 +  // 冷启动由原生执行入口负责，metadata和已启动kernel都不是执行资格。
-   // 默认超时 5 分钟：平衡长时间执行和用户体验
-   const timeoutMs = numberProp(input, "timeoutMs") ?? 300_000
-   const type = stringProp(input, "type")
-@@ -116,13 +96,25 @@ if (cell.kind !== vscode.NotebookCellKind.Code) {
-     // 选中当前 cell：确保执行命令作用于正确的 cell
- editor.selection = new vscode.NotebookRange(cell.index, cell.index + 1)
-     editor.revealRange(new vscode.NotebookRange(cell.index, cell.index + 1))
+   // 所有界面与能力查询结束后再校验目标，结构漂移时不调用命令或更新旧选区。
+   if (notebook.isClosed || cells.some((cell, index) => notebook.getCells()[positions[index]] !== cell)) {
+     // 按原范围核对对象，目标移位、删除或替换仍拒绝；不要求整份文档版本保持不变。
+@@ -88,6 +70,8 @@ export async function runNotebook(input: Record<string, unknown>) {
+   for (const cell of cells) {
 +    // 断开只取消本请求；不得继续调度下一cell，也不擅自中断其他运行。
 +    signal?.throwIfAborted()
- 
-         // 先注册 waiter 再 execute，避免错过快速完成的事件
--    const wait = waitForSingleCell(cell, timeoutMs)
-+    const wait = waitForSingleCell(cell, timeoutMs, signal)
+     // Markup 保留在范围显示中，但不能提交给原生代码执行命令。
+     if (cell.kind !== vscode.NotebookCellKind.Code) {
+       results.push({ i: c1(cell), id: copilotLikeCellId(cell), exec: "skipped (not code)", execution: executionState(cell), existing_outs: [], artifacts: [] })
+       continue
+     }
+@@ -106,12 +90,15 @@ export async function runNotebook(input: Record<string, unknown>) {
+     // 提交前注册等待器，快速执行的完成事件不能落在命令 await 与订阅之间。
+-    const wait = waitForSingleCell(notebook, cell, timeoutMs)
++    const wait = waitForSingleCell(notebook, cell, timeoutMs, signal)
      let executionSummary: vscode.NotebookCellExecutionSummary | undefined
      try {
--      await vscode.commands.executeCommand("notebook.cell.execute")
+-      // 每格仍显式传文档 URI 和半开范围，UI 聚焦只能辅助显示，不能成为执行身份。
+-      await vscode.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cell.index, end: cell.index + 1 }], document: notebook.uri, autoReveal: false })
 -      executionSummary = await wait.promise
-+      // 命令本身可能不返回；期限覆盖命令等待，不能只覆盖后续事件等待。
-+      // 显式文档与范围保证活动编辑器变化不会把代码执行到另一个notebook。
-+// [0633] executeCommand 可能在原生层永不 resolve：期限必须覆盖命令等待本身，
-+// [0633] 只包事件等待会让 deadline 到期后仍卡在命令 Promise 上。
++      // 命令可能不返回，deadline须覆盖原生命令等待；目标仍是已保留文档与格。
 +      executionSummary = await Promise.race([
 +        wait.promise,
-+        vscode.commands.executeCommand("notebook.cell.execute", {
-+// [0633] 显式 document+ranges：活动编辑器切换时无参命令会执行到别的 notebook。
-+          document: notebook.uri, ranges: [{ start: cell.index, end: cell.index + 1 }], autoReveal: false,
-+        }).then(() => wait.promise),
++        vscode.commands.executeCommand("notebook.cell.execute", { ranges: [{ start: cell.index, end: cell.index + 1 }], document: notebook.uri, autoReveal: false }).then(() => wait.promise),
 +      ])
 +      signal?.throwIfAborted()
+       // 等待器因目标失效唤醒时仍由原身份守卫报错，不把它降级成超时结果。
+       if (notebook.isClosed || cells.some((target) => notebook.getCells()[target.index] !== target)) throw new Error("Notebook target cells changed during execution")
      } finally {
+       // 命令拒绝也释放预注册资源，不能只在正常完成或超时事件中清理。
        wait.dispose()
-     }
-@@ -288,12 +280,20 @@ function runSummaryText(
- // 单 cell 等待收敛 timeout 与状态订阅，防止无限挂起
- // 预注册：仅当 executionSummary.success 成为 boolean 才完成；超时 resolve(undefined)
- // URI 身份匹配：避免结构变化后 index 错配
--function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
-+function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number, signal?: AbortSignal) {
-   const targetUri = cell.document.uri.toString()
-   const notebookUri = cell.notebook.uri.toString()
+@@ -240,8 +229,9 @@ function runSummaryText(
+ function waitForSingleCell(
+   notebook: vscode.NotebookDocument,
+   cell: vscode.NotebookCell,
+   timeoutMs: number,
++  signal?: AbortSignal,
+ ) {
+   // 此 waiter 只观察提交时保留的格对象，不把插入到旧范围内的新格当执行目标。
+   const valid = () => !notebook.isClosed && notebook.getCells()[cell.index] === cell
+   // 预注册前失效直接报错，不能为不存在的目标创建一个假完成等待器。
+@@ -251,9 +241,14 @@ function waitForSingleCell(
    let subscription: vscode.Disposable | undefined
    let timer: ReturnType<typeof setTimeout> | undefined
-+// [0633] abort 回调与 timer/subscription 同生命周期：dispose 统一移除监听，
-+// [0633] 防止已完成 cell 的 waiter 被后续断开事件误触发。
 +  let abort: (() => void) | undefined
+   // 目标失效交由命令结算后守卫抛错，避免命令 pending 时产生悬空拒绝。
    const promise = new Promise<vscode.NotebookCellExecutionSummary | undefined>((resolve) => {
-+    // 断开时立即以 undefined 结束等待：过期请求不再消费后续执行结果。
-+// [0633] 断开以 undefined 收尾：过期请求不得消费下一次执行的完成事件。
++    // 请求断开结束本次等待，内核中断仍由显式stop负责。
 +    abort = () => resolve(undefined)
 +    signal?.addEventListener("abort", abort, { once: true })
 +    if (signal?.aborted) abort()
      timer = setTimeout(() => {
+       // 超时只结束摘要观察，不证明内核取消，也不能把旧结果标成这次完成。
        subscription?.dispose()
        resolve(undefined)
-@@ -314,6 +314,8 @@ function waitForSingleCell(cell: vscode.NotebookCell, timeoutMs: number) {
-   return {
+     }, timeoutMs)
+@@ -288,5 +283,7 @@ function waitForSingleCell(
      promise,
      dispose() {
-+      // 成功、失败和超时均移除请求监听，避免后续取消影响已完成cell。
++      // 正常、失败、期限与取消共用释放路径，后续请求不触发旧监听器。
 +      if (abort) signal?.removeEventListener("abort", abort)
-       if (timer) {
-         clearTimeout(timer)
-         timer = undefined
+       if (timer) clearTimeout(timer)
+       subscription?.dispose()
+     },
 
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -16,6 +16,7 @@ import { stringProp, numberProp, quoteForSummary } from "../util"
- // source header 的 range 必须来自统一虚拟坐标
+@@ -9,6 +9,7 @@
+ import { stringProp, numberProp, quoteForSummary } from "../util"
  import { c1, copilotLikeCellId, cellTypeLabel, computeVirtualRanges, runtimeLabel, notebookHeader, cellRef } from "./format"
  import { resolveNotebook, resolveNotebookCell } from "./resolve"
 +import { writeArtifact } from "./output"
  
- // ---------------------------------------------------------------------------
- // Handler
-@@ -82,6 +83,7 @@ export async function notebookSource(input: Record<string, unknown>) {
-   // #234：钳制到文档范围——空文档退化为单行窗口
-   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
- 
+ /**
+  * filePath 必填，主定位参数为完整规范化 cellId。
+@@ -79,6 +80,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   let bytesCut = false
 +  let sourceArtifact: string | undefined
-   // Render cells one by one, emitting headers + in-range source lines
-   // 16KB 字节预算；满额后设 bytesCut 并 break 外层
-   // #234：16KB 预算先于行数检查——避免单行过长撑爆上下文
-@@ -151,9 +153,17 @@ export async function notebookSource(input: Record<string, unknown>) {
-             bytesCut = true
-             break outer
-           }
--          // #252：单行可能超过整个 16KB 工具响应预算——保留行号前缀 + UTF-8
--          // #252：有界前缀给 agent 一个源锚点，页尾提示指明下一条真实存在的行
--          // 有界前缀并标记截断；工具仍按行分页，下一 offset 推进到后续虚拟源行
-+          // 行内尾段不能用offset+1恢复，导出当前dirty cell而不是磁盘旧版。
-+          // 每300码点JSON最坏1802字符，低于通用read的2000字符逐行上限。
-+// [0633] 超长行逐页不可恢复（offset 按虚拟行推进）：导出 dirty 全文 artifact，
-+// [0633] 300 码点分片保证每片 JSON 转义后低于通用 read 的 2000 字符行上限。
-+          const chunks = Array.from(cell.document.getText().matchAll(/[\s\S]{1,300}/gu), (match) => JSON.stringify(match[0]))
-+// [0633] writeArtifact 0,0 覆盖参数：该 artifact 是当前 cell 的唯一快照，
-+// [0633] 不设行/字节上限——分片上限已在 chunk 层保证。
-+          sourceArtifact = (await writeArtifact(notebook, cell, {
-+            mime: "application/json",
-+            data: Buffer.from(chunks.join("\n")),
-+          }, 0, 0)).fsPath
-           const prefix = `${globalLineNum}: `
-           const prefixBytes = Buffer.byteLength(prefix, "utf8")
-           const available = maxBytes - bytes - prefixBytes
-@@ -210,7 +220,12 @@ export async function notebookSource(input: Record<string, unknown>) {
+   let lastRenderedLine = 0
+   const outputCells: string[] = []
+ 
+   for (const cell of notebook.getCells()) {
+     const cellRange = ranges.get(cell.index)
+@@ -123,6 +125,12 @@ export async function notebookSource(input: Record<string, unknown>) {
+           bytesCut = true
+           break
+         }
++        // 行内尾段不能以offset+1恢复；按300码点JSON分片导出dirty全文，仍复用唯一writer。
++        const chunks = Array.from(cell.document.getText().matchAll(/[\s\S]{1,300}/gu), (match) => JSON.stringify(match[0]))
++        const artifact = await writeArtifact(notebook, cell, { mime: "application/json", data: Buffer.from(chunks.join("\n")) }, 0, 0)
++        // 远程提供者必须保留scheme/authority，不能只交付其本地形状fsPath。
++        sourceArtifact = artifact.uri.scheme === "file" ? artifact.fsPath : artifact.uri.toString()
++
+         const prefix = `${globalLineNum}: `
+         const prefixBytes = Buffer.byteLength(prefix, "utf8")
+         const available = maxBytes - bytes - prefixBytes
+@@ -171,6 +179,9 @@ export async function notebookSource(input: Record<string, unknown>) {
    output += outputCells.join("\n")
  
-   // 页脚仅在 bytesCut 时提示 16KB；行限走 more 分页文案
 -  if (bytesCut) {
-+// [0633] artifact 路径随响应返回：agent 用通用 read 工具按 2000 字符行读取，
-+// [0633] 分片保证超长行内容无损可恢复。
 +  if (sourceArtifact) {
 +    // 每行是独立JSON字符串；按顺序解析再连接，不引入额外换行。
 +    output += `\n\n(Full current cell source: ${sourceArtifact}. Read this artifact with offset/limit; JSON-decode each line and concatenate the strings to recover the exact source.)`
@@ -1901,32 +1756,11 @@ diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/sourc
      output += `\n\n(Output capped at 16 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
    } else if (more) {
      output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
-@@ -229,6 +244,7 @@ export async function notebookSource(input: Record<string, unknown>) {
-       // returned 使用源码行计数，不含 header
+@@ -188,6 +199,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+       limit,
        returned: renderedLines,
        totalLines,
 +      sourceArtifact,
        truncated: bytesCut || more,
-       bytesCut,
-       lineLimited,
-
-diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
---- a/sdks/vscode/src/notebook/summary.ts
-+++ b/sdks/vscode/src/notebook/summary.ts
-@@ -53,10 +53,13 @@ const cells = notebook.getCells().map(compactCell)
- // #105：session 内稳定——type change 会换 URI/ID，文案与 edit 对齐
- function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnType<typeof compactCell>[]) {
-   const virtualRanges = computeVirtualRanges(notebook)
--  const code = cells.filter((cell) => cell.kind === "code")
--  const executed = code.filter((cell) => cell.exec !== "not-run")
-+  // 展示文本含来源和时间前缀，不能反向充当执行状态协议。
-+// [0633] 直接读文档实时 cell：compactCell 快照可能来自上一个会话的展示缓存。
-+  const code = notebook.getCells().filter((cell) => cell.kind === vscode.NotebookCellKind.Code)
-+// [0633] 展示字符串含来源/时间前缀，反向解析会把旧会话文案当成协议字段。
-+  const executed = code.filter((cell) => cell.executionSummary?.success !== undefined)
-   // #234：failed 优先于比例——任何失败都值得立即处理
--  const failed = code.filter((cell) => cell.exec.startsWith("fail"))
-+  const failed = code.filter((cell) => cell.executionSummary?.success === false)
-   // #234：status 三态——failed/全成功/部分执行，header 直接呈现
-   const status = failed.length
-     ? `${failed.length} failed`
+     },
+   }

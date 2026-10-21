@@ -13,13 +13,12 @@ Content-Transfer-Encoding: 8bit
 加入 source revision provenance、CI closure 校验和完整 native/Box 回归证据；VS Code host 像素碎块问题保持 deferred。
 
 适配说明（v1.18.32 重放）：
-目标的 OpenTUI 运行时决策为 registry 0.4.5（#146 catalog 钉死），重放 0489 已裁定
-smark.1 release-closure 脚手架不在目标落地（workflows 步骤与 script/opentui-provenance.ts、
-verify-opentui-closure.ts、opentui-source-revision.json 均无目标 base）。本 current 保留
-可承载的 source 语义：docs plan 全量落地（0513 审计收尾依赖该文件）与 thirdparty/opentui
-gitlink 前移（cbe492a5→0ac61b0f，携带 CJK 半透明/宽字形修复的 SMARK fork 源码指针，
-与 0452 建立的子模块引用保持谱系一致）。渲染器修复本体位于 OpenTUI 子模块 Zig/native
-源码，目标运行时经 @opentui/* 0.4.5 二进制解析，子模块指针不参与运行时。
+本轮 consumer 沿 0489 冻结的十一包 0.4.3-smark.1 family，不能以 registry 0.4.5 说明承载。
+本 current 携带完整 source plan 与 thirdparty/opentui gitlink（cbe492a5→0ac61b0f）；
+source pin 前移不等于 root consumer 已获得新 native，保持原来的 source-only 阶段边界。
+原 source/release provenance、manifest、closure、测试及两处 workflow 尚未迁入，
+该验证面差异记录于对应 record，不以 consumer 布局测试声称等价覆盖。
+子模块内部实现不在当前可读输入内；后续 .2 发布物接入仍按 manifest 顺序处理。
 
 diff --git a/docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md b/docs/plans/opentui-cjk-overlay-and-terminal-corruption-repair.md
 new file mode 100644

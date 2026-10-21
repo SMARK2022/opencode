@@ -5,6 +5,38 @@ Subject: [PATCH] =?UTF-8?q?feat(search):=20=E6=B7=BB=E5=8A=A0=E6=90=9C?=
  =?UTF-8?q?=E7=B4=A2=E6=9D=A1=E4=BB=B6=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF?=
  =?UTF-8?q?=E6=8C=81=E9=80=9A=E8=BF=87=E6=A0=87=E9=A2=98=E6=88=96=E6=B6=88?=
 
+diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
+--- a/packages/tui/src/component/dialog-session-list.tsx
++++ b/packages/tui/src/component/dialog-session-list.tsx
+@@ -45,0 +46,9 @@
++export function matchesDialogSessionSearch(
++  session: { id: string; title: string },
++  query: string,
++  results?: { id: string }[],
++) {
++  // 服务端命中也可能来自正文；只对额外附加的会话保留标题过滤。
++  return !query || results?.some((item) => item.id === session.id) || session.title.toLowerCase().includes(query)
++}
++
+@@ -180,1 +189,1 @@
+-      .filter((session) => !query || session.title.toLowerCase().includes(query))
++      .filter((session) => matchesDialogSessionSearch(session, query, searchResults()))
+diff --git a/packages/tui/test/component/dialog-session-list.test.ts b/packages/tui/test/component/dialog-session-list.test.ts
+--- a/packages/tui/test/component/dialog-session-list.test.ts
++++ b/packages/tui/test/component/dialog-session-list.test.ts
+@@ -2,1 +2,1 @@
+-import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/component/dialog-session-list"
++import { createDialogSessionListQuery, loadDialogSessionList, matchesDialogSessionSearch } from "../../src/component/dialog-session-list"
+@@ -4,1 +4,9 @@
+ describe("dialog session list", () => {
++  test("retains body matches without admitting unrelated pinned sessions", () => {
++    const session = { id: "body-match", title: "Deployment notes" }
++    // 标题不含搜索词时，已由服务端正文匹配的会话也必须出现在结果中。
++    expect(matchesDialogSessionSearch(session, "needle", [session])).toBe(true)
++    expect(matchesDialogSessionSearch(session, "needle", [])).toBe(false)
++    expect(matchesDialogSessionSearch(session, "deployment", [])).toBe(true)
++  })
++
 diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
 new file mode 100644
 index 0000000000..56f85aa333

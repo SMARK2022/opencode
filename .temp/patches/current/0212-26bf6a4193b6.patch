@@ -11,35 +11,9 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index 58ec5022bd..ffb15f8370 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -261,12 +261,24 @@ export function Session() {
-   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-   // #135：任一 assistant 未完成则视为流式，关闭 viewport culling 避免裁剪抖动
-   const streamingActive = createMemo(() => hasStreamingAssistant(messages()))
-  const messagesBeforeRevert = () => {
-    const messageID = session()?.revert?.messageID
-    if (!messageID) return messages()
-    const index = messages().findIndex((message) => message.id === messageID)
-    return index === -1 ? messages() : messages().slice(0, index)
-  }
-+  // #212：内容增长信号——跟踪 part 文本/tool-raw 长度（非仅 part 数量），确保 text delta 触发贴底跟随
-+  // #212：applyPartDelta 原地修改 part 文本不改 part 数组长度——仅计 part.length 会漏 text delta
-+  const contentGrowthKey = createMemo(() => {
-+    let total = 0
-+    for (const m of messages()) {
-+      for (const p of (sync.data.part[m.id] ?? []) as any[]) {
-+        if (p.type === "text") total += (p.text ?? "").length
-+        else if (p.type === "tool" && p.state?.raw) total += p.state.raw.length
-+      }
-+    }
-+    return total
-+  })
-   const foregroundTasks = createMemo(() =>
-     sync.data.capabilities.experimentalBackgroundSubagents
-       ? messages().flatMap((message) =>
-@@ -444,6 +456,8 @@ setTimeout(() => {
+@@ -444,6 +444,8 @@ export function Session() {
  
    let seeded = false
    let scroll: ScrollBoxRenderable
@@ -48,82 +22,184 @@ index 58ec5022bd..ffb15f8370 100644
    let prompt: PromptRef | undefined
    const bind = (r: PromptRef | undefined) => {
      prompt = r
-@@ -1283,6 +1297,19 @@ setTimeout(() => {
-   // snap to bottom when session changes
-   createEffect(on(() => route.sessionID, toBottom))
+@@ -456,6 +458,18 @@ export function Session() {
+   const dialog = useDialog()
+   const renderer = useRenderer()
  
-+  // #212：流式内容增长时，若视口原本贴底（一行容差），则跟随到新的底部
-+  // #212：OpenTUI sticky scroll 仅从精确最大值跟随；一行偏差时不会自动追尾
-+  // #212：终端舍入和滚动条半格绘制可能导致最新行看似脱节，一行容差消除该视觉问题
-+  // #212：手动一行上滚后内容未增长时不归一化——用户应能检查上一行直到新内容到达
-+  createEffect(on(contentGrowthKey, () => {
++  // #212：布局后读取滚动范围，避免文本更新早于原生尺寸刷新。
++  function syncSessionViewportStuckToBottom() {
 +    if (!scroll || scroll.isDestroyed) return
-+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.height)
-+    const wasStuckToBottom = scroll.y >= lastMaxScrollTop - 1
++    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
++    // #212：scrollTop 是滚动偏移；y 是屏幕位置，不能用于贴底判断。
++    const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
 +    const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
 +    lastMaxScrollTop = maxScrollTop
-+    if (wasStuckToBottom && maxScrollTopIncreased && scroll.y < maxScrollTop) scroll.scrollTo(maxScrollTop)
-+  }))
++    // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
++    if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
++  }
 +
-   return (
-     <LocationProvider location={location()}>
-       <context.Provider
+   event.on("session.status", (evt) => {
+     if (evt.properties.sessionID !== route.sessionID) return
+     if (evt.properties.status.type !== "retry") return
+@@ -1309,6 +1323,8 @@ export function Session() {
+               <scrollbox
+                 ref={(r) => (scroll = r)}
++                // #212：由原生 renderAfter 在布局后跟随增长，无需 part 长度信号。
++                renderAfter={syncSessionViewportStuckToBottom}
+                 // #135：流式时禁用 viewportCulling，避免裁剪抖动
+                 viewportCulling={!streamingActive()}
+                 viewportOptions={{
+                   // #144：滚动条占位，避免消息贴到 scrollbar 轨道
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -240,6 +240,53 @@
+   },
+ )
+ 
++// 与原回归一样经过正文delta和Markdown布局，而非仅调用滚动计算函数。
++test("session follows streamed text from a one-row bottom gap", async () => {
++  const message: AssistantMessage = {
++    id: "msg_bottom", sessionID, role: "assistant", parentID: "msg_user",
++    time: { created: 1 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const part: Part = { id: "part_bottom", sessionID, messageID: message.id, type: "text", text: `${"wrapped content ".repeat(180)}OLD_BOTTOM` }
++  await withRenderedReview([{ info: message, parts: [part] }], async (app, _route, emit) => {
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("OLD_BOTTOM")) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    await app.renderOnce()
++    await app.renderOnce()
++    // 沿实际快捷键进入一行容差区，未增长时仍尊重手动上滚。
++    app.mockInput.pressKey("y", { ctrl: true, meta: true })
++    await app.renderOnce()
++    await app.renderOnce()
++    expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
++    emit({
++      directory, project: "proj_test",
++      payload: { id: "evt_bottom_growth", type: "message.part.delta", properties: {
++        sessionID, messageID: message.id, partID: part.id, field: "text", delta: `${" new content".repeat(80)} NEW_BOTTOM`,
++      } },
++    })
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("NEW_BOTTOM")) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    expect(app.captureCharFrame()).toContain("NEW_BOTTOM")
++  }, { width: 100, height: 18 })
++})
++
++// 没有已排队的渲染不等于事件合并定时器已完成，等待可观察帧并持续推进原生绘制。
++async function waitForReviewFrame(app: Awaited<ReturnType<typeof testRender>>, predicate: (frame: string) => Promise<boolean>, options: { maxPasses: number }) {
++  for (let pass = 0; pass < options.maxPasses; pass++) {
++    await app.renderOnce()
++    if (await predicate(app.captureCharFrame())) return
++  }
++  throw new Error(`Expected session frame did not appear:\n${app.captureCharFrame()}`)
++}
++
+ async function withRenderedReview(
+   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
+-  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>) => Promise<void>,
++  run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
++  dimensions: { width?: number; height?: number } = {},
+@@ -259,12 +306,12 @@
+   }, events)
+   const observed: { route?: ReturnType<typeof useRoute> } = {}
+   const app = await testRender(() => <ReviewHarness state={tmp.path} fetch={calls.fetch} events={events.source} observe={(route) => { observed.route = route }} />, {
+-    width: 110, height: 56, footerHeight: 0, screenMode: "alternate-screen",
++    width: dimensions.width ?? 110, height: dimensions.height ?? 56, footerHeight: 0, screenMode: "alternate-screen",
+   })
+   try {
+     await wait(() => Boolean(observed.route))
+     if (!observed.route) throw new Error("review route was not mounted")
+-    await run(app, observed.route)
++    await run(app, observed.route, events.emit)
+   } finally {
+     app.renderer.destroy()
+   }
 diff --git a/packages/tui/test/routes/session/session-viewport-follow.test.ts b/packages/tui/test/routes/session/session-viewport-follow.test.ts
 new file mode 100644
-index 0000000000..5295981f06
 --- /dev/null
 +++ b/packages/tui/test/routes/session/session-viewport-follow.test.ts
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,75 @@
 +import { describe, expect, test } from "bun:test"
++import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
++import { createTestRenderer } from "@opentui/core/testing"
 +
-+// #212：session viewport 贴底跟随逻辑测试
-+// #212：源 patch 的 renderAfter 集成测试需要完整 TUI 渲染框架，tip 无此 harness
-+// #212：此处提取跟随决策逻辑为纯函数测试，覆盖核心 invariant
++const sessionSource = await Bun.file(new URL("../../../src/routes/session/index.tsx", import.meta.url)).text()
++// #212：提取生产回调在原生布局中执行，避免测试另写一份跟随公式。
++const callback = sessionSource.match(/  function syncSessionViewportStuckToBottom\(\) \{[\s\S]*?\n  \}/)?.[0]
 +
-+// #212：跟随决策——视口在一行容差内贴底且内容增长时跟随到新底部
-+function shouldFollowStreamingBottom(scrollY: number, lastMaxScrollTop: number, maxScrollTop: number) {
-+  const wasStuckToBottom = scrollY >= lastMaxScrollTop - 1
-+  const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
-+  return wasStuckToBottom && maxScrollTopIncreased && scrollY < maxScrollTop
++async function fixture() {
++  expect(callback).toBeDefined()
++  expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
++  const app = await createTestRenderer({ width: 100, height: 18, useThread: false })
++  // #212：非零屏幕位置与边框让 y/height 不等于滚动偏移/视口高度。
++  const scroll = new ScrollBoxRenderable(app.renderer, {
++    width: 96,
++    height: 14,
++    top: 2,
++    border: true,
++    stickyScroll: true,
++    stickyStart: "bottom",
++  })
++  scroll.renderAfter = new Function(
++    "scroll",
++    `let lastMaxScrollTop = 0\n${callback}\nreturn syncSessionViewportStuckToBottom`,
++  )(scroll) as () => void
++  app.renderer.root.add(scroll)
++  const message = new BoxRenderable(app.renderer, { flexShrink: 0 })
++  const text = new TextRenderable(app.renderer, {
++    content: `${"wrapped content ".repeat(180)}OLD_BOTTOM`,
++    wrapMode: "word",
++  })
++  message.add(text)
++  scroll.add(message)
++  return { app, scroll, text }
 +}
 +
 +describe("session viewport streaming bottom follow (#212)", () => {
-+  // #212：内容增长 + 原本贴底 → 应跟随
-+  test("follows to new bottom when content grows and viewport was stuck", () => {
-+    expect(shouldFollowStreamingBottom(100, 100, 120)).toBe(true)
-+  })
++  test.each([0, 1, 3])("streaming layout respects a %s-row bottom gap", async (gap) => {
++    const { app, scroll, text } = await fixture()
++    try {
++      // #212：用真实 renderOnce 推进原生回绕、滚动范围刷新和后续绘制。
++      for (let frame = 0; frame < 4; frame++) await app.renderOnce()
++      expect(scroll.scrollTop).toBeGreaterThan(3)
++      expect(scroll.y).toBeGreaterThan(0)
++      expect(scroll.viewport.height).toBeLessThan(scroll.height)
++      expect(app.captureCharFrame()).toContain("OLD_BOTTOM")
 +
-+  // #212：内容增长 + 一行容差内 → 应跟随（terminal 舍入/半格绘制容差）
-+  test("follows within one-row tolerance", () => {
-+    expect(shouldFollowStreamingBottom(99, 100, 120)).toBe(true)
-+  })
++      const previous = scroll.scrollTop
++      const previousHeight = scroll.scrollHeight
++      scroll.scrollBy(-gap)
++      // #212：没有内容增长的普通帧不得吞掉手动一行上滚。
++      await app.renderOnce()
++      await app.renderOnce()
++      expect(scroll.scrollTop).toBe(previous - gap)
++      if (gap > 0) expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
 +
-+  // #212：内容增长 + 用户主动上滚超过一行 → 不跟随（用户在检查上一行）
-+  test("does not follow when user scrolled up beyond tolerance", () => {
-+    expect(shouldFollowStreamingBottom(95, 100, 120)).toBe(false)
-+  })
++      // #212：同一文本节点追加 delta，实际换行增高，不靠新增节点或手工改高度。
++      text.content = `${text.plainText}${" new content".repeat(80)} NEW_BOTTOM`
++      for (let frame = 0; frame < 4; frame++) await app.renderOnce()
++      expect(scroll.scrollHeight).toBeGreaterThan(previousHeight)
++      expect(scroll.getChildren()).toHaveLength(1)
 +
-+  // #212：内容未增长 → 不跟随（避免无意义的 scrollTo 调用）
-+  test("does not follow when content did not grow", () => {
-+    expect(shouldFollowStreamingBottom(100, 100, 100)).toBe(false)
-+  })
-+
-+  // #212：内容增长 + 已在新底部 → 不需要跟随（scrollTo 冗余）
-+  test("does not follow when already at new bottom", () => {
-+    expect(shouldFollowStreamingBottom(120, 100, 120)).toBe(false)
-+  })
-+
-+  // #212：text delta 不改 part count 但改 contentGrowthKey——验证信号覆盖文本增长
-+  test("contentGrowthKey tracks text length not just part count", () => {
-+    // #212：模拟 part 数组——text delta 原地修改 text 字段，part.length 不变
-+    const parts = [{ type: "text", text: "hello" }]
-+    const before = parts.reduce((sum, p) => sum + (p.text?.length ?? 0), 0)
-+    parts[0].text = "hello world"
-+    const after = parts.reduce((sum, p) => sum + (p.text?.length ?? 0), 0)
-+    // #212：part.length 不变（1→1），但文本长度变了（5→11）——contentGrowthKey 应捕获此变化
-+    expect(parts.length).toBe(1)
-+    expect(before).toBe(5)
-+    expect(after).toBe(11)
-+    expect(after).not.toBe(before)
++      if (gap > 1) {
++        expect(scroll.scrollTop).toBe(previous - gap)
++        expect(app.captureCharFrame()).not.toContain("NEW_BOTTOM")
++        return
++      }
++      expect(scroll.scrollTop).toBeGreaterThan(previous)
++      expect(scroll.scrollTop).toBe(scroll.scrollHeight - scroll.viewport.height)
++      expect(app.captureCharFrame()).toContain("NEW_BOTTOM")
++    } finally {
++      app.renderer.destroy()
++    }
 +  })
 +})

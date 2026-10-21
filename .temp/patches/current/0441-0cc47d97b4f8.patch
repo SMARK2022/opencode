@@ -661,6 +661,44 @@ index 0000000000000000000000000000000000000000..4edf14d6f2e0264a945f778aae4ea3d3
 +This task target is `<verified-implementation>`, not a commit target. No commit
 +is authorized by this plan. Existing unrelated staged/unstaged changes must
 +remain untouched.
+diff --git a/packages/core/src/patch.ts b/packages/core/src/patch.ts
+--- a/packages/core/src/patch.ts
++++ b/packages/core/src/patch.ts
+@@ -143,1 +143,2 @@
+-      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context '${chunk.changeContext}' in ${path}`, persistedText, chunk.changeContext))
++      // 原始 context 已在 Tool input 中；失败只补磁盘实际候选，不再回显请求。
++      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context in ${path}.`, persistedText, chunk.changeContext))
+@@ -154,4 +155,5 @@
++    // 匹配与文件原子性保持不变，三类失败都共享不复制 old block 的诊断合同。
+     if (result.type === "ambiguous")
+-      throw new Error(`Found multiple matches for expected lines in ${path}:\n${chunk.oldLines.join("\n")}\nProvide more context to make the match unique.`)
++      throw new Error(`Found multiple matches for expected lines in ${path}. Provide more context to make the match unique.`)
+     if (result.type === "not-found")
+-      throw new Error(withCandidate(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`, persistedText, chunk.oldLines.join("\n")))
++      throw new Error(withCandidate(`Failed to find expected lines in ${path}.`, persistedText, chunk.oldLines.join("\n")))
+diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
+--- a/packages/core/test/patch.test.ts
++++ b/packages/core/test/patch.test.ts
+@@ -50,1 +50,1 @@
+-    expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow("Closest match at line 2:\nconst after = good()")
++    expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow('Closest match at line 2:\nline 2 actual: "const after = good()"')
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -332,1 +332,3 @@
+-            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst after = good()") })
++            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const after = good()"') })
++            // 真实 leaf 的模型输出也必须去重，而非只在共享 helper 单测中修正文案。
++            expect(JSON.stringify(failed)).not.toContain("const after = good(1)")
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -336,1 +336,4 @@
+-                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst preferred = true") })
++                const missing = yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))
++                expect(missing).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const preferred = true"') })
++                // 请求仍由原始 Tool input 保存，模型结果只呈现 actual 差异和位置。
++                expect(JSON.stringify(missing)).not.toContain("const preferred = false")
 diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
 index d0658d084f39b1638f498d01de4e6045dbd7dcf2..0fef11c8dbab6311282c0f01d0265e5879962352 100644
 --- a/packages/opencode/src/patch/index.ts
@@ -686,10 +724,10 @@ index d0658d084f39b1638f498d01de4e6045dbd7dcf2..0fef11c8dbab6311282c0f01d0265e58
 +      // Tool input 已携带完整 old block；错误正文只补充结果与 actual 证据，避免模型上下文出现第二份请求文本。
 +      throw new Error(withCandidate(`Failed to find expected lines in ${filePath}.`, persistedText, expected))
      }
-diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
+diff --git a/packages/core/src/patch-match.ts b/packages/core/src/patch-match.ts
 index a4e595c1c78d43b9175ec55dfa293bdffc67e5bc..586d9196390df41f1bf41f00f71b29b5ad6027c5 100644
---- a/packages/opencode/src/patch/match.ts
-+++ b/packages/opencode/src/patch/match.ts
+--- a/packages/core/src/patch-match.ts
++++ b/packages/core/src/patch-match.ts
 @@ -1,3 +1,5 @@
 +import { diffChars } from "diff"
 +

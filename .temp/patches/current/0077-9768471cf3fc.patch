@@ -525,7 +525,7 @@ diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/con
 +            const providerApi = record?.provider.api
 +            const api = model.api.type === "native" && !model.api.url && Object.keys(model.api.settings).length === 0 && providerApi ? providerApi : model.api
 +            const reasoning = model.request.body.__opencodeReasoning
-+            if (reasoning === false || api.type !== "aisdk" || api.package !== "@ai-sdk/anthropic" || !ProviderV2.isAnthropicThinkingModel(model.api.id)) continue
++            if (reasoning === false || api.type !== "aisdk" || api.package !== "@ai-sdk/anthropic" || (reasoning !== true && !ProviderV2.isAnthropicThinkingModel(model.api.id))) continue
 +            const lowerer = ConfigProviderOptionsV1.get(api.package)
 +            const generated = Object.entries(ProviderV2.anthropicThinkingVariants({ apiID: model.api.id, providerID, output: model.limit.output }))
 +              .map(([id, options]) => ({ id: ModelV2.VariantID.make(id), headers: {}, body: lowerer.request(options) }))
@@ -579,7 +579,7 @@ diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/sessi
 -  const claudecode = model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic"
 +  const claudecode = ProviderV2.isClaudeCode(model)
 +  const anthropic = model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic" &&
-+    (claudecode || ProviderV2.isAnthropicThinkingModel(model.api.id))
++    (claudecode || body.__opencodeReasoning === true || ProviderV2.isAnthropicThinkingModel(model.api.id))
    // 源补丁按 provider ID 或 SDK package 识别 OpenAI 系列，不扩大普通兼容服务默认值。
    const parallel = model.providerID === "openai" || (model.api.type === "aisdk" &&
      ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/github-copilot"].includes(model.api.package))
@@ -737,7 +737,29 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
  import { AnthropicMessages } from "@opencode-ai/llm/protocols/anthropic-messages"
  import { HttpClientRequest } from "effect/unstable/http"
  import { ProjectV2 } from "@opencode-ai/core/project"
-@@ -412,7 +413,8 @@
+@@ -69,3 +70,3 @@
+   it.effect("preserves configured API keys through availability and native authentication", () =>
+-    withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: "fallback-key" }, () =>
++    Effect.forEach(["fallback-key", undefined], (cc) => withEnv({ ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined, CLAUDECODE_API_KEY: cc }, () =>
+       Effect.gen(function* () {
+@@ -111,12 +112,14 @@
+           const prepared = yield* LLMClient.prepare<AnthropicMessages.AnthropicMessagesBody>(input).pipe(Effect.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer))))
+           const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
+           const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
+-          expect(web.headers.get(provider === "claudecode" ? "authorization" : "x-api-key")).toBe(provider === "claudecode" ? "Bearer configured-key" : "configured-key")
++          const claudecode = provider === "claudecode" || provider === "explicit-claudecode"
++          expect(web.headers.get(claudecode ? "authorization" : "x-api-key")).toBe(claudecode ? `Bearer ${cc ?? "configured-key"}` : "configured-key")
++          expect(web.headers.has(claudecode ? "x-api-key" : "authorization")).toBe(false)
+           // 检查真正编码的请求，内部可用性信号不能成为发送给模型的密钥正文。
+           const body = yield* Effect.promise(() => web.text())
+           expect(body).not.toContain("configured-key")
+           expect(body).not.toContain("fallback-key")
+         }
+       }),
+-    ),
++    )),
+   )
+@@ -412,7 +415,8 @@
          const anthropic = required(yield* catalog.model.get(ProviderV2.ID.make("anthropic-copy"), ModelV2.ID.make("claude")))
          // 同一个已有 SDK lowerer 应同时转换模型与变体；中间配置和实际 wire 都无 camel userId。
          expect(anthropic.request.body).toEqual({ extension: { base: "keep", child: "add", shared: "high" }, items: ["high"], metadata: { base: "keep", user_id: "later-model-user" } })
@@ -746,7 +768,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
          // authToken 不能困在 settings/body；基础不变，高层 URL/settings/headers 均独立覆盖。
          expect(anthropic.api).toMatchObject({ type: "aisdk", package: "@ai-sdk/anthropic", url: "https://anthropic-high.test/v1", settings: { region: "high" } })
          expect(anthropic.api.settings).not.toHaveProperty("authToken")
-@@ -427,9 +429,14 @@
+@@ -427,9 +431,14 @@
            // preview body 不携带 endpoint，typed transport 必须接续 resolver 已选定的 endpoint/auth。
            const wire = yield* AnthropicMessages.route.with({ endpoint: selected.route.endpoint, auth: selected.route.auth }).prepareTransport(prepared.body, input)
            const web = yield* HttpClientRequest.toWeb(wire.request).pipe(Effect.orDie)
@@ -761,7 +783,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
            expect(text).toContain(variant === undefined ? '"user_id":"later-model-user"' : '"user_id":"later-variant-user"')
            expect(text).not.toContain('"userId"')
            expect(text).not.toContain('"authToken"')
-@@ -438,4 +445,157 @@
+@@ -438,4 +447,170 @@
        }),
      ),
    )
@@ -783,6 +805,8 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +            } },
 +            // 无 extends 的普通提供者刻意带同名设置，锁定专用身份必须来自真实继承证明。
 +            ordinary: { npm: "@ai-sdk/anthropic", options: { apiKey: "ordinary-key", claudeCode: true }, models: {
++              "claude-4.7-opus": { reasoning: true, limit: { context: 64000, output: 32000 } },
++              deployment: { reasoning: true, limit: { context: 64000, output: 32000 } },
 +              "claude-opus-4-6": { limit: { context: 64000, output: 32000 } },
 +              "claude-sonnet-4-5": { limit: { context: 64000, output: 1024 } },
 +              "claude-3-7-sonnet": { limit: { context: 64000, output: 1025 }, variants: { high: { metadata: { userId: "small-window" } } } },
@@ -832,7 +856,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +          time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) }, location: { directory: AbsolutePath.make("/project") },
 +        })
 +        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
-+        const selected = yield* resolver.resolve(session)
++        const selected = (yield* resolver.resolve(session)).model
 +        // 真实 Location resolver 保留派生 provider 与 wire ID，冻结预算不随 Catalog 别名重写。
 +        expect(selected.provider).toBe(ProviderID.make(providerID))
 +        expect(selected.id).toBe(ModelID.make("claude-opus-4-6"))
@@ -845,6 +869,17 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +        expect(prepared.web.headers.get("authorization")).toBe("Bearer derived-key")
 +        expect(prepared.web.headers.has("x-api-key")).toBe(false)
 +        expect(prepared.web.headers.get("x-app")).toBe("cli")
++        // 显式能力支持新版命名和自定义部署，不能再次被缺省型号推断否决。
++        for (const id of ["claude-4.7-opus", "deployment"]) {
++          const explicit = required(yield* catalog.model.get(ProviderV2.ID.make("ordinary"), ModelV2.ID.make(id)))
++          expect(explicit.variants.some((variant) => variant.id === "high")).toBe(true)
++          const resolved = yield* SessionRunnerModel.resolve(SessionSchema.Info.make({ ...session, model: { providerID: explicit.providerID, id: explicit.id, variant: ModelV2.VariantID.make("high") } }), explicit)
++          expect(resolved.route.defaults.http?.body).not.toHaveProperty("thinking")
++          expect(resolved.route.defaults.http?.body).not.toHaveProperty("output_config")
++          const request = yield* compile(resolved)
++          expect(request.body.thinking?.type).toBe(id === "claude-4.7-opus" ? "adaptive" : "enabled")
++          expect(request.body.max_tokens).toBeGreaterThan(0)
++        }
 +        // 只准备请求而不发送，四种来源验证源优先级，保存凭据属于当前派生身份。
 +        for (const sample of [
 +          { token: "env-token", cc: "cc-token", saved: "saved-key", expected: "env-token" },

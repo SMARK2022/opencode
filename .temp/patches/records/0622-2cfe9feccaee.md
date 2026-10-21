@@ -1,5 +1,14 @@
 # 0622-2cfe9feccaee Record
 
+## 本轮复查（2026-10-20）
+- 621已累计、30包类型与受控反馈/纯matcher/原性能断言通过。官方预应用622报告 `materialize-0622-2026-10-20T09-54-09-802Z.md` 停在测试中的旧it.instance前像，621/622；不是当前622已应用。
+- 完整original/current、记录、实际621的V1与Core原生apply_patch、FileMutation与既有原生测试已核对。恰好canonical同文件[Delete,Add]应在批准面前归一化，旧内容进diff，不执行remove；其他冲突组合继续拒绝，多个Update仍沿原始快照聚合。
+- V1使用621受控反馈测试层并保留既有Add覆写/EOL/BOM/锁内formatter；成功提醒只根据实际可提交的覆写提案。Core保留上游Add-alone排他create，显式配对才用已有writeIfUnchanged提交，批准后读旧bytes供diff和条件写共用；不修改底层create或引入新锁/协调器。原生提示须明确其Add-alone不同合同，不机械复制误导文案。
+- 本轮仅主代理手改current/record；原生既有Add不覆盖、批准后竞态、部分成功和中断/清理断言保留。尚待修后累计与行为验证，不采用下文旧PASS。
+- 已手改两代主路径：V1折叠意图不变，Note只追踪准备成功的覆写提案；Core按canonical完整组先归一化再授权，显式配对批准后读取原bytes，存在时用既有条件写、缺失时仍排他create，Applied仅增加可选事实标记供模型Note消费。新增一个原生既有fixture上的行为case覆盖交错别名配对、remove不可调用、真实旧diff、批准前零正文读取及反序/三项拒绝；源V1两case与描述断言保留并复用621受控服务。待官方累计验证。
+- 正式 `typecheck-0622-2026-10-20T10-03-28-193Z.md`：622/622、reused621/applied1、30包类型通过、source/target unchanged均true。同安装宿主Core原生apply-patch完整九项既有+一个新增、纯Patch七项共17 pass/0 fail/79 assertions；V1源两项及扩展描述3/0/15（73 filtered）。原生Add-existing/批准后出现目标/部分成功/defect与中断提交合同均在实际套件中保持，未执行应用/LSP或daemon。正式独立结论留给621–625完整双审。
+- 621–625全新独立升序ses_ea686b82bffe7cwOsxQdZ2IF8p、降序ses_ea686b7e3ffe1mA0MMyISSYw0O均逐项及整批PASS，无未关闭B/G。本项两代覆写/权限/条件写入/冲突语义在终态625相关181/0/1032及30包类型证据内再次覆盖；结论和保留N归档D:/Temp/opencode/batch621-625-20261020-audit-verdicts.md。
+
 ## 结论
 `PASS`（待批次双审确认）。apply_patch Delete+Add 同文件顺序对折叠为覆写，3 文件全部重锚落地。
 

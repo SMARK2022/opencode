@@ -1,5 +1,17 @@
 # 0621-aede70fbccdd Record
 
+## 本轮复查（2026-10-20）
+- 前批616–620已完整独立正反双审PASS。官方预应用625报告 `materialize-0625-2026-10-20T09-12-19-359Z.md` 实际620/625、reused620/applied0、停621、无625state；下文旧PASS和测试数字不用于本轮。
+- 五项只读预研已完成，621完整反馈与预过滤意图已按实际620 owner核对：matcher/derive与renderFileDiff都已在Core，V1为facade。歧义候选及共享扩展计算下沉现有Core patch-match，V1 edit保留自己的计数域并复用计算/格式，不反向依赖应用包。
+- 继续保留成功域/不可变原快照/错误传播与既有EOL/BOM、锁内formatter、审批proposal及最终diff分工。Read单一可见性抽取须保留compacted!==undefined和非空文件returned=0过滤；工具文案保留existing-file禁止空oldString的更强合同。测试原意均保留，优先调整既有用例；不会执行真实Edit/LSP生命周期或全量read套件。
+- 602的原<1000ms断言保持，等待本项实际Core行多重集下界预过滤后重测；只在下界严格大于2000时跳过jsdiff，不改阈值或扩大成功域。当前进入主代理手改current阶段，未实施622或宣称本项通过。
+- current已手工重锚：共享候选/扩展格式归Core patch-match，Core derive接同域建议；V1 edit-apply保留原计数/错误索引并导入共享诊断。boundDiff与多重集预过滤归Core file-diff，legacy仅转导出。Read保留compacted数值0和非空零行排除，edit文案不覆盖目标更强的现存文件非空匹配规则；source的反馈/formatter/测试及两个计划仍保留。只读hunk计数检查已通过，继续官方累计与类型验证，尚未宣布行为通过。
+- 首次正式621已累计发布，`typecheck-0621-2026-10-20T09-37-43-519Z.md` 在CLI检查Core时发现新增诊断函数被零上下文插入位置放进locateExact末尾；已检查真实生成源码并改为与原结束上下文同一hunk，确保函数仍是顶层。没有手改state或调整物化脚本；旧结果只算累计成功，不算类型通过。
+- 修后 `typecheck-0621-2026-10-20T09-40-54-731Z.md` 已621/621及30包类型通过；同宿主纯Core Patch 7/0/29。保留原D盘602反馈脚本、原输入和<1000ms阈值重跑，实际中止路径20ms通过，合法标记/显式计数/稀疏真实diff等断言也通过，不以升高测试阈值消除红测。
+- 为执行source新增反馈切片而不触发真实LSP/formatter，仅补一个三文件共用的测试边界fixture，新增切片在LayerNode构建时替换外部服务；真实工具、mutation、文件与输出投影保持原实现，原有LSP测试层不改也不运行。apply_patch历史fixture改用真实Context/品牌ID，移除unknown双重强转。此测试适配尚待修后累计与行为检查，未推进622。
+- 测试适配后正式 `typecheck-0621-2026-10-20T09-50-48-586Z.md` 再次621/621及30包类型通过，两侧unchanged=true。受控层的新source切片实际运行：apply_patch五项5/0/19、edit九项9/0/22、write两项2/0/4；没有运行旧真实LSP生命周期用例或完整read套件。结合Core纯Patch7/0/29及原602性能反馈，此项主要语义与本轮验证已闭合，正式独立放行仍属621–625整批双审。
+- 621–625本轮全新独立正反双审闭合：升序ses_ea686b82bffe7cwOsxQdZ2IF8p、降序ses_ea686b7e3ffe1mA0MMyISSYw0O均逐项及整批PASS，无未关闭B/G。终态625累计30包通过，相关181/0/1032与原diff性能28ms；该项受控反馈切片含在18/0/58中。完整范围与N保存在D:/Temp/opencode/batch621-625-20261020-audit-verdicts.md，不追认旧历史报告。
+
 ## 结论
 `PASS`（待批次双审确认）。编辑三工具（edit/write/apply_patch）上下文一致性反馈与 diff 预算门预过滤的完整目标适配，15 文件全部重锚落地。
 

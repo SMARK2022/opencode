@@ -3,6 +3,68 @@ From: SMARK <3222301373@qq.com>
 Date: Fri, 22 May 2026 23:39:51 +0800
 Subject: [PATCH] feat(permission): add auto review config schema
 
+diff --git a/packages/schema/src/permission.ts b/packages/schema/src/permission.ts
+--- a/packages/schema/src/permission.ts
++++ b/packages/schema/src/permission.ts
+@@ -57,8 +57,11 @@
++// 配置中的 auto 保留到 Permission owner；对外裁决 Effect 仍只有三种终态。
++export const RuleEffect = Schema.Literals(["allow", "deny", "ask", "auto"]).annotate({ identifier: "Permission.RuleEffect" })
++
+ export interface Rule extends Schema.Schema.Type<typeof Rule> {}
+ export const Rule = Schema.Struct({
+   action: Schema.String,
+   resource: Schema.String,
+-  effect: Effect,
++  effect: RuleEffect,
+ }).annotate({ identifier: "PermissionV2.Rule" })
+ 
+ export const Ruleset = Schema.Array(Rule).annotate({ identifier: "PermissionV2.Ruleset" })
+diff --git a/packages/core/src/config/auto-review.ts b/packages/core/src/config/auto-review.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/config/auto-review.ts
+@@ -0,0 +1,18 @@
++export * as ConfigAutoReview from "./auto-review"
++
++import { Schema } from "effect"
++
++export const ApprovalsReviewer = Schema.Literals(["user", "auto_review"])
++
++// 控制项独立于权限规则，保留源配置语义而不伪装成工具名。
++export class Info extends Schema.Class<Info>("Config.AutoReview")({
++  model: Schema.String.pipe(Schema.optional),
++  timeout_ms: Schema.Number.pipe(Schema.optional),
++  policy_path: Schema.String.pipe(Schema.optional),
++  policy: Schema.String.pipe(Schema.optional),
++  fallback: Schema.Literals(["deny", "user"]).pipe(Schema.optional),
++  strict: Schema.Boolean.pipe(Schema.optional),
++  max_consecutive_denials: Schema.Number.pipe(Schema.optional),
++  max_recent_denials: Schema.Number.pipe(Schema.optional),
++  recent_denial_window: Schema.Number.pipe(Schema.optional),
++}) {}
+diff --git a/packages/core/src/config.ts b/packages/core/src/config.ts
+--- a/packages/core/src/config.ts
++++ b/packages/core/src/config.ts
+@@ -13,2 +13,3 @@
+ import { ConfigAgent } from "./config/agent"
++import { ConfigAutoReview } from "./config/auto-review"
+ import { ConfigAttachments } from "./config/attachments"
+@@ -60,4 +61,6 @@
+   permissions: Permission.Ruleset.pipe(Schema.optional).annotate({
+     description: "Ordered tool permission rules applied to agent tool use",
+   }),
++  approvals_reviewer: ConfigAutoReview.ApprovalsReviewer.pipe(Schema.optional),
++  auto_review: ConfigAutoReview.Info.pipe(Schema.optional),
+   agents: Schema.Record(Schema.String, ConfigAgent.Info).pipe(Schema.optional).annotate({
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -159,3 +159,4 @@
+       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+-      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") ? "ask" : "allow"
++      // 后续自动裁决接线前保留人工审批，不能把尚未解析的 auto 当成 allow。
++      const effect: Permission.Effect = effects.includes("deny") ? "deny" : effects.includes("ask") || effects.includes("auto") ? "ask" : "allow"
+       return { effect, rules: all }
 diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/config/permission.ts
 --- a/packages/core/src/v1/config/permission.ts
 +++ b/packages/core/src/v1/config/permission.ts
@@ -435,9 +497,22 @@ diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/ge
      }
  
  export type AgentConfig = {
+@@ -4153,6 +4198,6 @@
+ export type PermissionV2Rule = {
+   action: string
+   resource: string
+-  effect: PermissionV2Effect
++  effect: PermissionV2Effect | "auto"
+ }
+ 
 diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
 --- a/packages/core/src/v1/config/migrate.ts
 +++ b/packages/core/src/v1/config/migrate.ts
+@@ -45,2 +45,4 @@
+     permissions: permissions(info.permission, info.tools),
++    approvals_reviewer: info.permission?.approvals_reviewer,
++    auto_review: info.permission?.auto_review,
+     agents: agents(info),
 @@ -80,12 +80,17 @@ function permissions(info?: ConfigPermissionV1.Info, tools?: Readonly<Record<str
      effect: enabled ? ("allow" as const) : ("deny" as const),
    }))
@@ -448,16 +523,40 @@ diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/confi
      if (!rule) continue
      if (typeof rule === "string") {
 -      rules.push({ action, resource: "*", effect: rule })
-+      // #196：skip check 后 rule 只可能是 Action 字符串，但 TS 无法从 key 过滤收窄
-+      rules.push({ action, resource: "*", effect: rule as ConfigPermissionV1.Action })
++      // 保留四态原值及最后匹配顺序，控制字段已在上方排除。
++      if (rule === "allow" || rule === "deny" || rule === "ask" || rule === "auto") rules.push({ action, resource: "*", effect: rule })
        continue
      }
 -    rules.push(...Object.entries(rule).map(([resource, effect]) => ({ action, resource, effect })))
-+    // #196：object 的 value 也只可能是 Action，同样需要断言收窄
-+    rules.push(...Object.entries(rule).map(([resource, effect]) => ({ action, resource, effect: effect as ConfigPermissionV1.Action })))
++    // #196：pattern 映射沿用同一 action 转换，agent 权限也经过该迁移入口。
++    rules.push(...Object.entries(rule).flatMap(([resource, effect]): typeof rules => effect === "allow" || effect === "deny" || effect === "ask" || effect === "auto" ? [{ action, resource, effect }] : []))
    }
    return rules.length ? rules : undefined
  }
+diff --git a/packages/core/test/config/config.test.ts b/packages/core/test/config/config.test.ts
+--- a/packages/core/test/config/config.test.ts
++++ b/packages/core/test/config/config.test.ts
+@@ -54,1 +54,20 @@
+ describe("Config", () => {
++  it.effect("migrates auto permissions without dropping denies or agent configuration", () =>
++    Effect.sync(() => {
++      // 全局与 agent 均保留 auto，控制项独立迁移，静态拒绝不被覆盖。
++      for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
++        const legacy = Schema.decodeUnknownSync(ConfigV1.Info)({
++          model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
++        })
++        const info = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate(legacy))
++        expect(info.model).toBe("test/model")
++        expect(info.approvals_reviewer).toBe("auto_review")
++        expect(info.auto_review).toMatchObject({ strict: true, fallback: "user" })
++        for (const rules of [info.permissions, info.agents?.build.permissions]) {
++          expect(rules).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
++          expect(rules?.find(rule => rule.action === "bash")?.effect).toBe("auto")
++        }
++      }
++    }),
++  )
++
 diff --git a/packages/core/src/config/plugin/agent.ts b/packages/core/src/config/plugin/agent.ts
 --- a/packages/core/src/config/plugin/agent.ts
 +++ b/packages/core/src/config/plugin/agent.ts

@@ -666,7 +666,7 @@ diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode
    }
  }
  
-@@ -57,4 +57,60 @@ describe("tokenAccounting", () => {
+@@ -57,4 +57,72 @@ describe("tokenAccounting", () => {
      // session 级累计遍历所有 assistant，不受 lastUser 选择影响（回归保护）
      expect(acc.session.input).toBe(3_000)
    })
@@ -691,17 +691,20 @@ diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode
 +      userMsg("old-user"),
 +      assistantMsg("old-assistant", "old-user", 100, 200),
 +      userMsg("new-user"),
-+      assistantMsg("new-assistant", "new-user", 300, 900),
++      { ...assistantMsg("new-assistant", "new-user", 300, 900), time: { created: 10 } },
 +    ]
 +    const parts = {
 +      "old-assistant": [stepFinishPart("old-assistant", 100, 200)],
-+      "new-assistant": [stepFinishPart("new-assistant", 300, 900)],
++      "new-assistant": [stepFinishPart("new-assistant", 300, 900), { type: "text", text: "streaming output ".repeat(64) }],
 +    }
 +
-+    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, "old-user")
++    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user")
 +
 +    // 200 与 900 的差异直接对应两个可达 assistant parent 的归属边界。
 +    expect(acc.request.totalOutput).toBe(200)
++    // 实际增长的未完成 tail 比两个静态 finish 更能暴露全局 latest 泄漏。
++    parts["new-assistant"].push({ type: "text", text: "more streaming output ".repeat(64) })
++    expect(tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "old-user").request.totalOutput).toBe(200)
 +  })
 +
 +  // #490：无 step-finish 的历史持久化 message 经 fallback 也必须保留纯 input。
@@ -720,11 +723,20 @@ diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode
 +      "current-assistant": [stepFinishPart("current-assistant", 300, 900)],
 +    }
 +
-+    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, "legacy-user")
++    const acc = tokenAccounting(messages as never, (id) => parts[id as keyof typeof parts] ?? [], 200_000, undefined, "legacy-user")
 +
 +    // cache read/write 留在 fixture 里，证明 fallback 不能通过 totalInput 间接冒充 pure input。
 +    expect(acc.request.totalInputPure).toBe(77)
 +    expect(acc.request.totalOutput).toBe(14)
++  })
++
++  test("retains durable session totals outside the visible message window", () => {
++    const acc = tokenAccounting([], () => [], undefined, {
++      session: { tokens: { input: 12_300, output: 1_000, reasoning: 40, cache: { read: 20, write: 5 } }, cost: 0.01, request: undefined },
++      last: undefined, parts: [],
++    })
++    // 空分页不能把持久账本抹成零；退出记录仍需要完整 input、output、reasoning 与 cost。
++    expect(acc.session).toMatchObject({ input: 12_300, output: 1_000, reasoning: 40, cost: 0.01 })
 +  })
  })
 
@@ -738,7 +750,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 -import { sessionEpilogue } from "../../util/presentation"
 +import { formatUsageStats, sessionEpilogue } from "../../util/presentation"
 +import { tokenAccounting } from "../../util/token-accounting"
- import { setPreLayoutSiblingMargin } from "../../util/layout"
+ import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
  import { useTuiConfig } from "../../config"
  import { useClipboard } from "../../context/clipboard"
 @@ -262,11 +263,7 @@ export function Session() {
@@ -758,9 +770,9 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
    })
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-+  // #490：Session aggregate 只在 route owner 计算一次，退出文本读取它而不让 epilogue 接触 Message/Part。
-+  // getParts 直接使用 Sync store，保证新增 Stats 与当前 TUI 已展示的数据源一致。
-+  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? []))
++  // Session 账本独立于分页；退出摘要复用已有 projection，不能仅累计窗口内的消息。
++  // 此处只消费 session 汇总，不为退出文本另建 request 或 Message/Part owner。
++  const sessionUsage = createMemo(() => tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, { session: session(), last: undefined, parts: [] }))
    // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
    const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
    // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
@@ -784,16 +796,14 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const messagesBeforeRevert = () => {
      const messageID = session()?.revert?.messageID
      if (!messageID) return messages()
-@@ -1776,6 +1790,14 @@ const footerVisible = createMemo(() => {
+@@ -1776,6 +1790,12 @@ const footerVisible = createMemo(() => {
      // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
      return assistantTurnDuration(messages(), props.message)
    })
-+  // #490：完成 footer 只记录当前 parent 的永久口径，不读取 prompt/sidebar 的 cache-inclusive total。
-+  // 只在 footerVisible 后计算，避免未完成或不可见的 assistant 为视口中每条消息重算统计。
-+  // parentID 是 queued/coalesced turn 的归属边界，不能改用全局 latest assistant。
++  // 完成 footer 按自己的 parent 取纯 input；不可见时不扫描，不能借全局活跃 turn 的统计。
 +  const turnUsage = createMemo(() => {
 +    if (!footerVisible()) return ""
-+    const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, props.message.parentID).request
++    const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, undefined, props.message.parentID).request
 +    return formatUsageStats({ input: usage.totalInputPure, output: usage.totalOutput, cost: usage.cost })
 +  })
  
@@ -869,16 +879,17 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
      totalOutput: number
      cost: number
    }
-@@ -113,6 +115,8 @@ export function tokenAccounting(
+@@ -80,7 +82,9 @@ export function tokenAccounting(
    messages: ReadonlyArray<Msg>,
    getParts: (id: string) => ReadonlyArray<Pt>,
    contextLimit?: number,
+   projection?: { session: Pick<Session, "tokens" | "cost" | "request"> | undefined; last: AssistantMessage | undefined; parts: ReadonlyArray<Part> },
 +  // #490：显式历史 request 选择器——只改变 request projection 的 parent，不改变 session 全量遍历
 +  requestUserID?: string,
  ): TokenAccounting {
    // #122：会话累计与当前 request 边界（按 user 消息切分）
  // ── 1. lastUser / requestAssistantIDs ──
-@@ -128,32 +132,35 @@ export function tokenAccounting(
+@@ -96,32 +100,37 @@ export function tokenAccounting(
    const lastUser = latestAssistantForUser
      ? messages.findLast((m) => m.role === "user" && m.id === latestAssistantForUser.parentID)
      : messages.findLast((m) => m.role === "user")
@@ -902,6 +913,8 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
 +  // #490：requestUserID 只改变 request projection 的选择，不改变 session projection 的全量遍历。
 +  // 默认调用方（prompt/sidebar/context）语义零变化：latestAssistantForRequest 即全局 latest。
 +  const latestAssistantForRequest = requestUserID ? latestRequestAssistant : latestAssistantForUser
++  // 历史 parent 不借当前 durable request；Session 汇总仍保留原 projection。
++  const requestProjection = requestUserID ? undefined : projection
  
    // ── 2. 一次遍历 ──
    const session = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }
@@ -943,81 +956,85 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
          confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
          confirmedRequest.cost += msg.cost ?? 0
        }
-@@ -241,12 +254,12 @@ export function tokenAccounting(
+@@ -220,8 +229,8 @@
+-  const density = projection?.session?.request?.inputEstimate?.charsPerToken
++  const density = requestProjection?.session?.request?.inputEstimate?.charsPerToken
+   const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? Math.min(8, Math.max(2, ratioChars / ratioTokens)) : DEFAULT_RATIO
+   // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
    const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
- 
+   // 持久投影拥有完整请求确认值；输入密度与输出校准分别进入既有尾部 helper。
+-  const projected = projection?.session?.request
+-    ? computeFinalTokens(projection.last, projection.parts, projection.session.request, outputRatio)
++  const projected = requestProjection?.session?.request
++    ? computeFinalTokens(requestProjection.last, requestProjection.parts, requestProjection.session.request, outputRatio)
+     : undefined
+@@ -229,12 +238,12 @@
    // ── 4. step（基于 latest assistant）───────────────────────────────
--  const lastParts = latestAssistant ? getParts(latestAssistant.id) : []
-+  const lastParts = latestAssistantForRequest ? getParts(latestAssistantForRequest.id) : []
+-  // 请求投影明确选择当前助手，分页中的旧助手不能接管当前分类。
+-  latestAssistant = projection ? projection.last : latestAssistant
+-  const lastParts: ReadonlyArray<Pt> = projection ? projection.parts : latestAssistant ? getParts(latestAssistant.id) : []
++  // 当前投影或显式历史 parent 唯一决定尾部，保留上游分页选择与零确认语义。
++  const latestAssistant = requestProjection ? requestProjection.last : latestAssistantForRequest
++  const lastParts: ReadonlyArray<Pt> = requestProjection ? requestProjection.parts : latestAssistant ? getParts(latestAssistant.id) : []
    // #122：最后一个 step-finish 划分已确认区与流式追加区
    const sfIdx = lastParts.findLastIndex((p) => p.type === "step-finish")
    const stepSF = sfIdx >= 0 ? lastParts[sfIdx] : undefined
    // #122：消息 completed 才把 step-finish 当最终确认
--  const msgCompleted = !!latestAssistant?.time?.completed
-+  const msgCompleted = !!latestAssistantForRequest?.time?.completed
+   const msgCompleted = latestAssistant?.time?.completed !== undefined
  
    let stepInput: number
    let stepConfirmed: boolean
-@@ -257,13 +270,13 @@ export function tokenAccounting(
-   // #122：流式中 step-finish 可能存在但仍需叠加未确认输出
-   } else if (stepSF && !msgCompleted) {
-     // #122：流式进行中：step-finish 存在但消息未 completed
--    stepInput = latestAssistant?.tokens
--      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
-+    stepInput = latestAssistantForRequest?.tokens
-+      ? latestAssistantForRequest.tokens.input + latestAssistantForRequest.tokens.cache.read + latestAssistantForRequest.tokens.cache.write
-       : stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-     stepConfirmed = false
-   } else {
--    stepInput = latestAssistant?.tokens
--      ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write
-+    stepInput = latestAssistantForRequest?.tokens
-+      ? latestAssistantForRequest.tokens.input + latestAssistantForRequest.tokens.cache.read + latestAssistantForRequest.tokens.cache.write
-       : 0
-     stepConfirmed = false
-   }
+@@ -285,3 +294,3 @@
+     // prepared 游标已覆盖的结果和附件属于输入快照，不能再追加为 pending。
+-    if (projection?.session?.request?.estimatedInput !== undefined && (p.id ?? "") <= (projection.last?.inputEstimate?.afterPartID ?? "")) continue
++    if (requestProjection?.session?.request?.estimatedInput !== undefined && (p.id ?? "") <= (requestProjection.last?.inputEstimate?.afterPartID ?? "")) continue
+     if (p.state?.status === "completed") {
 @@ -317,7 +330,8 @@ export function tokenAccounting(
    // 写入的工具结果才是已知的未来 input。
    const inFlightInput = stepConfirmed
      ? 0
 -    : stepSF && latestAssistant?.id === latestRequestAssistant?.id
 +    // #490：selected historical parent 不是 global latest 时，不能把当前 parent 的 pending input 借给它。
-+    : stepSF && latestAssistantForRequest?.id === latestAssistantForUser?.id
++    : stepSF && latestAssistant?.id === (requestUserID ? latestAssistantForUser?.id : latestRequestAssistant?.id)
        ? pendingToolResultTokens + pendingAttachTokens
        : stepInput
    const totalInput = confirmedRequest.input + inFlightInput
-@@ -333,12 +347,12 @@ export function tokenAccounting(
-   const stepSS = ssIdx >= 0 ? lastParts[ssIdx] : undefined
-   // #127：assistant 消息级 pending 快照（stream 尚未产生 part 时）
+@@ -323,3 +333,3 @@
+   // 当前请求没有快照时不能借旧助手；显式零字符、零估算也是有效快照。
+-  const estimate = projection?.session?.request ? projection.session.request.inputEstimate : latestAssistant?.inputEstimate
++  const estimate = requestProjection?.session?.request ? requestProjection.session.request.inputEstimate : latestAssistant?.inputEstimate
    const pendingMsg =
--    latestAssistant?.inputBreakdown && latestAssistant.inputChars
-+    latestAssistantForRequest?.inputBreakdown && latestAssistantForRequest.inputChars
-       ? {
-           type: "pending" as const,
--          inputBreakdown: latestAssistant.inputBreakdown,
--          inputChars: latestAssistant.inputChars,
--          inputTokens: latestAssistant.inputTokens,
-+          inputBreakdown: latestAssistantForRequest.inputBreakdown,
-+          inputChars: latestAssistantForRequest.inputChars,
-+          inputTokens: latestAssistantForRequest.inputTokens,
-         }
-       : undefined
-   const breakdownSrc = stepSF?.inputBreakdown
-@@ -447,6 +461,9 @@ export function tokenAccounting(
-       input: stepInput,
-       output: stepOutput,
-       totalInput,
+@@ -351,5 +361,5 @@
+     const confirmedInput = breakdownSrc.type === "step-finish" && stepSF?.tokens
+       ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
+-      : isConfirmed ? projection?.session?.request?.stepInput ?? (latestAssistant?.tokens
++      : isConfirmed ? requestProjection?.session?.request?.stepInput ?? (latestAssistant?.tokens
+         ? latestAssistant.tokens.input + latestAssistant.tokens.cache.read + latestAssistant.tokens.cache.write : 0)
+       : breakdownSrc.inputTokens ?? Math.round(breakdownSrc.inputChars / inputRatio)
+@@ -428,3 +438,3 @@
+-  const limit = projection?.session?.request?.model?.contextLimit ?? contextLimit ?? 0
++  const limit = requestProjection?.session?.request?.model?.contextLimit ?? contextLimit ?? 0
+   // #122：context 占用按 step input+output 相对 limit
+   const stepTotal = (projected?.input ?? stepInput) + (projected?.output ?? stepOutput)
+@@ -438,9 +448,12 @@
+       input: projected?.input ?? stepInput,
+       output: projected?.output ?? stepOutput,
+       totalInput: projected?.totalInput ?? totalInput,
 +      // #490：totalInput 继续服务实时上下文；totalInputPure 只服务完成态和退出记录。
 +      // 两字段同时返回让 consumer 选择口径，而不是让下游重新遍历 Message/Part。
 +      totalInputPure: confirmedRequest.inputPure,
-       totalOutput,
+       totalOutput: projected?.totalOutput ?? totalOutput,
        // #122：cost 仅累计已确认 request 费用
-       cost: confirmedRequest.cost,
+-      cost: projection?.session?.request?.cost ?? confirmedRequest.cost,
++      cost: requestProjection?.session?.request?.cost ?? confirmedRequest.cost,
+     },
+     // 会话账本独立于前端分页，旧 transcript-only 调用仍保留原始统计语义。
+     session: projection?.session?.tokens
 
 diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/util/presentation.test.ts
 --- a/packages/tui/test/util/presentation.test.ts
 +++ b/packages/tui/test/util/presentation.test.ts
-@@ -1,8 +1,19 @@
+@@ -1,8 +1,28 @@
 -import { expect, test } from "bun:test"
 -import { sessionEpilogue } from "../../src/util/presentation"
 +import { describe, expect, test } from "bun:test"
@@ -1027,6 +1044,13 @@ diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/uti
    const epilogue = sessionEpilogue({ title: "A session", sessionID: "ses_123" })
    expect(epilogue).toContain("A session")
    expect(epilogue).toContain("opencode -s ses_123")
++  // 直接覆盖 stdout 最终消费的 epilogue 文本，不能只验证孤立 formatter。
++  const populated = sessionEpilogue({ title: "A session", sessionID: "ses_123", usage: { input: 12_300, output: 1_000, cost: 0.01 } })
++  expect(populated).toContain("↑12.3K ↓1.0K · $0.01")
++  expect(populated).toContain("Stats")
++  expect(populated.indexOf("Stats")).toBeGreaterThan(populated.indexOf("Session"))
++  expect(populated.indexOf("Stats")).toBeLessThan(populated.indexOf("Continue"))
++  expect(sessionEpilogue({ title: "Empty", sessionID: "ses_zero", usage: { input: 0, output: 0, cost: 0 } })).not.toContain("Stats")
  })
 +
 +describe("formatUsageStats", () => {
@@ -1037,6 +1061,30 @@ diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/uti
 +    expect(formatUsageStats({ input: 0, output: 1_000, cost: 0 })).toBe("↓1.0K")
 +    expect(formatUsageStats({ input: 0, output: 0, cost: 0.25 })).toBe("$0.25")
 +    expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
++    expect(formatUsageStats({ input: 100, output: 0, cost: 0.25 })).toBe("↑100 · $0.25")
++    expect(formatUsageStats({ input: 0, output: 100, cost: 0.25 })).toBe("↓100 · $0.25")
 +  })
 +})
+
+diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test/util/token-accounting.test.ts
+--- a/packages/tui/test/util/token-accounting.test.ts
++++ b/packages/tui/test/util/token-accounting.test.ts
+@@ -295,3 +295,3 @@
+     // 窗口没有旧消息也不能截断持久累计，未记录会话费用时沿用零值。
+     const confirmed = snapshot(request)
+-    expect(confirmed.request).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30, cost: 2 })
++    expect(confirmed.request).toEqual({ input: 1000, output: 10, totalInput: 4000, totalInputPure: 0, totalOutput: 30, cost: 2 })
+@@ -300,3 +300,3 @@
+     const prepared = { ...request, stepInput: 0, stepOutput: 0, estimatedInput: 777,
+       model: { providerID: "p", modelID: "m", contextLimit: 2000 } }
+-    expect(snapshot(prepared).request).toEqual({ input: 777, output: 0, totalInput: 4777, totalOutput: 30, cost: 2 })
++    expect(snapshot(prepared).request).toEqual({ input: 777, output: 0, totalInput: 4777, totalInputPure: 0, totalOutput: 30, cost: 2 })
+@@ -339,5 +339,5 @@
+-    // 历史输出密度为 8，输入密度为 2；游标覆盖的工具结果不能再加入 prepared input。
++    // 密度仍分别为 8/2，游标覆盖结果不重复计入；窗口缺少 parent user 时，不从含 cache 的投影反推 pure input。
+     expect(acc.ratio.output).toBe(8)
+     expect(acc.step).toMatchObject({ input: 777, output: 20 })
+-    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalOutput: 320, cost: 2 })
++    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalInputPure: 0, totalOutput: 320, cost: 2 })
+     expect(acc.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
 

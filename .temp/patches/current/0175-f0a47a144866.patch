@@ -8,7 +8,7 @@ new file mode 100644
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/util/attachment-token.ts
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,234 @@
 +// #175：媒体 token 与文本密度隔离；daemon 与 TUI 必须共用
 +import { Token } from "./token"
 +
@@ -185,7 +185,7 @@ new file mode 100644
 +      mime: typeof value.mime === "string" ? value.mime : undefined,
 +      mediaType: typeof value.mediaType === "string" ? value.mediaType : undefined,
 +      url: typeof value.url === "string" ? value.url : undefined,
-+      data: typeof value.data === "string" ? value.data : undefined,
++      data: typeof value.data === "string" ? value.data : value.data instanceof Uint8Array ? Buffer.from(value.data).toString("base64") : undefined,
 +      filename: typeof value.filename === "string" ? value.filename : undefined,
 +    }
 +  }
@@ -198,7 +198,16 @@ new file mode 100644
 +      filename: typeof value.filename === "string" ? value.filename : undefined,
 +    }
 +  }
++  // SDK 图片可为二进制；转换只供估算，不改实际 provider 请求。
++  if (value.type === "image" && value.image instanceof Uint8Array) {
++    return { type: "media", data: Buffer.from(value.image).toString("base64"), mediaType: typeof value.mediaType === "string" ? value.mediaType : "image/png" }
++  }
 +  if (value.type === "image" && typeof value.image === "string") return { type: "image", url: value.image, mime: parseDataUrl(value.image)?.mime }
++  // native Responses 的字段不同，仍消费同一 prepared 载荷。
++  if (value.type === "input_image" && typeof value.image_url === "string")
++    return { type: "image", url: value.image_url, mime: parseDataUrl(value.image_url)?.mime }
++  if (value.type === "input_file" && typeof value.file_data === "string")
++    return { type: "file", data: value.file_data, mime: "application/pdf" }
 +  return undefined
 +}
 +
@@ -206,6 +215,10 @@ new file mode 100644
 +function sanitizeAttachmentRecord(value: Record<string, unknown>, input: AttachmentInput) {
 +  const mime = input.mime ?? input.mediaType ?? parseDataUrl(input.url ?? input.data ?? "")?.mime ?? "attachment"
 +  const text = placeholder({ mime, filename: input.filename })
++  if (value.image instanceof Uint8Array) return { ...value, image: text }
++  if (value.data instanceof Uint8Array) return { ...value, data: text }
++  if (typeof value.image_url === "string" && value.image_url.startsWith("data:")) return { ...value, image_url: text }
++  if (typeof value.file_data === "string" && value.file_data.startsWith("data:")) return { ...value, file_data: text }
 +  if (typeof value.url === "string" && value.url.startsWith("data:")) return { ...value, url: text }
 +  if (typeof value.data === "string") return { ...value, data: text }
 +  if (typeof value.image === "string" && value.image.startsWith("data:")) return { ...value, image: text }
@@ -216,27 +229,30 @@ new file mode 100644
 +export function sanitizeModelMessagesForTokenEstimate(messages: unknown): SanitizedTextEstimate {
 +  const result = sanitize(messages)
 +  const text = JSON.stringify(result.value)
++  const rawChars = JSON.stringify(messages).length
 +  return {
 +    value: result.value,
 +    text,
 +    textChars: text.length,
 +// #175：rawChars 用未消毒 JSON 对齐 wire
-+    rawChars: JSON.stringify(messages).length,
-+    attachments: result.attachments,
++    rawChars,
++    // 二进制与 data URL 的 JSON 长度不同，raw→text 的差额必须对齐真实准备体。
++    attachments: { ...result.attachments,
++      rawChars: rawChars - text.length + result.attachments.textChars },
 +  }
 +}
 +
 +export * as AttachmentToken from "./attachment-token"
-diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
---- a/packages/schema/src/v1/session.ts
-+++ b/packages/schema/src/v1/session.ts
-@@ -256,6 +256,19 @@ export const InputBreakdownSchema = Schema.Struct({
-     attachments: NonNegativeInt,
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -178,4 +178,17 @@ export const InputBreakdown = Schema.Struct({
+     // 包含归属消息的 JSON 结构开销，六个子项之和就是 total。
      total: NonNegativeInt,
    }),
 +  // #175：media 与 messages 分列，避免 base64 污染文本密度
-+  // #175：缺省 media 时 TUI 回退旧 attachments 字符路径
-+  media: Schema.optional(
++  // 未携带媒体的旧样本保持原字符口径，V1/V2 引用同一可选定义。
++  media: optional(
 +    Schema.Struct({
 +      rawChars: NonNegativeInt,
 +      textChars: NonNegativeInt,
@@ -247,133 +263,115 @@ diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.
 +      otherTokens: NonNegativeInt,
 +    }),
 +  ),
- })
+ }).annotate({ identifier: "Session.Message.InputBreakdown" })
+diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
+--- a/packages/core/src/util/token.ts
++++ b/packages/core/src/util/token.ts
+@@ -3,4 +3,5 @@
+ import type { SessionMessage } from "@opencode-ai/schema/session-message"
++import { AttachmentToken } from "./attachment-token"
  
- export const StepStartPart = Schema.Struct({
-@@ -281,6 +294,18 @@ export const StepStartPart = Schema.Struct({
-         attachments: NonNegativeInt,
-         total: NonNegativeInt,
-       }),
-+      // #175：step 快照同步携带 media
-+      media: Schema.optional(
-+        Schema.Struct({
-+          rawChars: NonNegativeInt,
-+          textChars: NonNegativeInt,
-+          tokens: NonNegativeInt,
-+          count: NonNegativeInt,
-+          imageTokens: NonNegativeInt,
-+          pdfTokens: NonNegativeInt,
-+          otherTokens: NonNegativeInt,
-+        }),
-+      ),
-     }),
-   ),
- }).annotate({ identifier: "StepStartPart" })
-@@ -320,6 +345,18 @@ export const StepFinishPart = Schema.Struct({
-         attachments: NonNegativeInt,
-         total: NonNegativeInt,
-       }),
-+      // #175：step 快照同步携带 media
-+      media: Schema.optional(
-+        Schema.Struct({
-+          rawChars: NonNegativeInt,
-+          textChars: NonNegativeInt,
-+          tokens: NonNegativeInt,
-+          count: NonNegativeInt,
-+          imageTokens: NonNegativeInt,
-+          pdfTokens: NonNegativeInt,
-+          otherTokens: NonNegativeInt,
-+        }),
-+      ),
-     }),
-   ),
- }).annotate({ identifier: "StepFinishPart" })
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -43,6 +43,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
- import { Truncate } from "@/tool/truncate"
- import { Image } from "@/image/image"
- import { decodeDataUrl } from "@/util/data-url"
-+import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
- import { Process } from "@/util/process"
- import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types , Semaphore} from "effect"
- import { InstanceState } from "@/effect/instance-state"
-@@ -1557,7 +1558,12 @@ const layer = Layer.effect(
-             const modelMsgs = yield* MessageV2.toModelMessagesEffect(requestMsgs, model)
-             // 提前组装 messages 复用：token 估算与 handle.process 共用同一份，保证口径一致
-             const messages = [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : [])]
--            const messagesText = JSON.stringify(messages)
-+            // #175：消毒后文本用于估计；raw 单独保留线长
-+            // #175：messagesText 不得再含 base64
-+            const messageEstimate = AttachmentToken.sanitizeModelMessagesForTokenEstimate(messages)
-+            const messagesText = messageEstimate.text
-+            // #175：raw 仅用于 inputChars，不参与 Token.estimate 文本路径
-+            const rawMessagesText = JSON.stringify(messages)
-             // 合并 agent 与 session 权限，仅估算实际发送的工具定义
-             const disabledTools = Permission.disabled(Object.keys(tools), Permission.merge(agent.permission, session.permission ?? []))
-             const toolsText = Object.entries(tools)
-@@ -1574,7 +1580,7 @@ const layer = Layer.effect(
-               })
-               .join("\n")
-             // 三段字符总量近似请求体，除以 chars-per-token 得 token 估算
--            const inputChars = [systemText, messagesText, toolsText].join("\n").length
-+            const inputChars = [systemText, rawMessagesText, toolsText].join("\n").length // #175：inputChars 用 raw
-             // 输入字符细分：遍历实际请求消息（requestMsgs）计算每类字符数
-             let msgUserChars = 0, msgAssistantChars = 0, msgReasoningChars = 0
-             let msgToolInputChars = 0, msgToolOutputChars = 0, msgAttachmentChars = 0
-@@ -1603,6 +1609,8 @@ const layer = Layer.effect(
-               skills: skillsText.length,
-               tools: toolsText.length,
-               messages: { userText: msgUserChars, assistantText: msgAssistantChars, reasoning: msgReasoningChars, toolInput: msgToolInputChars, toolOutput: msgToolOutputChars, attachments: msgAttachmentChars, total: msgUserChars + msgAssistantChars + msgReasoningChars + msgToolInputChars + msgToolOutputChars + msgAttachmentChars },
-+              // #175：count>0 才写 media，兼容无附件会话
-+              ...(messageEstimate.attachments.count > 0 ? { media: messageEstimate.attachments } : {}),
-             } as SessionV1.StepFinishPart["inputBreakdown"]
-             // #140：输入侧比率校准（历史 step-finish inputChars/tokens），夹紧到 [3,4]
-             // #140：history 校准样本来自 step-finish.inputChars
-@@ -1615,16 +1623,22 @@ const layer = Layer.effect(
-               if (typeof chars === "number" && chars > 0 && tokens > 0) {
-                 // 附件不参与输入侧 chars/token 密度校准
-                 const bd = (sf as any).inputBreakdown
--                historyInputChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-+                // #175：history 与 live 同一 raw→text 密度公式
-+                historyInputChars += bd?.media
-+                  ? Math.max(0, chars - bd.media.rawChars + bd.media.textChars)
-+                  : Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-                 historyInputTokens += tokens
-               }
-             }
-             // #140：样本不足时回退 Token.estimate；有样本则夹紧比值
-+            // #175：文本估计后加 media.tokens，只加一次
-             const estimatedInput =
--              historyInputTokens > 0 && historyInputChars > 500
-+              (historyInputTokens > 0 && historyInputChars > 500
--                ? Math.round(inputChars / clampCharsPerToken(historyInputChars / historyInputTokens))
-+                // #175：校准分支被除数用消毒文本；raw 含 base64 会导致 media.tokens 二次计入
-+                ? Math.round([systemText, messagesText, toolsText].join("\n").length / clampCharsPerToken(historyInputChars / historyInputTokens))
--                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))
-+                : tokenEstimate([systemText, messagesText, toolsText].join("\n"))) + messageEstimate.attachments.tokens
-             // #140：用即将发送的 estimatedInput 做 overflow，而非 lastFinished 历史巨量
-+            // #175：overflow 使用含 media 的 estimatedInput
-             if (
-               yield* compaction.isOverflow({
-                 tokens: { input: estimatedInput, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+ export type SystemSection = { readonly kind: "instructions" | "skills"; readonly text: string }
+-type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
++type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages" | "media"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
+@@ -10,3 +11,4 @@
+   role?: string
+   entries: number
++  media?: boolean
+ }
+@@ -21,2 +22,5 @@
+-    // 附件/base64 字符不参与文本密度，确认输入与缓存 token 仍保留原分母。
+-    return { bodyChars: sum.bodyChars + Math.max(0, item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
++    // 媒体样本用占位字符替换 raw；文本密度不能把 base64 当普通正文。
++    const media = item.inputBreakdown?.media
++    return { bodyChars: sum.bodyChars + Math.max(0, media
++      ? item.bodyChars - media.rawChars + media.textChars
++      : item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
+@@ -34,2 +39,4 @@
+   const nodes = new WeakMap<object, Node>()
++  // 媒体沿同一个 JSON visitor 统计；getter、toJSON 与原 provider body 仍只观察一次。
++  const media = AttachmentToken.estimateAttachment({})
+   // 唯一 stringify 的 visitor 同时计数，既不重跑 Schema parser，也不按子树再次序列化。
+@@ -85,1 +92,21 @@
++    // Buffer 在 JSON visitor 前已执行 toJSON，必须识别其原生字节形态而非再序列化。
++    const bytes = value instanceof Uint8Array ? value
++      : value !== null && typeof value === "object" && "type" in value && value.type === "Buffer" && "data" in value && Array.isArray(value.data)
++        ? Buffer.from(value.data) : undefined
++    const binary = bucket === "attachments" && bytes !== undefined && (key === "data" || key === "image")
++    const source = this as Record<string, unknown>
++    const attachment = binary
++      ? AttachmentToken.estimateAttachment({ type: "media", data: Buffer.from(bytes).toString("base64"),
++          mediaType: typeof source.mediaType === "string" ? source.mediaType : "image/png" })
++      : bucket === "attachments" && typeof scalar === "string" && ["data", "image", "url", "image_url", "file_data"].includes(key)
++        ? AttachmentToken.estimateAttachment({ type: "file", url: scalar, data: scalar,
++            // Anthropic 的已校验 source 使用 media_type，不能把图片预算退成 base64 文本预算。
++            mediaType: typeof source.mediaType === "string" ? source.mediaType : typeof source.media_type === "string" ? source.media_type : undefined }) : undefined
++    if (attachment?.count) {
++      for (const field of ["tokens", "textChars", "count", "imageTokens", "pdfTokens", "otherTokens"] as const)
++        media[field] += attachment[field]
++      // 字符串外引号保留；二进制对象的实际 JSON 长度由后续子节点计入，不另做 stringify。
++      if (!binary) media.rawChars += chars - 2
++    }
++    if (parent?.media) media.rawChars += prefix + chars
+     if (section === "system" && typeof scalar === "string" && sections) {
+@@ -111,1 +132,1 @@
+-    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0 })
++    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0, media: binary || parent?.media })
+@@ -117,2 +138,4 @@
+-  return { input: Math.max(0, Math.round(bodyChars / ratio)), bodyChars, confirmed: false,
+-    ...(sections === undefined ? {} : { charsPerToken: ratio, inputBreakdown: counts }) }
++  return { input: Math.max(0, Math.round((bodyChars - media.rawChars + media.textChars) / ratio)) + media.tokens, bodyChars, confirmed: false,
++    ...(sections === undefined ? {} : { charsPerToken: ratio, inputBreakdown: {
++      ...counts, ...(media.count > 0 ? { media } : {}),
++    } }) }
+diff --git a/packages/core/test/util-token.test.ts b/packages/core/test/util-token.test.ts
+--- a/packages/core/test/util-token.test.ts
++++ b/packages/core/test/util-token.test.ts
+@@ -104,3 +104,23 @@
+   expect(normal.input).toBeLessThan(middle.input)
+   expect(dense.input).toBeGreaterThan(middle.input)
+ })
++
++test("prepared media handles SDK binary, base64 and native fields without inflating text tokens", () => {
++  const bytes = Buffer.alloc(5625)
++  // 同一7500字符图片负载经过不同 provider 准备格式，视觉预算与 raw JSON 计数都应一致。
++  for (const content of [
++    { type: "file", mediaType: "image/png", data: bytes },
++    { type: "file", mediaType: "image/png", data: new Uint8Array(bytes) },
++    { type: "file", mediaType: "image/png", data: bytes.toString("base64") },
++    { type: "input_image", image_url: `data:image/png;base64,${bytes.toString("base64")}` },
++    { type: "image", source: { type: "base64", media_type: "image/png", data: bytes.toString("base64") } },
++  ]) {
++    const body = { messages: [{ role: "user", content: [content] }] }
++    const result = Token.estimateRequest(body, [], [])
++    expect(result.bodyChars).toBe(JSON.stringify(body).length)
++    expect(result.inputBreakdown?.media?.tokens).toBe(10)
++    expect(result.inputBreakdown?.media?.count).toBe(1)
++    // 文本估量只含包装与占位，不能把二进制展开或 base64 再除四计入。
++    expect(result.input).toBeLessThan(250)
++  }
++})
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -809,1 +809,3 @@
+-                input: Math.round(estimate.bodyChars / charsPerToken),
++                // clamp 只调整文本密度，媒体 token 固定追加一次，raw 字符只作展示基数。
++                input: Math.round((estimate.bodyChars - (estimate.inputBreakdown?.media?.rawChars ?? 0)
++                  + (estimate.inputBreakdown?.media?.textChars ?? 0)) / charsPerToken) + (estimate.inputBreakdown?.media?.tokens ?? 0),
 diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/token-accounting.ts
 --- a/packages/tui/src/util/token-accounting.ts
 +++ b/packages/tui/src/util/token-accounting.ts
 @@ -1,3 +1,4 @@
 +// #175：TUI 固定侧分配 media.tokens，不抢 system/user 文本份额
- // #122：统一 token 统计入口（step / request / session + breakdown 分配）
- /**
-  * token-accounting.ts — 统一 token 统计入口
-@@ -14,6 +15,7 @@
-  * 这不是"估计"，是按字符占比精确分配已确认 token 总量。
-  */
+ // step/request/session 共用统计入口，持久投影拥有完整累计，parts 只提供当前尾部。
+ // 确认分类按 categoryChars / inputChars 分配 provider input，不在 TUI 重建请求体。
  
+@@ -17,3 +18,4 @@
 +import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
- import { estimateDataUrlInputTokens } from "./token-estimate"
+ import type { AssistantMessage, Part, Session } from "@opencode-ai/sdk/v2"
+ import { computeFinalTokens, estimateDataUrlInputTokens } from "./token-estimate"
  
- // #122：无历史校准时默认约 4 字符/token
 @@ -167,8 +169,11 @@ export function tokenAccounting(
        if (chars && chars >= 100) {
          const tok = p.tokens.input + p.tokens.cache.read + p.tokens.cache.write
@@ -404,12 +402,10 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
        messages: { userText: number; assistantText: number; reasoning: number; toolInput: number; toolOutput: number; attachments: number; total: number }
 +      media?: { rawChars: number; textChars: number; tokens: number; count: number; imageTokens: number; pdfTokens: number; otherTokens: number }
      }
-     // #127：仅 step-finish 且 step 已确认才走 provider 精确 output
-   const isConfirmed = (breakdownSrc as any).type === "step-finish" && stepConfirmed
-@@ -322,16 +329,25 @@ export function tokenAccounting(
-       ? stepSF.tokens.input + stepSF.tokens.cache.read + stepSF.tokens.cache.write
-       : (Number((breakdownSrc as any).inputTokens) || Math.round((Number((breakdownSrc as any).inputChars) || 0) / inputRatio))
-     const denom = Number((breakdownSrc as any).inputChars)
+     // provider 确认优先于旧 prepared 密度，不必等整条消息 completed。
+     const isConfirmed = breakdownSrc.type === "step-finish" || (breakdownSrc === pendingMsg && estimate?.confirmed === true)
+@@ -318,13 +324,22 @@ export function tokenAccounting(
+     const denom = breakdownSrc.inputChars
 -
 -    // #124/#127：按字符占比分配 input 分类
 -    const alloc = (chars: number) => denom > 0 ? Math.round((chars / denom) * confirmedInput) : 0
@@ -434,53 +430,37 @@ diff --git a/packages/tui/src/util/token-accounting.ts b/packages/tui/src/util/t
 +    // #175：attachments UI 槽位优先固定 media.tokens
 +    const attachments = attachmentTokens ?? alloc(bd.messages.attachments)
      // #127：历史 assistant/reasoning/tool-call 属于 input context，不是当前 step 新输出
-     // #127：历史 assistant 文本计入 input context
      const inputAssistantText = alloc(bd.messages.assistantText)
 diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
 --- a/packages/tui/src/util/token-estimate.ts
 +++ b/packages/tui/src/util/token-estimate.ts
 @@ -1,3 +1,4 @@
 +import { AttachmentToken } from "@opencode-ai/core/util/attachment-token"
- import type { AssistantMessage } from "@opencode-ai/sdk/v2"
+ import type { AssistantMessage, Part, SessionRequestUsage } from "@opencode-ai/sdk/v2"
  import { estimate } from "@opencode-ai/core/util/token"
  
-@@ -14,16 +15,8 @@ export type UsageInfo = {
- // 图片按每 750 字符约 1 token 估算（Anthropic 视觉编码），上限 1600 token
- // PDF 按每 1100 字符约 1 token 估算；其他类型回退到通用文本估算
+@@ -13,13 +14,4 @@ export type UsageInfo = {
  export function estimateDataUrlInputTokens(url: string, mime: string) {
 -  if (!url.startsWith("data:")) return 0
 -  const comma = url.indexOf(",")
 -  if (comma < 0) return 0
 -  const payloadLength = url.length - comma - 1
 -  if (payloadLength <= 0) return 0
--  // 图片 token 随分辨率增长，但 Anthropic 对单图有 1600 token 上限
+-  // 图片沿用每 750 字符约 1 token、1600 封顶的视觉启发式，不把 base64 当等长文本；实际用量以 provider 确认为准。
 -  if (mime.startsWith("image/")) return Math.max(1, Math.min(1600, Math.round(payloadLength / 750)))
--  // PDF 按 base64 负载密度估算，每 1100 字符约 1 token
+-  // PDF 沿用每 1100 字符约 1 token 且不套图片封顶，多页文档负载增长仍参与估算。
 -  if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
+-  // 其他 MIME 没有视觉估算规则，负载回到通用文本估算。
 -  return Math.max(1, estimate(url.slice(comma + 1)))
 +  // #175：委托 core，禁止 TUI 本地 /750 分叉
 +  return AttachmentToken.estimateAttachment({ url, mime, type: "file" }).tokens
  }
- 
- // 默认 chars-per-token 比率：4 字符约等于 1 token（适用于英文文本）
-@@ -53,8 +46,9 @@ export function charsPerTokenFromHistory(
-       // 样本不足 100 字符忽略，避免早期噪声主导密度
-       if (typeof inputChars !== "number" || inputChars < 100 || inputTokens <= 0) continue
-       // 附件字符不参与文本密度校准：视觉/base64 与自然语言密度不同
--      const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
--      totalChars += Math.max(0, inputChars - (bd?.messages?.attachments ?? 0))
-+      const bd = p.inputBreakdown as { messages?: { attachments?: number }; media?: { rawChars: number; textChars: number } } | undefined
-+      // #175：history 与 live 同一 media 回写
-+      totalChars += Math.max(0, inputChars - (bd?.media ? bd.media.rawChars - bd.media.textChars : (bd?.messages?.attachments ?? 0)))
-       totalTokens += inputTokens
-     }
-   }
 diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test/util/token-accounting.test.ts
 --- a/packages/tui/test/util/token-accounting.test.ts
 +++ b/packages/tui/test/util/token-accounting.test.ts
-@@ -250,4 +250,23 @@ describe("tokenAccounting", () => {
-     expect(acc.breakdown!.assistantText).toBe(35)
-     expect(acc.breakdown!.toolCalls).toBe(16)
+@@ -266,4 +266,23 @@ describe("tokenAccounting", () => {
+     expect(next.breakdown!.system).toBe(80)
+     expect(next.breakdown!.assistantText).toBe(35)
    })
 +  // #175：media.tokens=10 固定；system/user 经 textDenom 为 242
 +  test("breakdown allocates media tokens outside text character ratio", () => {
@@ -501,11 +481,11 @@ diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test
 +    expect(acc.breakdown?.userMessages).toBe(242)
 +  })
 +
- })
+ 
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2867,3 +2867,61 @@ noLLMServer.instance(
+@@ -2867,3 +2867,62 @@ noLLMServer.instance(
      }),
    30_000,
  )
@@ -527,6 +507,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +                "test-model": {
 +                  ...base.provider.test.models["test-model"],
 +                  attachment: true,
++                  modalities: { input: ["text", "image"], output: ["text"] },
 +                  limit: { context: 100_000, output: 10_000 },
 +                },
 +              },
@@ -558,11 +539,11 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      const result = yield* prompt.loop({ sessionID: chat.id })
 +      expect(result.info.role).toBe("assistant")
 +      if (result.info.role !== "assistant") return
-+      expect(result.parts.some((p) => p.type === "text" && p.text === "image accepted")).toBe(true)
++      expect(result.parts.some((p) => p.type === "text" && p.text === "image accepted"), JSON.stringify(result.info)).toBe(true)
 +      // #175：若仍按 base64/4，inputTokens 会远超 90k
-+      expect(result.info.inputTokens).toBeLessThan(90_000)
++      expect(result.info.inputEstimate?.input).toBeLessThan(90_000)
 +      // #175：large-image 夹紧上限 1600
-+      expect(result.info.inputBreakdown?.media?.tokens).toBe(1_600)
++      expect(result.info.inputEstimate?.inputBreakdown?.media?.tokens).toBe(1_600)
 +      expect(yield* llm.calls).toBe(1)
 +    }),
 +  { git: true },
@@ -614,3 +595,28 @@ new file mode 100644
 +    expect(estimate.text).toContain("//example.com/image.png")
 +  })
 +})
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -303,5 +303,6 @@
+     if (
+-      estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
++      // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
++      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }, []).input <=
+       Math.min(usable, inputUsable)
+     )
+       return false
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1669,3 +1669,10 @@
+         expect(streams).toBe(expected ? 1 : 0)
++        if (limit === 73_700 && size === 68_000) {
++          // 同样的真实预检入口应把大图算成媒体，避免无谓摘要请求与历史替换。
++          const mediaRequest = LLM.request({ model: resolved, messages: [Message.user([
++            { type: "text", text: "x".repeat(50_000) }, { type: "media", mediaType: "image/png", data: `data:image/png;base64,${"a".repeat(400_000)}` },
++          ])] })
++          expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: mediaRequest })).toBe(false)
++        }
+         yield* registration.dispose
+       }

@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee83163d4a0dd8
 --- /dev/null
 +++ b/.github/workflows/test.yml
-@@ -0,0 +1,565 @@
+@@ -0,0 +1,573 @@
 +name: test
 +# #263：触发面收敛到 dev-smark——fork 分支的自有 CI，不随上游 dev 分支空转
 +
@@ -55,37 +55,37 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +            label: packages/opencode
 +            os_label: Linux
 +            runner: ubuntu-latest
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/opencode/.artifacts/unit/junit.xml
 +          - id: opencode-windows
 +            label: packages/opencode
 +            os_label: Windows
 +            runner: windows-latest
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/opencode/.artifacts/unit/junit.xml
 +          - id: core-linux
 +            label: packages/core
 +            os_label: Linux
 +            runner: ubuntu-latest
-+            command: bun run --cwd packages/core test:ci
++            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/core/.artifacts/unit/junit.xml
 +          - id: core-windows
 +            label: packages/core
 +            os_label: Windows
 +            runner: windows-latest
-+            command: bun run --cwd packages/core test:ci
++            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/core/.artifacts/unit/junit.xml
 +          - id: http-recorder-linux
 +            label: packages/http-recorder
 +            os_label: Linux
 +            runner: ubuntu-latest
-+            command: bun run --cwd packages/http-recorder test:ci
++            command: GITHUB_ACTIONS=false bun run --cwd packages/http-recorder test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/http-recorder/.artifacts/unit/junit.xml
 +          - id: http-recorder-windows
 +            label: packages/http-recorder
 +            os_label: Windows
 +            runner: windows-latest
-+            command: bun run --cwd packages/http-recorder test:ci
++            command: GITHUB_ACTIONS=false bun run --cwd packages/http-recorder test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/http-recorder/.artifacts/unit/junit.xml
 +    defaults:
 +      run:
@@ -113,7 +113,10 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +
 +      - name: Run required package tests
 +        id: test
-+        run: ${{ matrix.command }}
++        run: |
++          # Bun reporter不创建父目录；保留矩阵原有的JUnit产物路径。
++          mkdir -p "$(dirname "${{ matrix.junit }}")"
++          ${{ matrix.command }}
 +
 +      - name: Check unit report
 +        id: junit
@@ -309,7 +312,12 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +      - name: Run upstream unit compatibility tests
 +        id: upstream
 +        continue-on-error: true
-+        run: bun turbo test:ci --continue=always --summarize
++        run: |
++          # 所有现有test任务共用相同相对报告路径，各包目录先准备好。
++          for package in packages/* packages/console/* packages/stats/*; do
++            if [ -f "$package/package.json" ]; then mkdir -p "$package/.artifacts/unit"; fi
++          done
++          GITHUB_ACTIONS=false bun turbo test --continue=always --summarize -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +
 +      - name: Warn on upstream unit failures
 +        if: always() && steps.upstream.outcome != 'success'
@@ -350,7 +358,7 @@ index 0000000000000000000000000000000000000000..955123dce3b540b7fb102f3007ee8316
 +            echo "### 警告 上游单元兼容性"
 +            echo "| 范围 | 平台 | 结果 | 说明 |"
 +            echo "| --- | --- | --- | --- |"
-+            echo "| bun turbo test:ci --continue=always | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
++            echo "| bun turbo test --continue=always | ${{ matrix.os_label }} | ${result} | 不阻断必过核心测试 |"
 +          } >> "$GITHUB_STEP_SUMMARY"
 +
 +  upstream-extra-warning:

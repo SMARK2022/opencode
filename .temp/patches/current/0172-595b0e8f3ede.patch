@@ -3,9 +3,9 @@ From: SMARK <3222301373@qq.com>
 Date: Tue, 19 May 2026 03:42:18 +0800
 Subject: [PATCH] feat(text-decoding): buffer short ASCII for UTF-16LE (#172 tip)
 
-diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
---- a/packages/opencode/src/util/text-decoding.ts
-+++ b/packages/opencode/src/util/text-decoding.ts
+diff --git a/packages/core/src/text-decoding.ts b/packages/core/src/text-decoding.ts
+--- a/packages/core/src/text-decoding.ts
++++ b/packages/core/src/text-decoding.ts
 @@ -7,6 +7,8 @@ type Options = {
  }
  

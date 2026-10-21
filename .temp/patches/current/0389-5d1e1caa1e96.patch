@@ -1,51 +1,17 @@
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -185,7 +185,10 @@
+@@ -182,7 +182,7 @@
    // #189：改按 prompt 实际分配宽度，侧栏挤压时即使终端很宽也要紧凑
    const [promptWidth, setPromptWidth] = createSignal(dimensions().width)
-   // #189：阈值 100 列（相对终端 120 更贴近 prompt 槽）
+-  // #189：阈值 100 列（相对终端 120 更贴近 prompt 槽）
++  // 实际prompt槽超过90列才分拆流量，voice超过120列才显示，保持信息露出梯度。
 -  const showCumulative = createMemo(() => promptWidth() > 100)
-+  // 宽窄屏分界：promptWidth>90 显示分拆 ↑/↓ 流量，否则合并 ↑↓ 只露总量。
-+  // 阈值由 100 下调至 90，让中小终端也能看到上下行分拆；voice 提示阈值(>120)仍晚于此，保持露出梯度。
-+  // 旧名 showCumulative 已 rename 为 showSplitFlow：累积括号移除后，该开关改为控制是否分拆上下行流量。
 +  const showSplitFlow = createMemo(() => promptWidth() > 90)
    const { theme, syntax } = useTheme()
    const kv = useKV()
    const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
-@@ -283,8 +286,6 @@
-   type UsageInfo = {
-     input: number
-     output: number
--    totalInput: number
--    totalOutput: number
-     context: string | undefined
-     cost: string | undefined
-   }
-@@ -318,11 +319,10 @@
- 
-     if (stepTotal <= 0 && requestTotal <= 0) {
-       if (!isRunning) return
-+      // running 但尚无确认 token：保留 input/output 占位以维持 footer 流量脉冲，不再携带累积量
-       return {
-         input: 0,
-         output: 0,
--        totalInput: acc.request.totalInput,
--        totalOutput: acc.request.totalOutput,
-         context: undefined,
-         cost: undefined,
-       }
-@@ -333,8 +333,7 @@
-     return {
-       input: acc.step.input,
-       output: acc.step.output,
--      totalInput: acc.request.totalInput,
--      totalOutput: acc.request.totalOutput,
-+      // 总量保留 stepTotal(input+output) 与百分比，作为上下文占用读数；累积上传/下载不再在此展示
-       context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
-       cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
-     }
-@@ -1914,7 +1913,7 @@
+@@ -1897,7 +1897,7 @@
                      <Match when={usage()}>
                        {(item) => (
                          <Show
@@ -54,25 +20,31 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
                            fallback={
                              // #125：窄屏合并 ↑↓，只保留 context/cost
                              <text fg={theme.textMuted} wrapMode="none">
-@@ -1925,9 +1924,9 @@
+@@ -1908,9 +1908,8 @@
                            }
                          >
                            <text fg={theme.textMuted} wrapMode="none">
 -                            {/* 宽屏：分向箭头 + 可选累计括号 */}
 -                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
 -                            <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
-+                            {/* prompt width > 90：分拆 ↑/↓ 流量(当前 step)，空格内聚为流动组，与总量/费用以 · 分隔；
-+                                相比旧版逐段 · 更紧凑，借鉴窄屏分组思想：流动组 | 占用组 | 费用 */}
++                            {/* 只移除重复累计括号，step/request的原始数值与增长脉冲继续由完整投影提供。 */}
 +                            <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                              {item().context ? ` · ${item().context}` : ""}
                              {item().cost ? ` · ${item().cost}` : ""}
                            </text>
+@@ -1927,5 +1926,5 @@
+                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
+                   </text>
+-                  {/* 仅显示判定：promptWidth>140 才露出 voice 提示（比 usage 的 >100 更晚），窄终端把 chrome 让给更高频信息；
++                  {/* 仅显示判定：promptWidth>120 才露出 voice 提示（比 usage 的 >90 更晚），窄终端把 chrome 让给更高频信息；
+                       不影响 Alt+V 绑定本身，窄终端隐藏提示文案但快捷键仍可转录。 */}
+                   <Show when={PromptVoiceInput.voiceHintVisible(tuiConfig.voice?.transcriber, promptWidth())}>
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -6,6 +6,7 @@
- import { useSDK } from "../../context/sdk"
+@@ -7,6 +7,7 @@
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { getContextLimit } from "../../util/token-estimate"
  import { tokenAccounting } from "../../util/token-accounting"
 +import { Locale } from "../../util/locale"
  // #122：侧栏 context 与 prompt 共用 accounting
@@ -81,22 +53,22 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 @@ -214,7 +215,8 @@
          <b>Context</b>
        </text>
-       {/* 使用脉冲信号控制箭头颜色，token 增加时短暂高亮 */}
+       {/* 插件主题在渲染时读取，脉冲只存布尔值，不缓存可能被换肤替换的颜色。 */}
 -      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})</text>
 +      {/* 上下载当前值与累积量改用 K/M 缩略(Locale.number)，与 prompt footer 流量格式对齐 */}
 +      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {Locale.number(state().input)}({Locale.number(state().totalInput)}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {Locale.number(state().output)}({Locale.number(state().totalOutput)})</text>
-       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens</text>
-       <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
-       {/* 无可用 API URL 时不渲染延迟段，避免永远显示 ... */}
+       <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens{state().percent != null ? ` · ${state().percent}%` : ""}</text>
+       {/* 未解析到 origin 时隐藏探测，避免冷启动一直显示没有目标的等待状态。 */}
+       <text fg={theme().textMuted}>
 diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
 --- a/packages/tui/src/prompt-voice-input.ts
 +++ b/packages/tui/src/prompt-voice-input.ts
-@@ -6,8 +6,9 @@
+@@ -6,8 +6,8 @@
  // 90 秒覆盖网页端冷启动、录音上传和 ChatGPT 私有转写接口波动；超时后必须把控制权还给 TUI。
  export const VOICE_TRANSCRIBE_TIMEOUT_MS = 90_000
  // voice 提示标签(footer "alt+v voice")的显示宽度阈值：promptWidth 超过该值才显示。
-+// 阈值由 140 下调至 120：usage 分拆阈值降至 90 后，voice 提示相应提前，保持露出梯度。
- // 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
+-// 比 usage 显示阈值(>100)更晚出现，确保窄终端优先保留 usage/commands 等更高频 chrome。
++// 比usage分拆阈值(>90)更晚出现，确保窄终端优先保留usage/commands等更高频信息。
 -export const VOICE_HINT_MIN_PROMPT_WIDTH = 140
 +export const VOICE_HINT_MIN_PROMPT_WIDTH = 120
  
@@ -122,9 +94,9 @@ new file mode 100644
 +      expect(promptSource).toContain("usageFlow")
 +      expect(promptSource).toContain("Locale.number(item().input)")
 +      expect(promptSource).toContain("Locale.number(item().output)")
-+      // requestTotal（stepTotal 守卫，source 同样保留）仍以 totalInput/totalOutput 计算会话累计，
-+      // 仅 footer 渲染改为分拆流量——锁定计算路径保留，防止误删累计口径
-+      expect(promptSource).toContain("requestTotal")
++      // 完整请求统计不受紧凑展示影响，不能退回只累计100条显示窗口。
++      expect(promptSource).toContain("requestTokens")
++      expect(promptSource).toContain("const showSplitFlow = createMemo(() => promptWidth() > 90)")
 +    })
 +    test("imports tokenAccounting", () => {
 +      expect(promptSource).toContain("tokenAccounting")

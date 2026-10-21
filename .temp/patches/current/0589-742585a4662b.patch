@@ -545,11 +545,11 @@ index 27aa70736998cfb87a9da9d22b2e65b0ec382030..21805459f9b47f11b32c398569378035
  }
  
  function applyReplacements(content: string, replacements: TextReplacement[], offset = 0): string {
-+  // 前置条件：replacements 必须已按 matchIndex 升序排列（由唯一 owner applyEdits 在重叠门处原位排序）；
++  // 调用方须传入按 matchIndex 升序排列的区间，preserve 自身也维持这一前提。
    // 从高 offset 到低 offset 写回，保证同一快照上的多 range 互不干扰
    let result = content
    for (let i = replacements.length - 1; i >= 0; i--) {
-@@ -504,11 +505,14 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -504,11 +505,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
      })
    }
  
@@ -558,10 +558,8 @@ index 27aa70736998cfb87a9da9d22b2e65b0ec382030..21805459f9b47f11b32c398569378035
 -  for (let i = 1; i < sorted.length; i++) {
 -    const previous = sorted[i - 1]
 -    const current = sorted[i]
-+  // 重叠拒绝与写回共用同一份原位排序：applyReplacements 的"从高偏移写到低偏移"
-+  // 只对按 matchIndex 升序的数组成立（与 preserve 分支内部排序、
-+  // patch/index.ts applyChunks、pi 参照实现同一约定）；排序保证低偏移变长
-+  // 替换不再使高偏移的记录偏移失效，乱序/交错提交给结果顺序不变性。
++  // 重叠检查与逆序写回共用升序区间，避免低位变长替换使尚未应用的高位坐标失效。
++  // preserve 与 Core patch 也先排序；syncEdits/mismatch 仍按原 editIndex 记录提交身份。
 +  allRanges.sort((a, b) => a.matchIndex - b.matchIndex)
 +  for (let i = 1; i < allRanges.length; i++) {
 +    const previous = allRanges[i - 1]
@@ -573,13 +571,12 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b30af690f 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -1528,6 +1528,107 @@ describe("tool.edit", () => {
+@@ -1528,6 +1528,104 @@ describe("tool.edit", () => {
        }),
      )
  
-+    // INV-01/02：高偏移在前 + 变长替换的乱序提交必须按位置应用。
-+    // 历史缺陷：exact 分支按提交顺序逆序写回，低偏移变长替换使高偏移记录失效，
-+    // 产生 "B = " + newString + 残尾 的中线拼接（生产事故同构样本）。
++    // 高偏移在前且包含变长替换，必须按原文位置写回，不能按提交序逆转。
++    // 该样本锁定低位变长导致高位失效、拼入中行并残留旧尾的实际缺陷。
 +    it.instance("applies out-of-order edits by match position", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -650,9 +647,8 @@ index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b
 +      }),
 +    )
 +
-+    // INV-05 锁定（现状正确，防回退）：字面缩进语义与未触碰前缀字节保真。
-+    // (a) 中线锚点：未变的深缩进段必须原样保留；(b) oldString 带缩进、newString 无缩进 → 该缩进按字面移除；
-+    // (c) 归一化匹配（ASCII 引号 vs 磁盘弯引号）下缩进严格按 newString 字面变化。
++    // exact 中线替换保留未触碰前缀，needle 所含缩进则按 newString 字面增删。
++    // 归一化匹配的触碰行遵循既有 preserve 合同，不扩大为整行逐字节不变。
 +    it.instance("preserves indentation semantics for exact and normalized matches", () =>
 +      Effect.gen(function* () {
 +        const test = yield* TestInstance
@@ -672,8 +668,7 @@ index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b
 +          filePath: normalized,
 +          edits: [{ oldString: '        say "x"', newString: '            say "x"' }],
 +        })
-+        // 归一化分支只重写匹配段本身：缩进增量严格按 newString 字面计算，
-+        // 不携带旧段缩进叠加——这是“缩进段未变则结果不变”的反向锁定。
++        // 归一化按触碰行块回写；本例完整匹配缩进前缀，结果按 newString 决定，不叠加旧缩进。
 +        expect(yield* load(normalized)).toBe('            say "x"\n')
 +      }),
 +    )

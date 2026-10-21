@@ -20,7 +20,7 @@ index 1111111111..2222222222 100644
              const oldest = updated[0]
              batch(() => {
                setStore(
-@@ -667,7 +668,8 @@
+@@ -667,8 +668,9 @@
              const [session, messages, todo, diff] = await Promise.all([
                sdk.client.session.get({ sessionID }, { throwOnError: true }),
 -              sdk.client.session.messages({ sessionID, limit: 100 }),
@@ -29,7 +29,8 @@ index 1111111111..2222222222 100644
                sdk.client.session.todo({ sessionID }),
                sdk.client.session.diff({ sessionID }),
                // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
-               sdk.client.session.status({ workspace: project.workspace.current() }),
+               sdk.client.session.status({ workspace: project.workspace.current() })
+                 .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
 @@ -693,8 +694,10 @@
                      (message) => tracker.messages.has(message.id) && !infos.some((item) => item.id === message.id),
                    ),
@@ -47,20 +48,38 @@ index 1111111111..2222222222 100644
 diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
-@@ -179,3 +179,4 @@
+@@ -437,3 +437,3 @@
+-    // 保持上游 100 条上限；本测试不靠取消 eviction 来让全量 usage 看似正确。
+-    for (let index = 0; index < 101; index++) {
++    // 200 条窗口仍需越界，持久 usage 的正确性不能靠取消 transcript 淘汰保证。
++    for (let index = 0; index < 201; index++) {
+       const info = { ...assistant, id: `msg_usage_${index}`, time: { created: index, completed: index + 1 } }
+@@ -445,3 +445,3 @@
+-    // 窗口已满时 length 不再增长，需等待第 101 条才能证明 eviction 真正发生。
+-    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_100") ?? false)
++    // 窗口满后长度不再增长，等待第 201 条证明淘汰实际发生。
++    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_200") ?? false)
+     // GET 保留旧零值；若 hydration 覆盖了较新事件，本断言会观察到倒退。
+@@ -450,4 +450,4 @@
+     expect(sync.session.get(sessionID)?.tokens).toEqual(current.tokens)
+     expect(sync.session.get(sessionID)?.cost).toBe(1)
+-    expect(sync.data.message[sessionID]).toHaveLength(100)
++    expect(sync.data.message[sessionID]).toHaveLength(200)
+     // 连 parts 也必须随最老消息回收，不能把完整 transcript 偷藏在 part store。
+@@ -461,3 +461,4 @@
 -test("live messages merged during hydration retain the 100 message window", async () => {
 +// #162：窗口扩大后仍必须真正越界，验证实时合并与最旧 parts 的淘汰。
 +test("live messages merged during hydration retain the 200 message window", async () => {
    await using tmp = await tmpdir()
    await Bun.write(`${tmp.path}/kv.json`, "{}")
-@@ -204,5 +205,5 @@
+@@ -488,5 +489,5 @@
      resolveMessages(
        json(
 -        Array.from({ length: 100 }, (_, index) => {
 +        Array.from({ length: 200 }, (_, index) => {
            const id = `msg_${String(index).padStart(3, "0")}`
            return {
-@@ -215,6 +216,6 @@
+@@ -499,6 +500,6 @@
      await hydrate
  
 -    expect(sync.data.message[sessionID]).toHaveLength(100)

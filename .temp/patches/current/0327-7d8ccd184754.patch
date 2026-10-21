@@ -20,7 +20,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 @@ -135,13 +137,7 @@ export const layer = Layer.effect(
                  Provider.parseModel(autoReview.model).providerID,
                  Provider.parseModel(autoReview.model).modelID,
-               )
+                 )
 -            : yield* Effect.gen(function* () {
 -                const current = yield* provider.defaultModel()
 -                return (
@@ -28,9 +28,9 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 -                  (yield* provider.getModel(current.providerID, current.modelID))
 -                )
 -              })
-+            : yield* resolveImplicitReviewerModel(input.sessionID)
++            : yield* resolveImplicitReviewerModel(input.sessionID ? SessionID.make(input.sessionID) : undefined)
            // #208：获取或创建 reviewer 子会话——复用同一 transcript 追加请求/决策轮次
-           const reviewerSession = input.sessionID ? yield* getReviewerSession(input.sessionID, model) : undefined
+           const reviewerSession = input.sessionID ? yield* getReviewerSession(SessionID.make(input.sessionID), model) : undefined
            // #209：标记工具状态为 reviewing 并附带 reviewer 子会话 ID——UI 可导航到 reviewer 子会话查看完整推理
 @@ -263,3 +263,73 @@
  
@@ -516,4 +516,75 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
      permission: "bash",
      patterns: [COMMAND_EVIDENCE],
      // #280：metadata 展开供 agent 名称类用例注入，不影响既有证据字段
+
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -42,6 +42,7 @@
+       const session = yield* sessions.get(SessionSchema.ID.make(sessionID))
+       if (!session) return yield* new Failed({ reason: "Review session was not found" })
+       const target = options.model ? ModelV2.parse(options.model) : undefined
+       // 独立审查复用真实 Catalog/认证解析，不运行 Session 或任何工具。
+-      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : undefined })
++      // 未显式指定 reviewer 模型时保留父会话选择，避免漂移到其他默认提供者。
++      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : session.model })
+       const history = yield* sessions.context(session.id)
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -12,6 +12,8 @@
+ import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
+ import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+ import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
+ import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
+ import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
+@@ -32,5 +34,6 @@
+ let assessment: typeof PermissionReviewerSchema.Assessment.Type = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
+ const reviewRequests: LLMRequest[] = []
++const reviewModels: unknown[] = []
+ let reviewGate: Deferred.Deferred<void> | undefined
+ let reviewStarted: Deferred.Deferred<void> | undefined
+ let malformed = false
+@@ -49,3 +52,6 @@
+-const reviewModel = SessionRunnerModel.layerWith(() => Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route })))
++const reviewModel = SessionRunnerModel.layerWith((session) => {
++  reviewModels.push(session.model)
++  return Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route }))
++})
+ const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
+ 
+@@ -348,5 +354,6 @@
+   it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
+     reviewSettings = new Config.Info({})
+     reviewRequests.length = 0
++    reviewModels.length = 0
+     malformed = false
+     reviewGate = undefined
+@@ -363,3 +370,7 @@
+     const evidence = yield* Database.Service
++    // 验证的是实际 reviewer 到 resolver 的输入，不能用固定返回模型掩盖来源漂移。
++    yield* evidence.db.update(SessionTable).set({ model: {
++      id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider"),
++    } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
+     const evidenceRows = [
+       ...Array.from({ length: 45 }, (_, index) => ({
+@@ -382,4 +393,5 @@
+     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
+     expect(reviewRequests).toHaveLength(1)
++    expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
+     expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
+     expect(progress[0]?.reviewID).toBeDefined()
+@@ -393,6 +405,9 @@
+     // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
++    // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。
++    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "override/reviewer" }) })
+     expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
+     expect(reviewRequests).toHaveLength(2)
++    expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
+     reviewSettings = new Config.Info({ approvals_reviewer: "user" })
+     const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
+     expect(user.effect).toBe("ask")
 

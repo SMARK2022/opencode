@@ -13,23 +13,17 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 index 62c73ec..1ae0cf1 100644
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -1,4 +1,4 @@
--import { describe, expect, test } from "bun:test"
-+import { afterEach, describe, expect, test } from "bun:test"
- import { Effect } from "effect"
- import fs from "fs/promises"
- import path from "path"
-@@ -19,6 +19,9 @@ import * as ServerLockModule from "../../../src/cli/tui/server-lock"
+@@ -17,6 +17,9 @@
  import { UI } from "../../../src/cli/ui"
- import { mock, spyOn } from "bun:test"
  
 +// #271：保护测试进程的退出码，避免 TuiThreadCommand 设置的 exitCode 在测试间泄漏
 +const originalExitCode = process.exitCode
 +
- // 注入 deps 验证单服务器复用与 spawn 主路径
+ // 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
  // #179：幸福路径 mock 使用永不 resolve 的 exited
  function hangingExited() {
-@@ -26,6 +29,11 @@ function hangingExited() {
+   return new Promise<number>(() => {})
+@@ -23,6 +26,11 @@ function hangingExited() {
  }
  
  describe("tui thread", () => {

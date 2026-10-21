@@ -76,7 +76,7 @@ index bba63df6b..eb92446d9 100644
 +          }),
 +        ),
        )
- .annotateMerge(
+       .annotateMerge(
          OpenApi.annotations({
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 index 7a8b5695f..6d94bb660 100644

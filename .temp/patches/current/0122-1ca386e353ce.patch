@@ -10,26 +10,13 @@ new file mode 100644
 index 0000000000..2c0a60a43c
 --- /dev/null
 +++ b/packages/tui/src/util/token-accounting.ts
-@@ -0,0 +1,343 @@
-+// #122：统一 token 统计入口（step / request / session + breakdown 分配）
-+/**
-+ * token-accounting.ts — 统一 token 统计入口
-+ *
-+ * 设计原则：
-+ * - 一个函数 `tokenAccounting()`，一个类型 `TokenAccounting`
-+ * - 一次遍历完成所有统计
-+ * - 有确定（step-finish confirmed）用确定，没有用 estimate（chars / ratio）
-+ * - 所有消费端读同一份结果
-+ * - 不做 TUI 端 prompt 重建；token 数字始终来自 daemon 的 inputBreakdown → 精确分配
-+ *
-+ * 核心公式（step-finish 后）：
-+ *   category_tokens = round((category_chars / inputChars_total) × confirmedInputTokens)
-+ * 这不是"估计"，是按字符占比精确分配已确认 token 总量。
-+ */
+@@ -0,0 +1,354 @@
++// step/request/session 共用统计入口，持久投影拥有完整累计，parts 只提供当前尾部。
++// 确认分类按 categoryChars / inputChars 分配 provider input，不在 TUI 重建请求体。
 +
-+import { estimateDataUrlInputTokens } from "./token-estimate"
++import type { AssistantMessage, Part, Session } from "@opencode-ai/sdk/v2"
++import { computeFinalTokens, estimateDataUrlInputTokens } from "./token-estimate"
 +
-+// #122：无历史校准时默认约 4 字符/token
 +// #122：缺校准样本时默认 4 字符约 1 token
 +const DEFAULT_RATIO = 4
 +
@@ -64,10 +51,8 @@ index 0000000000..2c0a60a43c
 +  contextLimit: number
 +  /** (step.input + step.output) / contextLimit；无 limit 为 null */
 +  contextPercent: number | null
-+  /**
-+   * 上下文窗口各组件精确分配。
-+   * 有 latest assistant 的 step-finish + inputBreakdown 时可用；否则 null。
-+   */
++  // 分类来自当前请求的字符快照；缺少快照时不构造另一份请求体。
++  // 确认后分配 provider input，准备阶段保留服务端估算。
 +  breakdown: {
 +    system: number
 +    instructions: number
@@ -104,6 +89,7 @@ index 0000000000..2c0a60a43c
 +  messages: ReadonlyArray<Msg>,
 +  getParts: (id: string) => ReadonlyArray<Pt>,
 +  contextLimit?: number,
++  projection?: { session: Pick<Session, "tokens" | "cost" | "request"> | undefined; last: AssistantMessage | undefined; parts: ReadonlyArray<Part> },
 +): TokenAccounting {
 +  // #122：会话累计与当前 request 边界（按 user 消息切分）
 +// ── 1. lastUser / requestAssistantIDs ──
@@ -198,22 +184,41 @@ index 0000000000..2c0a60a43c
 +        confirmedRequest.output += msg.tokens.output + msg.tokens.reasoning
 +        confirmedRequest.cost += msg.cost ?? 0
 +      }
++      // native 消息没有 V1 finish part 时，已完成消息的真实输出仍可校准输出密度。
++      const confirmedOut = msg.tokens.output + msg.tokens.reasoning
++      if (msg.time?.completed !== undefined && confirmedOut > 0) {
++        const stepChars = parts.reduce((sum, p) => {
++          if ((p.type === "text" && !p.ignored) || p.type === "reasoning") return sum + (p.text?.length ?? 0)
++          if (p.type === "tool") return sum + (p.state?.status === "pending"
++            ? (p.state.raw?.length ?? 0)
++            : JSON.stringify(p.state?.input ?? {}).length)
++          return sum
++        }, 0)
++        if (stepChars > 0) { outputCharsTotal += stepChars; outputTokensTotal += confirmedOut }
++      }
 +    }
 +  }
 +
 +  // ── 3. ratio ──
 +  // #122：样本不足时回落 DEFAULT_RATIO，避免小样本失真
-+  const inputRatio = ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
++  const density = projection?.session?.request?.inputEstimate?.charsPerToken
++  const inputRatio = density !== undefined && Number.isFinite(density) && density > 0 ? density : ratioTokens > 0 && ratioChars > 500 ? ratioChars / ratioTokens : DEFAULT_RATIO
 +  // #122：输出字符/token 比；样本不足回落 DEFAULT_RATIO
 +  const outputRatio = outputTokensTotal > 0 && outputCharsTotal > 100 ? outputCharsTotal / outputTokensTotal : DEFAULT_RATIO
++  // 持久投影拥有完整请求确认值；输入密度与输出校准分别进入既有尾部 helper。
++  const projected = projection?.session?.request
++    ? computeFinalTokens(projection.last, projection.parts, projection.session.request, outputRatio)
++    : undefined
 +
 +  // ── 4. step（基于 latest assistant）───────────────────────────────
-+  const lastParts = latestAssistant ? getParts(latestAssistant.id) : []
++  // 请求投影明确选择当前助手，分页中的旧助手不能接管当前分类。
++  latestAssistant = projection ? projection.last : latestAssistant
++  const lastParts: ReadonlyArray<Pt> = projection ? projection.parts : latestAssistant ? getParts(latestAssistant.id) : []
 +  // #122：最后一个 step-finish 划分已确认区与流式追加区
 +  const sfIdx = lastParts.findLastIndex((p) => p.type === "step-finish")
 +  const stepSF = sfIdx >= 0 ? lastParts[sfIdx] : undefined
 +  // #122：消息 completed 才把 step-finish 当最终确认
-+  const msgCompleted = !!latestAssistant?.time?.completed
++  const msgCompleted = latestAssistant?.time?.completed !== undefined
 +
 +  let stepInput: number
 +  let stepConfirmed: boolean
@@ -261,6 +266,8 @@ index 0000000000..2c0a60a43c
 +  for (let i = sfIdx + 1; i < lastParts.length; i++) {
 +    const p = lastParts[i]
 +    if (p.type !== "tool") continue
++    // prepared 游标已覆盖的结果和附件属于输入快照，不能再追加为 pending。
++    if (projection?.session?.request?.estimatedInput !== undefined && (p.id ?? "") <= (projection.last?.inputEstimate?.afterPartID ?? "")) continue
 +    if (p.state?.status === "completed") {
 +      pendingToolResultChars += (p.state.output?.length ?? 0)
 +      for (const att of (p.state.attachments ?? []) as Array<{ url: string; mime: string }>) {
@@ -330,24 +337,28 @@ index 0000000000..2c0a60a43c
 +  }
 +
 +  // ── 8. contextPercent ──
-+  const limit = contextLimit ?? 0
++  const limit = projection?.session?.request?.model?.contextLimit ?? contextLimit ?? 0
 +  // #122：context 占用按 step input+output 相对 limit
-+  const stepTotal = stepInput + stepOutput
++  const stepTotal = (projected?.input ?? stepInput) + (projected?.output ?? stepOutput)
 +  // #122：context 百分比相对 model limit
 +  const contextPercent = limit > 0 ? Math.round((stepTotal / limit) * 100) : null
 +
 +  // #122：返回结构供 prompt/sidebar/footer 只读；勿在 UI 再拆第二套算法
 +  return {
-+    step: { input: stepInput, output: stepOutput, confirmed: stepConfirmed },
++    step: { input: projected?.input ?? stepInput, output: projected?.output ?? stepOutput, confirmed: stepConfirmed },
 +    request: {
-+      input: stepInput,
-+      output: stepOutput,
-+      totalInput,
-+      totalOutput,
++      input: projected?.input ?? stepInput,
++      output: projected?.output ?? stepOutput,
++      totalInput: projected?.totalInput ?? totalInput,
++      totalOutput: projected?.totalOutput ?? totalOutput,
 +      // #122：cost 仅累计已确认 request 费用
-+      cost: confirmedRequest.cost,
++      cost: projection?.session?.request?.cost ?? confirmedRequest.cost,
 +    },
-+    session,
++    // 会话账本独立于前端分页，旧 transcript-only 调用仍保留原始统计语义。
++    session: projection?.session?.tokens
++      ? { input: projection.session.tokens.input, output: projection.session.tokens.output, reasoning: projection.session.tokens.reasoning,
++          cacheRead: projection.session.tokens.cache.read, cacheWrite: projection.session.tokens.cache.write, cost: projection.session.cost ?? 0 }
++      : session,
 +    contextLimit: limit,
 +    contextPercent,
 +    breakdown,
@@ -358,274 +369,49 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
 index 6588bb84c5..d80b61a63b 100644
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -42,7 +42,8 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
- import { Locale } from "../../util/locale"
- import { errorMessage } from "../../util/error"
- import { formatDuration, formatDurationCompact } from "../../util/format"
--import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
+@@ -44,1 +44,3 @@
+-import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
++import { getContextLimit } from "../../util/token-estimate"
 +import { tokenAccounting } from "../../util/token-accounting"
 +// #122：统一 token 统计入口
- import { createColors, createFrames } from "../../ui/spinner"
- import { useDialog } from "../../ui/dialog"
- import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
-@@ -288,58 +289,41 @@ export function Prompt(props: PromptProps) {
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
-     const getParts = (id: string) => sync.data.part[id] ?? []
-+    // #122：整会话消息交给 tokenAccounting 一次算清 step/request/session
-+    const lastUser = msg.findLast((item) => item.role === "user")
-+    const last = lastUser
-+      ? msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.parentID === lastUser.id)
-+      : undefined
-+    if (!last) return
- 
--    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
--    const lastUser = users.at(-1)
--    // parentID 匹配确保只选取由当前用户消息触发的助手回复，排除历史轮次
--    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
--
--    // 本次请求尚无助手回复时，等待服务端写入 tokens.input 后再显示
--    if (requestAssistants.length === 0) {
--      // 服务端尚未写入估算值前不显示，避免客户端引导估算与服务端口径不一致
--      return
--    }
-+    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-+    // #122：整会话一次 accounting，避免 UI 重复 sumConfirmed/computeFinalTokens
-+    const acc = tokenAccounting(msg, getParts, model?.limit.context)
-+    // #122：当前 step 用于主显示数字
-+    const stepTotal = acc.step.input + acc.step.output
-+    const requestTotal = acc.request.totalInput + acc.request.totalOutput
- 
--    // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
--    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
--    // 从历史 step-finish 记录中校准 chars-per-token 比率，提高 JSON 密集内容的估算精度
--    const ratio = charsPerTokenFromHistory(msg, getParts)
--
--    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
--    const last = requestAssistants.at(-1)!
--    const lastParts = sync.data.part[last.id] ?? []
--    const {
--      input: currentInput,
--      output: currentOutput,
--      totalInput,
--      totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
--    // 移除 bootstrapInputTokens 参数，改由服务端 prompt.ts 写入真实估算到 assistant.tokens.input
--    // requestTokens 用于 context 百分比和显示
--    const requestTokens = currentInput + currentOutput
--    const actualTotalTokens = currentInput + currentOutput
--    const totalTokens = totalInput + totalOutput
--
--    if (requestTokens <= 0 && totalTokens <= 0) {
-+    if (stepTotal <= 0 && requestTotal <= 0) {
-       if (!isRunning) return
--      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
-+      return {
-+        input: 0,
-+        output: 0,
-+        totalInput: acc.request.totalInput,
-+        totalOutput: acc.request.totalOutput,
-+        context: undefined,
-+        cost: undefined,
-+      }
-     }
- 
--    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
--    // 使用 actualTotalTokens 计算百分比，与显示值一致
--    const pct =
--      actualTotalTokens > 0 && model?.limit.context
--        ? `${Math.round((actualTotalTokens / model.limit.context) * 100)}%`
--        : undefined
--    const cost = session?.cost ?? 0
-+    // #122：contextPercent 来自 accounting 统一结果
-+    const pct = acc.contextPercent != null ? `${acc.contextPercent}%` : undefined
-     return {
--      // 返回数值而非格式化字符串，由 JSX 配合 usageFlow 信号控制显示
--      input: currentInput,
--      output: currentOutput,
--      totalInput,
--      totalOutput,
--      context: actualTotalTokens > 0 ? (pct ? `${Locale.number(actualTotalTokens)} (${pct})` : Locale.number(actualTotalTokens)) : undefined,
--      cost: cost > 0 ? money.format(cost) : undefined,
-+      input: acc.step.input,
-+      output: acc.step.output,
-+      totalInput: acc.request.totalInput,
-+      totalOutput: acc.request.totalOutput,
-+      context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
-+      cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
-     }
-   })
- 
+@@ -309,1 +311,2 @@
+-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
++    // 统一统计入口保留完整请求投影与当前尾部，不因分页或首包前无助手而丢失计数。
++    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session, last, parts: lastParts }).request
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 index 3cfe618346..67117a806f 100644
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -5,7 +5,8 @@ import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
- import { NetworkProxy } from "@opencode-ai/core/network-proxy"
- import { useLocal } from "../../context/local"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
--import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
+@@ -8,1 +8,3 @@
+-import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
++import { getContextLimit } from "../../util/token-estimate"
 +import { tokenAccounting } from "../../util/token-accounting"
 +// #122：侧栏 context 与 prompt 共用 accounting
- 
- const id = "internal:sidebar-context"
- // 侧边栏 RTT 探测间隔：串行 setTimeout，避免 interval 重叠
-@@ -159,32 +160,20 @@ const latencyDisplay = createMemo(() => {
-       return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
-     }
- 
--    // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
--    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
--    // 从历史 step-finish 记录中校准 chars-per-token 比率，提高 JSON 密集内容的估算精度
--    const ratio = charsPerTokenFromHistory(messages, getParts)
--
--    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-+    // #122：整会话 messages + getParts 统一统计
-     const last = requestAssistants.at(-1)!
--    const lastParts = props.api.state.part(last.id)
--    const {
--      input,
--      output,
--      totalInput,
--      totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
--    // 侧边栏移除 bootstrap 参数，依赖服务端写入的 assistant.tokens.input
--    const tokens = input + output
--    const totalTokens = totalInput + totalOutput
-     const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-+    // #122：侧栏 percent 直接用 contextPercent，避免本地再算
-+    const acc = tokenAccounting(messages, getParts, model?.limit.context)
-+    const tokens = acc.step.input + acc.step.output
-     return {
-       tokens,
--      totalTokens,
--      input,
--      output,
--      totalInput,
--      totalOutput,
--      percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
-+      totalTokens: acc.request.totalInput + acc.request.totalOutput,
-+      input: acc.step.input,
-+      output: acc.step.output,
-+      totalInput: acc.request.totalInput,
-+      totalOutput: acc.request.totalOutput,
-+      percent: acc.contextPercent,
-     }
-   })
- 
+@@ -57,1 +59,2 @@
+-    const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
++    // 侧栏使用同一会话投影，保留未到首个助手及窗口外累计的显示。
++    const { input, output, totalInput, totalOutput } = tokenAccounting(messages, (id) => props.api.state.part(id), undefined, { session: session(), last, parts: lastParts }).request
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 index 1ccb145fc6..710b27a4d9 100644
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -5,7 +5,8 @@ import { useTheme } from "../../context/theme"
- import { SplitBorder } from "../../ui/border"
- import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { Locale } from "../../util/locale"
--import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
+@@ -8,1 +8,3 @@
+-import { computeFinalTokens, getContextLimit } from "../../util/token-estimate"
++import { getContextLimit } from "../../util/token-estimate"
 +import { tokenAccounting } from "../../util/token-accounting"
 +// #122：subagent footer 共用 accounting
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { useTerminalDimensions } from "@opentui/solid"
- import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
-@@ -58,60 +59,46 @@ export function SubagentFooter() {
-     const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
-     const getParts = (id: string) => sync.data.part[id] ?? []
--
--    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
--    const lastUser = users.at(-1)
--    // parentID 过滤确保子代理页脚只统计当前请求的助手消息
--    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
--
--    // 本次请求尚无助手回复时，等待服务端写入 tokens.input 后再显示
--    if (requestAssistants.length === 0) {
--      // 子代理场景同样等待服务端估算，避免双端估算口径分歧
--      return
--    }
--
--    // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
--    const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
--    // 从历史 step-finish 记录中校准 chars-per-token 比率，提高 JSON 密集内容的估算精度
--    const ratio = charsPerTokenFromHistory(msg, getParts)
--
--    // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
--    const last = requestAssistants.at(-1)!
--    const lastParts = sync.data.part[last.id] ?? []
--    const {
--      input: currentInput,
--      output: currentOutput,
--      totalInput,
--      totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
--    // 子代理页脚复用 computeFinalTokens，参数与主提示栏保持一致
--    const requestTokens = currentInput + currentOutput
--    const totalTokens = totalInput + totalOutput
--
--    if (requestTokens <= 0 && totalTokens <= 0) {
-+    // #122：子代理页脚与主提示栏共用 tokenAccounting
-+    const lastUser = msg.findLast((item) => item.role === "user")
-+    const last = lastUser
-+      ? msg.findLast((item) => item.role === "assistant" && (item as any).parentID === lastUser.id)
-+      : undefined
-+    if (!last) return
-+
-+    const model = sync.data.provider.find((item) => item.id === (last as any).providerID)?.models[(last as any).modelID]
-+    // #122：子代理页脚与主提示栏同一 accounting 口径
-+    const acc = tokenAccounting(msg, getParts, model?.limit.context)
-+    const stepTotal = acc.step.input + acc.step.output
-+    const requestTotal = acc.request.totalInput + acc.request.totalOutput
-+
-+    if (stepTotal <= 0 && requestTotal <= 0) {
-       if (!isRunning) return
--      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
-+      return {
-+        input: 0,
-+        output: 0,
-+        totalInput: acc.request.totalInput,
-+        totalOutput: acc.request.totalOutput,
-+        context: undefined,
-+        cost: undefined,
-+      }
-     }
- 
--    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
--    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
--    const cost = session()?.cost ?? 0
-+    const pct = acc.contextPercent != null ? `${acc.contextPercent}%` : undefined
-     return {
--      // 返回数值而非格式化字符串，由 JSX 配合 usageFlow 信号控制显示
--      input: currentInput,
--      output: currentOutput,
--      totalInput,
--      totalOutput,
--      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
--      cost: cost > 0 ? money.format(cost) : undefined,
-+      input: acc.step.input,
-+      output: acc.step.output,
-+      totalInput: acc.request.totalInput,
-+      totalOutput: acc.request.totalOutput,
-+      context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
-+      cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
-     }
-   })
- 
--  // 节流 usage 信号，避免流式输出时频繁刷新导致 UI 卡顿
-+  // #122：节流 usage 并驱动脉冲箭头
-+  // #122：节流 usage 避免流式每帧刷新页脚
-   const [usage, setUsageThrottled] = createThrottledSignal<UsageInfo | undefined>(undefined, 50)
-   createEffect(() => setUsageThrottled(usageRaw()))
--
--  // 创建 token 流动脉冲信号，当 input/output 变化时短暂点亮箭头
-   const usageFlow = createTokenFlowPulse(usage)
- 
-   const { theme } = useTheme()
+@@ -77,1 +79,2 @@
+-    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
++    // 子代理传自己的完整投影，沿既有节流与费用范围展示统计。
++    const { input: currentInput, output: currentOutput, totalInput, totalOutput } = tokenAccounting(msg, (id) => sync.data.part[id] ?? [], undefined, { session: session(), last, parts: lastParts }).request
 diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test/util/token-accounting.test.ts
 new file mode 100644
 index 0000000000..cc35077c1a
 --- /dev/null
 +++ b/packages/tui/test/util/token-accounting.test.ts
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,123 @@
 +import { describe, expect, test } from "bun:test"
++import type { AssistantMessage, Part, SessionRequestUsage } from "@opencode-ai/sdk/v2"
 +import { tokenAccounting } from "../../src/util/token-accounting"
 +
 +// #122：助手消息工厂
@@ -663,11 +449,6 @@ index 0000000000..cc35077c1a
 +}
 +
 +describe("tokenAccounting", () => {
-+  // #122：ratio 样本要求足够大，避免小字符量误导
-+  // #122：cache read/write 计入确认 input
-+  // #122：测试工厂保持与 runtime Msg/Pt 结构兼容
-+
-+  // #122：step-finish 确认后 step.input 含 cache
 +  // #122：完成消息 + step-finish → step.input 用确认值（含 cache）
 +  test("step.input uses confirmed tokens when last step-finish exists and message completed", () => {
 +    const msgs = [userMsg("u1"), assistantMsg("a1", "u1", { input: 10, output: 20, reasoning: 0, cache: { read: 0, write: 0 } }, 100)]
@@ -689,4 +470,157 @@ index 0000000000..cc35077c1a
 +    const acc = tokenAccounting(msgs as any, (id) => parts[id] ?? [])
 +    expect(acc.ratio.input).toBeGreaterThan(1)
 +  })
++
++  test("durable projection survives an empty visible history and preserves prepared input", () => {
++    const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }
++    const snapshot = (request: SessionRequestUsage) => tokenAccounting([], () => [], undefined, {
++      session: { tokens, request }, last: undefined, parts: [],
++    })
++    const request = { messageID: "u", input: 4000, output: 30, stepInput: 1000, stepOutput: 10, cost: 2 }
++    // 窗口没有旧消息也不能截断持久累计，未记录会话费用时沿用零值。
++    const confirmed = snapshot(request)
++    expect(confirmed.request).toEqual({ input: 1000, output: 10, totalInput: 4000, totalOutput: 30, cost: 2 })
++    expect(confirmed.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 0 })
++    // 首包前由服务端发布估算；零估算同样权威，不能借上一个请求的窗口补值。
++    const prepared = { ...request, stepInput: 0, stepOutput: 0, estimatedInput: 777,
++      model: { providerID: "p", modelID: "m", contextLimit: 2000 } }
++    expect(snapshot(prepared).request).toEqual({ input: 777, output: 0, totalInput: 4777, totalOutput: 30, cost: 2 })
++    expect(snapshot(prepared).contextPercent).toBe(39)
++    expect(snapshot({ ...prepared, estimatedInput: 0 }).request.totalInput).toBe(4000)
++    expect(snapshot(prepared).breakdown).toBeNull()
++  })
++
++  test("projection calibrates live output independently and preserves durable totals", () => {
++    const history = assistantMsg("old", "u", undefined, 1)
++    const last: AssistantMessage = {
++      ...assistantMsg("a", "u"), sessionID: "s", agent: "build", mode: "build",
++      providerID: "p", modelID: "m", path: { cwd: "/", root: "/" },
++      inputEstimate: { input: 777, bodyChars: 1554, confirmed: false, charsPerToken: 2, afterPartID: "02-tool" },
++    }
++    const parts: Record<string, Part[]> = {
++      old: [
++        { id: "01-text", sessionID: "s", messageID: "old", type: "text", text: "x".repeat(800) },
++        { ...stepFinish("01-finish", { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } }, 800),
++          sessionID: "s", messageID: "old", reason: "stop", cost: 0 },
++      ],
++      a: [
++        { id: "02-tool", sessionID: "s", messageID: "a", type: "tool", callID: "covered", tool: "read",
++          state: { status: "completed", input: {}, output: "x".repeat(80), title: "read", metadata: {}, time: { start: 1, end: 2 } } },
++        { id: "03-text", sessionID: "s", messageID: "a", type: "text", text: "x".repeat(80) },
++        { id: "04-reason", sessionID: "s", messageID: "a", type: "reasoning", text: "x".repeat(40), time: { start: 0, end: 1 } },
++        { id: "05-tool", sessionID: "s", messageID: "a", type: "tool", callID: "live", tool: "read",
++          state: { status: "pending", input: {}, raw: "x".repeat(40) } },
++      ],
++    }
++    const request: SessionRequestUsage = {
++      messageID: "u", assistantID: "a", input: 4000, output: 300, cost: 2, stepInput: 0, stepOutput: 0,
++      estimatedInput: 777, inputEstimate: last.inputEstimate,
++      model: { providerID: "p", modelID: "m", contextLimit: 2000 },
++    }
++    const tokens = { input: 9000, output: 700, reasoning: 30, cache: { read: 100, write: 20 } }
++    const acc = tokenAccounting([history, last], (id) => parts[id] ?? [], undefined, {
++      session: { tokens, cost: 3, request }, last, parts: parts.a,
++    })
++    // 历史输出密度为 8，输入密度为 2；游标覆盖的工具结果不能再加入 prepared input。
++    expect(acc.ratio.output).toBe(8)
++    expect(acc.step).toMatchObject({ input: 777, output: 20 })
++    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalOutput: 320, cost: 2 })
++    expect(acc.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
++    const native = { ...history, tokens: { input: 400, output: 80, reasoning: 20, cache: { read: 0, write: 0 } } }
++    const calibrated = tokenAccounting([native, last], (id) => id === "old" ? parts.old.slice(0, 1) : parts.a,
++      undefined, { session: { tokens, request }, last, parts: parts.a })
++    expect(calibrated.ratio.output).toBe(8)
++    expect(calibrated.request.totalOutput).toBe(320)
++  })
 +})
+diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
+--- a/packages/tui/src/util/token-estimate.ts
++++ b/packages/tui/src/util/token-estimate.ts
+@@ -53,5 +53,6 @@ export function computeFinalTokens(
+   lastAssistant: AssistantMessage | undefined,
+   lastParts: ReadonlyArray<Part>,
+   request: SessionRequestUsage,
++  outputRatio = 4,
+ ) {
+   const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
+@@ -80,8 +81,9 @@ export function computeFinalTokens(
+   // 三个消费者只校准未确认尾部；prepared input 与零确认继续沿原投影/游标优先级取值。
+   const density = request.inputEstimate?.charsPerToken
+   const ratio = density !== undefined && Number.isFinite(density) && density > 0 ? density : 4
+   const pendingInputTokens = Math.round(pendingIn / ratio)
+-  const pendingOutputTokens = Math.round(streamingOut / ratio)
++  // 输出使用独立历史校准；请求体的 JSON/附件输入密度不能解释新生成的文本与参数。
++  const pendingOutputTokens = Math.round(streamingOut / outputRatio)
+   // 可见尾部可能先于 Session 快照到达；立即遮掉旧 step，保留请求历史累计。
+   const hasInFlightTail = !!lastAssistant && lastAssistant.time.completed === undefined && lastParts.some((_, i) => i > lastSFIdx)
+   const lastStepFinish = lastParts[lastSFIdx]
+diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
+--- a/packages/tui/src/util/context-usage.ts
++++ b/packages/tui/src/util/context-usage.ts
+@@ -13,2 +13,3 @@
+ import { estimateDataUrlInputTokens } from "./token-estimate"
++import { tokenAccounting } from "./token-accounting"
+ import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
+@@ -1145,7 +1146,14 @@ export async function computeContextData(input: ComputeContextDataInput): Promise<ContextUsageData> {
+   const maxTokens = frozen ?? modelInfo.model?.limit.context ?? 0
+ 
++  const last = input.messages.findLast((item): item is AssistantMessage => item.role === "assistant" &&
++    (input.session?.request
++      ? item.id === input.session.request.assistantID
++      : item.providerID === modelInfo.providerID && item.modelID === modelInfo.modelID))
++  const acc = tokenAccounting(input.messages, (id) => input.parts[id] ?? [], maxTokens,
++    { session: input.session, last, parts: last ? input.parts[last.id] ?? [] : [] })
++  // 分类与统计消费同一入口；会话累计来自持久 Session，不受可见消息窗口限制。
+   const msg = messageTokens(compacted, ratio)
+-  // #99：usage 用 raw 全量消息 + ratio 估流式增量
+-  const usage = usageTotals(raw, ratio)
++  const usage = { ...acc.session, total: acc.session.input + acc.session.output + acc.session.reasoning
++    + acc.session.cacheRead + acc.session.cacheWrite }
+   const instructions = await gatherInstructionFiles(input)
+   const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
+@@ -1163,1 +1171,1 @@
+-  const skillTokens = bd ? Math.round(bd.skills / ratio) : estimate(skillListing, ratio)
++  const skillTokens = acc.breakdown?.skills ?? estimate(skillListing, ratio)
+@@ -1176,11 +1184,12 @@
+   // 文本分类消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
+-  const envTokens = bd ? Math.round(bd.system / ratio) : estimate(systemText, ratio)
+-  const instructionTokens = bd ? Math.round(bd.instructions / ratio) : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
++  const envTokens = acc.breakdown?.system ?? estimate(systemText, ratio)
++  const instructionTokens = acc.breakdown?.instructions ?? instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
+-  const toolDefTokens = bd ? Math.round(bd.tools / ratio) : toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+-  const messageDetails = bd ? {
++  const toolDefTokens = acc.breakdown?.tools ?? toolDefs.reduce((sum, item) => sum + item.tokens, 0)
++  // 上传历史与当前输出的分配只由 accounting 计算，分类和明细读取同一份整数。
++  const messageDetails = acc.breakdown ? {
++    userText: acc.breakdown.userMessages, assistantText: acc.breakdown.assistantText,
++    reasoning: acc.breakdown.reasoning, toolCalls: acc.breakdown.toolCalls,
++    toolResults: acc.breakdown.toolResults + acc.breakdown.pending,
++    attachments: acc.breakdown.attachments, compactionSummary: 0,
+-    userText: Math.round(bd.messages.userText / ratio), assistantText: Math.round(bd.messages.assistantText / ratio),
+-    reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
+-    // 附件沿用视觉估算，不把 base64 字符除以文本密度。
+-    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: msg.details.attachments, compactionSummary: 0,
+   } : msg.details
+@@ -1195,1 +1204,1 @@
+-  // used 只包含发送载荷；free、模型预留与压缩缓冲不是 token 消费，不能再次加入分子。
++  // used 包含上传输入与本 step 输出；free、模型预留和压缩缓冲不计入消费。
+diff --git a/packages/tui/test/util/token-estimate.test.ts b/packages/tui/test/util/token-estimate.test.ts
+--- a/packages/tui/test/util/token-estimate.test.ts
++++ b/packages/tui/test/util/token-estimate.test.ts
+@@ -91,6 +91,7 @@
+-  // 固定prepared输入777，仅改变尾部密度；未确认字符应变而请求的4000/30确认累计必须保持。
++  // 输入密度只影响新增工具结果；live 输出使用独立密度，完整请求累计保持不变。
+   const dense = { ...prepared, inputEstimate: { input: 777, bodyChars: 1943, confirmed: false, charsPerToken: 2.5 } }
+-  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense)).toEqual({ input: 777, output: 3, totalInput: 4777, totalOutput: 33 })
++  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense)).toEqual({ input: 777, output: 2, totalInput: 4777, totalOutput: 32 })
++  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense, 8)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
+   expect(computeFinalTokens(nextAssistant, [tool], dense)).toEqual({ input: 780, output: 1, totalInput: 4780, totalOutput: 31 })
+   // captured的游标已覆盖该工具结果，新密度不能把同一份结果再次追加到prepared输入。
+   expect(computeFinalTokens(captured, [tool], dense)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
+@@ -104,3 +105,3 @@
+-  // raw参数16字符与两段正文共20字符，8与5的差值能发现pending输入被丢弃或密度未传入。
+-  expect(computeFinalTokens(nextAssistant, [before, pending, after], dense).output).toBe(8)
++  // 同样的输出字符不随输入密度变化；传入输出校准后才改变估算。
++  expect(computeFinalTokens(nextAssistant, [before, pending, after], dense, 2.5).output).toBe(8)
+   expect(computeFinalTokens(nextAssistant, [before, pending, after], prepared).output).toBe(5)

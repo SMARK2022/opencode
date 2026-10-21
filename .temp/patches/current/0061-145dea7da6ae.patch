@@ -315,7 +315,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +          }) })],
 +        })
 +        const request = LLM.request({ model: resolved, messages: [Message.user("x".repeat(size * 4))], generation: { maxTokens: output } })
-+        expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, request })).toBe(expected)
++        expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request })).toBe(expected)
 +        // 阈值触发只产生现有一次 summary turn；未触发和摘要预算拒绝都保持零 provider 调用。
 +        expect(streams).toBe(expected ? 1 : 0)
 +        yield* registration.dispose

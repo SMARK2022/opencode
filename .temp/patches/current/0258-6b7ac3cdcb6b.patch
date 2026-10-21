@@ -467,7 +467,7 @@ index 1d394176d..34f59c962 100644
 +      new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
 +      // #258：raw daemon 请求必须携带与生成 SDK client 相同的 attach/auth headers；
 +      // 否则受保护 TUI 连接能读常规 SDK 路由，但 sidebar/helper fetch 会被 Authorization 拒绝。
-+      return (props.testTransport?.fetch ?? fetch)(input, { ...init, headers })
++      return (props.fetch ?? props.testTransport?.fetch ?? fetch)(input, { ...init, headers })
 +    }
 +
      function createSDK() {
@@ -477,7 +477,7 @@ index 1d394176d..34f59c962 100644
        },
        directory: props.directory,
        event: emitter,
--      fetch: props.testTransport?.fetch ?? fetch,
+-      fetch: props.fetch ?? props.testTransport?.fetch ?? fetch,
 +      fetch: fetchWithHeaders,
        get url() {
          return url
@@ -486,7 +486,7 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 index 67117a806..71f15bcbc 100644
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -2,8 +2,8 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
+@@ -2,9 +2,9 @@ import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
  import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
  import type { BuiltinTuiPlugin } from "../builtins"
  import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
@@ -494,6 +494,7 @@ index 67117a806..71f15bcbc 100644
  import { useLocal } from "../../context/local"
 +import { useSDK } from "../../context/sdk"
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
+ import { getContextLimit } from "../../util/token-estimate"
  import { tokenAccounting } from "../../util/token-accounting"
  // #122：侧栏 context 与 prompt 共用 accounting
 @@ -20,6 +20,7 @@ const money = new Intl.NumberFormat("en-US", {
@@ -501,58 +502,40 @@ index 67117a806..71f15bcbc 100644
  function View(props: { api: TuiPluginApi; session_id: string }) {
    const theme = () => props.api.theme.current
 +  const sdk = useSDK()
-   // 读当前选中模型，决定 ping 的 provider/model
- const local = useLocal()
- 
-@@ -74,27 +75,36 @@
-       let timer: ReturnType<typeof setTimeout> | undefined
+   const local = useLocal()
+   const msg = createMemo(() => props.api.state.session.messages(props.session_id))
+   const session = createMemo(() => props.api.state.session.get(props.session_id))
+@@ -131,22 +132,22 @@
        const ping = async () => {
          if (!active) return
 -        const t0 = Date.now()
+         // 从探测开始统一计三秒，后续请求沿同一信号，不因代理刷新重新开启超时窗口。
+         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(3000)])
          try {
--          // 与业务请求相同 purpose，反映真实代理路径
--const route = await NetworkProxy.resolveProxyRoute(url, "provider")
+-          // provider 用途复用源系统代理策略，代理图标与所选路由保持一致。
+-          const route = await NetworkProxy.resolveProxyRoute(url, "provider")
 -          if (!active) return
 -          setIsProxy(route.type === "proxy")
--          const res = await NetworkProxy.routedFetch(url, {
--            method: "HEAD",
-+          // #258：proxy/latency 必须由 daemon 统一计算——多个 TUI 复用同一个 daemon，
-+          // 真实 provider 请求也从 daemon 发出；这里仅订阅 daemon 的缓存结果，避免每个
-+          // TUI 用自己的 env/system proxy 重复探测。
+-          // 普通 HTTP 探测调用统一路由入口，继续透传同一取消信号。
+-          const res = await NetworkProxy.fetch(url, { method: "HEAD", signal, purpose: "provider" })
++          // 唯一探测owner归daemon，侧栏只订阅结果并保留现有清理与超时信号。
 +          const target = new URL("/tui/provider-endpoint-status", sdk.url)
 +          target.searchParams.set("url", url)
 +          if (sdk.directory) target.searchParams.set("directory", sdk.directory)
-+          // #258：directory 让 daemon 在多实例场景下定位正确 workspace 的网络环境
-+          const res = await sdk.fetch(target, {
-+            method: "GET",
-+            // #258：客户端 3s 超时独立于 daemon 探测超时——HTTP 层卡住时 sidebar 也不能无限等待
-             signal: AbortSignal.timeout(3000),
--            purpose: "provider",
--          } as RequestInit)
--          const elapsed = Date.now() - t0
-+          })
++          const res = await sdk.fetch(target, { method: "GET", signal })
 +          if (!res.ok) throw new Error(`endpoint status failed: ${res.status}`)
-+          const status = (await res.json()) as {
-+            status: "ok" | "down"
-+            latency: number | null
-+            route: { type: "direct" | "proxy" }
-+          }
-+          // #258：await 之后再查 active——响应返回前用户可能已切换/关闭 sidebar，过期结果不得写入 signal
++          const status = (await res.json()) as { status: "ok" | "down"; latency: number | null; route: { type: "direct" | "proxy" } }
            if (!active) return
--          // 仅 502/503/504 记 offline；其余状态仍展示 RTT
--          // 仅网关错误记 offline；其它 4xx/5xx 仍展示 RTT
--if (res.status === 502 || res.status === 503 || res.status === 504) {
-+
+-          // 认证拒绝仍证明网络可达；按源语义仅将三类网关故障记为离线。
+-          const down = res.status === 502 || res.status === 503 || res.status === 504
+-          setPingStatus(down ? "down" : "ok")
+-          setLatency(down ? null : Date.now() - t0)
 +          setIsProxy(status.route.type === "proxy")
-+          // #258：down 由 daemon 网关错误语义（502/503/504）决定，TUI 不再自行解释状态码
-+          if (status.status === "down") {
-             setPingStatus("down")
-             setLatency(null)
-           } else {
--            setPingStatus("ok")
--            setLatency(elapsed)
-+            setPingStatus(status.status)
-+            setLatency(status.latency)
-           }
++          // 网关故障判定沿daemon口径，不把业务认证状态另判为网络故障。
++          setPingStatus(status.status)
++          setLatency(status.status === "down" ? null : status.latency)
          } catch {
-           if (active) {
+           if (!active) return
+           setPingStatus("down")
+           setLatency(null)
+         }

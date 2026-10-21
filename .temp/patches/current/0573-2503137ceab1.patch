@@ -11,19 +11,16 @@ Content-Transfer-Encoding: 8bit
 
 保持 VS Code 扩展独立版本源不变，仅更新其文档中的推荐 CLI，避免扩展版本随 TUI 发布误升。
 
-适配说明：目标版本合同为 1.18.44-smark（0527 已同步 VSIX/vscode README 推荐字段并沿用目标版本）；目标各 README 已无 1.15.x 字面，唯一残留的 fork 简介历史字面位于 CONTEXT.md。本补丁仅更新该行；其余 24 个源版本文件在目标没有 1.15.12 基线字面，按 0527 版本合同裁记，不回写源 1.15.13，也不擅自递增目标 1.18.44。
+适配说明：source 的27文件版本同步映射到目标现有1.18.44-smark发布合同；0527已对齐推荐CLI，manifest/锁文件保持一致，VS Code扩展独立版本化。本补丁在现有CONTEXT简介后明确版本权威，不覆盖原生V2术语、不回写source的1.15.13，也不把v1.18.32迁移基线当发布版本。
 
 diff --git a/CONTEXT.md b/CONTEXT.md
 --- a/CONTEXT.md
 +++ b/CONTEXT.md
-@@ -227,9 +227,9 @@
- 
- ---
- 
+@@ -229,5 +229,7 @@
  # opencode (SMARK fork)
  
--The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.12-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
-+The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.13-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
+ The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.18.44-smark`.
  
++CLI 发布版本以 `packages/opencode/package.json` 与 `bun.lock` 为准；`v1.18.32` 仅表示迁移基线，VS Code 扩展保持独立版本。
++
  ## Language
- 

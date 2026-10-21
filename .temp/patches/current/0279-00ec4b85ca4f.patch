@@ -16,76 +16,107 @@ index 2cf85e358..a83c51e7e 100644
 --- a/packages/tui/src/routes/session/context-usage.tsx
 +++ b/packages/tui/src/routes/session/context-usage.tsx
 @@ -1,4 +1,4 @@
--import { createEffect, createMemo, createResource, For, Show } from "solid-js"
-+import { createEffect, createMemo, createResource, For, Show, untrack } from "solid-js"
- import { useRenderer, useTerminalDimensions } from "@opentui/solid"
- import { useDialog } from "../../ui/dialog"
- import { useBindings } from "../../keymap"
-@@ -10,10 +10,14 @@ import { useTheme } from "../../context/theme"
+-import { createEffect, createMemo, createResource, For, onCleanup, Show } from "solid-js"
++import { createEffect, createMemo, createResource, For, onCleanup, Show, untrack } from "solid-js"
+ import { useTerminalDimensions } from "@opentui/solid"
+ import type { Binding, Keymap, KeymapEvent } from "@opentui/keymap"
  import { useTuiConfig } from "../../config"
+@@ -11,6 +11,17 @@ import { useTheme } from "../../context/theme"
+ import { createThrottledSignal } from "../../util/signal"
  import { TextAttributes } from "@opentui/core"
  import { Locale } from "../../util/locale"
-+// #279：refresh key 需要读取 SDK 侧 Message/Part/Provider 等型别做轻量签名
-+import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
++import type {
++  Agent,
++  Config,
++  Message,
++  Part,
++  Provider,
++  Session,
++  SessionMessageInputEstimate,
++  VcsInfo,
++} from "@opencode-ai/sdk/v2"
++import type { InputBreakdown } from "@opencode-ai/schema/session-message"
  import {
    computeContextData,
-   type ContextCategoryColor,
-   type ContextUsageData,
-+  type ComputeContextDataInput,
-+  type InputBreakdown,
-   type GridSquare,
- } from "../../util/context-usage"
- 
-@@ -23,6 +27,155 @@ export function contextUsageSnapshot<T,>(value: T): T {
+   type ComputeContextDataInput,
+@@ -22,8 +33,193 @@
+-// 深读 Solid 嵌套字段使 raw 增量参与依赖追踪；节流继续作用于完整快照。
++// 完整快照保留全部 wire 字段；resource 仅在节流后深拷贝，避免订阅绕过节流。
+ export function contextUsageSnapshot<T,>(value: T): T {
    return JSON.parse(JSON.stringify(value)) as T
  }
  
-+// #279：这个 key 是 `/context` 面板的低成本刷新信号：它必须读取 streaming
-+// part 的 nested 字段来保持响应式依赖，但不能像真正输入快照那样深拷贝
-+// message/part 全量内容。否则高频 tool raw/text delta 会在 throttle 之前
-+// 先触发 JSON roundtrip，正是本次修复要移除的热路径。
 +export function contextUsageRefreshKey(input: {
 +  messages: readonly Message[]
 +  getParts: (id: string) => readonly Part[]
 +  providers: readonly Provider[]
 +  config?: Config
 +  agents?: readonly Agent[]
++  session?: Session
 +  lastUserModel?: { providerID: string; modelID: string }
 +  vcs?: VcsInfo
-+  paths: { cwd: string; worktree?: string }
++  paths: ComputeContextDataInput["paths"]
 +  columns?: number
++  instructionFiles?: ComputeContextDataInput["instructionFiles"]
++  skills?: ComputeContextDataInput["skills"]
++  toolDefinitions?: ComputeContextDataInput["toolDefinitions"]
 +}) {
++  const request = input.session?.request
++  // 轻量字段订阅 streaming；流式正文只取长度，完整快照留到节流发布后。
 +  return [
-+    // #279：列数变化会改变网格布局，必须参与 key
 +    input.columns ?? "",
-+    // #279：cwd/worktree 变化意味着实例迁移，面板标题与路径行需要重绘
 +    input.paths.cwd,
 +    input.paths.worktree ?? "",
-+    // #279：模型切换同时改变窗口上限与模型行，是面板的关键信号
++    input.paths.shell ?? "",
++    input.paths.home ?? "",
++    input.paths.config ?? "",
 +    input.lastUserModel ? `${input.lastUserModel.providerID}/${input.lastUserModel.modelID}` : "",
 +    configRefreshKey(input.config),
-+    // #279：vcs 是小对象，直接序列化即可，无需逐字段展开
 +    input.vcs ? refreshJson(input.vcs) : "",
 +    input.providers.map(providerRefreshKey).join("|"),
 +    (input.agents ?? [])
-+      .map((agent) => `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${refreshJson(agent.permission)}`)
++      .map((agent) => `${agent.name}:${agent.mode}:${agent.hidden ? 1 : 0}:${agent.description ?? ""}:${agent.prompt?.length ?? 0}:${refreshJson(agent.permission)}`)
 +      .join("|"),
-+    // #279：消息与其 parts 拼接成段，保证 part 级粒度的刷新信号；段间 \n、段内 ,/: ，层级唯一可解析
-+    input.messages.map((message) => [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("=")).join("\n"),
++    input.session?.id ?? "",
++    refreshJson(input.session?.permission),
++    input.session?.tokens ? tokenRefreshKey(input.session.tokens) : "",
++    input.session?.cost ?? "",
++    // 本轮投影包括零预算与首包前估算，不能退回旧消息的估算 owner。
++    request
++      ? [
++          request.messageID,
++          request.assistantID ?? "",
++          request.input,
++          request.output,
++          request.cost,
++          request.stepInput,
++          request.stepOutput,
++          request.pendingInput ?? "",
++          request.estimatedInput ?? "",
++          request.model?.providerID ?? "",
++          request.model?.modelID ?? "",
++          request.model?.contextLimit ?? "",
++          inputEstimateRefreshKey(request.inputEstimate),
++        ].join("/")
++      : "",
++    // 显式空列表覆盖扫描或目录默认，和未提供列表不同。
++    input.instructionFiles ? input.instructionFiles.map((item) => `${item.path}:${item.content.length}`).join("|") : "-",
++    input.skills ? input.skills.map((item) => `${item.name}:${item.description}:${item.path}`).join("|") : "-",
++    input.toolDefinitions ? input.toolDefinitions.map((item) => `${item.name}:${item.text.length}`).join("|") : "-",
++    input.messages
++      .map((message) => [messageRefreshKey(message), input.getParts(message.id).map(partRefreshKey).join(",")].join("="))
++      .join("\n"),
 +  ].join("\n")
 +}
 +
-+// #279：仅取 JSON 序列化长度做信号：长度变化必然代表内容变化，且避免为 tool.input 生成完整字符串
-+function refreshJsonLength(value: unknown) {
-+  try {
-+    return JSON.stringify(value)?.length ?? 0
-+  } catch {
-+    // #279：循环引用等序列化异常按 0 处理，保证 key 构建本身永不抛出
-+    return 0
-+  }
++// 只累计结构和字符串长度，不序列化工具参数；这个信号不参与 token 估算。
++function refreshJsonLength(value: unknown): number {
++  if (typeof value === "string") return value.length + 2
++  if (value === null || typeof value !== "object") return String(value).length
++  if (Array.isArray(value)) return value.reduce<number>((length, item) => length + 1 + refreshJsonLength(item), 2)
++  return Object.entries(value).reduce((length, [key, item]) => length + key.length + 4 + refreshJsonLength(item), 2)
 +}
 +
-+// #279：小对象（vcs、权限）直接序列化；循环引用等异常回退 String，不让 key 构建把面板炸掉
 +function refreshJson(value: unknown) {
 +  try {
 +    return JSON.stringify(value) ?? ""
@@ -94,22 +125,19 @@ index 2cf85e358..a83c51e7e 100644
 +  }
 +}
 +
-+// #279：provider 签名只含 id 与各模型的 id/status/limit：模型列表增减或限额调整才会刷新面板
 +function providerRefreshKey(provider: Provider) {
 +  return [
 +    provider.id,
-+    Object.values(provider.models)
-+      .map((model) => `${model.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`)
++    Object.entries(provider.models)
++      .map(([id, model]) => `${id}:${model.id}:${model.providerID}:${model.api.id}:${model.status}:${model.limit.context}:${model.limit.input}:${model.limit.output}`)
 +      .join(","),
 +  ].join(":")
 +}
 +
 +function configRefreshKey(config: Config | undefined) {
 +  if (!config) return ""
-+  // #279：computeContextData 只读取 compaction 预留、额外 instruction 路径与 skill 路径；
-+  // 刻意不序列化完整 config，避免把无关配置变更接进 `/context` 面板的 streaming 热路径。
++  // 只观察计算实际使用的预留和扫描路径，流式更新不复制整份 config。
 +  return [
-+    // #279：缺省时留空而非 0，区分"未配置"与"配置为 0"
 +    config.compaction?.reserved ?? "",
 +    Array.isArray(config.instructions) ? config.instructions.join("\0") : "",
 +    Array.isArray(config.skills?.paths) ? config.skills.paths.join("\0") : "",
@@ -117,62 +145,75 @@ index 2cf85e358..a83c51e7e 100644
 +}
 +
 +function messageRefreshKey(message: Message) {
-+  // #279：inputChars/inputBreakdown 等字段在目标 SDK 型别上未声明，沿 util 惯例用 cast 读取
-+  const extra = message as {
-+    inputChars?: number
-+    inputTokens?: number
-+    inputBreakdown?: InputBreakdown
-+  }
++  const extra = message.role === "assistant" ? message.inputEstimate : undefined
 +  return [
 +    message.id,
 +    message.role,
-+    // #279：parentID/providerID/modelID 是压缩过滤与模型行的输入，必须参与 key
 +    "parentID" in message ? message.parentID : "",
 +    "providerID" in message ? message.providerID : "",
 +    "modelID" in message ? message.modelID : "",
-+    // #279：completed 时间是压缩过滤的相关信号，缺失时留空即可
 +    message.time && "completed" in message.time ? message.time.completed : "",
-+    // #279：tokens 仅在 assistant 上存在，in 守卫同时收窄型别
 +    "tokens" in message && message.tokens ? tokenRefreshKey(message.tokens) : "",
-+    extra.inputChars ?? "",
-+    extra.inputTokens ?? "",
-+    extra.inputBreakdown ? inputBreakdownRefreshKey(extra.inputBreakdown) : "",
++    message.agent,
++    message.role === "user" ? `${message.model.providerID}/${message.model.modelID}` : "",
++    message.role === "user" ? message.system?.length ?? 0 : "",
++    message.role === "user" ? refreshJson(message.tools) : "",
++    message.role === "assistant" ? `${message.summary ? 1 : 0}:${message.finish ?? ""}:${message.error ? 1 : 0}` : "",
++    message.role === "assistant" ? message.cost : "",
++    inputEstimateRefreshKey(extra),
 +  ].join(":")
 +}
 +
-+function partRefreshKey(part: Part) {
++function partRefreshKey(part: Part): string {
 +  const base = `${part.id ?? ""}:${part.type}`
 +  if (part.type === "text") return `${base}:${part.text?.length ?? 0}:${part.ignored ? 1 : 0}`
-+  // #279：ignored 标记影响分类归属，仅文本长度不足以表达它
 +  if (part.type === "reasoning") return `${base}:${part.text?.length ?? 0}`
 +  if (part.type === "tool") {
 +    const state = part.state
-+    // #279：pending 用 raw 长度、completed/error 用 input 长度+产物：流式 raw 增长必然改变 key
-+    if (state.status === "pending") return `${base}:${part.tool}:${state.status}:${state.raw?.length ?? 0}`
++    if (state.status === "pending") return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.raw?.length ?? 0}`
++    // 压缩标记、read 规则路径和附件各自改变分类，不能只观察工具输出长度。
 +    if (state.status === "completed")
-+      return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.output?.length ?? 0}:${refreshJson(state.attachments)}`
++      return [
++        base,
++        part.tool,
++        state.status,
++        refreshJsonLength(state.input),
++        state.output?.length ?? 0,
++        state.time.compacted ?? "",
++        Array.isArray(state.metadata.loaded) ? state.metadata.loaded.filter((item) => typeof item === "string").join("\0") : "",
++        state.attachments?.map(partRefreshKey).join(",") ?? "",
++      ].join(":")
 +    if (state.status === "error")
 +      return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}:${state.error?.length ?? 0}`
-+    return `${base}:${part.tool}:${state.status}`
++    return `${base}:${part.tool}:${state.status}:${refreshJsonLength(state.input)}`
 +  }
-+  // #279：step-start/step-finish 携带 inputBreakdown，直接参与 key，面板分类条才能跟随数值刷新
-+  const steps = part as { inputTokens?: number; inputChars?: number; inputBreakdown?: InputBreakdown }
-+  if (part.type === "step-start")
-+    return `${base}:${steps.inputTokens ?? ""}:${steps.inputChars ?? ""}:${steps.inputBreakdown ? inputBreakdownRefreshKey(steps.inputBreakdown) : ""}`
++  // 目标只有 step-finish 携带确认细分；step-start 不再承担上传估算。
 +  if (part.type === "step-finish")
-+    return `${base}:${part.cost ?? 0}:${"tokens" in part && part.tokens ? tokenRefreshKey(part.tokens) : ""}:${steps.inputChars ?? ""}:${steps.inputBreakdown ? inputBreakdownRefreshKey(steps.inputBreakdown) : ""}`
-+  // #279：id+type 是 part 的最小 identity；文件附件长度变化必须刷新（图片/粘贴路径）
++    return `${base}:${part.cost ?? 0}:${tokenRefreshKey(part.tokens)}:${part.inputChars ?? ""}:${part.inputBreakdown ? inputBreakdownRefreshKey(part.inputBreakdown) : ""}`
 +  if (part.type === "file") return `${base}:${part.filename ?? ""}:${part.mime}:${part.url?.length ?? 0}`
++  if (part.type === "compaction") return `${base}:${part.tail_start_id ?? ""}`
++  if (part.type === "subtask") return `${base}:${part.prompt.length}:${part.description.length}`
 +  return base
 +}
 +
 +function tokenRefreshKey(tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }) {
-+  // #279：五段数值完整展开；cache 读写分开，任一变化都应触发面板
 +  return `${tokens.input}/${tokens.output}/${tokens.reasoning}/${tokens.cache.read}/${tokens.cache.write}`
 +}
 +
-+// #279：inputBreakdown 是纯数值结构，逐字段展开：数值变化（如 100→200 同长度）也必须改变 key，
-+// 只取 JSON 长度会漏掉同长度的数值变化，面板分类条就会停留在陈旧数字上。
++function inputEstimateRefreshKey(input: SessionMessageInputEstimate | undefined) {
++  if (!input) return ""
++  return [
++    input.input,
++    input.bodyChars,
++    input.confirmed ? 1 : 0,
++    input.charsPerToken ?? "",
++    input.afterPartID ?? "",
++    input.contextLimit ?? "",
++    input.inputBreakdown ? inputBreakdownRefreshKey(input.inputBreakdown) : "",
++  ].join("/")
++}
++
++// 数值逐字段展开，100→200这类等长变化也要刷新；共享Schema保留可选媒体测量。
 +function inputBreakdownRefreshKey(input: InputBreakdown) {
 +  return [
 +    input.system,
@@ -186,77 +227,71 @@ index 2cf85e358..a83c51e7e 100644
 +    input.messages.toolOutput,
 +    input.messages.attachments,
 +    input.messages.total,
++    input.media ? `${input.media.rawChars}/${input.media.textChars}/${input.media.tokens}/${input.media.count}` : "",
 +  ].join("/")
 +}
 +
  
- // 格式化 token 数为人类可读的 k/m 简写
+ // 显示缩写不改变底层 token，明细相加仍使用原始整数，不能把四舍五入结果当账本。
  function formatTokens(tokens: number) {
-@@ -269,9 +422,11 @@
-   useRenderer()
+@@ -246,12 +442,19 @@
+-// SDK 输入只有 wire 数据；在 tracked memo 内序列化才能订阅嵌套字段，unwrap 不会建立订阅。
++// 先订阅轻量字段，完整输入只在节流发布后形成脱离 store proxy 的快照。
+ export function contextUsageResource(input: () => ComputeContextDataInput) {
+-  const snapshot = createMemo<ComputeContextDataInput>(() => contextUsageSnapshot(input()))
+-  // 深层快照先追踪原位变更，再首尾节流，避免连续 delta 让异步计算持续失效。
+-  const [throttled, setThrottled] = createThrottledSignal(snapshot(), 500)
+-  createEffect(() => setThrottled(snapshot()))
+-  // fetcher 被 Solid untrack；传入脱离 store proxy 的快照，异步 await 后也不会读到另一版本。
+-  return createResource(throttled, computeContextData)
++  const inputSource = createMemo(() => {
++    const value = input()
++    return contextUsageRefreshKey({ ...value, getParts: (id) => value.parts[id] ?? [] })
++  })
++  // 首值立即发布，持续 delta 只覆盖尾值，沿用现有 500ms 首尾节流。
++  const [throttled, setThrottled] = createThrottledSignal(inputSource(), 500)
++  createEffect(() => setThrottled(inputSource()))
++  const snapshot = createMemo<ComputeContextDataInput>(() => {
++    throttled()
++    // 深拷贝不再订阅 store，异步计算也只读取这一轮完整快照。
++    return untrack(() => contextUsageSnapshot(input()))
++  })
++  return createResource(snapshot, computeContextData)
+ }
  
-   // 收集计算输入：消息、部件、提供者、配置、代理、模型、VCS、路径、终端宽度
-   // #157：inputRaw 的响应式依赖由深快照建立，后续 produce 内的 raw 增量可精确触发重算
--  const inputRaw = createMemo(() => {
--    // #157：messages/parts 都 deep snapshot，嵌套 raw 增量才能触发 memo
-+  // #279：inputRaw 改为纯函数 buildInput：快照构建不再被 memo 直接订阅，
-+  // 响应式依赖全部收敛到轻量 inputSource 上。
-+  function buildInput(): ComputeContextDataInput {
-+    // #157：messages/parts 都 deep snapshot，嵌套 raw 增量才能触发重算
-     const messages = contextUsageSnapshot([...(sync.data.message[props.sessionID] ?? [])])
-     // #157：parts 同样 deep-read，否则 state.raw 增长不重算
-     const parts = Object.fromEntries(
-@@ -280,6 +435,7 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+ // 此注册入口由面板与真实 keymap harness 共用，关闭键不经过另一个 matcher 或全局退出命令。
+ export function registerContextUsageKeys<TTarget extends object, TEvent extends KeymapEvent>(
+@@ -279,5 +482,5 @@
+-// 面板仍使用唯一 resource；消息追加与部件原位更新都经同一 tracked 快照触发。
++// 面板与 headless 调用共用唯一 resource，流式更新只发布节流后的完整快照。
+ export function ContextUsagePanel(props: { sessionID: string; onClose: () => void }) {
+   const sync = useSync()
+   const local = useLocal()
+   const project = useProject()
+@@ -290,20 +493,20 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
+-  // 外层只选择会话输入；深层字段由 contextUsageResource 的 tracked 序列化订阅，不能在 fetcher 里读 proxy。
++  // 保留全部计算输入；原位 streaming 依赖由 resource 的轻量 key 订阅。
+   const input = createMemo(() => {
+-    // 消息追加时更新成员集合，text/raw/tokens 的原位修改仍由内层快照单独追踪。
++    // 这里只复制成员集合，消息与部件的完整深快照仍在节流后构建。
+     const messages = [...(sync.data.message[props.sessionID] ?? [])]
+     // 只取当前会话消息关联的部件，其他会话的 delta 不应刷新本窗口的估算。
+     const parts = Object.fromEntries(messages.map((msg) => [msg.id, [...(sync.data.part[msg.id] ?? [])]]))
+     const paths = project.instance.path()
      return {
        messages,
        parts,
-+      // #279：浅拷贝数组：provider 列表换代而非原地变更，copy 即可保持信号
        providers: [...sync.data.provider],
        config: sync.data.config,
        agents: [...sync.data.agent],
-@@ -288,13 +444,37 @@ export function ContextUsagePanel(props: { sessionID: string; onClose: () => voi
-       paths: { cwd: paths.directory, worktree: paths.worktree },
+-      // 保留 store proxy 到现有 tracked 序列化边界，嵌套 permission 更新也能刷新同一 resource。
++      // 持久权限与本轮 request 一起进入同一 key 和快照，保持服务端投影优先级。
+       session: sync.session.get(props.sessionID),
+       lastUserModel: local.model.current(),
+       vcs: sync.data.vcs,
+       paths: { cwd: paths.directory, worktree: paths.worktree, shell: sync.data.config.shell },
        columns: dimensions().width,
      }
-+  }
-+
-+  // #279：轻量刷新信号：只读 nested 字段建立响应式依赖，不复制任何 payload
-+  const inputSource = createMemo(() => {
-+    const paths = project.instance.path()
-+    return contextUsageRefreshKey({
-+      messages: sync.data.message[props.sessionID] ?? [],
-+      // #279：getParts 闭包只引用 store，不复制 payload，保持零拷贝信号路径
-+      getParts: (id) => sync.data.part[id] ?? [],
-+      // #279：inputSource 不拷贝任何数组，保持信号构建零分配
-+      providers: sync.data.provider,
-+      config: sync.data.config,
-+      agents: sync.data.agent,
-+      lastUserModel: local.model.current(),
-+      vcs: sync.data.vcs,
-+      paths: { cwd: paths.directory, worktree: paths.worktree },
-+      columns: dimensions().width,
-+    })
-   })
- 
--  // 异步计算上下文数据，Solid 自动追踪 input 变化并重新计算
--  // createResource 自动追踪 input memo 变化并异步重算，加载中 data() 为 undefined
-   // #125：节流 resource 源，避免流式 delta 饿死 computeContextData
--  const [input, setInput] = createThrottledSignal(inputRaw(), 500)
--  createEffect(() => setInput(inputRaw()))
-+  // #279：这里只 throttle 轻量 refresh key；真正的 message/part snapshot 放在
-+  // untrack(buildInput) 内执行，保证 JSON roundtrip 不会重新订阅 nested
-+  // streaming 字段并绕过 throttle。leading/trailing 语义仍保持首次立即刷新、
-+  // 流式更新结束后补最后一次刷新，这是面板读数必须保持的不变量。
-+  const [inputKey, setInputKey] = createThrottledSignal(inputSource(), 500)
-+  createEffect(() => setInputKey(inputSource()))
-+  const input = createMemo(() => {
-+    inputKey()
-+    return untrack(buildInput)
-+  })
- 
- 
-   // #125：双参 createResource 让 input 成为响应式 source
-warning: in the working copy of 'F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0274-e58ec8b0ecd4\repo\packages/tui/src/component/dialog-model.tsx', LF will be replaced by CRLF the next time Git touches it
 diff --git a/packages/tui/src/component/dialog-model.tsx b/packages/tui/src/component/dialog-model.tsx
 index 38db569aa..0ae2f78d5 100644
 --- a/packages/tui/src/component/dialog-model.tsx
@@ -388,7 +423,9 @@ index 5b2c76e3c..53ba7569d 100644
  export function DialogSelect<T>(props: DialogSelectProps<T>) {
    type Action = NonNullable<DialogSelectProps<T>["actions"]>[number]
    type FooterHint = NonNullable<DialogSelectProps<T>["footerHints"]>[number]
-@@ -100,21 +137,6 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+@@ -99,22 +136,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+-  let selection: { value: T; category?: string } | undefined
++  let selection: DialogSelectOption<T> | undefined
    let resetSelection = false
    let visibilityGeneration = 0
  
@@ -440,12 +477,12 @@ index 5b2c76e3c..53ba7569d 100644
 +    return flatRows().findIndex((row) => isDeepEqual(row.option.value, props.current))
 +  })
 +
-+  // #279：替代旧 isDeepEqual current 同步效果；selection 同步必须保留，
-+  // 否则 preserveSelection 在 options 变化后无法锚定先前选中项。
++  // #279：仅 current/currentKey 变化时同步选择；options 更新继续由 preserveSelection 保持锚点。
 +  createEffect(
 +    on(
-+      () => currentIndex(),
-+      (index) => {
++      [() => props.current, () => props.currentKey],
++      () => {
++        const index = currentIndex()
 +        if (index >= 0) {
 +          setStore("selected", index)
 +          selection = flat()[index]
@@ -458,13 +495,63 @@ index 5b2c76e3c..53ba7569d 100644
    createEffect(
      on(
        () => props.options,
-@@ -278,16 +341,23 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+@@ -233,34 +296,39 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+           return
+         }
+         if (!selection) {
+-          if (props.current !== undefined) {
+-            const index = flat().findIndex((option) => isDeepEqual(option.value, props.current))
+-            if (index >= 0) {
+-              setStore("selected", index)
+-              selection = flat()[index]
+-              return
+-            }
+-          }
++          // #279：初次锚定复用 currentKey 匹配，与高亮和延迟滚动保持同一身份语义。
++          const index = currentIndex()
++          if (index >= 0) {
++            setStore("selected", index)
++            selection = flat()[index]
++            return
++          }
+           const option = selected()
+           if (!option) return
+           selection = option
+           return
+         }
+         const previous = selection
+-        const index = flat().findIndex((option) => isDeepEqual(option.value, previous.value))
++        // #279：重建选项时沿用 option.key；无 key 的对象仍按 value 深比较。
++        const key = optionIdentityKey(previous)
++        const index = flatRows().findIndex((row) =>
++          key !== undefined ? row.identityKey === key : isDeepEqual(row.option.value, previous.value),
++        )
+         if (index >= 0) {
+           const option = flat()[index]
+           const moved = index !== store.selected || option.category !== previous.category
+           setStore("selected", index)
+           selection = option
+           if (!moved) return
+           const value = option.value
+           const generation = ++visibilityGeneration
+           requestAnimationFrame(() => {
+             requestAnimationFrame(() => {
+               if (generation !== visibilityGeneration) return
+               if (!props.preserveSelection || store.filter.length > 0) return
+-              if (!isDeepEqual(selected()?.value, value)) return
++              const current = selected()
++              if (!current) return
++              if (key !== undefined ? optionIdentityKey(current) !== key : !isDeepEqual(current.value, value)) return
+               scrollToSelection(false)
+             })
+           })
+@@ -278,16 +346,23 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
    })
  
    createEffect(
 -    on([() => store.filter, () => props.current], ([filter, current]) => {
-+    // #279：filter 与 current 共用同一延迟解析路径，避免两条效果竞态写 selected
-+    on([() => store.filter, () => currentIndex()], ([filter]) => {
++    // #279：filter/current 变化后延迟滚动，回调再读取最新 key 与列表。
++    on([() => store.filter, () => props.current, () => props.currentKey], ([filter]) => {
        if (filter.length > 0) resetSelection = true
        setTimeout(() => {
 -        if (filter.length > 0) {
@@ -489,7 +576,7 @@ index 5b2c76e3c..53ba7569d 100644
          }
        }, 0)
      }),
-@@ -340,7 +410,8 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+@@ -340,7 +415,8 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
        }
        if (y < 0) {
          scroll.scrollBy(y)
@@ -499,7 +586,7 @@ index 5b2c76e3c..53ba7569d 100644
            scroll.scrollTo(0)
          }
        }
-@@ -639,14 +710,26 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+@@ -640,14 +716,26 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                    </Show>
                    <For each={options}>
                      {(option) => {
@@ -528,7 +615,7 @@ index 5b2c76e3c..53ba7569d 100644
                              setStore("input", "mouse")
                              setFocusedAction(undefined)
                            }}
-@@ -658,14 +741,15 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
+@@ -659,14 +747,15 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
                            onMouseOver={() => {
                              if (props.locked) return
                              if (store.input !== "mouse") return
@@ -552,123 +639,156 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 index 0d8ec26c1..a73e8d71a 100644
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -4,7 +4,7 @@ import { createStore } from "solid-js/store"
- import { describe, expect, test } from "bun:test"
- import type { Message, Part, Provider } from "@opencode-ai/sdk/v2"
- import { computeContextData, filterCompactedMessages } from "../src/util/context-usage"
--import { contextUsageDetailLines, contextUsageFooter } from "../src/routes/session/context-usage"
-+import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey } from "../src/routes/session/context-usage"
+@@ -8,10 +8,11 @@ import { createTestKeymap, type TestKeymapEvent, type TestKeymapTarget } from "@opentui/keymap/testing"
+ import { estimate } from "@opencode-ai/core/util/token"
++import type { InputBreakdown } from "@opencode-ai/schema/session-message"
+ import { TuiKeybind } from "../src/config/keybind"
+ import { tmpdir } from "./fixture/fixture"
+ import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
+ import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
+ import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
+-import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
++import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
  
- // 测试用 Provider：上下文 20k、输入 19.9k、输出 100，用于验证窗口与缓冲区计算
+ // 窗口/输入/输出故意不相等，才能让测试区分模型预留与压缩缓冲而非只验证零差额。
  const provider: Provider = {
-@@ -86,6 +86,99 @@ function text(messageID: string, value: string): Part {
- }
- 
+@@ -124,4 +125,129 @@
  describe("context usage", () => {
-+  // #279：raw payload 绝不能被 JSON 序列化——toJSON 抛错即代表实现退化为深序列化
 +  test("refresh key follows streaming tool deltas without serializing raw payloads", () => {
 +    const raw = new String('{"filePath"')
-+    // #279：只拦截 toJSON，其余 String 行为不变；一旦实现序列化 raw 立即暴露
-+    Object.defineProperty(raw, "toJSON", {
-+      value() {
-+        throw new Error("raw payload should not be JSON-serialized while building the refresh key")
-+      },
-+    })
-+    const messages = [user("1"), assistant("2", "1")]
-+    // #279：公共输入固化；两组 key 只差 getParts 返回的 raw 内容
-+    const common = {
-+      messages,
-+      providers: [provider],
-+      config: {},
-+      agents: [],
-+      lastUserModel: undefined,
-+      vcs: undefined,
-+      paths: { cwd: process.cwd(), worktree: process.cwd() },
-+      columns: 100,
++    const payload = new String("short")
++    let serializations = 0
++    // 同时拦截 raw/text；即使实现吞掉序列化异常，调用次数也必须暴露回归。
++    for (const value of [raw, payload]) {
++      Object.defineProperty(value, "toJSON", {
++        value() {
++          serializations++
++          throw new Error("streaming payload should not be JSON-serialized while building the refresh key")
++        },
++      })
 +    }
-+
-+    const first = contextUsageRefreshKey({
-+      ...common,
-+      // #279：pending 态 raw 从占位符到真实内容：流式增量必须反映在 key 上
-+      getParts: (id) => id === "2" ? [{
-+        id: "tool",
-+        sessionID: "s",
-+        messageID: "2",
-+        type: "tool",
-+        tool: "bash",
-+        callID: "call",
-+        // #279：双重断言保持 Part 型别，raw 实为带 throwing toJSON 的 String 实例
-+        state: { status: "pending", input: {}, raw: raw as unknown as string },
-+      } as Part] : [],
++    createRoot((dispose) => {
++      const [store, setStore] = createStore({
++        messages: [user("1"), assistant("2", "1")],
++        parts: {
++          "1": [text("1", payload as unknown as string)],
++          "2": [{
++            id: "tool",
++            sessionID: "s",
++            messageID: "2",
++            type: "tool" as const,
++            tool: "bash",
++            callID: "call",
++            state: { status: "pending" as const, input: {}, raw: raw as unknown as string },
++          }],
++        },
++      })
++      const input = {
++        messages: store.messages,
++        parts: store.parts,
++        getParts: (id: string) => id === "2" ? store.parts["2"] : id === "1" ? store.parts["1"] : [],
++        providers: [provider],
++        paths: { cwd: process.cwd(), worktree: process.cwd() },
++        columns: 100,
++      }
++      let runs = 0
++      const key = createMemo(() => {
++        runs++
++        return contextUsageRefreshKey(input)
++      })
++      try {
++        const first = key()
++        expect(runs).toBe(1)
++        // 保持消息和部件数组身份，只修改嵌套 raw/text，验证生产 key 的响应式依赖。
++        setStore("parts", "2", 0, "state", "raw", '{"filePath":"src/index.ts"')
++        const second = key()
++        expect(first).not.toBe(second)
++        expect(runs).toBe(2)
++        setStore("parts", "1", 0, "text", "streaming text grows")
++        expect(key()).not.toBe(second)
++        expect(runs).toBe(3)
++        expect(serializations).toBe(0)
++      } finally {
++        dispose()
++      }
 +    })
-+    const second = contextUsageRefreshKey({
-+      ...common,
-+      getParts: (id) => id === "2" ? [{
-+        id: "tool",
-+        sessionID: "s",
-+        messageID: "2",
-+        type: "tool",
-+        tool: "bash",
-+        callID: "call",
-+        state: { status: "pending", input: {}, raw: '{"filePath":"src/index.ts"' },
-+      } as Part] : [],
-+    })
-+
-+    expect(first).not.toBe(second)
 +  })
 +
-+  // #279：inputBreakdown 数值变化但 JSON 长度不变时 key 也必须变化，否则面板分类条停留陈旧值
 +  test("refresh key tracks inputBreakdown value changes even when string length is unchanged", () => {
-+    const messages = [user("1"), assistant("2", "1")]
++    // 媒体 fixture 使用共享 Schema 的完整字段，不能用 Part 强转隐藏缺失的分类 token。
++    const media = { rawChars: 1000, textChars: 10, tokens: 100, count: 1, imageTokens: 100, pdfTokens: 0, otherTokens: 0 }
++    const inputBreakdown: InputBreakdown = {
++      system: 100,
++      instructions: 0,
++      skills: 0,
++      tools: 0,
++      messages: { total: 0, userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0 },
++      media,
++    }
 +    const common = {
-+      messages,
++      messages: [user("1"), assistant("2", "1")],
 +      providers: [provider],
-+      config: {},
-+      agents: [],
-+      lastUserModel: undefined,
-+      vcs: undefined,
 +      paths: { cwd: process.cwd(), worktree: process.cwd() },
 +      columns: 100,
 +    }
-+    // step-finish 携带 inputBreakdown：与 processor 落盘 owner 一致
-+    // #279：fixture 其余字段置零，隔离 system 单变量，排除串扰
-+    const step = (system: number): Part =>
-+      ({
-+        id: "step",
-+        sessionID: "s",
-+        messageID: "2",
-+        type: "step-finish",
-+        cost: 0,
-+        // reason 为 StepFinishPart 必填字段；refresh key 不读它，任意字面量即可
-+        reason: "test",
-+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        inputBreakdown: {
-+          system,
-+          instructions: 0,
-+          skills: 0,
-+          tools: 0,
-+          messages: { total: 0, userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0 },
-+        },
-+      } as Part)
++    const step = (inputBreakdown: InputBreakdown): Part => ({
++      id: "step",
++      sessionID: "s",
++      messageID: "2",
++      type: "step-finish",
++      cost: 0,
++      reason: "stop",
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      inputBreakdown,
++    })
++    const firstParts = [step(inputBreakdown)]
++    const secondParts = [step({ ...inputBreakdown, system: 200 })]
++    const firstInput = { ...common, parts: { "2": firstParts }, getParts: (id: string) => id === "2" ? firstParts : [] }
++    const secondInput = { ...common, parts: { "2": secondParts }, getParts: (id: string) => id === "2" ? secondParts : [] }
++    const first = contextUsageRefreshKey(firstInput)
++    const second = contextUsageRefreshKey(secondInput)
 +
-+    const first = contextUsageRefreshKey({ ...common, getParts: (id) => (id === "2" ? [step(100)] : []) })
-+    const second = contextUsageRefreshKey({ ...common, getParts: (id) => (id === "2" ? [step(200)] : []) })
-+
-+    // 同长度保护："100"/"200" 字符串等长，证明断言针对数值而非序列化长度
++    // 旧 V1 确认部件仍要区分同长度数值，不能用 JSON 长度代替字段值。
 +    expect(String(100)).toHaveLength(String(200).length)
 +    expect(first).not.toBe(second)
++
++    const session = {
++      id: "s", slug: "s", projectID: "p", directory: ".", title: "s", version: "1", time: { created: 0, updated: 0 },
++      request: {
++        messageID: "1", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0,
++        model: { providerID: "test", modelID: "model", contextLimit: 20000 },
++        inputEstimate: { input: 128, bodyChars: 1100, confirmed: false, charsPerToken: 4, inputBreakdown },
++      },
++    } satisfies Session
++    createRoot((dispose) => {
++      const [store, setStore] = createStore({ session })
++      // native 首包前没有可见消息；必须订阅 computeContextData 实际消费的 Session 请求投影。
++      const input = { ...common, messages: [], parts: {}, getParts: () => [], session: store.session }
++      const key = createMemo(() => contextUsageRefreshKey(input))
++      try {
++        const initial = key()
++        setStore("session", "request", "inputEstimate", "inputBreakdown", { ...inputBreakdown, system: 200 })
++        const changed = key()
++        expect(changed).not.toBe(initial)
++        const serialized = JSON.stringify(store.session.request.inputEstimate.inputBreakdown)
++        setStore("session", "request", "inputEstimate", "inputBreakdown", { ...inputBreakdown, system: 200, media: { ...media, tokens: 200, imageTokens: 200 } })
++        expect(JSON.stringify(store.session.request.inputEstimate.inputBreakdown)).toHaveLength(serialized.length)
++        expect(key()).not.toBe(changed)
++      } finally {
++        dispose()
++      }
++    })
 +  })
-   // 验证消息、指令、技能、工具、缓冲区、自由空间分类均正确计数
- 
-   // 无 custom agent prompt 时，System 分类必须计入 default/provider 系统提示词（禁止空 stub）
+   test("confirmed allocation composes input history and live output on the panel path", async () => {
+     const inputBreakdown = {
+       system: 300, instructions: 100, skills: 0, tools: 100,
 diff --git a/packages/tui/test/cli/tui/dialog-select.test.tsx b/packages/tui/test/cli/tui/dialog-select.test.tsx
 new file mode 100644
 index 000000000..e551eb55f
 --- /dev/null
 +++ b/packages/tui/test/cli/tui/dialog-select.test.tsx
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,205 @@
 +/** @jsxImportSource @opentui/solid */
-+// #279：DialogSelect identity-key 回归：稳定 key 标记 current、延迟 current 解析、无 key 对象回退
 +import { expect, test } from "bun:test"
 +import { mkdir } from "node:fs/promises"
 +import path from "node:path"
@@ -687,7 +807,7 @@ index 000000000..e551eb55f
 +import { OpencodeKeymapProvider, registerOpencodeKeymap } from "../../../src/keymap"
 +
 +async function waitForFrame(app: Awaited<ReturnType<typeof testRender>>, text: string) {
-+  // #279：2s 预算覆盖慢 CI；超时后仍返回末帧，让断言给出可读差异
++  // 超时返回末帧，由原有断言报告实际渲染差异。
 +  const timeout = Date.now() + 2000
 +  while (Date.now() < timeout) {
 +    await app.renderOnce()
@@ -698,14 +818,14 @@ index 000000000..e551eb55f
 +  return app.captureCharFrame()
 +}
 +
-+// Harness 复用 dialog-prompt.test.tsx 的 provider 栈：keymap/config/kv/theme/toast/dialog 缺一不可
++// 复用 headless fixture 的完整上下文，包括停机提示；不加载真实 App。
 +function DialogSelectHarness(props: {
 +  root: string
 +  state: string
-+  options: DialogSelectOption<any>[]
-+  current?: any
++  options: DialogSelectOption<unknown>[]
++  current?: unknown
 +  currentKey?: string
-+  onMove?: (option: DialogSelectOption<any>) => void
++  onMove?: (option: DialogSelectOption<unknown>) => void
 +}) {
 +  const renderer = useRenderer()
 +  const keymap = createDefaultOpenTuiKeymap(renderer)
@@ -728,7 +848,6 @@ index 000000000..e551eb55f
 +            <ThemeProvider mode="dark">
 +              <ToastProvider>
 +                <DialogProvider>
-+                  {/* #279：renderFilter=false 聚焦 identity 行为，过滤框非本用例范围 */}
 +                  <DialogSelect
 +                    title="Models"
 +                    options={props.options}
@@ -748,27 +867,30 @@ index 000000000..e551eb55f
 +}
 +
 +async function mountHarness(input: {
-+  options: DialogSelectOption<any>[]
-+  current?: any
++  root: string
++  options: DialogSelectOption<unknown>[]
++  current?: unknown
 +  currentKey?: string
-+  onMove?: (option: DialogSelectOption<any>) => void
-+  deferredKey?: (setCurrentKey: (key: string) => void) => void
++  onMove?: (option: DialogSelectOption<unknown>) => void
++  deferredKey?: (
++    setCurrentKey: (key: string) => void,
++    setOptions: (options: DialogSelectOption<unknown>[]) => void,
++  ) => void
 +}) {
-+  // #279：每用例独立 tmp 与 kv 状态，避免用例间串扰
-+  await using tmp = await tmpdir()
-+  const state = path.join(tmp.path, "state")
++  const state = path.join(input.root, "state")
 +  await mkdir(state, { recursive: true })
 +  await Bun.write(path.join(state, "kv.json"), "{}")
 +
 +  function Harness() {
 +    const [currentKey, setCurrentKey] = createSignal<string | undefined>(input.currentKey)
-+    onMount(() => input.deferredKey?.((key) => setCurrentKey(key)))
++    const [options, setOptions] = createSignal(input.options)
++    onMount(() => input.deferredKey?.((key) => setCurrentKey(key), (next) => setOptions(next)))
 +
 +    return (
 +      <DialogSelectHarness
-+        root={tmp.path}
++        root={input.root}
 +        state={state}
-+        options={input.options}
++        options={options()}
 +        current={input.current}
 +        currentKey={currentKey()}
 +        onMove={input.onMove}
@@ -781,12 +903,13 @@ index 000000000..e551eb55f
 +}
 +
 +test("dialog select can mark the current object by stable key", async () => {
++  // 临时目录由用例持有，renderer 销毁前 KV 状态必须仍然存在。
++  await using tmp = await tmpdir()
 +  const app = await mountHarness({
-+    // #279：current 与 currentKey 同时传入，验证 key 优先于对象比较
++    root: tmp.path,
 +    current: { providerID: "test", modelID: "two" },
 +    currentKey: "test/two",
 +    options: [
-+      // #279：metadata 字段使深比较代价高：验证 key 路径完全绕开对象比较
 +      {
 +        key: "test/one",
 +        title: "Model One",
@@ -805,7 +928,7 @@ index 000000000..e551eb55f
 +    const current = frame.find((line) => line.includes("Model Two")) ?? ""
 +    const other = frame.find((line) => line.includes("Model One")) ?? ""
 +
-+    // #279：current 标记只能落在 key 匹配行上，深比较对带 metadata 的对象不再参与判定
++    // value 多出的 metadata 使对象不相等，高亮必须来自稳定 key。
 +    expect(current).toContain("●")
 +    expect(other).not.toContain("●")
 +  } finally {
@@ -814,14 +937,21 @@ index 000000000..e551eb55f
 +})
 +
 +test("dialog select resolves deferred current movement against the latest options", async () => {
++  await using tmp = await tmpdir()
 +  const moves: string[] = []
-+  let applyKey: ((key: string) => void) | undefined
-+  // #279：onMove 是 moveTo 的可观测出口，用它验证延迟 current 的落点
 +  const app = await mountHarness({
-+    // #279：初始不传 key，验证纯延迟路径而非首帧命中
++    root: tmp.path,
 +    current: { providerID: "test", modelID: "two" },
-+    deferredKey: (setCurrentKey) => {
-+      applyKey = setCurrentKey
++    currentKey: "test/one",
++    deferredKey: (setCurrentKey, setOptions) => {
++      // 先让初始效果排入 timeout，再在回调执行前切换 key 和列表顺序。
++      queueMicrotask(() => {
++        setCurrentKey("test/two")
++        setOptions([
++          { key: "test/two", title: "Model Two", value: { providerID: "test", modelID: "two" } },
++          { key: "test/one", title: "Model One", value: { providerID: "test", modelID: "one" } },
++        ])
++      })
 +    },
 +    onMove: (option) => moves.push(option.title),
 +    options: [
@@ -831,13 +961,11 @@ index 000000000..e551eb55f
 +  })
 +
 +  try {
-+    await waitForFrame(app.app, "Model Two")
-+    // #279：模拟 current 在 options 渲染后才到达：延迟效果必须在 timeout 回调里按最新 index 解析
-+    // #279：延迟 current 晚于首帧到达，Bun.sleep 给 timeout(0) 回调执行窗口
-+    applyKey?.("test/two")
++    const frame = await waitForFrame(app.app, "Model Two")
 +    await Bun.sleep(30)
 +    await app.app.renderOnce()
 +
++    expect(frame.indexOf("Model Two")).toBeLessThan(frame.indexOf("Model One"))
 +    expect(moves).toContain("Model Two")
 +    expect(moves).not.toContain("Model One")
 +  } finally {
@@ -846,8 +974,9 @@ index 000000000..e551eb55f
 +})
 +
 +test("dialog select keeps current fallback for unkeyed object values", async () => {
++  await using tmp = await tmpdir()
 +  const app = await mountHarness({
-+    // #279：current 同为无 key 对象，回退路径两端一致
++    root: tmp.path,
 +    current: { id: "two", label: "Model Two" },
 +    options: [
 +      { title: "Model One", value: { id: "one", label: "Model One" } },
@@ -858,10 +987,9 @@ index 000000000..e551eb55f
 +  try {
 +    const line = (await waitForFrame(app.app, "Model Two")).split("\n").find((item) => item.includes("Model Two")) ?? ""
 +
-+    // #279：无 key 的对象 value 仍走深比较回退，兼容既有无 key 调用方
++    // 未提供 key 的对象仍按原有深比较语义匹配 current。
 +    expect(line).toContain("●")
 +  } finally {
-+    // #279：destroy 释放渲染器句柄，避免残留进程拖慢后续用例
 +    app.cleanup()
 +  }
 +})

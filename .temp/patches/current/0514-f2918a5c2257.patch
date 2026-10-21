@@ -1853,7 +1853,7 @@ index d3e7d46cc..52e555de7 100644
 +- Indent/tab differences and escape artifacts still fail; re-read and copy exact text.
 +- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context to make it unique or set `replaceAll` on that edit item.
 +- Use `replaceAll` on an edit item to rename a string across the file.
-+- Create/overwrite: single edit with empty `oldString` only (raw empty string). Whitespace-only oldString is not create and will fail.
++- Create a new file with a single edit whose `oldString` is empty (raw empty string). Existing files require a non-empty match or the Write tool; whitespace-only oldString is not create and will fail.
 +- If both `edits` and legacy top-level `oldString`/`newString` are sent, `edits` wins when non-empty.
 +- Successful normalized matches may rewrite the recorded `oldString` in tool history to the actual file text that was replaced.
 
@@ -1939,7 +1939,7 @@ index 11be770ce..d0f2f59fb 100644
  // [local-smark] elapsedMs 由 server 在终态时写入，覆盖工具 metadata 中的同名键，
  // 防止外部伪造。只有 Number.isFinite 且非负的值才写入；旧记录无此字段则不追加
  export function interruptedToolMetadata(metadata: Record<string, unknown> | undefined, elapsedMs?: number): Record<string, unknown> {
-@@ -268,14 +299,12 @@ const layer = Layer.effect(
+@@ -294,24 +325,22 @@ const layer = Layer.effect(
            ...match.part,
            state: {
              status: "completed",
@@ -1957,12 +1957,7 @@ index 11be770ce..d0f2f59fb 100644
 +              match.part.state.input as Record<string, unknown>,
 +              output.metadata as Record<string, unknown> | undefined,
 +            ),
-             // [local-smark] 所有工具 ≥120s 完成时追加中性耗时 Notice：completeToolCall
-             // 是全部工具类型（local/MCP/Task/bash）唯一完成汇聚点。shell 的 outcome
-             // Notice 由 formatShellExecutionNotice 单点承载（单一 outcome 不变量），
-@@ -288,9 +317,9 @@ const layer = Layer.effect(
-                   return longNotice ? `${output.output}\n\n${longNotice}` : output.output
-                 })(),
+             output: output.output,
              // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
 -            // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
 +            // #514：strip 真值临时字段（_formattedContent/_syncInput），避免进持久化 metadata
@@ -1972,6 +1967,11 @@ index 11be770ce..d0f2f59fb 100644
                return match.part.state.metadata?.autoReview
                  ? { ...rest, autoReview: match.part.state.metadata.autoReview }
                  : rest
+             })(),
+             title: output.title,
+             time: { start: match.part.state.time.start, end: Date.now() },
+             attachments: output.attachments,
+           },
 
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index ed2e0caeb..beb7585eb 100644

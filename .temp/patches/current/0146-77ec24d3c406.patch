@@ -9,19 +9,15 @@ diff --git a/package.json b/package.json
 index 3c36b2255a..7430f2d9f8 100644
 --- a/package.json
 +++ b/package.json
-@@ -136,10 +136,15 @@
+@@ -136,10 +136,11 @@
      "electron"
    ],
    "overrides": {
      "@ai-sdk/anthropic": "3.0.111",
-+    // #146：OpenTUI 运行时必须经 catalog 钉死，禁止嵌套依赖漂移
      "@opentui/core": "catalog:",
-+    // #146：keymap 与 core 同批 catalog（tip 更强覆盖，保留）
      "@opentui/keymap": "catalog:",
-+    // #146：solid 与 core 同批 catalog，保证 TUI 渲染栈版本一致
      "@opentui/solid": "catalog:",
-+    // #146：spinner 同步 catalog，避免与 core 版本分叉
 +    "opentui-spinner": "catalog:",
      "@types/bun": "catalog:",
      "@types/node": "catalog:",
-     // #102：钉死 poe-oauth 0.0.6，避免 * 解析到不兼容次版本
+     "poe-oauth": "0.0.6"

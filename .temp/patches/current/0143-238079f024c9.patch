@@ -221,6 +221,54 @@ index d792279560..0a93139e34 100644
          path: SessionPath.relative(project.data.instance.path.worktree, project.data.instance.path.directory),
        }
      }
+@@ -202,12 +204,41 @@ export const {
+       const query = { start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() }
+       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
+       const projectID = project.project()
+-      const directory = project.instance.directory()
+-      // 对齐 listByProject：空 path 是整个项目，非空 path 含子目录及同目录的旧 pathless 行。
+-      const matches = (info: Session) =>
+-        info.projectID === projectID &&
+-        (!query.path || info.path === query.path || info.path?.startsWith(`${query.path}/`) ||
+-          (info.path === undefined && info.directory === directory))
++      const directory = query.directory
++      const worktree = project.data.instance.path.worktree
++      // #143：接收合并也遵循服务端的祖先、子孙、global 与 directory OR，包含已定义的空 path。
++      const matches = (info: Session) => {
++        if (query.path === undefined) return info.projectID === projectID
++        const nullPath = info.path === undefined && directory !== undefined && info.directory === directory
++        const projectPath = SessionPath.aliases({
++          path: query.path,
++          directory,
++          global: projectID === "global",
++        }).some((item) => {
++          const prefix = item.replace(/\/+$/, "")
++          return info.path !== undefined && (SessionPath.ancestors(item, { root: true }).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
++        })
++        if (info.projectID === projectID && (projectPath || nullPath)) return true
++        if (!directory) return false
++        const left = SessionPath.relative(worktree, directory)
++        const right = query.path.replaceAll("\\", "/")
++        if (process.platform === "win32" ? left.toLowerCase() !== right.toLowerCase() : left !== right) return false
++        // #143：仅 directory/path 同源时启用跨项目分支；不把所有触碰行盲目并入列表。
++        const globalPath = SessionPath.aliases({
++          path: SessionPath.relative("/", directory),
++          directory,
++          global: true,
++        }).some((item) => {
++          const prefix = item.replace(/\/+$/, "")
++          return info.path !== undefined && (SessionPath.ancestors(item).includes(info.path) || info.path.startsWith(prefix ? `${prefix}/` : ""))
++        })
++        if (info.projectID === "global" && (globalPath || nullPath)) return true
++        const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
++        const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
++        const comparable = info.directory.replaceAll("\\", "/")
++        const current = process.platform === "win32" ? comparable.toLowerCase() : comparable
++        return SessionPath.ancestors(value).includes(current) || current.startsWith(value ? `${value}/` : "")
++      }
+       return sdk.client.session
+         .list(query)
+         .then((x) => {
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
 index 354a578b23..3707828d49 100644
 --- a/packages/opencode/test/server/session-list.test.ts
@@ -334,3 +382,58 @@ index 354a578b23..3707828d49 100644
 +  ])
 +  expect(SessionPath.ancestors("F:/A/B/C")).toEqual(["F:", "F:/", "F:/A", "F:/A/B", "F:/A/B/C"])
  })
+diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+@@ -1,5 +1,7 @@
+ /** @jsxImportSource @opentui/solid */
+ import { expect, test } from "bun:test"
++import { SessionPath } from "@opencode-ai/core/session/path"
++import path from "path"
+ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
+ import { tmpdir } from "../../../fixture/fixture"
+ import { json, mount, wait } from "./sync-fixture"
+@@ -217,9 +219,18 @@ test.each(["refresh", "bootstrap", "directory"] as const)("live usage and deletion survive stale %s lists", async (mode) => {
+   const foreign = { ...added, id: "ses_live_foreign", projectID: "proj_other" }
+   // 旧 pathless 行依靠请求目录匹配，不能仅靠相对 path 判定遗漏这类合法成员。
+   const pathless = { ...added, id: "ses_live_pathless", path: undefined, directory: "/tmp/opencode/packages/tui" }
++  // #143：旧 HTTP 中已存在且被事件触碰的祖先/global 行，与新补入行共用成员判定。
++  const relatives = [
++    { ...current, id: "ses_live_root", path: "", directory: path.resolve("/tmp/opencode") },
++    { ...current, id: "ses_live_ancestor", path: "packages", directory: path.resolve("/tmp/opencode/packages") },
++    { ...current, id: "ses_live_global", projectID: "global", path: SessionPath.relative("/", "/tmp/opencode"), directory: path.resolve("/tmp/opencode") },
++    { ...current, id: "ses_live_global_alias", projectID: "global", path: SessionPath.relative("/", "/tmp/opencode").replace(/^[A-Za-z]:\//, ""), directory: path.resolve("/tmp/unrelated") },
++    { ...current, id: "ses_live_directory_relative", projectID: "proj_other", path: undefined, directory: path.resolve("/tmp/opencode/packages") },
++  ].map((info) => ({ ...info, time: { created: Date.now(), updated: Date.now() } }))
++  const sibling = { ...added, id: "ses_live_sibling", path: "packages/tui-other", directory: path.resolve("/tmp/unrelated") }
+   let resolveList!: (response: Response) => void
+   const response = new Promise<Response>((resolve) => { resolveList = resolve })
+   let delayed = false
+   let requested = false
+   const { app, emit, sync, kv } = await mount((url) => {
+     if (url.pathname !== "/session") return undefined
+@@ -226,3 +237,3 @@
+     // 初次 mount 正常完成；仅把被测 refresh/bootstrap 的列表 HTTP 延迟。
+-    if (!delayed) return json([old, deleted, excluded])
++    if (!delayed) return json([old, deleted, excluded, ...relatives.map((info) => ({ ...info, tokens: old.tokens }))])
+     requested = true
+@@ -239,3 +250,3 @@
+     emit(global({ id: `evt_${mode}_deleted`, type: "session.deleted", properties: { sessionID: deleted.id, info: deleted } }))
+-    for (const info of [added, outside, foreign, pathless])
++    for (const info of [added, outside, foreign, pathless, ...relatives, sibling])
+       emit(global({ id: `evt_${mode}_${info.id}`, type: "session.updated", properties: { sessionID: info.id, info } }))
+@@ -249,3 +260,3 @@
+     // 接收时切换偏好不改变已发出请求的筛选；否则迟到结果会按另一个查询解释。
+     kv.set("session_directory_filter_enabled", mode !== "directory")
+-    resolveList(json([old, deleted, marker]))
++    resolveList(json([old, deleted, marker, ...relatives.map((info) => ({ ...info, tokens: old.tokens })), sibling]))
+@@ -262,5 +273,8 @@
+     expect(sync.session.get(pathless.id)?.tokens).toEqual(current.tokens)
+-    // 全局事件不会替列表做 project/path 筛选，跨项目和移出的行必须在接收处排除。
++    // #143：项目模式保留兄弟目录，目录模式排除无关分支；全局事件本身不是成员证明。
+     expect(sync.session.get(foreign.id)).toBeUndefined()
+     expect(!!sync.session.get(outside.id)).toBe(mode !== "directory")
++    for (const info of relatives)
++      expect(sync.session.get(info.id)?.tokens).toEqual(mode === "directory" || info.projectID === old.projectID ? current.tokens : undefined)
++    expect(sync.session.get(sibling.id)?.tokens).toEqual(mode === "directory" ? undefined : current.tokens)
+     delayed = false

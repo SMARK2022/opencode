@@ -598,11 +598,11 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
  import { useSync } from "../context/sync"
  import { useSDK } from "../context/sdk"
  import { useToast } from "../ui/toast"
--import { createMemo } from "solid-js"
-+import { createMemo, createSignal } from "solid-js"
+-import { createMemo, onMount } from "solid-js"
++import { createMemo, createSignal, onMount } from "solid-js"
  import { useTheme } from "../context/theme"
  import { Locale } from "../util/locale"
- 
+ import { MAX_OBJECTIVE_CHARS } from "@opencode-ai/schema/session-goal"
 @@ -38,7 +38,8 @@ function useGoalApi(sessionID: string) {
    }
  
@@ -625,7 +625,7 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
      } catch {
        toast.show({ message: "Failed to update goal", variant: "error" })
      }
-@@ -113,9 +117,27 @@ export function DialogGoalMenu(props: DialogGoalProps) {
+@@ -112,11 +116,29 @@ export function DialogGoalMenu(props: DialogGoalProps) {
    const sync = useSync()
    const { theme } = useTheme()
    const { setGoal, clearGoal } = useGoalApi(props.sessionID)
@@ -650,6 +650,8 @@ diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/compo
 +    setToggleLoading(false)
 +  }
 +
+   // 摘要使用large宽度；header只提供内容槽位，不能替代对话框尺寸。
+   onMount(() => dialog.setSize("large"))
    // header 显示 goal 摘要：wrapMode=none + overflow=hidden + Locale.truncate
    // 保证可预测的行数，不依赖渲染器自动撑开容器
    const goalHeader = createMemo(() => {
@@ -684,7 +686,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
    time: { created: number; updated: number }
  }
  
-@@ -1079,6 +1081,12 @@ export const {
+@@ -1184,7 +1186,13 @@ export const {
            return task
          },
        },
@@ -694,6 +696,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +          setStore("session_goal", sessionID, goal)
 +        },
 +      },
+       sessionStatus: { refresh: refreshStatus },
        bootstrap,
      }
      return result
@@ -718,12 +721,12 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
        tokenBudget: ctx.payload.tokenBudget,
 +      // [local-smark] 透传错误续跑策略到 domain service
 +      continueOnError: ctx.payload.continueOnError,
-     }).pipe(
+     })).pipe(
        // GoalError 的具体原因（空/超长/budget/无goal）透传到 wire 体 data.message，
        // 让 TUI 能展示真实拒绝原因，而非通用 "Failed to update goal"；
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
+--- a/packages/core/src/session/goal.ts
++++ b/packages/core/src/session/goal.ts
 @@ -31,6 +31,8 @@ export interface SetInput {
    status?: Status
    // null = 清除预算；正数 = 设置预算；缺省 = 不改
@@ -763,60 +766,47 @@ diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/sessi
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1,1 +1,4 @@
- import { SessionV1 } from "@opencode-ai/core/v1/session"
-+// [local-smark] 直接从定义 owner 导入 APIError：message-v2 仅导入未 re-export，
-+// 本 index 独立编译不依赖后续 patch 的 re-export
-+import { APIError } from "@opencode-ai/core/v1/session"
-@@ -1470,6 +1470,11 @@ const layer = Layer.effect(
+@@ -1440,6 +1440,9 @@ const layer = Layer.effect(
          // #364：goal 续跑计数器：独立于 step，
          // 防止 step++ 在 continue 路径被跳过导致无限循环
          let goalTurns = 0
-+        // [local-smark] 一次性 terminal-error marker：只在 eligible 错误发生时设置，
-+        // 下一次 iteration 开头消费。不携带错误内容，只保存 assistantID 用于
-+        // provenance 校验。消费后立即清空，防止历史错误在新 iteration 或新
-+        // runLoop 中残留
++        // marker只属于本次loop的eligible错误，下一次迭代消费即清空。
++        // 不持久化错误内容，也不让历史助手错误触发新的续跑。
 +        let pendingTerminalError: { assistantID: string } | undefined
          // [local-smark] nearOverflow 提示：首次达到 85% usable 时注入一次。
          // 当上下文降到 85% 以下时（如模型切换到更大上下文模型）重置标志，
          // 使后续再次达到 85% 时可以重新提示。
-@@ -1499,16 +1507,33 @@ const layer = Layer.effect(
-               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
+@@ -1472,13 +1475,25 @@ const layer = Layer.effect(
              ) ?? false
  
 -          if (
 -            lastAssistant?.finish &&
--            // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
--            // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
--            // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
-+          // [local-smark] 消费一次性 terminal-error marker：只在下一条 iteration 生效，
-+          // 之后立即清空防止历史错误残留。marker 不携带错误内容
+-            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+-            !hasToolCalls &&
+-            lastAssistant.parentID === lastUser.id
+-          ) {
+-            // 错误助手仍走退出分支，不能因跳过整个if而重新进入模型或Goal续跑。
+-            if (lastAssistant.error) break
++          // 消费本轮错误身份；新用户消息不能继承前一个请求的续跑资格。
 +          const terminalError = pendingTerminalError
 +          pendingTerminalError = undefined
-+
-+          // 正常完成路径：assistant 有 finish 且无 error。
-+          // [local-smark] 防御性检查：有 error 的 assistant 不应触发 goal continuation。
-+          // 正常控制流中 error → process 返回 "stop" → loop break，不会到达此处。
-+          // 此检查防止未来控制流变更导致 errored assistant 被误判为可续跑。
 +          const normalCompletion =
 +            lastAssistant?.finish !== undefined &&
-             !lastAssistant.error &&
-             !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
-             !hasToolCalls &&
-             lastAssistant.parentID === lastUser.id
--          ) {
-+
-+          // [local-smark] 错误续跑路径：marker 证明来源是 eligible terminal error，
-+          // 且 latest assistant 仍是对应的 errored message。
-+          // 使用同一个精确 allowlist predicate 重新验证，防止 assistant 被意外修改后误触发
++            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
++            !hasToolCalls &&
++            lastAssistant.parentID === lastUser.id
++          // 相同精确allowlist复核marker指向的助手，其他终止路径仍保持退出。
 +          const errorCompletion =
 +            terminalError !== undefined &&
 +            lastAssistant?.error !== undefined &&
 +            lastAssistant.id === terminalError.assistantID &&
-+            (APIError.isInstance(lastAssistant.error) ||
++            lastAssistant.parentID === lastUser.id &&
++            (SessionV1.APIError.isInstance(lastAssistant.error) ||
 +              NamedError.Unknown.isInstance(lastAssistant.error))
 +
 +          if (normalCompletion || errorCompletion) {
++            // 仅本轮获准错误跳过旧错误退出，不能把一般错误重新送入模型。
++            if (lastAssistant.error && !errorCompletion) break
              const orphan = lastAssistantMsg?.parts.find(
                (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
              )
@@ -832,9 +822,9 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
                  ) {
                    goalTurns++
                    // 注入 synthetic user message 作为续跑 prompt
-@@ -1647,7 +1672,8 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
+@@ -1619,7 +1635,8 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
+               model,
              })
-             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
  
 -          const outcome: "break" | "continue" = yield* Effect.gen(function* () {
 +          // [local-smark] outcome 增加 "terminal-error"：仅 eligible 错误返回此值
@@ -856,7 +846,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 +              const err = handle.message.error
 +              if (
 +                err &&
-+                (APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
++                (SessionV1.APIError.isInstance(err) || NamedError.Unknown.isInstance(err))
 +              ) {
 +                return "terminal-error" as const
 +              }
@@ -865,14 +855,11 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
              // #364：goal token/time 计费：assistant message 完成后，
              // 如果 goal active 则累加本轮 token 消耗和耗时到 goal DB 记录
              if (handle.message.tokens && handle.message.time.completed) {
-@@ -1944,6 +1984,14 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
-             Effect.onInterrupt(() => finalizeInterruptedAssistant),
+@@ -1805,6 +1836,11 @@ const maxGoalTurns = cfg.goal_max_turns ?? 32
+             Effect.ensuring(instruction.clear(handle.message.id)),
            )
            if (outcome === "break") break
-+          // [local-smark] terminal-error：设置一次性 marker 并重新进入 loop。
-+          // 下一次 iteration 的 continuation block 会检查 continueOnError、
-+          // goalTurns、active status 等条件。不满足条件时自然 fall through 到
-+          // break；达到 maxGoalTurns 时按现有逻辑 pause。不在此处重复任何 guard
++          // 下一轮复用active/策略/agent/共享额度检查，不在错误分支重复调度。
 +          if (outcome === "terminal-error") {
 +            pendingTerminalError = { assistantID: handle.message.id }
 +            continue
@@ -880,6 +867,127 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
            continue
          }
  
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -350,6 +350,8 @@ const layer = Layer.effect(
+         withPublication(publisher.publish(event, outputPaths))
+       const startedAt = DateTime.toEpochMillis(yield* DateTime.now)
+       let overflowFailure: ProviderErrorEvent | undefined
++      // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
++      let terminalError = false
+       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
+         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
+         inputEstimate = {
+@@ -377,6 +379,7 @@ const layer = Layer.effect(
+                 overflowFailure = event
+                 return
+               }
++              terminalError = !isContextOverflowFailure(event)
+             }
+             yield* publish(event)
+             if (event.type !== "tool-call" || event.providerExecuted) return
+@@ -502,10 +505,15 @@ const layer = Layer.effect(
+           if (settled._tag === "Failure" && isUserDeclined(settled.cause)) return yield* Effect.interrupt
++          // typed鉴权/路由/格式/策略错误不等同于source的API/Unknown错误。
++          // 只在本轮结算后读取显式策略，原始中断和未授权错误继续传播同一cause。
++          const eligibleFailure = stream._tag === "Failure" && !Cause.hasInterrupts(stream.cause) && llmFailure && !isContextOverflowFailure(llmFailure) && !["Authentication", "NoRoute", "InvalidProviderOutput", "ContentPolicy"].includes(llmFailure.reason._tag)
++          const goal = (stream._tag === "Success" && terminalError) || eligibleFailure ? yield* goals.get(session.id) : Option.none()
++          const continueAfterError = Option.isSome(goal) && goal.value.status === "active" && goal.value.continueOnError
+           if (stream._tag === "Failure") {
+             // LLMError 已按上游 hosted-only 清理；其他 cause 才补清理，保留本地 raw partial。
+             if (!llmFailure) yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", false, true))
+             if (publisher.hasAssistantStarted() && !Cause.hasInterrupts(stream.cause))
+               yield* withPublication(publisher.failAssistant(String(Cause.squash(stream.cause)), false, true))
+-            return yield* Effect.failCause(stream.cause)
++            if (!continueAfterError) return yield* Effect.failCause(stream.cause)
+           }
+           if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
+             return yield* Effect.failCause(settled.cause)
+@@ -518,14 +526,14 @@ const layer = Layer.effect(
+               Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
+             )
+           }
+-          if (publisher.hasActiveAssistant() && !stepSettlement) {
++          if (!continueAfterError && publisher.hasActiveAssistant() && !stepSettlement) {
+             // 无内容 turn 的 Started 可迟于 step-finish；结算快照存在时不能按 active 误报 EOF。
+             yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))
+             // 只补消息和账本终态；raw EOF 的成功返回及原 continuation 契约保持。
+           }
+           return {
+-            needsContinuation: !publisher.hasProviderError() && needsContinuation,
+-            canContinueGoal: !!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown"),
++            needsContinuation: !continueAfterError && !publisher.hasProviderError() && needsContinuation,
++            canContinueGoal: continueAfterError || (!!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown")),
+             step: currentStep,
+           }
+         }),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -7,6 +7,7 @@ import {
+   LLMEvent,
+   Model,
+   TransportReason,
++  AuthenticationReason,
+   InvalidRequestReason,
+   type LLMClientShape,
+   type LLMRequest,
+@@ -735,6 +736,54 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+   }),
+ )
+ 
++goalTests.effect("gates native terminal error continuation and preserves typed authentication failure", () =>
++  Effect.gen(function* () {
++    yield* setup
++    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0; responses = undefined; responseStream = undefined; streamFailure = undefined }))
++    const session = yield* SessionV2.Service
++    const runner = yield* SessionRunner.Service
++    const goals = yield* SessionGoal.Service
++    const normal = [
++      LLMEvent.stepStart({ index: 0 }),
++      LLMEvent.stepFinish({ index: 0, reason: "stop" }),
++      LLMEvent.finish({ reason: "stop" }),
++    ]
++    for (const kind of ["raw", "event"] as const) {
++      for (const enabled of [false, true]) {
++        const id = SessionV2.ID.make(`ses_goal_error_${kind}_${enabled}`)
++        yield* insertSession(id)
++        yield* goals.set(id, { objective: "Complete the requested task", continueOnError: enabled })
++        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Start" }), resume: false })
++        requests.length = 0
++        responses = [normal, normal]
++        responseStream = kind === "raw"
++          ? Stream.fail(providerUnavailable())
++          : Stream.fromIterable([LLMEvent.providerError({ message: "Provider unavailable" })])
++        const exit = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit)
++        // raw失败默认保留typed cause；显式开启后，错误与正常轮次共用两次续跑额度。
++        expect(Exit.isFailure(exit)).toBe(kind === "raw" && !enabled)
++        expect(requests).toHaveLength(enabled ? 3 : 1)
++        expect(Option.getOrThrow(yield* goals.get(id)).status).toBe(enabled ? "paused" : "active")
++        if (enabled) {
++          // 新回合只携带标准Goal提示，不把错误内容变成新的用户指令。
++          expect(userTexts(requests[1]!).at(-1)).toContain("<session-goal-continuation>")
++          expect(userTexts(requests[1]!).at(-1)).not.toContain("Provider unavailable")
++        }
++      }
++    }
++    // 鉴权错误即使开启策略也不进入API/Unknown续跑集合。
++    const id = SessionV2.ID.make("ses_goal_error_auth")
++    yield* insertSession(id)
++    yield* goals.set(id, { objective: "Complete the task", continueOnError: true })
++    yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Start" }), resume: false })
++    requests.length = 0
++    responseStream = Stream.fail(new LLMError({ module: "test", method: "stream", reason: new AuthenticationReason({ message: "Invalid credentials", kind: "invalid" }) }))
++    expect((yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit))._tag).toBe("Failure")
++    expect(requests).toHaveLength(1)
++    expect(Option.getOrThrow(yield* goals.get(id)).status).toBe("active")
++  }),
++)
++
+ it.effect("defaults native goal continuation to 32 and resets the allowance on a new drain", () =>
+   Effect.gen(function* () {
+     yield* setup
 diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
 --- a/packages/opencode/test/server/httpapi-goal.test.ts
 +++ b/packages/opencode/test/server/httpapi-goal.test.ts
@@ -1093,7 +1201,7 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3768,4 +3768,83 @@ it.instance(
+@@ -3768,4 +3768,97 @@ it.instance(
    30_000,
  )
  
@@ -1128,6 +1236,20 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +          ),
 +      )
 +      expect(continuations.length).toBe(0)
++
++      // 非空且可见的历史错误仍走0398守卫，不把零输出修复行为混入本回归。
++      const last = msgs.findLast((message) => message.info.role === "assistant")?.info
++      if (last?.role !== "assistant") throw new Error("expected failed assistant")
++      const historical = { ...last, id: MessageID.ascending(), finish: "stop", hidden: undefined, time: { created: Date.now(), completed: Date.now() } }
++      yield* sessions.updateMessage(historical)
++      yield* sessions.updatePart({ id: PartID.ascending(), sessionID: chat.id, messageID: historical.id, type: "text", text: "partial provider output" })
++      const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: historical.id })
++      expect(stored.info).toMatchObject({ finish: "stop", error: expect.anything() })
++      expect(stored.info.hidden).toBeUndefined()
++      yield* llm.error(400, { error: { message: "unexpected historical retry" } })
++      const calls = yield* llm.calls
++      yield* prompt.loop({ sessionID: chat.id })
++      expect(yield* llm.calls).toBe(calls)
 +    }),
 +  { git: true },
 +  30_000,
@@ -1177,58 +1299,63 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +)
 +
  
-diff --git a/packages/opencode/test/storage/goal-migration.test.ts b/packages/opencode/test/storage/goal-migration.test.ts
+diff --git a/packages/core/test/database-goal-migration.test.ts b/packages/core/test/database-goal-migration.test.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/test/storage/goal-migration.test.ts
-@@ -0,0 +1,49 @@
++++ b/packages/core/test/database-goal-migration.test.ts
+@@ -0,0 +1,54 @@
 +import { describe, expect, test } from "bun:test"
-+import { Database } from "bun:sqlite"
++import { SqliteClient } from "@effect/sql-sqlite-bun"
++import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
++import { Effect } from "effect"
++import { sql } from "drizzle-orm"
++import type { SqlClient } from "effect/unstable/sql/SqlClient"
++import { DatabaseMigration } from "@opencode-ai/core/database/migration"
++import { migrations } from "@opencode-ai/core/database/migration.gen"
++import goalMigration from "@opencode-ai/core/database/migration/20260726100000_session_goal"
++import continueMigration from "@opencode-ai/core/database/migration/20260812100000_goal_continue_on_error"
++import { SessionGoalTable } from "@opencode-ai/core/session/goal.sql"
 +
-+// [local-smark] goal_continue_on_error 迁移兼容性测试
-+// 验证旧 session_goal 行在添加 continue_on_error 列后：
-+// 1. 迁移不抛错 2. 新列默认 false 3. 原有字段不变。
-+// 目标架构：core 使用 TS migration（migration.gen），无 drizzle sql 目录，
-+// 因此这里直接复现 20260726100000 建表 + 20260812100000 ALTER 的组合语义
++// 两次独立内存连接分别验证升级与新库，不能复制SQL自证或触碰全局数据库。
++const run = (body: Effect.Effect<void, unknown, SqlClient>) =>
++  Effect.runPromise(body.pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Effect.scoped))
++
 +describe("goal continue_on_error migration", () => {
-+  test("migrates existing session_goal rows with default false", () => {
-+    const sqlite = new Database(":memory:")
-+    // 建表（等价 20260726100000_session_goal 的 CREATE TABLE）
-+    sqlite.run(`CREATE TABLE \`session_goal\` (
-+      \`session_id\` text PRIMARY KEY,
-+      \`id\` text NOT NULL,
-+      \`objective\` text NOT NULL,
-+      \`status\` text NOT NULL,
-+      \`token_budget\` integer,
-+      \`tokens_used\` integer DEFAULT 0 NOT NULL,
-+      \`time_used_seconds\` integer DEFAULT 0 NOT NULL,
-+      \`time_created\` integer NOT NULL,
-+      \`time_updated\` integer NOT NULL
-+    )`)
-+    // 插入旧结构行（无 continue_on_error 列）
-+    sqlite.run(
-+      "INSERT INTO session_goal (session_id, id, objective, status, token_budget, tokens_used, time_used_seconds, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-+      ["ses_test", "goal_1", "test objective", "active", 50000, 1000, 30, 1, 1],
++  test("runs real upgrade and fresh initialization while preserving goal data", async () => {
++    await run(
++      Effect.gen(function* () {
++        const db = yield* EffectDrizzleSqlite.makeWithDefaults()
++        // 仅提供真实Goal建表迁移所需的父表，其余结构由生产工件创建。
++        yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY)`)
++        yield* db.run(sql`INSERT INTO session (id) VALUES ('ses_test')`)
++        yield* db.transaction(goalMigration.up)
++        yield* db.run(sql`INSERT INTO session_goal (session_id, id, objective, status, token_budget, tokens_used, time_used_seconds, time_created, time_updated) VALUES ('ses_test', 'goal_1', 'test objective', 'active', 50000, 1000, 30, 1, 1)`)
++        // journal与ALTER都走实际迁移owner，旧行默认关闭且所有原字段保持。
++        yield* DatabaseMigration.applyOnly(db, [continueMigration])
++        expect(yield* db.get(sql`SELECT * FROM session_goal WHERE session_id = 'ses_test'`)).toEqual({
++          session_id: "ses_test", id: "goal_1", objective: "test objective", status: "active",
++          token_budget: 50000, tokens_used: 1000, time_used_seconds: 30, time_created: 1, time_updated: 1,
++          continue_on_error: 0,
++        })
++        expect(migrations).toContain(continueMigration)
++        yield* db.run(sql`UPDATE session_goal SET continue_on_error = 1 WHERE session_id = 'ses_test'`)
++        yield* DatabaseMigration.applyOnly(db, [continueMigration])
++        // 重复初始化不重放ALTER或重置值，真实Drizzle列按boolean解码。
++        expect((yield* db.select().from(SessionGoalTable).get())?.continue_on_error).toBe(true)
++        expect(yield* db.all(sql`SELECT id FROM migration`)).toEqual([{ id: continueMigration.id }])
++      }),
 +    )
-+
-+    // 应用新 migration（20260812100000_goal_continue_on_error 的 ALTER）
-+    expect(() =>
-+      sqlite.run(`ALTER TABLE \`session_goal\` ADD \`continue_on_error\` integer DEFAULT false NOT NULL`),
-+    ).not.toThrow()
-+
-+    // 验证新列默认 false（SQLite boolean: 0 = false）
-+    const row = sqlite.query("SELECT * FROM session_goal WHERE session_id = ?").get("ses_test") as any
-+    expect(row.continue_on_error).toBe(0)
-+
-+    // 验证原有字段不变
-+    expect(row.id).toBe("goal_1")
-+    expect(row.objective).toBe("test objective")
-+    expect(row.status).toBe("active")
-+    expect(row.token_budget).toBe(50000)
-+    expect(row.tokens_used).toBe(1000)
-+    expect(row.time_used_seconds).toBe(30)
-+    expect(row.time_created).toBe(1)
-+    expect(row.time_updated).toBe(1)
++    await run(
++      Effect.gen(function* () {
++        const db = yield* EffectDrizzleSqlite.makeWithDefaults()
++        // 新库使用fresh schema并登记迁移，不执行ALTER；两条路径必须得到同一列。
++        yield* DatabaseMigration.apply(db)
++        const columns = yield* db.all<{ name: string; notnull: number; dflt_value: string }>(sql`PRAGMA table_info(session_goal)`)
++        expect(columns.find((column) => column.name === "continue_on_error")).toMatchObject({ notnull: 1, dflt_value: "false" })
++        yield* DatabaseMigration.apply(db)
++        expect(yield* db.all(sql`SELECT id FROM migration WHERE id = ${continueMigration.id}`)).toEqual([{ id: continueMigration.id }])
++      }),
++    )
 +  })
 +})
 diff --git a/packages/schema/src/session-goal.ts b/packages/schema/src/session-goal.ts
@@ -1285,6 +1412,1427 @@ diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/dat
 +    import("./migration/20260812100000_goal_continue_on_error"),
    ])
  ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -143,7 +143,7 @@ export type AgentsListOutput = {
+     readonly permissions: ReadonlyArray<{
+       readonly action: string
+       readonly resource: string
+-      readonly effect: "allow" | "deny" | "ask"
++      readonly effect: "allow" | "deny" | "ask" | "auto"
+     }>
+   }>
+ }
+@@ -268,6 +268,15 @@ export type SessionsListOutput = {
+             readonly attachments: number
+             readonly total: number
+           }
++          readonly media?: {
++            readonly rawChars: number
++            readonly textChars: number
++            readonly tokens: number
++            readonly count: number
++            readonly imageTokens: number
++            readonly pdfTokens: number
++            readonly otherTokens: number
++          }
+         }
+         readonly afterPartID?: string
+         readonly contextLimit?: number
+@@ -365,6 +374,15 @@ export type SessionsCreateOutput = {
+             readonly attachments: number
+             readonly total: number
+           }
++          readonly media?: {
++            readonly rawChars: number
++            readonly textChars: number
++            readonly tokens: number
++            readonly count: number
++            readonly imageTokens: number
++            readonly pdfTokens: number
++            readonly otherTokens: number
++          }
+         }
+         readonly afterPartID?: string
+         readonly contextLimit?: number
+@@ -438,6 +456,15 @@ export type SessionsGetOutput = {
+             readonly attachments: number
+             readonly total: number
+           }
++          readonly media?: {
++            readonly rawChars: number
++            readonly textChars: number
++            readonly tokens: number
++            readonly count: number
++            readonly imageTokens: number
++            readonly pdfTokens: number
++            readonly otherTokens: number
++          }
+         }
+         readonly afterPartID?: string
+         readonly contextLimit?: number
+@@ -711,6 +738,15 @@ export type SessionsContextOutput = {
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -963,6 +999,15 @@ export type SessionsHistoryOutput = {
+                 readonly attachments: number
+                 readonly total: number
+               }
++              readonly media?: {
++                readonly rawChars: number
++                readonly textChars: number
++                readonly tokens: number
++                readonly count: number
++                readonly imageTokens: number
++                readonly pdfTokens: number
++                readonly otherTokens: number
++              }
+             }
+             readonly afterPartID?: string
+             readonly contextLimit?: number
+@@ -1053,6 +1098,15 @@ export type SessionsHistoryOutput = {
+                 readonly attachments: number
+                 readonly total: number
+               }
++              readonly media?: {
++                readonly rawChars: number
++                readonly textChars: number
++                readonly tokens: number
++                readonly count: number
++                readonly imageTokens: number
++                readonly pdfTokens: number
++                readonly otherTokens: number
++              }
+             }
+             readonly afterPartID?: string
+             readonly contextLimit?: number
+@@ -1544,6 +1598,15 @@ export type SessionsEventsOutput =
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -1634,6 +1697,15 @@ export type SessionsEventsOutput =
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -2058,6 +2130,15 @@ export type SessionsMessageOutput = {
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -2253,6 +2334,15 @@ export type MessagesListOutput = {
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+diff --git a/packages/sdk/js/src/v2/gen/sdk.gen.ts b/packages/sdk/js/src/v2/gen/sdk.gen.ts
+--- a/packages/sdk/js/src/v2/gen/sdk.gen.ts
++++ b/packages/sdk/js/src/v2/gen/sdk.gen.ts
+@@ -193,6 +193,12 @@ import type {
+   SessionForkResponses,
+   SessionGetErrors,
+   SessionGetResponses,
++  SessionGoalClearErrors,
++  SessionGoalClearResponses,
++  SessionGoalErrors,
++  SessionGoalResponses,
++  SessionGoalSetErrors,
++  SessionGoalSetResponses,
+   SessionInitErrors,
+   SessionInitResponses,
+   SessionListErrors,
+@@ -201,6 +207,8 @@ import type {
+   SessionMessageResponses,
+   SessionMessagesErrors,
+   SessionMessagesResponses,
++  SessionPreviewErrors,
++  SessionPreviewResponses,
+   SessionPromptAsyncErrors,
+   SessionPromptAsyncResponses,
+   SessionPromptErrors,
+@@ -261,6 +269,8 @@ import type {
+   TuiOpenSessionsResponses,
+   TuiOpenThemesErrors,
+   TuiOpenThemesResponses,
++  TuiProviderEndpointStatusErrors,
++  TuiProviderEndpointStatusResponses,
+   TuiPublishErrors,
+   TuiPublishResponses,
+   TuiSelectSessionErrors,
+@@ -3375,7 +3385,7 @@ export class RequestUsage extends HeyApiClient {
+       directory?: string
+       workspace?: string
+       limit?: string
+-      before?: string
++      before?: number
+       rootRequestID?: string
+       source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+     },
+@@ -3481,6 +3491,85 @@ export class RequestUsage extends HeyApiClient {
+   }
+ }
+ 
++export class Goal extends HeyApiClient {
++  /**
++   * Clear session goal
++   *
++   * Clear the persistent goal for a session.
++   */
++  public clear<ThrowOnError extends boolean = false>(
++    parameters: {
++      sessionID: string
++      directory?: string
++      workspace?: string
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "path", key: "sessionID" },
++            { in: "query", key: "directory" },
++            { in: "query", key: "workspace" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).delete<SessionGoalClearResponses, SessionGoalClearErrors, ThrowOnError>({
++      url: "/session/{sessionID}/goal",
++      ...options,
++      ...params,
++    })
++  }
++
++  /**
++   * Set session goal
++   *
++   * Create or update the persistent goal for a session. If objective is omitted, only status/budget are updated.
++   */
++  public set<ThrowOnError extends boolean = false>(
++    parameters: {
++      sessionID: string
++      directory?: string
++      workspace?: string
++      objective?: string
++      status?: "active" | "paused" | "complete" | "blocked"
++      tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++      continueOnError?: boolean
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "path", key: "sessionID" },
++            { in: "query", key: "directory" },
++            { in: "query", key: "workspace" },
++            { in: "body", key: "objective" },
++            { in: "body", key: "status" },
++            { in: "body", key: "tokenBudget" },
++            { in: "body", key: "continueOnError" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).post<SessionGoalSetResponses, SessionGoalSetErrors, ThrowOnError>({
++      url: "/session/{sessionID}/goal",
++      ...options,
++      ...params,
++      headers: {
++        "Content-Type": "application/json",
++        ...options?.headers,
++        ...params.headers,
++      },
++    })
++  }
++}
++
+ export class Session2 extends HeyApiClient {
+   /**
+    * List sessions
+@@ -4448,10 +4537,86 @@ export class Session2 extends HeyApiClient {
+     })
+   }
+ 
++  /**
++   * Get session goal
++   *
++   * Retrieve the current persistent goal for a session.
++   */
++  public goal<ThrowOnError extends boolean = false>(
++    parameters: {
++      sessionID: string
++      directory?: string
++      workspace?: string
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "path", key: "sessionID" },
++            { in: "query", key: "directory" },
++            { in: "query", key: "workspace" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).get<SessionGoalResponses, SessionGoalErrors, ThrowOnError>({
++      url: "/session/{sessionID}/goal",
++      ...options,
++      ...params,
++    })
++  }
++
++  /**
++   * Batch session preview
++   *
++   * Retrieve the most recent user message text for multiple sessions in a single request.
++   */
++  public preview<ThrowOnError extends boolean = false>(
++    parameters?: {
++      directory?: string
++      workspace?: string
++      sessionIDs?: Array<string>
++      limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "query", key: "directory" },
++            { in: "query", key: "workspace" },
++            { in: "body", key: "sessionIDs" },
++            { in: "body", key: "limit" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).post<SessionPreviewResponses, SessionPreviewErrors, ThrowOnError>({
++      url: "/session/preview",
++      ...options,
++      ...params,
++      headers: {
++        "Content-Type": "application/json",
++        ...options?.headers,
++        ...params.headers,
++      },
++    })
++  }
++
+   private _requestUsage?: RequestUsage
+   get requestUsage(): RequestUsage {
+     return (this._requestUsage ??= new RequestUsage({ client: this.client }))
+   }
++
++  private _goal?: Goal
++  get goal2(): Goal {
++    return (this._goal ??= new Goal({ client: this.client }))
++  }
+ }
+ 
+ export class Part extends HeyApiClient {
+@@ -5142,6 +5307,42 @@ export class Tui extends HeyApiClient {
+     })
+   }
+ 
++  /**
++   * Get provider endpoint status
++   *
++   * Return daemon-owned proxy route and latency for a provider endpoint origin.
++   */
++  public providerEndpointStatus<ThrowOnError extends boolean = false>(
++    parameters: {
++      directory?: string
++      workspace?: string
++      url: string
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "query", key: "directory" },
++            { in: "query", key: "workspace" },
++            { in: "query", key: "url" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).get<
++      TuiProviderEndpointStatusResponses,
++      TuiProviderEndpointStatusErrors,
++      ThrowOnError
++    >({
++      url: "/tui/provider-endpoint-status",
++      ...options,
++      ...params,
++    })
++  }
++
+   private _control?: Control
+   get control(): Control {
+     return (this._control ??= new Control({ client: this.client }))
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -72,9 +72,15 @@ export type Event =
+   | EventQuestionV2Replied
+   | EventQuestionV2Rejected
+   | EventTodoUpdated
++  | EventSessionGoalUpdated
++  | EventSessionGoalCleared
+   | EventLspUpdated
+   | EventPermissionAsked
+   | EventPermissionReplied
++  | EventPermissionReviewStarted
++  | EventPermissionReviewCompleted
++  | EventPermissionReviewFailed
++  | EventPermissionReviewCircuitBroken
+   | EventTuiPromptAppend2
+   | EventTuiCommandExecute2
+   | EventTuiToastShow2
+@@ -244,6 +250,10 @@ export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
+ export type UserMessage = {
+   id: string
+   sessionID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   role: "user"
+   time: {
+     created: number
+@@ -338,6 +348,10 @@ export type ApiError = {
+ export type AssistantMessage = {
+   id: string
+   sessionID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   role: "assistant"
+   time: {
+     created: number
+@@ -385,6 +399,10 @@ export type TextPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "text"
+   text: string
+   synthetic?: boolean
+@@ -402,6 +420,10 @@ export type SubtaskPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "subtask"
+   prompt: string
+   description: string
+@@ -417,6 +439,10 @@ export type ReasoningPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "reasoning"
+   text: string
+   metadata?: {
+@@ -473,6 +499,10 @@ export type FilePart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "file"
+   mime: string
+   filename?: string
+@@ -541,6 +571,10 @@ export type ToolPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "tool"
+   callID: string
+   tool: string
+@@ -554,14 +588,25 @@ export type StepStartPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "step-start"
+   snapshot?: string
++  inputChars?: number
++  inputTokens?: number
++  inputBreakdown?: SessionMessageInputBreakdown
+ }
+ 
+ export type StepFinishPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "step-finish"
+   reason: string
+   snapshot?: string
+@@ -584,6 +629,10 @@ export type SnapshotPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "snapshot"
+   snapshot: string
+ }
+@@ -592,6 +641,10 @@ export type PatchPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "patch"
+   hash: string
+   files: Array<string>
+@@ -601,6 +654,10 @@ export type AgentPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "agent"
+   name: string
+   source?: {
+@@ -614,6 +671,10 @@ export type RetryPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "retry"
+   attempt: number
+   error: ApiError
+@@ -626,12 +687,15 @@ export type CompactionPart = {
+   id: string
+   sessionID: string
+   messageID: string
++  hidden?: {
++    time: number
++    reason: "undo" | "repair-empty-dangling-assistant" | "permission-reviewer-protocol-retry" | "compaction-cancelled"
++  }
+   type: "compaction"
+   auto: boolean
+   overflow?: boolean
+   tail_start_id?: string
+   recent_user_messages?: Array<{
+-  // #256：生成文件与 schema 同步——SDK 消费者可类型化读取 memento
+     id: string
+     text: string
+     truncated?: boolean
+@@ -684,6 +748,21 @@ export type Todo = {
+   priority: string
+ }
+ 
++export type SessionGoal = {
++  sessionID: string
++  id: string
++  objective: string
++  status: "active" | "paused" | "complete" | "blocked"
++  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  tokensUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  continueOnError: boolean
++  time: {
++    created: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++    updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  }
++}
++
+ export type SessionStatus =
+   | {
+       type: "idle"
+@@ -1453,6 +1532,21 @@ export type GlobalEvent = {
+           todos: Array<Todo>
+         }
+       }
++    | {
++        id: string
++        type: "session.goal.updated"
++        properties: {
++          sessionID: string
++          goal: SessionGoal
++        }
++      }
++    | {
++        id: string
++        type: "session.goal.cleared"
++        properties: {
++          sessionID: string
++        }
++      }
+     | {
+         id: string
+         type: "lsp.updated"
+@@ -1487,6 +1581,48 @@ export type GlobalEvent = {
+           reply: "once" | "always" | "reject"
+         }
+       }
++    | {
++        id: string
++        type: "permission.review.started"
++        properties: {
++          sessionID: string
++          reviewID: string
++          permission: string
++          patterns: Array<string>
++          precheck: {
++            level: "safe" | "general" | "cautious" | "dangerous"
++            reason: string
++          }
++        }
++      }
++    | {
++        id: string
++        type: "permission.review.completed"
++        properties: {
++          sessionID: string
++          reviewID: string
++          outcome: "allow" | "deny"
++          rationale: string
++        }
++      }
++    | {
++        id: string
++        type: "permission.review.failed"
++        properties: {
++          sessionID: string
++          reviewID: string
++          reason: string
++        }
++      }
++    | {
++        id: string
++        type: "permission.review.circuit_broken"
++        properties: {
++          sessionID: string
++          consecutive: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++          recent: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++        }
++      }
+     | {
+         id: string
+         type: "tui.prompt.append"
+@@ -1684,7 +1820,7 @@ export type GlobalEvent = {
+         id: string
+         type: "global.disposed"
+         properties: {
+-          [key: string]: unknown
++          reason?: string
+         }
+       }
+     | EventServerInstanceDisposed
+@@ -1747,26 +1883,38 @@ export type ServerConfig = {
+ 
+ export type PermissionActionConfig = "ask" | "allow" | "deny" | "auto"
+ 
++export type PermissionObjectConfig = {
++  [key: string]: PermissionActionConfig
++}
++
++export type PermissionRuleConfig = PermissionActionConfig | PermissionObjectConfig
++
+ export type ApprovalsReviewer = "user" | "auto_review"
+ 
+ export type AutoReviewConfig = {
+   model?: string
+-  timeout_ms?: number
++  /**
++   * Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Defaults to 90000.
++   */
++  timeout_ms?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+   policy_path?: string
+   policy?: string
+   fallback?: "deny" | "user"
+   strict?: boolean
+-  max_consecutive_denials?: number
+-  max_recent_denials?: number
+-  recent_denial_window?: number
+-}
+-
+-export type PermissionObjectConfig = {
+-  [key: string]: PermissionActionConfig
++  /**
++   * Circuit breaker consecutive denial threshold.
++   */
++  max_consecutive_denials?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  /**
++   * Circuit breaker recent denial threshold.
++   */
++  max_recent_denials?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  /**
++   * Circuit breaker recent decision window.
++   */
++  recent_denial_window?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+ }
+ 
+-export type PermissionRuleConfig = PermissionActionConfig | PermissionObjectConfig
+-
+ export type PermissionConfig =
+   | PermissionActionConfig
+   | {
+@@ -1787,7 +1935,15 @@ export type PermissionConfig =
+       skill?: PermissionRuleConfig
+       approvals_reviewer?: ApprovalsReviewer
+       auto_review?: AutoReviewConfig
+-      [key: string]: PermissionRuleConfig | PermissionActionConfig | ApprovalsReviewer | AutoReviewConfig | undefined
++      [key: string]:
++        | PermissionRuleConfig
++        | ApprovalsReviewer
++        | AutoReviewConfig
++        | PermissionRuleConfig
++        | PermissionActionConfig
++        | ApprovalsReviewer
++        | AutoReviewConfig
++        | undefined
+     }
+ 
+ export type AgentConfig = {
+@@ -1852,6 +2008,11 @@ export type ProviderConfig = {
+   options?: {
+     apiKey?: string
+     baseURL?: string
++    headers?: {
++      [key: string]: string
++    }
++    "header-ua"?: string
++    version?: string
+     enterpriseUrl?: string
+     setCacheKey?: boolean
+     /**
+@@ -1866,7 +2027,20 @@ export type ProviderConfig = {
+      * Timeout in milliseconds between streamed SSE chunks for this provider. Default is 180000 (3 minutes). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.
+      */
+     chunkTimeout?: number | false
+-    [key: string]: unknown | string | boolean | number | false | number | false | number | false | undefined
++    [key: string]:
++      | unknown
++      | string
++      | {
++          [key: string]: string
++        }
++      | boolean
++      | number
++      | false
++      | number
++      | false
++      | number
++      | false
++      | undefined
+   }
+   models?: {
+     [key: string]: {
+@@ -2124,13 +2298,14 @@ export type Config = {
+      */
+     max_lines?: number
+     /**
+-     * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
++     * Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)
+      */
+     max_bytes?: number
+     /**
+      * Enable Bash output compression before truncation. Defaults to true. When enabled, repeated lines, repeated blocks, progress redraws, and obvious inline repeated patterns may be compacted while preserving the full raw output on disk.
+      */
+     bash_compression?: boolean
++    shell_encoding?: "auto" | "utf-8" | "gb18030" | "utf-16le" | "utf-16be"
+   }
+   compaction?: {
+     auto?: boolean
+@@ -2139,6 +2314,7 @@ export type Config = {
+     preserve_recent_tokens?: number
+     reserved?: number
+   }
++  goal_max_turns?: number
+   experimental?: {
+     disable_paste_summary?: boolean
+     batch_tool?: boolean
+@@ -2669,6 +2845,12 @@ export type NotFoundError = {
+   }
+ }
+ 
++export type SessionBusyError = {
++  _tag: "SessionBusyError"
++  sessionID: string
++  message: string
++}
++
+ export type TextPartInput = {
+   id?: string
+   type: "text"
+@@ -2717,10 +2899,11 @@ export type SubtaskPartInput = {
+   command?: string
+ }
+ 
+-export type SessionBusyError = {
+-  _tag: "SessionBusyError"
+-  sessionID: string
+-  message: string
++export type GoalApiError = {
++  name: "GoalError"
++  data: {
++    message: string
++  }
+ }
+ 
+ export type EventTuiPromptAppend = {
+@@ -2923,6 +3106,21 @@ export type OutputFormat1 =
+       retryCount?: number
+     }
+ 
++export type SessionGoal1 = {
++  sessionID: string
++  id: string
++  objective: string
++  status: "active" | "paused" | "complete" | "blocked"
++  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity"
++  tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
++  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity"
++  continueOnError: boolean
++  time: {
++    created: number | "NaN" | "Infinity" | "-Infinity"
++    updated: number | "NaN" | "Infinity" | "-Infinity"
++  }
++}
++
+ export type SessionStatus2 = {
+   id: string
+   metadata?: {
+@@ -3046,9 +3244,15 @@ export type V2Event =
+   | QuestionV2Replied
+   | QuestionV2Rejected
+   | TodoUpdated
++  | SessionGoalUpdated
++  | SessionGoalCleared
+   | LspUpdated
+   | PermissionAsked
+   | PermissionReplied
++  | PermissionReviewStarted
++  | PermissionReviewCompleted
++  | PermissionReviewFailed
++  | PermissionReviewCircuitBroken
+   | TuiPromptAppend
+   | TuiCommandExecute
+   | TuiToastShow
+@@ -3091,6 +3295,21 @@ export type EffectHttpApiErrorForbidden = {
+   _tag: "Forbidden"
+ }
+ 
++export type SessionGoal2 = {
++  sessionID: string
++  id: string
++  objective: string
++  status: "active" | "paused" | "complete" | "blocked"
++  tokenBudget?: number | "NaN" | "Infinity" | "-Infinity"
++  tokensUsed: number | "NaN" | "Infinity" | "-Infinity"
++  timeUsedSeconds: number | "NaN" | "Infinity" | "-Infinity"
++  continueOnError: boolean
++  time: {
++    created: number | "NaN" | "Infinity" | "-Infinity"
++    updated: number | "NaN" | "Infinity" | "-Infinity"
++  }
++}
++
+ export type EventTuiPromptAppend2 = {
+   id: string
+   type: "tui.prompt.append"
+@@ -3179,6 +3398,15 @@ export type SessionMessageInputBreakdown = {
+     attachments: number
+     total: number
+   }
++  media?: {
++    rawChars: number
++    textChars: number
++    tokens: number
++    count: number
++    imageTokens: number
++    pdfTokens: number
++    otherTokens: number
++  }
+ }
+ 
+ export type SessionMessageInputEstimate = {
+@@ -4154,12 +4382,12 @@ export type ProviderRequest = {
+ 
+ export type AgentColor = string | "primary" | "secondary" | "accent" | "success" | "warning" | "error" | "info"
+ 
+-export type PermissionV2Effect = "allow" | "deny" | "ask"
++export type PermissionRuleEffect = "allow" | "deny" | "ask" | "auto"
+ 
+ export type PermissionV2Rule = {
+   action: string
+   resource: string
+-  effect: PermissionV2Effect | "auto"
++  effect: PermissionRuleEffect
+ }
+ 
+ export type PermissionV2Ruleset = Array<PermissionV2Rule>
+@@ -5389,6 +5617,8 @@ export type PermissionSavedInfo = {
+   resource: string
+ }
+ 
++export type PermissionV2Effect = "allow" | "deny" | "ask"
++
+ export type FileSystemEntry = {
+   path: string
+   type: "file" | "directory"
+@@ -6066,6 +6296,41 @@ export type TodoUpdated = {
+   }
+ }
+ 
++export type SessionGoalUpdated = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "session.goal.updated"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++    goal: SessionGoal1
++  }
++}
++
++export type SessionGoalCleared = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "session.goal.cleared"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++  }
++}
++
+ export type LspUpdated = {
+   id: string
+   metadata?: {
+@@ -6130,6 +6395,88 @@ export type PermissionReplied = {
+   }
+ }
+ 
++export type PermissionReviewStarted = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "permission.review.started"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++    reviewID: string
++    permission: string
++    patterns: Array<string>
++    precheck: {
++      level: "safe" | "general" | "cautious" | "dangerous"
++      reason: string
++    }
++  }
++}
++
++export type PermissionReviewCompleted = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "permission.review.completed"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++    reviewID: string
++    outcome: "allow" | "deny"
++    rationale: string
++  }
++}
++
++export type PermissionReviewFailed = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "permission.review.failed"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++    reviewID: string
++    reason: string
++  }
++}
++
++export type PermissionReviewCircuitBroken = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "permission.review.circuit_broken"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    sessionID: string
++    consecutive: number | "NaN" | "Infinity" | "-Infinity"
++    recent: number | "NaN" | "Infinity" | "-Infinity"
++  }
++}
++
+ export type TuiPromptAppend = {
+   id: string
+   metadata?: {
+@@ -6491,7 +6838,7 @@ export type GlobalDisposed = {
+   }
+   location?: LocationRef
+   data: {
+-    [key: string]: unknown
++    reason?: string
+   }
+ }
+ 
+@@ -7315,6 +7662,23 @@ export type EventTodoUpdated = {
+   }
+ }
+ 
++export type EventSessionGoalUpdated = {
++  id: string
++  type: "session.goal.updated"
++  properties: {
++    sessionID: string
++    goal: SessionGoal2
++  }
++}
++
++export type EventSessionGoalCleared = {
++  id: string
++  type: "session.goal.cleared"
++  properties: {
++    sessionID: string
++  }
++}
++
+ export type EventLspUpdated = {
+   id: string
+   type: "lsp.updated"
+@@ -7352,6 +7716,52 @@ export type EventPermissionReplied = {
+   }
+ }
+ 
++export type EventPermissionReviewStarted = {
++  id: string
++  type: "permission.review.started"
++  properties: {
++    sessionID: string
++    reviewID: string
++    permission: string
++    patterns: Array<string>
++    precheck: {
++      level: "safe" | "general" | "cautious" | "dangerous"
++      reason: string
++    }
++  }
++}
++
++export type EventPermissionReviewCompleted = {
++  id: string
++  type: "permission.review.completed"
++  properties: {
++    sessionID: string
++    reviewID: string
++    outcome: "allow" | "deny"
++    rationale: string
++  }
++}
++
++export type EventPermissionReviewFailed = {
++  id: string
++  type: "permission.review.failed"
++  properties: {
++    sessionID: string
++    reviewID: string
++    reason: string
++  }
++}
++
++export type EventPermissionReviewCircuitBroken = {
++  id: string
++  type: "permission.review.circuit_broken"
++  properties: {
++    sessionID: string
++    consecutive: number | "NaN" | "Infinity" | "-Infinity"
++    recent: number | "NaN" | "Infinity" | "-Infinity"
++  }
++}
++
+ export type EventMcpToolsChanged = {
+   id: string
+   type: "mcp.tools.changed"
+@@ -8369,9 +8779,13 @@ export type FindTextData = {
+ 
+ export type FindTextErrors = {
+   /**
+-   * Bad request
++   * BadRequest | InvalidRequestError
+    */
+-  400: BadRequestError
++  400: EffectHttpApiErrorBadRequest | InvalidRequestError
++  /**
++   * InternalServerError
++   */
++  500: EffectHttpApiErrorInternalServerError
+ }
+ 
+ export type FindTextError = FindTextErrors[keyof FindTextErrors]
+@@ -10592,6 +11006,10 @@ export type SessionSummarizeErrors = {
+    * NotFoundError
+    */
+   404: NotFoundError
++  /**
++   * SessionBusyError
++   */
++  409: SessionBusyError
+ }
+ 
+ export type SessionSummarizeError = SessionSummarizeErrors[keyof SessionSummarizeErrors]
+@@ -10952,7 +11370,7 @@ export type SessionRequestUsageListData = {
+     directory?: string
+     workspace?: string
+     limit?: string
+-    before?: string
++    before?: number
+     rootRequestID?: string
+     source?: "prompt" | "command" | "shell" | "system_compaction" | "system_continue" | "unknown"
+   }
+@@ -11144,6 +11562,152 @@ export type SessionRequestUsageAssistantsResponses = {
+ export type SessionRequestUsageAssistantsResponse =
+   SessionRequestUsageAssistantsResponses[keyof SessionRequestUsageAssistantsResponses]
+ 
++export type SessionGoalClearData = {
++  body?: never
++  path: {
++    sessionID: string
++  }
++  query?: {
++    directory?: string
++    workspace?: string
++  }
++  url: "/session/{sessionID}/goal"
++}
++
++export type SessionGoalClearErrors = {
++  /**
++   * BadRequest | InvalidRequestError
++   */
++  400: EffectHttpApiErrorBadRequest | InvalidRequestError
++  /**
++   * NotFoundError
++   */
++  404: NotFoundError
++}
++
++export type SessionGoalClearError = SessionGoalClearErrors[keyof SessionGoalClearErrors]
++
++export type SessionGoalClearResponses = {
++  /**
++   * Cleared session goal
++   */
++  200: {
++    cleared: boolean
++  }
++}
++
++export type SessionGoalClearResponse = SessionGoalClearResponses[keyof SessionGoalClearResponses]
++
++export type SessionGoalData = {
++  body?: never
++  path: {
++    sessionID: string
++  }
++  query?: {
++    directory?: string
++    workspace?: string
++  }
++  url: "/session/{sessionID}/goal"
++}
++
++export type SessionGoalErrors = {
++  /**
++   * BadRequest | InvalidRequestError
++   */
++  400: EffectHttpApiErrorBadRequest | InvalidRequestError
++  /**
++   * NotFoundError
++   */
++  404: NotFoundError
++}
++
++export type SessionGoalError = SessionGoalErrors[keyof SessionGoalErrors]
++
++export type SessionGoalResponses = {
++  /**
++   * Session goal
++   */
++  200: {
++    goal: SessionGoal
++  }
++}
++
++export type SessionGoalResponse = SessionGoalResponses[keyof SessionGoalResponses]
++
++export type SessionGoalSetData = {
++  body?: {
++    objective?: string
++    status?: "active" | "paused" | "complete" | "blocked"
++    tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++    continueOnError?: boolean
++  }
++  path: {
++    sessionID: string
++  }
++  query?: {
++    directory?: string
++    workspace?: string
++  }
++  url: "/session/{sessionID}/goal"
++}
++
++export type SessionGoalSetErrors = {
++  /**
++   * BadRequest | GoalApiError | InvalidRequestError
++   */
++  400: EffectHttpApiErrorBadRequest | GoalApiError | InvalidRequestError
++  /**
++   * NotFoundError
++   */
++  404: NotFoundError
++}
++
++export type SessionGoalSetError = SessionGoalSetErrors[keyof SessionGoalSetErrors]
++
++export type SessionGoalSetResponses = {
++  /**
++   * Updated session goal
++   */
++  200: {
++    goal: SessionGoal
++  }
++}
++
++export type SessionGoalSetResponse = SessionGoalSetResponses[keyof SessionGoalSetResponses]
++
++export type SessionPreviewData = {
++  body?: {
++    sessionIDs: Array<string>
++    limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  }
++  path?: never
++  query?: {
++    directory?: string
++    workspace?: string
++  }
++  url: "/session/preview"
++}
++
++export type SessionPreviewErrors = {
++  /**
++   * BadRequest | InvalidRequestError
++   */
++  400: EffectHttpApiErrorBadRequest | InvalidRequestError
++}
++
++export type SessionPreviewError = SessionPreviewErrors[keyof SessionPreviewErrors]
++
++export type SessionPreviewResponses = {
++  /**
++   * Session preview lines keyed by session ID
++   */
++  200: {
++    [key: string]: Array<string>
++  }
++}
++
++export type SessionPreviewResponse = SessionPreviewResponses[keyof SessionPreviewResponses]
++
+ export type SyncStartData = {
+   body?: never
+   path?: never
+@@ -11609,6 +12173,45 @@ export type TuiSelectSessionResponses = {
+ 
+ export type TuiSelectSessionResponse = TuiSelectSessionResponses[keyof TuiSelectSessionResponses]
+ 
++export type TuiProviderEndpointStatusData = {
++  body?: never
++  path?: never
++  query: {
++    directory?: string
++    workspace?: string
++    url: string
++  }
++  url: "/tui/provider-endpoint-status"
++}
++
++export type TuiProviderEndpointStatusErrors = {
++  /**
++   * BadRequest | InvalidRequestError
++   */
++  400: EffectHttpApiErrorBadRequest | InvalidRequestError
++}
++
++export type TuiProviderEndpointStatusError = TuiProviderEndpointStatusErrors[keyof TuiProviderEndpointStatusErrors]
++
++export type TuiProviderEndpointStatusResponses = {
++  /**
++   * Provider endpoint route and latency
++   */
++  200: {
++    url: string
++    status: "ok" | "down"
++    latency: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++    route: {
++      type: "direct" | "proxy"
++      reason: string
++    }
++    checkedAt: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  }
++}
++
++export type TuiProviderEndpointStatusResponse =
++  TuiProviderEndpointStatusResponses[keyof TuiProviderEndpointStatusResponses]
++
+ export type TuiControlNextData = {
+   body?: never
+   path?: never
 diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
 --- a/packages/core/src/database/schema.gen.ts
 +++ b/packages/core/src/database/schema.gen.ts

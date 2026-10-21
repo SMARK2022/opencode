@@ -4,6 +4,325 @@ Date: Wed, 15 Jul 2026 01:35:59 +0800
 Subject: [PATCH] fix(tool): preserve unique substring patch matches
 
 
+diff --git a/packages/core/src/patch.ts b/packages/core/src/patch.ts
+--- a/packages/core/src/patch.ts
++++ b/packages/core/src/patch.ts
+@@ -1,3 +1,4 @@
+ export * as Patch from "./patch"
++import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./patch-match"
+ 
+ export type Hunk =
+@@ -71,11 +72,12 @@
+ export function derive(path: string, chunks: ReadonlyArray<UpdateFileChunk>, original: string): FileUpdate {
+   const source = splitBom(original)
+-  const lines = source.text.split("\n")
++  // 匹配使用逻辑LF，写回仍保留原CRLF/CR及BOM；字面恢复不引入纯行尾变更。
++  const ending = source.text.includes("\r\n") ? "\r\n" : source.text.includes("\r") ? "\r" : "\n"
++  const text = source.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n")
++  const lines = text.split("\n")
+   if (lines.at(-1) === "") lines.pop()
+-  const replacements = computeReplacements(lines, path, chunks)
+-  const updated = [...lines]
+-  for (const [start, remove, insert] of replacements.toReversed()) updated.splice(start, remove, ...insert)
+-  if (updated.at(-1) !== "") updated.push("")
+-  const next = splitBom(updated.join("\n"))
++  const updated = applyChunks(lines, path, chunks, text)
++  const normalized = updated.length === 0 ? "" : `${updated.join("\n")}\n`
++  const next = splitBom(ending === "\n" ? normalized : normalized.replaceAll("\n", ending))
+   return { content: next.text, bom: source.bom || next.bom }
+ }
+@@ -132,64 +134,57 @@
+-function computeReplacements(lines: ReadonlyArray<string>, path: string, chunks: ReadonlyArray<UpdateFileChunk>) {
+-  const replacements: Array<readonly [start: number, remove: number, insert: ReadonlyArray<string>]> = []
+-  let lineIndex = 0
+-  for (const chunk of chunks) {
+-    if (chunk.changeContext) {
+-      const context = seek(lines, [chunk.changeContext], lineIndex)
+-      if (context === -1) throw new Error(`Failed to find context '${chunk.changeContext}' in ${path}`)
+-      lineIndex = context + 1
+-    }
+-    if (chunk.oldLines.length === 0) {
+-      replacements.push([lines.length, 0, chunk.newLines])
+-      continue
+-    }
+-    let oldLines = chunk.oldLines
+-    let newLines = chunk.newLines
+-    let found = seek(lines, oldLines, lineIndex, chunk.endOfFile)
+-    if (found === -1 && oldLines.at(-1) === "") {
+-      oldLines = oldLines.slice(0, -1)
+-      if (newLines.at(-1) === "") newLines = newLines.slice(0, -1)
+-      found = seek(lines, oldLines, lineIndex, chunk.endOfFile)
+-    }
+-    if (found === -1) throw new Error(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`)
+-    replacements.push([found, oldLines.length, newLines])
+-    lineIndex = found + oldLines.length
+-  }
+-  return replacements.toSorted((left, right) => left[0] - right[0])
+-}
+-
+-function seek(lines: ReadonlyArray<string>, pattern: ReadonlyArray<string>, start: number, eof = false) {
+-  if (pattern.length === 0) return -1
+-  for (const compare of [exact, rstrip, trim, normalized]) {
+-    if (eof) {
+-      const offset = lines.length - pattern.length
+-      if (offset >= start && matches(lines, pattern, offset, compare)) return offset
+-    }
+-    for (let offset = start; offset <= lines.length - pattern.length; offset++) {
+-      if (matches(lines, pattern, offset, compare)) return offset
+-    }
+-  }
+-  return -1
+-}
+-
+-function matches(
+-  lines: ReadonlyArray<string>,
+-  pattern: ReadonlyArray<string>,
+-  offset: number,
+-  compare: (left: string, right: string) => boolean,
+-) {
+-  return pattern.every((line, index) => compare(lines[offset + index]!, line))
+-}
+-
+-const exact = (left: string, right: string) => left === right
+-const rstrip = (left: string, right: string) => left.trimEnd() === right.trimEnd()
+-const trim = (left: string, right: string) => left.trim() === right.trim()
+-const normalized = (left: string, right: string) => normalize(left.trim()) === normalize(right.trim())
+-const normalize = (value: string) =>
+-  value
+-    .replace(/[‘’‚‛]/g, "'")
+-    .replace(/[“”„‟]/g, '"')
+-    .replace(/[‐‑‒–—―]/g, "-")
+-    .replace(/…/g, "...")
+-    .replace(/ /g, " ")
++function applyChunks(originalLines: string[], path: string, chunks: ReadonlyArray<UpdateFileChunk>, persistedText: string) {
++  // 后续chunk失败只丢弃局部working copy，不能提交该文件已完成的半次修改。
++  let lines = [...originalLines]
++  let terminated = persistedText.endsWith("\n")
++  let cursorOffset = 0
++  const insertions: Array<ReadonlyArray<string>> = []
++  for (const chunk of chunks) {
++    if (chunk.changeContext) {
++      const context = locateExact(lines, [chunk.changeContext], cursorOffset, false, terminated)
++      if (context.type !== "found") throw new Error(withCandidate(`Failed to find context '${chunk.changeContext}' in ${path}`, persistedText, chunk.changeContext))
++      const text = workingText(lines, terminated)
++      const offset = context.location.kind === "line" ? lineOffset(lines, context.location.startLine) : context.location.startOffset
++      cursorOffset = nextLineOffset(text, offset)
++    }
++    if (chunk.oldLines.length === 0) {
++      // 延迟插入不能变成后续chunk的匹配输入，但仍先验证其公开context。
++      insertions.push(chunk.newLines)
++      continue
++    }
++    const result = locateExact(lines, chunk.oldLines, cursorOffset, chunk.endOfFile, terminated)
++    if (result.type === "ambiguous")
++      throw new Error(`Found multiple matches for expected lines in ${path}:\n${chunk.oldLines.join("\n")}\nProvide more context to make the match unique.`)
++    if (result.type === "not-found")
++      throw new Error(withCandidate(`Failed to find expected lines in ${path}:\n${chunk.oldLines.join("\n")}`, persistedText, chunk.oldLines.join("\n")))
++    if (result.location.kind === "line") {
++      const startLine = result.location.startLine
++      lines.splice(startLine, result.location.endLine - startLine, ...chunk.newLines)
++      if (lines.length === 0) terminated = false
++      // replacement生成的末行也已消费，不能让后续chunk回头重匹配空逻辑行。
++      const nextLine = startLine + chunk.newLines.length
++      cursorOffset = chunk.newLines.length === 0 ? lineOffset(lines, startLine) : nextLine < lines.length ? lineOffset(lines, nextLine) : workingText(lines, terminated).length + 1
++      continue
++    }
++    const text = workingText(lines, terminated)
++    const replacement = chunk.newLines.join("\n")
++    // 只拥有完整字面命中范围，其外的首行前缀与末行后缀原样保留。
++    const next = text.slice(0, result.location.startOffset) + replacement + text.slice(result.location.endOffset)
++    terminated = next.endsWith("\n")
++    lines = next === "" ? [] : next.split("\n")
++    if (terminated) lines.pop()
++    cursorOffset = result.location.startOffset + replacement.length
++  }
++  for (const insertion of insertions) lines.push(...insertion)
++  return lines
++}
++
++function workingText(lines: string[], terminated: boolean) {
++  return lines.join("\n") + (terminated && lines.length > 0 ? "\n" : "")
++}
++
++function withCandidate(message: string, content: string, expected: string) {
++  // 用失败chunk和未提交的磁盘原文诊断，不混入其他chunk或working copy。
++  const closest = closestWindow(content, expected)
++  return closest ? `${message}\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : `${message}\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.`
++}
+ const splitBom = (text: string) =>
+   text.startsWith("\uFEFF") ? { bom: true, text: text.slice(1) } : { bom: false, text }
+diff --git a/packages/core/src/tool/edit-excerpt.ts b/packages/core/src/tool/edit-excerpt.ts
+--- a/packages/core/src/tool/edit-excerpt.ts
++++ b/packages/core/src/tool/edit-excerpt.ts
+@@ -1,18 +1,3 @@
+-export function closestMatch(content: string, expected: string) {
+-  const first = expected.split("\n").find(line => line.trim().length >= 3)?.trim().toLowerCase()
+-  if (!first) return undefined
+-  const letters = new Set(first)
+-  const lines = content.split("\n")
+-  // 摘录只辅助重试，不能把相似位置当作授权后的真实匹配。
+-  const best = lines.map((line, index) => {
+-    const candidate = line.trim().toLowerCase()
+-    const common = [...candidate].filter(letter => letters.has(letter)).length
+-    return { index, score: common / Math.max(1, Math.min(first.length, candidate.length)) }
+-  }).sort((a, b) => b.score - a.score)[0]
+-  if (!best || best.score < 0.3) return undefined
+-  const start = Math.max(0, best.index - 1)
+-  return {
+-    line: start + 1,
+-    excerpt: lines.slice(start, best.index + 4).join("\n").slice(0, 500),
+-  }
+-}
++import { closestWindow } from "../patch-match"
++// 复用共享有序评分及并列拒绝，诊断结果不扩大Edit的字面成功域。
++export const closestMatch = closestWindow
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -1,3 +1,2 @@
+-import { closestMatch } from "./edit-excerpt"
+ export * as ApplyPatchTool from "./apply-patch"
+ 
+@@ -75,5 +74,5 @@
+           Tool.make({
+             description:
+-              "Apply one patch containing add, update, and delete file operations. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
++              "Apply one patch containing add, update, and delete file operations. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
+             input: Input,
+             output: Output,
+@@ -157,7 +156,5 @@
+                     const update = yield* Effect.try({
+                       try: () => Patch.derive(hunk.path, hunk.chunks, original),
+-                      catch: (error) => {
+-                        const closest = closestMatch(before, hunk.chunks.flatMap(chunk => chunk.oldLines).join("\n"))
+-                        return new ToolFailure({ message: `${error}${closest ? `\n\nActual content near expected location:\n${closest.excerpt}` : ""}` })
+-                      },
++                      // owning Patch保留失败chunk身份；此处不再运行第二套猜测位置的matcher。
++                      catch: (error) => new ToolFailure({ message: String(error) }),
+                     })
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -56,10 +56,11 @@
+-const countOccurrences = (content: string, search: string) => {
++const countOccurrences = (content: string, search: string, replaceAll: boolean) => {
+   if (search === "") return content.length + 1
+   let count = 0
+   let offset = 0
+   while ((offset = content.indexOf(search, offset)) !== -1) {
+     count++
+-    offset += search.length
++    // 单次替换也拒绝重叠的第二命中；replaceAll仍按实际非重叠替换数统计。
++    offset += replaceAll ? search.length : 1
+   }
+   return count
+ }
+@@ -86,3 +87,3 @@
+ /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
+-// TODO: Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.
++// 字面匹配现为两代共同合同，不再等待移植已明确弃用的fuzzy成功路径。
+ // TODO: Add formatter integration after V2 formatter runtime exists.
+@@ -173,5 +174,5 @@
+                 const oldString = convertToLineEnding(input.oldString, ending)
+                 const newString = convertToLineEnding(input.newString, ending)
+-                const replacements = countOccurrences(source.text, oldString)
++                const replacements = countOccurrences(source.text, oldString, input.replaceAll === true)
+                 if (replacements === 0) {
+                   const closest = closestMatch(source.text, oldString)
+diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
+--- a/packages/core/test/patch.test.ts
++++ b/packages/core/test/patch.test.ts
+@@ -28,8 +28,28 @@
+-  test("derives fuzzy line updates while preserving BOM", () => {
+-    const update = Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "\uFEFFold\n")
++  test("derives exact line updates while preserving BOM", () => {
++    const update = Patch.derive("update.txt", [{ oldLines: ["old"], newLines: ["new"] }], "\uFEFFold\n")
+     expect(update).toEqual({ content: "new\n", bom: true })
+     expect(Patch.joinBom(update.content, update.bom)).toBe("\uFEFFnew\n")
++    // source明确移除规范化成功，BOM断言仍保留，不能靠fuzzy路径验证它。
++    expect(() => Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "old\n")).toThrow("Failed to find expected lines")
+   })
+ 
++  test("preserves complete unique substring semantics and failed chunk diagnostics", () => {
++    const derive = (content: string, chunks: ReadonlyArray<Patch.UpdateFileChunk>) => Patch.derive("file.txt", chunks, content).content
++    // 原生owner沿相同字符cursor组合行内chunk，且所有原行尾均原样写回。
++    for (const ending of ["\n", "\r\n", "\r"]) {
++      expect(derive(`abcdef${ending}`, [{ oldLines: ["bc"], newLines: ["BC"] }, { oldLines: ["ef"], newLines: ["EF"] }])).toBe(`aBCdEF${ending}`)
++    }
++    expect(() => derive("prefix old old suffix\n", [{ oldLines: ["old"], newLines: ["new"] }])).toThrow("multiple matches")
++    expect(() => derive("aaaa\n", [{ oldLines: ["aa"], newLines: ["x"] }])).toThrow("multiple matches")
++    // 完整trailing-empty参与字面匹配，不能删除末空行来伪造命中。
++    expect(derive("prefix target\n", [{ oldLines: ["target", ""], newLines: ["changed"] }])).toBe("prefix changed\n")
++    expect(() => derive("prefix target", [{ oldLines: ["target", ""], newLines: ["changed"] }])).toThrow("Failed to find expected lines")
++    expect(() => derive("anchor\n", [{ oldLines: [], newLines: ["x"], changeContext: "missing" }])).toThrow("Failed to find context")
++    expect(derive("old\n", [{ oldLines: [], newLines: ["inserted"] }, { oldLines: ["old"], newLines: [] }])).toBe("inserted\n")
++    // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
++    expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow("Closest match at line 2:\nconst after = good()")
++    expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
++  })
++
+   test("matches EOF-anchored chunks from the end", () => {
+     expect(
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -139,4 +139,4 @@
+         const remove = path.join(tmp.path, "remove.txt")
+         return Effect.promise(() =>
+-          Promise.all([fs.writeFile(update, "before\n"), fs.writeFile(remove, "remove\n")]),
++          Promise.all([fs.writeFile(update, "prefix before suffix\n"), fs.writeFile(remove, "remove\n")]),
+         ).pipe(
+@@ -173,3 +173,3 @@
+                       additions: 1,
+                       deletions: 1,
+-                      patch: expect.stringContaining("-before\n+after"),
++                      patch: expect.stringContaining("-prefix before suffix\n+prefix after suffix"),
+@@ -199,3 +199,3 @@
+                 )
+-                expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("after\n")
++                expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("prefix after suffix\n")
+                 expect(yield* exists(remove)).toBe(false)
+@@ -324,4 +324,11 @@
+             ).toEqual({ type: "text", value: "Applied patch sequentially:\nA created.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.\n\nFailed to update 1 file(s):\nUnable to apply patch at missing.txt" })
+             expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
+             expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "created.txt"), "utf8"))).toBe("created\n")
++            // 真实leaf也必须交付第二chunk的诊断，失败文件不提交前一chunk。
++            const persisted = "alpha\nconst after = good()\n"
++            const target = path.join(tmp.path, "retry.txt")
++            yield* Effect.promise(() => fs.writeFile(target, persisted))
++            const failed = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n@@\n-const after = good(1)\n+done\n*** End Patch"))
++            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst after = good()") })
++            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
+           }),
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -319,5 +319,4 @@
+                 ).toEqual({
+                   type: "error",
+-                  value:
+-                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.\n\nClosest match at line 1:\nsame same",
++                  value: "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
+                 })
+@@ -329,4 +328,12 @@
+                     "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
+                 })
+                 expect(writes).toEqual([])
++                // 重叠literal也是第二候选，不能只按replaceAll的非重叠计数放行。
++                yield* Effect.promise(() => fs.writeFile(target, "aaaa"))
++                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple exact matches") })
++                // 候选行号是实际窗口起点，而非带上一行context的起点。
++                yield* Effect.promise(() => fs.writeFile(target, "header\nconst preferred = true\n"))
++                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst preferred = true") })
++                expect(writes).toEqual([])
++                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("header\nconst preferred = true\n")
+               }),
+@@ -427,3 +435,4 @@
++  // exact-only合同已生效，移除旧fuzzy移植待办而非恢复已废弃的成功域。
++  expect(source).not.toContain("TODO: Port V1 fuzzy correction")
+   for (const todo of [
+-    "Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.",
+     "Add formatter integration after V2 formatter runtime exists.",
 diff --git a/docs/plans/edit-apply-patch-match-recovery.md b/docs/plans/edit-apply-patch-match-recovery.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..2cf30e4c09df111fd9fd306250bcee4b94453683
@@ -2435,11 +2754,10 @@ diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/
  
  function generateUnifiedDiff(oldContent: string, newContent: string): string {
 
-diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
+diff --git a/packages/core/src/patch-match.ts b/packages/core/src/patch-match.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a4e595c1c78d43b9175ec55dfa293bdffc67e5bc
 --- /dev/null
-+++ b/packages/opencode/src/patch/match.ts
++++ b/packages/core/src/patch-match.ts
 @@ -0,0 +1,156 @@
 +export type ExactLocation =
 +  | { kind: "line"; startLine: number; endLine: number }
@@ -2452,7 +2770,7 @@ index 0000000000000000000000000000000000000000..a4e595c1c78d43b9175ec55dfa293bdf
 +
 +// 行起点统一从当前 working lines 推导，避免前一次替换后继续使用失效的原始坐标。
 +// index 等于行数时表示逻辑文本末尾，供删除和 replacement 后的 cursor 使用。
-+export function lineOffset(lines: string[], index: number) {
++export function lineOffset(lines: ReadonlyArray<string>, index: number) {
 +  // 此 helper 只处理单个 replacement cursor；批量行起点必须走 locateExact 的线性累计路径。
 +  if (index <= 0) return 0
 +  if (index >= lines.length) return lines.join("\n").length
@@ -2468,8 +2786,8 @@ index 0000000000000000000000000000000000000000..a4e595c1c78d43b9175ec55dfa293bdf
 +// 成功域只有两层：完整整行窗口优先，其后才搜索完整旧块的唯一字面 occurrence。
 +// 诊断相似度绝不能进入这里，否则会把提示算法重新变成隐式 replacement fallback。
 +export function locateExact(
-+  lines: string[],
-+  pattern: string[],
++  lines: ReadonlyArray<string>,
++  pattern: ReadonlyArray<string>,
 +  cursorOffset: number,
 +  eof = false,
 +  terminated = false,
@@ -2597,6 +2915,14 @@ index 0000000000000000000000000000000000000000..a4e595c1c78d43b9175ec55dfa293bdf
 +    score: bestScore,
 +  }
 +}
+diff --git a/packages/opencode/src/patch/match.ts b/packages/opencode/src/patch/match.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/patch/match.ts
+@@ -0,0 +1,3 @@
++// 共享成功域与诊断评分，避免两代工具在相同旧块上产生分裂结果。
++export { closestWindow, lineOffset, locateExact, nextLineOffset } from "@opencode-ai/core/patch-match"
++export type { ClosestWindow, ExactLocation, ExactResult } from "@opencode-ai/core/patch-match"
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 
 --- a/packages/opencode/src/tool/apply_patch.ts

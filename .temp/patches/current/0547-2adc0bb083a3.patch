@@ -493,70 +493,76 @@ index 0000000000000000000000000000000000000000..4f319c47a49ffabaaa930e1b60e2121a
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -12,6 +12,7 @@ import { AppRuntime } from "@/effect/app-runtime"
- import { Effect } from "effect"
+@@ -8,6 +8,7 @@ import { AppRuntime } from "@/effect/app-runtime"
+-import { Effect } from "effect"
++import { Effect, Layer, Scope } from "effect"
  import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
  import { Database } from "@opencode-ai/core/database/database"
 +import { SessionStaleTurn } from "@/session/stale-turn"
  import { ServerLock } from "@/cli/tui/server-lock"
  // #493：daemon maintenance 全部 SQL 位于 core ColdStorage；worker 只装配生命周期。
  import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
-@@ -280,6 +281,8 @@ if (isDaemon) {
-   async function gracefulShutdown(reason = "unknown") {
+@@ -232,9 +233,13 @@ if (isDaemon) {
+   }
+ 
++  let reconcileStale: ((scope: SessionStaleTurn.Scope, options?: { budgetMs?: number }) => Promise<void>) | undefined
++
+   async function gracefulShutdown(exitCode = 0, reason = "unknown") {
      if (shutdownInProgress) return
      shutdownInProgress = true
 +    // #547：residual 与 process.exit 硬截止必须同一 t0——maintenance abort 也吃墙钟，不能只从 dispose 起算。
 +    const shutdownStartedAt = Date.now()
-     // #523：到点仍未完成说明某个清理阶段挂死；exit(1) 保留现场给上层 force 路径
-     shutdownDeadlineTimer = setTimeout(() => {
+     // 五秒总预算从入口开始，maintenance 等待也受保护；超时不提前清锁。
+     const shutdownTimer = setTimeout(() => {
        log.error("daemon shutdown deadline exceeded", { reason, pid: process.pid })
-@@ -326,6 +329,18 @@ if (isDaemon) {
-       }),
-       Bun.sleep(3_000),
-     ])
-+    // #547：残余预算 = 5s 硬截止 − 已用墙钟 − SAFETY_MARGIN（stop/close/clear lock）。
-+    const remaining =
-+      SHUTDOWN_TIMEOUT_MS - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
-+    if (remaining > 0) {
-+      // exit-full 在 dispose 后、Database.close 前清扫残留 turn（D/E 优先，C 孤儿 best-effort）。
-+      await SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => {
-+        log.error("stale-turn exit-full failed", { error: String(error) })
-+      })
-+    } else {
-+      // maintenance/dispose 已占满 5s 窗口：跳过 transcript 清扫，残留由下次 pre-lock L1 覆盖 top-16。
-+      log.info("stale-turn exit-full skipped: no residual budget")
-+    }
-     // #259：control server 随 daemon 一起关闭——避免端口残留
-     // #259：清锁在先、停 control 在后——stop 轮询依赖 alive 与锁的最终一致性
-     controlServer?.stop(true)
-@@ -516,6 +531,13 @@ if (isDaemon) {
-   maintenanceRecoveryPromise = recoverInterruptedMaintenance()
-   // 这里只等待 recovery 完成“无需恢复或已发布 active”判定，不等待后台 maintenance 跑到 terminal。
-   await maintenanceRecoveryPromise
-+  // #547：L1 必须在 lock 对外可见前完成——ensure 以 lock+health 放行，首份 snapshot 只能依赖预写终态。
-+  // L1 失败不阻止 lock 发布：宁可带脏数据启动，也不让 ensure 永久卡住无法选主。
-+  await SessionStaleTurn.reconcile({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch(
-+    (error) => {
-+      log.error("stale-turn recent L1 failed", { error: String(error) })
-+    },
-+  )
-   lockToken = await ServerLock.write(internalServer.port, externalUrl, controlServer.port)
-   // #259：lock 写入延后到 controlPort 已知——锁文件与控制面端口原子地对外可见
-   log.info("daemon lock written", {
+       process.exit(1)
+@@ -273,3 +278,9 @@ if (isDaemon) {
+     const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
++    // 清理失败仍保留原退出码，但不能把仍可能运行的实例当成stale；五秒总截止保持原样。
++    const remaining = 5_000 - (Date.now() - shutdownStartedAt) - SessionStaleTurn.SAFETY_MARGIN_MS
++    if (disposed.every((item) => item.status === "fulfilled") && remaining > 0 && reconcileStale) {
++      await reconcileStale({ kind: "exit-full" }, { budgetMs: remaining }).catch((error) => log.error("stale-turn exit-full failed", { error: String(error) }))
++    } else log.info("stale-turn exit-full skipped: services unavailable or no cleanup budget")
++
+     // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
+     const stopped = await Promise.allSettled([
+@@ -484,5 +495,12 @@ if (isDaemon) {
+     internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
++    // 借用listener已构建的同一服务图；临时scope只持有引用，不新建数据库或native coordinator。
++    reconcileStale = (scope, options) => Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++      const owner = yield* Scope.Scope
++      const services = yield* Layer.buildWithMemoMap(sharedServices.layer, sharedServices.memoMap, owner)
++      yield* SessionStaleTurn.reconcile(scope, options).pipe(Effect.provide(services))
++    })))
++
+     const network = process.env.OPENCODE_EXTERNAL_NETWORK
+       ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
+       : undefined
+     if (network) {
+@@ -590,5 +609,7 @@ if (isDaemon) {
+     await AppRuntime.runPromise(Database.Service)
+     maintenanceRecoveryPromise = recoverInterruptedMaintenance()
+     await maintenanceRecoveryPromise
++    // L1先写入中断终态再发布发现锁，失败仍沿source约定记录并允许启动。
++    await reconcileStale({ kind: "recent", limit: SessionStaleTurn.RECENT_ACTIVE_SESSION_LIMIT }).catch((error) => log.error("stale-turn recent L1 failed", { error: String(error) }))
+     lockToken = await ServerLock.write(internalServer.port, externalUrl, network, controlServer.port)
+     log.info("daemon lock written", { pid: process.pid, port: internalServer.port, controlPort: controlServer.port, externalUrl, launcherPID: LAUNCHER_PID })
 
 diff --git a/packages/opencode/src/session/stale-turn.ts b/packages/opencode/src/session/stale-turn.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/session/stale-turn.ts
-@@ -0,0 +1,316 @@
-+import { Effect } from "effect"
+@@ -0,0 +1,363 @@
++import { DateTime, Effect, Schema } from "effect"
 +import { and, desc, eq, inArray, sql } from "drizzle-orm"
-+import { AppRuntime } from "@/effect/app-runtime"
 +import { Database } from "@opencode-ai/core/database/database"
 +import type { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 +import type { Sqlite } from "@opencode-ai/core/database/sqlite"
 +import { EventV2Bridge } from "@/event-v2-bridge"
-+import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { MessageTable, PartTable, SessionTable, SessionInputTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { SessionEvent } from "@opencode-ai/core/session/event"
++import { SessionExecution } from "@opencode-ai/core/session/execution"
++import { SessionMessage } from "@opencode-ai/core/session/message"
 +import { RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
 +import { MessageV2 } from "./message-v2"
 +import { SessionProcessor } from "./processor"
@@ -702,7 +708,8 @@ new file mode 100644
 +      time_completed: now,
 +      time_updated: now,
 +    })
-+    .where(where)
++    // 未提升native inbox的running行仍代表待接纳工作，不能按旧V1全表规则终结。
++    .where(and(where, sql`not exists (select 1 from session_input i where i.session_id = ${RequestUsageTable.session_id} and i.id = ${RequestUsageTable.request_id})`))
 +    .run()
 +}
 +
@@ -712,16 +719,16 @@ new file mode 100644
 +// SQLite）。与 source 的 publish:false 差异：bridge 在无 InstanceRef 时也会广播 bus；pre-lock
 +// 阶段无订阅者无害，exit-full 时已连 TUI 会收到无 directory 事件（SSE 端按 directory 过滤）。
 +// 可见性不靠 bus：pre-lock L1 完成后 ensure 才放行，首份 HTTP snapshot 已是终态（INV-01 不变）。
-+type RunEvents = <A, E>(effect: Effect.Effect<A, E, EventV2Bridge.Service>) => Promise<A>
++type RunEvents = <A, E>(effect: Effect.Effect<A, E, EventV2Bridge.Service>) => Effect.Effect<A, E>
 +
-+async function writeTerminal(input: {
++function* writeTerminal(input: {
 +  sessionID: SessionID
 +  assistant: MessageV2.Assistant
 +  parts: MessageV2.Part[]
 +  now: number
 +  run: RunEvents
 +}) {
-+  await input.run(
++  yield* input.run(
 +    EventV2Bridge.Service.use((events) =>
 +      Effect.gen(function* () {
 +        for (const part of input.parts.filter(isOpenToolPart)) {
@@ -733,7 +740,7 @@ new file mode 100644
 +            sessionID: input.sessionID,
 +            part: structuredClone(next),
 +            time: input.now,
-+          })
++          }, { finalizer: true })
 +        }
 +        // 浅拷贝后写终态——不改动 incompleteAssistants 读到的快照引用。
 +        const assistant = { ...input.assistant }
@@ -744,20 +751,19 @@ new file mode 100644
 +        if (input.parts.length === 0) {
 +          assistant.hidden = { time: input.now, reason: "repair-empty-dangling-assistant" }
 +        }
-+        yield* events.publish(MessageV2.Event.Updated, {
-+          sessionID: input.sessionID,
-+          info: assistant,
-+        })
++        // 复用已确认的原子助手账本提交，状态收尾不能让消费明细与消息分裂。
++        yield* SessionProcessor.publishAssistant(assistant, events, true)
 +      }),
 +    ),
 +  )
 +}
 +
 +// 幂等：已 completed 的 assistant / 非 open tool 不会进入 incompleteAssistants 集合。
-+async function terminalizeIncomplete(db: ColdStorage.TxOrDb, run: RunEvents, sessionIDs?: SessionID[]) {
++function* terminalizeIncomplete(database: Database.Interface, run: RunEvents, sessionIDs?: SessionID[]) {
 +  const now = Date.now()
-+  for (const item of incompleteAssistants(db, sessionIDs)) {
-+    await writeTerminal({
++  const items = yield* Database.withSync(database, (db) => incompleteAssistants(db, sessionIDs))
++  for (const item of items) {
++    yield* writeTerminal({
 +      sessionID: item.info.sessionID,
 +      assistant: item.info as MessageV2.Assistant,
 +      parts: item.parts,
@@ -765,16 +771,17 @@ new file mode 100644
 +      run,
 +    })
 +  }
-+  abortUsageRunning(db, sessionIDs)
++  yield* Database.withSync(database, (db) => abortUsageRunning(db, sessionIDs))
 +}
 +
-+async function terminalizeOrphanTools(db: ColdStorage.TxOrDb, run: RunEvents, deadlineMs: number) {
++function* terminalizeOrphanTools(database: Database.Interface, run: RunEvents, deadlineMs: number) {
 +  // 孤儿 tool：message 已 completed 但 tool 仍 pending/running。
 +  // cancelSnapshot 只处理 incomplete assistant，因此 half-write 残留必须在 exit-full C 步清掉。
 +  // 只改 tool part，不改写已 completed message 的 error（保持历史终态语义）。
 +  // 关键：SCAN 本身必须服从 deadline——1.8GB DB 上 full open-tool SCAN 约 5.3s，禁止 .all() 后再计时。
 +  // found 只携带定位字段——扫描阶段不解码 part JSON，预算花在行进上。
-+  const found: Array<{ id: string; message_id: string }> = []
++  const found = yield* Database.withSync(database, (db) => {
++  const result: Array<{ id: string; message_id: string }> = []
 +  // $client 仅存在于基础 Db（cold-storage 同款 cast）；事务句柄不参与孤儿扫描路径。
 +  const stmt = (db as Sqlite.DrizzleClient).$client.prepare(`
 +    SELECT part.id AS id, part.message_id AS message_id
@@ -786,11 +793,13 @@ new file mode 100644
 +  `)
 +  for (const row of stmt.iterate() as Iterable<{ id: string; message_id: string }>) {
 +    if (Date.now() >= deadlineMs) {
-+      log.info("orphan tool scan budget exhausted during scan", { collected: found.length })
++      log.info("orphan tool scan budget exhausted during scan", { collected: result.length })
 +      break
 +    }
-+    found.push(row)
++    result.push(row)
 +  }
++  return result
++  })
 +
 +  // 写阶段时钟单独取样：scan 与 write 之间的耗时不计入 tool 的 executionElapsedMs。
 +  const now = Date.now()
@@ -800,18 +809,61 @@ new file mode 100644
 +      log.info("orphan tool write budget exhausted", { remaining: found.length })
 +      return
 +    }
-+    const part = hotParts(db, row.message_id as MessageID).find((item) => item.id === row.id)
++    const part = yield* Database.withSync(database, (db) => hotParts(db, row.message_id as MessageID).find((item) => item.id === row.id))
 +    if (!part || !isOpenToolPart(part)) continue
-+    await run(
++    yield* run(
 +      EventV2Bridge.Service.use((events) =>
 +        events.publish(MessageV2.Event.PartUpdated, {
 +          sessionID: part.sessionID,
 +          part: structuredClone({ ...part, state: interruptedToolState(part.state, now) }),
 +          time: now,
-+        }),
++        }, { finalizer: true }),
 +      ),
 +    )
 +  }
++}
++
++// native由持久化Step/Prompt归属收尾，不能把尚未提升的inbox或正在运行的coordinator当成崩溃残留。
++function* terminalizeNative(database: Database.Interface, run: RunEvents, sessionIDs?: SessionID[]) {
++  const execution = yield* SessionExecution.Service
++  const active = yield* execution.active
++  const timestamp = yield* DateTime.now
++  const error = { type: "unknown" as const, message: SessionProcessor.TOOL_ABORTED_ERROR }
++  // 先冻结已提升的running请求；Step.Failed可能先将根账本终结，但Prompt终态仍需闭合同批估算。
++  const requests = yield* database.db.select({ sessionID: RequestUsageTable.session_id, id: SessionInputTable.id, root: RequestUsageTable.root_request_id })
++    .from(RequestUsageTable).innerJoin(SessionInputTable, and(eq(SessionInputTable.session_id, RequestUsageTable.session_id), eq(SessionInputTable.id, RequestUsageTable.request_id)))
++    .where(and(eq(RequestUsageTable.status, "running"), sql`${SessionInputTable.promoted_seq} is not null`, sessionIDs ? inArray(RequestUsageTable.session_id, sessionIDs) : undefined))
++    .all().pipe(Effect.orDie)
++  const rows = yield* database.db.select().from(SessionMessageTable)
++    .where(and(eq(SessionMessageTable.type, "assistant"), sql`json_extract(${SessionMessageTable.data}, '$.time.completed') is null`, sessionIDs ? inArray(SessionMessageTable.session_id, sessionIDs) : undefined))
++    .all().pipe(Effect.orDie)
++  for (const row of rows) {
++    if (active.has(row.session_id)) continue
++    const message = yield* Schema.decodeUnknownEffect(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie)
++    if (message.type !== "assistant" || message.time.completed !== undefined) continue
++    yield* run(EventV2Bridge.Service.use((events) => Effect.gen(function* () {
++      for (const part of message.content) {
++        if (part.type !== "tool" || (part.state.status !== "pending" && part.state.status !== "running")) continue
++        yield* events.publish(SessionEvent.Tool.Failed, {
++          sessionID: row.session_id, assistantMessageID: message.id, callID: part.id, timestamp, error,
++          provider: part.provider ?? { executed: false },
++        }, { finalizer: true })
++      }
++      // 原生projector保留已确认成本并更新助手明细，不伪造V1消息或直接覆写累计。
++      yield* events.publish(SessionEvent.Step.Failed, { sessionID: row.session_id, assistantMessageID: message.id, timestamp, error: message.error ?? error, aborted: true }, { finalizer: true })
++    })))
++  }
++  const batches = new Map<string, { sessionID: SessionID; root: string; ids: SessionMessage.ID[] }>()
++  for (const request of requests) {
++    if (active.has(request.sessionID)) continue
++    const key = `${request.sessionID}\0${request.root}`
++    const batch = batches.get(key)
++    if (batch) batch.ids.push(request.id)
++    else batches.set(key, { sessionID: request.sessionID, root: request.root, ids: [request.id] })
++  }
++  for (const batch of batches.values()) yield* run(EventV2Bridge.Service.use((events) => events.publish(SessionEvent.PromptFailed, {
++    sessionID: batch.sessionID, messageID: SessionMessage.ID.make(batch.root), requestIDs: batch.ids, timestamp, error, aborted: true,
++  }, { finalizer: true })))
 +}
 +
 +/**
@@ -819,26 +871,20 @@ new file mode 100644
 + * recent：启动 L1，必须在 ServerLock.write 之前调用。
 + * exit-full：优雅退出，必须在 dispose 之后、Database.close 之前，并带 residual budgetMs。
 + */
-+export async function reconcile(
++export const reconcile = Effect.fn("SessionStaleTurn.reconcile")(function* (
 +  scope: Scope,
-+  opts?: {
-+    budgetMs?: number
-+    // #547 适配：目标存在实例库/进程库两个 Database 形态——worker 调用方不传（默认进程库
-+    // Database.client()，与 AppRuntime 全局图同库）；测试传实例 sync 与测试 runtime 的 bridge，
-+    // 保证读写与投影落在同一库。run 只替换执行器，不改变事件语义（INV-08 不变）。
-+    db?: ColdStorage.TxOrDb
-+    run?: RunEvents
-+  },
++  opts?: { budgetMs?: number },
 +) {
-+  const db = opts?.db ?? Database.client()
-+  // 默认执行器走 AppRuntime 全局图——worker 内全局库与投影器同库，事件即达。
-+  const run: RunEvents = opts?.run ?? ((effect) => AppRuntime.runPromise(effect) as never)
++  const database = yield* Database.Service
++  const events = yield* EventV2Bridge.Service
++  const run: RunEvents = (effect) => effect.pipe(Effect.provideService(EventV2Bridge.Service, events))
 +  if (scope.kind === "recent") {
 +    // recent 不扫描孤儿 completed-message tools：L1 只修用户最可能打开的 streaming 会话。
 +    // 孤儿清理由 exit-full C 步或下次 graceful stop 承担（产品 L1 延迟预算约束）。
 +    const limit = scope.limit ?? RECENT_ACTIVE_SESSION_LIMIT
-+    const sessionIDs = recentSessionIDs(db, limit)
-+    await terminalizeIncomplete(db, run, sessionIDs)
++    const sessionIDs = yield* Database.withSync(database, (db) => recentSessionIDs(db, limit))
++    yield* terminalizeIncomplete(database, run, sessionIDs)
++    yield* terminalizeNative(database, run, sessionIDs)
 +    return
 +  }
 +
@@ -853,7 +899,12 @@ new file mode 100644
 +  // deadline 是软预算：D/E 完成后剩余才给 C，越界立即返回而非补偿重试。
 +  const deadline = Date.now() + budgetMs
 +  // D+E 优先：incomplete assistant / open tools / running usage 是用户可见 streaming 的主因。
-+  await terminalizeIncomplete(db, run)
++  const execution = yield* SessionExecution.Service
++  // 先等待真实native所有权链退出，再读持久残留；不使用resume/wake制造模型工作。
++  const active = yield* execution.active
++  yield* Effect.forEach(active, (id) => execution.interrupt(id), { concurrency: "unbounded", discard: true })
++  yield* terminalizeIncomplete(database, run)
++  yield* terminalizeNative(database, run)
 +  if (Date.now() >= deadline) {
 +    log.info("exit-full stopped after D/E: budget exhausted")
 +    return
@@ -861,8 +912,8 @@ new file mode 100644
 +  // C 步 best-effort：孤儿 open-tool 再占 min(2000ms, 剩余预算)。
 +  const orphanBudget = Math.min(ORPHAN_TOOL_SCAN_BUDGET_MS, deadline - Date.now())
 +  if (orphanBudget <= 0) return
-+  await terminalizeOrphanTools(db, run, Date.now() + orphanBudget)
-+}
++  yield* terminalizeOrphanTools(database, run, Date.now() + orphanBudget)
++})
 +
 +export * as SessionStaleTurn from "./stale-turn"
 
@@ -870,9 +921,9 @@ diff --git a/packages/opencode/test/session/stale-turn.test.ts b/packages/openco
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/session/stale-turn.test.ts
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,363 @@
 +import { describe, expect } from "bun:test"
-+import { Effect } from "effect"
++import { DateTime, Effect, Layer, Schema } from "effect"
 +import { eq } from "drizzle-orm"
 +import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 +import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -888,15 +939,18 @@ new file mode 100644
 +import { ProviderV2 } from "@opencode-ai/core/provider"
 +import { EventV2Bridge } from "@/event-v2-bridge"
 +import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-+import type { EventV2 } from "@opencode-ai/core/event"
++import { SessionExecution } from "@opencode-ai/core/session/execution"
++import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
++import { SessionEvent } from "@opencode-ai/core/session/event"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { SessionInputTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { InstanceRef, WorkspaceRef } from "@/effect/instance-ref"
 +import { Storage } from "@/storage/storage"
 +import { testEffect } from "../lib/effect"
 +
-+// #547：测试层与 cold.test 同构——Session 全图（含 projector/bridge/Database 全局 node）。
-+// EventV2/Database 均 makeGlobalNode 且 AppRuntime 共享同一 memoMap：reconcile 内部经
-+// AppRuntime.runPromise 发布的事件会到达本层 projector 的订阅（同一 EventV2.Service 实例）。
++// 测试和生产消费同一Effect入口；只为测试提供空执行协调器，绝不启动native runner或daemon。
 +const it = testEffect(
-+  LayerNode.compile(
++  Layer.mergeAll(LayerNode.compile(
 +    LayerNode.group([
 +      SessionNs.node,
 +      MessageV2.node,
@@ -905,8 +959,9 @@ new file mode 100644
 +      Database.node,
 +      EventV2Bridge.node,
 +      Storage.node,
++      SessionRequestUsage.node,
 +    ]),
-+  ),
++  ), SessionExecution.noopLayer),
 +)
 +
 +// 构造 crash 残留：incomplete assistant + pending tool + running usage。
@@ -956,8 +1011,7 @@ new file mode 100644
 +      },
 +    })
 +    // usage 直接插 running 行：绕过 begin() 的 Effect 服务，聚焦 reconcile 的 SQL 终态。
-+    // 测试侧用上下文 Database.Service 的 sync——Database.client() 的 syncRef 指向进程
-+    // 首个初始化的库，与 it.instance 的隔离库不同（生产 worker 内二者一致）。
++    // 只写本fixture所持的同一连接，不借用全局数据库或最后打开的sync引用。
 +    const { sync } = yield* Database.Service
 +    sync.insert(RequestUsageTable)
 +      .values({
@@ -977,16 +1031,6 @@ new file mode 100644
 +  })
 +}
 +
-+// #547 适配：目标实例库与进程全局库是两个文件——reconcile 注入实例 sync 与测试上下文 bridge，
-+// 使读写/投影与种子落在同一库（worker 不注入，默认全局库，语义不变）。
-+function instanceReconcileOpts(svc: Database.Interface, events: EventV2.Interface) {
-+  return {
-+    db: svc.sync,
-+    run: <A, E>(effect: Effect.Effect<A, E, EventV2Bridge.Service>) =>
-+      Effect.runPromise(Effect.provideService(EventV2Bridge.Service, events)(effect)) as Promise<A>,
-+  }
-+}
-+
 +describe("SessionStaleTurn", () => {
 +  // 行为：owner-transition reconcile 把 incomplete assistant 写成 cancel 等价终态（time.completed + MessageAbortedError）。
 +  // 这是 INV-01 / 用户可见「· interrupted」的 durable 前提。
@@ -999,8 +1043,7 @@ new file mode 100644
 +        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
 +        // 期望值来自 cancel 合同字面量，不复制 reconcile 内部算法。
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
 +
 +        // MessageV2.get 走 effect 上下文读回投影终态——断言面是 durable 结果而非内存种子。
 +        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
@@ -1023,8 +1066,7 @@ new file mode 100644
 +        const chat = yield* sessions.create({ title: "stale-tool" })
 +        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
 +
 +        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
 +        const tool = msg.parts.find((part) => part.id === seeded.tool.id)
@@ -1048,8 +1090,7 @@ new file mode 100644
 +        const chat = yield* sessions.create({ title: "stale-usage" })
 +        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
 +
 +        // usage 断言直接查表——status 是计费聚合的输入，不经事件重放。
 +        const { sync } = yield* Database.Service
@@ -1061,6 +1102,11 @@ new file mode 100644
 +        // status 与 time_completed 对齐 RequestUsage.complete(aborted) 字段合同。
 +        expect(row?.status).toBe("aborted")
 +        expect(row?.time_completed).toBeDefined()
++        // 助手明细沿同一commit结算，不能只把请求总行改成aborted而留下running明细。
++        const usage = yield* SessionRequestUsage.Service
++        const assistants = yield* usage.assistants({ sessionID: chat.id, requestID: seeded.userID })
++        expect(assistants).toHaveLength(1)
++        expect(assistants[0]?.status).toBe("aborted")
 +      }),
 +    { git: true },
 +  )
@@ -1076,9 +1122,10 @@ new file mode 100644
 +        const chat = yield* sessions.create({ title: "stale-no-instance" })
 +        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+        // reconcile 在独立 AppRuntime fiber 上执行：不得依赖调用方 InstanceRef。
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        // 显式去掉两个实例引用，仍须经真实数据库和projector写终态。
++        yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }).pipe(
++          Effect.provideService(InstanceRef, undefined), Effect.provideService(WorkspaceRef, undefined),
++        )
 +
 +        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
 +        if (msg.info.role !== "assistant") throw new Error("expected assistant")
@@ -1132,9 +1179,8 @@ new file mode 100644
 +          state: { status: "running", input: {}, time: { start: Date.now() } },
 +        })
 +
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
 +          // exit-full 走完整 D/E/C 链：先 incomplete 后孤儿，预算 5s 覆盖两段。
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 5_000, ...opts }))
++        yield* SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 5_000 })
 +
 +        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: assistantID })
 +        const tool = msg.parts.find((part) => part.id === partID)
@@ -1158,8 +1204,7 @@ new file mode 100644
 +        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
 +        // budgetMs=0 是 worker residual 计算的边界：remaining<=0 时不得触碰 SQLite 行。
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 0, ...opts }))
++        yield* SessionStaleTurn.reconcile({ kind: "exit-full" }, { budgetMs: 0 })
 +
 +        const msg = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
 +        if (msg.info.role !== "assistant") throw new Error("expected assistant")
@@ -1167,6 +1212,51 @@ new file mode 100644
 +        expect(msg.info.time.completed).toBeUndefined()
 +      }),
 +    { git: true },
++  )
++
++  // native残留沿真实事件与投影闭合；未提升队列仍是有效待执行输入，绝不被当作旧running请求。
++  it.instance("reconciles native tools and promoted usage without aborting pending inbox", () =>
++    Effect.gen(function* () {
++      const sessions = yield* SessionNs.Service
++      const chat = yield* sessions.create({ title: "stale-native" })
++      const database = yield* Database.Service
++      const events = yield* EventV2Bridge.Service
++      const timestamp = yield* DateTime.now
++      const ids = [SessionMessage.ID.create(), SessionMessage.ID.create()] as const
++      for (const [index, id] of ids.entries()) {
++        // 由真实admission/promotion projector分配序列；夹具不伪造会与durable身份冲突的输入行。
++        yield* events.publish(SessionEvent.PromptAdmitted, {
++          sessionID: chat.id, messageID: id, prompt: { text: "native request" }, delivery: "steer", timestamp,
++        })
++        if (index === 0) yield* events.publish(SessionEvent.Prompted, {
++          sessionID: chat.id, messageID: id, prompt: { text: "native request" }, delivery: "steer", timestamp,
++        })
++      }
++      const assistant = SessionMessage.ID.create()
++      yield* events.publish(SessionEvent.Step.Started, {
++        sessionID: chat.id, assistantMessageID: assistant, agent: "build", timestamp,
++        model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") },
++      })
++      yield* events.publish(SessionEvent.Tool.Input.Started, {
++        sessionID: chat.id, assistantMessageID: assistant, callID: "native-stale", name: "edit", timestamp,
++      })
++      yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
++      const row = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistant)).get().pipe(Effect.orDie)
++      if (!row) throw new Error("expected native assistant")
++      const data = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
++      if (data.type !== "assistant") throw new Error("expected native assistant data")
++      // completed与tool error必须来自projector；不存在V1影子助手或重复消费重建。
++      expect(data.time.completed).toBeDefined()
++      expect(data.content.filter((part) => part.type === "tool").map((part) => part.state.status)).toEqual(["error"])
++      const stored = yield* database.db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, chat.id)).all().pipe(Effect.orDie)
++      expect(stored.find((item) => item.request_id === MessageID.make(ids[0]))?.status).toBe("aborted")
++      expect(stored.find((item) => item.request_id === MessageID.make(ids[1]))?.status).toBe("running")
++      const pending = yield* database.db.select().from(SessionInputTable).where(eq(SessionInputTable.id, ids[1])).get().pipe(Effect.orDie)
++      expect(pending?.promoted_seq).toBeNull()
++      const usage = yield* SessionRequestUsage.Service
++      const details = yield* usage.assistants({ sessionID: chat.id, requestID: MessageID.make(ids[0]) })
++      expect(details[0]?.status).toBe("aborted")
++    }), { git: true },
 +  )
 +
 +  // 行为：二次 reconcile 幂等，防止 double-start / 重复 exit 改写已终态字段。
@@ -1178,11 +1268,10 @@ new file mode 100644
 +        const chat = yield* sessions.create({ title: "stale-idempotent" })
 +        const seeded = yield* seedIncompleteTurn(sessions, chat.id)
 +
-+        const opts = instanceReconcileOpts(yield* Database.Service, yield* EventV2Bridge.Service)
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
 +        const first = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
-+        // 幂等二次调用复用同一 opts：db/bridge 在两次调用间不变，变量不重声明。
-+        yield* Effect.promise(() => SessionStaleTurn.reconcile({ kind: "recent", limit: 16 }, opts))
++        // 两次均消费同一服务图的数据库与事件，不使用测试专用第二执行器。
++        yield* SessionStaleTurn.reconcile({ kind: "recent", limit: 16 })
 +        const second = yield* MessageV2.get({ sessionID: chat.id, messageID: seeded.assistant.id })
 +
 +        if (first.info.role !== "assistant" || second.info.role !== "assistant") throw new Error("expected assistant")

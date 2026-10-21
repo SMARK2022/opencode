@@ -1,7 +1,7 @@
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
 
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
+--- a/packages/core/src/session/goal.ts
++++ b/packages/core/src/session/goal.ts
 @@ -321,19 +321,19 @@ const layer = Layer.effect(
        // [local-smark] CAS 校验：snapshot 必须匹配当前 row，防止 stale write
        if (row.id !== input.snapshot.goalID)
@@ -202,13 +202,9 @@ diff --git a/packages/opencode/src/tool/goal.txt b/packages/opencode/src/tool/go
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
 --- a/packages/opencode/test/session/goal.test.ts
 +++ b/packages/opencode/test/session/goal.test.ts
-@@ -374,5 +374,5 @@ it.instance(
-        const prompt = SessionGoal.continuationPrompt(result.value)
-        // 续跑 prompt 是模型判断 terminal transition 的真实 contract；除目标和预算外，
+@@ -383,1 +383,1 @@
 -        // 必须使用实际参数名 mark，并与 runtime 的两轮同 reason 规则完全一致。
 +        // 必须使用实际参数名 operate，并与 runtime 的两轮同 reason 规则完全一致。
-        expect(prompt).toContain("<session-goal-continuation>")
-        expect(prompt).toContain("build the feature")
 @@ -379,7 +379,7 @@ it.instance(
          expect(prompt).toContain("Tokens used: 1234")
          expect(prompt).toContain("Token budget: 50000")
@@ -221,43 +217,6 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -2047,7 +2055,8 @@ it.instance(
-       // #216：cancel 后再释放 gate——确保 reviewer 响应不晚于 cancel 写入
-       yield* prompt.cancel(chat.id)
-       gate.resolve()
--      yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds").pipe(Effect.ignore)
-+      const exit = yield* awaitWithTimeout(Fiber.await(fiber), "session did not stop after review cancel", "5 seconds")
-+      expect(Exit.isSuccess(exit)).toBe(true)
- 
-       const shell = yield* pollWithTimeout(
-         Effect.gen(function* () {
-@@ -2093,8 +2102,8 @@ it.instance(
-       // #216：reviewer 不应执行 bash——中止阻止了 reviewer 代理执行被审查的命令
-       expect(
-         reviewerParts.some((part) => part.type === "tool" && part.tool === "bash"),
-       ).toBe(false)
-     }),
-   { git: true },
--  15_000,
-+  process.platform === "win32" ? 30_000 : 15_000,
- )
-@@ -2629,6 +2645,6 @@ it.instance(
-         expect(exitA.value.info.id).toBe(exitB.value.info.id)
-       }
-     }),
-   { git: true },
--  10_000,
-+  process.platform === "win32" ? 30_000 : 10_000,
- )
-@@ -3840,6 +3856,7 @@
-       expect(hasExtAuto).toBe(true)
-       expect(hasBashAuto).toBe(true)
-     }),
-   { git: true },
--  15_000,
-+  // 父子会话各自保留真实模型与 Git 路径，Windows 总预算覆盖两轮初始化。
-+  process.platform === "win32" ? 60_000 : 15_000,
- )
 @@ -4081,10 +4081,12 @@ it.instance(
          synthetic: true,
          goalContinuation: true,
@@ -312,13 +271,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      yield* llm.push(reply().tool("goal", { operate: "read" }).stop())
 +      yield* llm.push(reply().tool("goal", { operate: "active" }).stop())
        yield* llm.text("recovery accepted")
-@@ -4174,4 +4176,5 @@
-     }),
-   { git: true },
--  60_000,
-+  // Windows 冷启动下多轮真实 loop 耗时接近 60s——放宽到 120s 避免 flaky
-+  process.platform === "win32" ? 120_000 : 60_000,
- )
 diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/tool/goal.test.ts
 --- a/packages/opencode/test/tool/goal.test.ts
 +++ b/packages/opencode/test/tool/goal.test.ts
@@ -513,7 +465,7 @@ diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/t
 +          yield* def.execute({ operate: "read" }, makeCtx(session.id, goalSvc, turn1))
            const remark = yield* def
 -            .execute({ mark, reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
-+            .execute({ operate: mark as "active", reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
++            .execute({ operate: mark, reason: "model claim" }, makeCtx(session.id, goalSvc, turn1))
              .pipe(Effect.exit)
            expect(Exit.isFailure(remark)).toBe(true)
            if (Exit.isFailure(remark)) {
@@ -565,18 +517,65 @@ diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/
      })
      test("grep", () => expect(toJsonSchema(Grep)).toMatchSnapshot())
      test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -1522,7 +1522,7 @@ const layer = Layer.effect(
-       return fallback ?? sanitized
-     })
- 
--    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-+    const runLoop = Effect.fn("SessionPrompt.run")(
-       function* (sessionID: SessionID) {
-         const ctx = yield* InstanceState.context
-         let structured: unknown
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+--- a/packages/core/src/tool/goal.ts
++++ b/packages/core/src/tool/goal.ts
+@@ -16,1 +16,1 @@
+-      description: "Read the current goal with no arguments before marking any status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Mark complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Mark blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the goal active for further exploration; the second confirms a persistent genuine blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Mark active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
++      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the goal active for further exploration; the second confirms a persistent genuine blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
+@@ -18,5 +18,6 @@
+-        mark: Schema.Literals(["complete", "blocked", "active"]).pipe(Schema.optional).annotate({
+-          description: "Omit to read. Mark complete/blocked with reason, or active to resume in a later user turn. Requires a prior read in this goal turn.",
++        // 显式 read 消除空调用歧义；可信快照仍保存在 runner 提供的同一 turn 上。
++        operate: Schema.Literals(["read", "complete", "blocked", "active"]).annotate({
++          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Blocked requires two consecutive eligible Goal turns using the same trimmed reason.",
+         }),
+         reason: Schema.String.pipe(Schema.optional).annotate({
+-          description: "Required non-empty explanation for complete/blocked; ignored for active.",
++          description: "Required non-empty explanation for complete/blocked; ignored for read and active.",
+@@ -32,1 +33,1 @@
+-        if (input.mark === undefined) {
++        if (input.operate === "read") {
+@@ -38,1 +39,1 @@
+-          message: "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
++          message: "You must call the goal tool with operate `read` before changing the goal. Read the current goal, then retry with operate and reason.",
+@@ -42,1 +43,1 @@
+-          userInitiated: turn.userInitiated, status: input.mark, reason: input.reason,
++          userInitiated: turn.userInitiated, status: input.operate, reason: input.reason,
+@@ -52,1 +53,1 @@
+-          : input.mark === undefined
++          : input.operate === "read"
+@@ -62,1 +63,1 @@
+-              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`
++              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call operate blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -688,1 +688,3 @@
+     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
++    // 检查真实模型签名，防止仅改 executor 却仍广告可选 mark 的旧合同。
++    expect(requests[0]!.tools.find(tool => tool.name === "goal")?.inputSchema).toMatchObject({ required: ["operate"] })
+@@ -699,1 +701,1 @@
+-      call: LLMEvent.toolCall({ id: "goal-read", name: "goal", input: {} }),
++      call: LLMEvent.toolCall({ id: "goal-read", name: "goal", input: { operate: "read" } }),
+@@ -718,2 +720,2 @@
+-      // 读取和mark分属两个provider step，验证可信快照不随普通工具轮次丢失。
+-      LLMEvent.toolCall({ id: "goal-read-before-done", name: "goal", input: {} }),
++      // 读取和操作分属两个 provider step，验证可信快照不随普通工具轮次丢失。
++      LLMEvent.toolCall({ id: "goal-read-before-done", name: "goal", input: { operate: "read" } }),
+@@ -724,1 +726,1 @@
+-      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { mark: "complete", reason: " Verified requested end state " } }),
++      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { operate: "complete", reason: " Verified requested end state " } }),
+@@ -745,1 +747,1 @@
+-    // 沿真实原生runner跨两个eligible turn确认blocker，工具read与mark仍各占provider step。
++    // 沿真实原生 runner 跨两个 eligible turn 确认 blocker，读取与操作仍各占 provider step。
+@@ -753,2 +755,2 @@
+-    const blocked = { mark: "blocked", reason: "persistent blocker" }
+-    responses = [callGoal("read-1", {}), callGoal("block-1", blocked), normal, callGoal("read-2", {}), callGoal("block-2", blocked), normal]
++    const blocked = { operate: "blocked", reason: "persistent blocker" }
++    responses = [callGoal("read-1", { operate: "read" }), callGoal("block-1", blocked), normal, callGoal("read-2", { operate: "read" }), callGoal("block-2", blocked), normal]
+@@ -762,1 +764,1 @@
+-    responses = [callGoal("read-recovery", {}), callGoal("recover", { mark: "active" }), []]
++    responses = [callGoal("read-recovery", { operate: "read" }), callGoal("recover", { operate: "active" }), []]
  
 

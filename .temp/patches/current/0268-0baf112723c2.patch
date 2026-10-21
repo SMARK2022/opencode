@@ -7,76 +7,14 @@ diff --git a/packages/core/src/models-dev.ts b/packages/core/src/models-dev.ts
 index 344a29828..12e33df4a 100644
 --- a/packages/core/src/models-dev.ts
 +++ b/packages/core/src/models-dev.ts
-@@ -11,7 +11,8 @@ import { EventV2 } from "./event"
- import { makeGlobalNode } from "./effect/app-node"
- // #71：catalog 刷新经 NetworkProxy，应用系统代理
- import { NetworkProxy } from "./network-proxy"
--// #150：catalog 只经 NetworkProxy.routedFetch，禁止回退 globalThis.fetch / HttpClient
-+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
-+// #268：catalog HTTP 现在经 HttpClient seam，测试可注入 mock client；生产入口仍接 NetworkProxy
- // purpose="infrastructure" 区分基础设施请求，便于代理路由策略
- 
- export const CatalogModelStatus = Schema.Literals(["alpha", "beta", "deprecated"])
-@@ -146,6 +147,9 @@
-   Effect.gen(function* () {
-     const fs = yield* FSUtil.Service
-     const events = yield* EventV2.Service
-+    // #268：yield HttpClient.HttpClient 后接 filterStatusOk——后续 execute 拿到的是已过滤客户端
-+    const http = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
-+    // #268：filterStatusOk 把 4xx/5xx 转为失败——目录源拉取失败不得以空目录静默成功
-     // #150：模型源 HTTP 仅走 NetworkProxy.routedFetch
- 
-    const source = Flag.OPENCODE_MODELS_URL || "https://models.opencode.ai"
-@@ -164,23 +167,23 @@
-     })
- 
-     const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
--      // infrastructure 用途走 NetworkProxy.routedFetch，真正应用系统代理（非仅 resolve）
--      // #71：非 2xx 用 Effect.fail（可被 refresh 的 ignore 吞掉），禁止 Promise throw 变 defect
--      const res = yield* Effect.tryPromise({
--        try: () =>
--          NetworkProxy.routedFetch(`${source}/api.json`, {
--            purpose: "infrastructure",
-+      // #268：HttpClient seam 替代直接 routedFetch——保留测试和 recorder 注入能力；
-+      // #268：失败仍走 Effect.fail 通道，refresh 的 ignore 吞掉语义与 #71 一致
-+      // #268：生产路径由 infrastructureHttpClientLayer 接到 NetworkProxy，不能改成裸 FetchHttpClient
-+      return yield* Effect.gen(function* () {
-+        const result = yield* http.execute(
-+          HttpClientRequest.get(`${source}/api.json`, {
-             headers: { "User-Agent": USER_AGENT },
-           }),
--        catch: (cause) => cause as Error,
--      }).pipe(Effect.timeout("10 seconds"))
--      if (!res.ok) {
--        return yield* Effect.fail(new Error(`models.dev fetch failed: ${res.status}`))
--      }
--      return yield* Effect.tryPromise({
--        try: () => res.text(),
--        catch: (cause) => cause as Error,
--      })
-+        )
-+        return yield* result.text
-+      }).pipe(
-+        // #268：保留 10 秒超时边界，超时必须覆盖响应体读取
-+        Effect.timeoutOrElse({
-+          duration: Duration.seconds(10),
-+          orElse: () => Effect.fail(new Error("Failed to fetch models.dev: timeout")),
-+        }),
-+      )
-     })
- 
-     const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
-@@ -263,7 +265,8 @@ const layer = Layer.effect(
-   }),
- )
- 
--// #150：ModelsDev 不再依赖 Effect HttpClient 层
--export const node = makeGlobalNode({ service: Service, layer: layer, deps: [FSUtil.node, EventV2.node] })
-+// #268：ModelsDev 现在依赖 HttpClient seam，生产路径由 NetworkProxy 提供
-+// #268：provide 放在 node 边界而非 layer 内——layer 保持可注入，生产组装才固定走 NetworkProxy
-+export const node = makeGlobalNode({ service: Service, layer: layer.pipe(Layer.provide(NetworkProxy.infrastructureHttpClientLayer)), deps: [FSUtil.node, EventV2.node] })
- 
- export * as ModelsDev from "./models-dev"
+@@ -181,6 +181,7 @@
+       // 原 client 仍负责 transient 重试及非 2xx typed failure，refresh 可继续吞掉可恢复失败。
++      // HttpClient seam 已由目标承载，保留可注入客户端和下层 infrastructure 路由，不重复装配 owner。
+       return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
+         HttpClientRequest.setHeader("User-Agent", USER_AGENT),
+         http.execute,
+         Effect.flatMap((res) => res.text),
+         // Fetch reference 覆盖共享 transport 而非再包一层，catalog 的 infrastructure 用途仍单次路由。
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
 index 04de50deb..c01e24e51 100644
 --- a/packages/core/src/network-proxy.ts
@@ -87,10 +25,10 @@ index 04de50deb..c01e24e51 100644
 +import { Effect } from "effect"
 +import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 +
- // #83：purpose 分流插件/provider/基础设施流量
+ // 本地 RPC 与远程 provider/安装请求必须分流，避免代理拦截 daemon 自己的健康通道。
  export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin" | "unknown"
  
-@@ -212,6 +215,35 @@
+@@ -196,6 +199,35 @@
    return fetch(input, init)
  }
  
@@ -123,9 +61,9 @@ index 04de50deb..c01e24e51 100644
 +)
 +
 +
- /**
-  * Primary network fetch entry point.
-  *
+ // 统一入口在当前路由上发送一次，请求失败直接交给调用方处理。
+ export async function fetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
+   const url = new URL(input instanceof Request ? input.url : input.toString())
 diff --git a/packages/core/test/network-proxy.test.ts b/packages/core/test/network-proxy.test.ts
 index 3643243ea..2d1e6b92f 100644
 --- a/packages/core/test/network-proxy.test.ts

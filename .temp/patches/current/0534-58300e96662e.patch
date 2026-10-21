@@ -560,6 +560,11 @@ diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/
 index 842f272b3..b7f4ffd55 100644
 --- a/packages/opencode/src/image/image.ts
 +++ b/packages/opencode/src/image/image.ts
+@@ -9,3 +9,4 @@
+ import { fileURLToPath } from "node:url"
++import { hasPngHeader, hasValidBmpHeader, isBmp, isPng } from "@opencode-ai/core/image/header"
+ 
+ const MAX_BASE64_BYTES = 5 * 1024 * 1024
 @@ -64,6 +64,31 @@ export interface Interface {
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
@@ -592,40 +597,49 @@ index 842f272b3..b7f4ffd55 100644
  // #485：导出 layer 供离线维护脚本（script/migrate-image-attachment.ts）复用生产 normalize 链
  export const layer = Layer.effect(
    Service,
-@@ -102,9 +127,18 @@ export const layer = Layer.effect(
+@@ -108,8 +134,10 @@ export const layer = Layer.effect(
+       const base64 = input.url.slice(input.url.indexOf(";base64,") + ";base64,".length)
        const bytes = Buffer.byteLength(base64, "utf8")
- 
-       const photon = yield* loadPhoton
 +      const buffer = Buffer.from(base64, "base64")
-+
-+      // #534：PNG/BMP 的便宜结构门禁在 decoder 前拒绝已知截断头；它不能替代下面的完整像素解码。
-+      // magic 只决定格式分支，不信任调用方 MIME；扩展名错误或 provider MIME 偏差不能改变 decoder 选择。
-+      // PNG 结构检查只锁定固定首块，IDAT 完整性仍完全交给 Photon，避免维护第二套压缩流 parser。
-+      if (isPng(buffer) && !hasPngHeader(buffer)) return yield* new DecodeError()
-+      // #534：Photon 会宽松接受错误 file-size/pixel-offset；open 前固定验证 BMP 文件与 DIB 边界。
-+      // 前置拒绝保证 malformed input 产生普通 DecodeError，而不是让 WASM trap 决定可观测行为。
-+      if (isBmp(buffer) && !hasValidBmpHeader(buffer)) return yield* new DecodeError()
++      // 结构门禁不替代像素解码；按真实bytes预选BMP，禁止失败后换backend。
++      if (buffer.length === 0 || (isPng(buffer) && !hasPngHeader(buffer)) || (isBmp(buffer) && !hasValidBmpHeader(buffer))) return yield* new DecodeError()
+ 
+-      const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(input.mime)
+-      if (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(input.mime)) {
++      if (!isBmp(buffer)) {
+         const content = yield* loadSharp.pipe(
+           Effect.flatMap((normalize) =>
+             normalize(
+@@ -144,6 +172,6 @@ export const layer = Layer.effect(
+       const photon = yield* loadPhoton
  
        const decoded = yield* Effect.try({
 -        try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
 +        try: () => photon.PhotonImage.new_from_byteslice(buffer),
          catch: () => new DecodeError(),
        }).pipe(Effect.tapError((error) => Effect.logWarning("failed to decode image", { error })))
- 
-@@ -184,6 +218,42 @@ export const layer = Layer.effect(
- 
- export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node] })
- 
+@@ -154,5 +182,4 @@ export const layer = Layer.effect(
+         const withinLimits =
+           originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes
+         // BMP 即使未超限也须转成 PNG/JPEG；禁用缩放不禁止等尺寸转码。
+-        if (withinLimits && supported) return input
+         if (!info.autoResize && !withinLimits)
+
+diff --git a/packages/core/src/image/header.ts b/packages/core/src/image/header.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/image/header.ts
+@@ -0,0 +1,36 @@
 +// #534：PNG 首块必须是固定 13-byte IHDR；提前限定该结构可避免宽松 parser 把坏头当作可传递图片。
-+function isPng(buffer: Buffer) {
++export function isPng(buffer: Buffer) {
 +  return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
 +}
 +
-+function hasPngHeader(buffer: Buffer) {
++export function hasPngHeader(buffer: Buffer) {
 +  return buffer.length >= 33 && buffer.readUInt32BE(8) === 13 && buffer.toString("ascii", 12, 16) === "IHDR"
 +}
 +
-+function isBmp(buffer: Buffer) {
++export function isBmp(buffer: Buffer) {
 +  return buffer.length >= 2 && buffer.toString("ascii", 0, 2) === "BM"
 +}
 +
@@ -633,7 +647,7 @@ index 842f272b3..b7f4ffd55 100644
 +// DIB 12 与 40..124 的字段偏移不同，混读会把宽高字节误判为 planes/bpp 并产生平台差异。
 +// offset 必须同时落在 DIB 之后和真实 buffer 内；声明长度存在时还不能越过声明末尾。
 +// planes 必须为 1，位深只接受 BMP 规范的离散集合——白名单来自 Pi 的 BMP predicate。
-+function hasValidBmpHeader(buffer: Buffer) {
++export function hasValidBmpHeader(buffer: Buffer) {
 +  if (buffer.length < 26) return false
 +  const declared = buffer.readUInt32LE(2)
 +  const dib = buffer.readUInt32LE(14)
@@ -652,9 +666,80 @@ index 842f272b3..b7f4ffd55 100644
 +  return fields !== undefined && fields.planes === 1 && [1, 4, 8, 16, 24, 32].includes(fields.bpp)
 +}
 +
- // #277：配置上限与调用方预算取小值，budget 未提供时保持既有配置语义
- function targetMaxBase64Bytes(
-   configuredMax: number,
+
+diff --git a/packages/core/src/image/sharp.ts b/packages/core/src/image/sharp.ts
+--- a/packages/core/src/image/sharp.ts
++++ b/packages/core/src/image/sharp.ts
+@@ -44,3 +44,11 @@
+     const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
++    // metadata不消费像素；透传、禁缩放和多页编码前必须验证所有待发送pages。
++    // 单页后续编码本身完整解码，不额外生成一份raw副本。
++    if (withinLimits || !limits.autoResize || (metadata.pages ?? 1) > 1)
++      yield* Effect.tryPromise({
++        try: async () => void (await sharp(buffer, (metadata.pages ?? 1) > 1 ? { pages: -1 } : undefined).raw().toBuffer()),
++        catch: () => new Image.DecodeError({ resource }),
++      })
++
+     if (withinLimits && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(content.mime)) return content
+     const sizeError = new Image.SizeError({
+
+diff --git a/packages/core/src/image.ts b/packages/core/src/image.ts
+--- a/packages/core/src/image.ts
++++ b/packages/core/src/image.ts
+@@ -6,1 +6,2 @@
+ import { FileSystem } from "./filesystem"
++import { hasPngHeader, hasValidBmpHeader, isBmp, isPng } from "./image/header"
+@@ -75,3 +76,6 @@
+-      const normalize = yield* (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime)
+-        ? loadSharpAdapter
+-        : loadAdapter)
++      const buffer = Buffer.from(content.content, "base64")
++      // 与V1同一header合同；错误仍使用当前Location/资源的typed Image错误。
++      if (buffer.length === 0 || (isPng(buffer) && !hasPngHeader(buffer)) || (isBmp(buffer) && !hasValidBmpHeader(buffer)))
++        return yield* new DecodeError({ resource })
++      // 互斥格式分支保留BMP WASM能力，其余格式共用generic全页解码。
++      const normalize = yield* (isBmp(buffer) ? loadAdapter : loadSharpAdapter)
+
+diff --git a/packages/core/src/image/photon.ts b/packages/core/src/image/photon.ts
+--- a/packages/core/src/image/photon.ts
++++ b/packages/core/src/image/photon.ts
+@@ -7,1 +7,2 @@
+ import { DecodeError, ResizerUnavailableError, SizeError } from "../image"
++import { isBmp } from "./header"
+@@ -30,3 +31,4 @@
+     const photon = yield* loadPhoton
++    const buffer = Buffer.from(content.content, "base64")
+     const decoded = yield* Effect.try({
+-      try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(content.content, "base64")),
++      try: () => photon.PhotonImage.new_from_byteslice(buffer),
+@@ -41,1 +43,1 @@
+-      if (withinLimits && content.mime !== "image/bmp") return content
++      if (withinLimits && !isBmp(buffer)) return content
+
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -104,12 +104,18 @@
+               if (
+                 "encoding" in content &&
+                 content.encoding === "base64" &&
+-                (SUPPORTED_IMAGE_MIMES.has(content.mime) ||
+-                  ["image/bmp", "image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime))
++                content.mime.startsWith("image/")
+               ) {
+                 return yield* image
+                   // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
+                   .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
++                  // 只适配Image的typed内容错误；读盘/权限错误与interrupt仍沿原失败通道。
++                  .pipe(Effect.catch(() => Effect.succeed({
++                    ...content,
++                    encoding: "utf8" as const,
++                    mime: "text/plain",
++                    content: "Image omitted: could not be decoded or resized within the image size limit.",
++                  })))
+               }
+               if ("encoding" in content && content.encoding === "base64")
+                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
 
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 index 4eb462779..b28ebbcfd 100644
@@ -666,10 +751,10 @@ index 4eb462779..b28ebbcfd 100644
  
 +      const prepareToolOutput = Effect.fn("SessionProcessor.prepareToolOutput")(function* (output: {
 +        title: string
-+        metadata: Record<string, any>
++        metadata: Record<string, unknown>
 +        output: string
 +        attachments?: SessionV1.FilePart[]
-+      }) {
++      }, options?: { readonly tokenBudget?: number }) {
 +        const normalized = yield* Effect.forEach(output.attachments ?? [], (candidate) => {
 +          const proof = Image.consumeNormalized(candidate)
 +          // #534：ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
@@ -678,7 +763,7 @@ index 4eb462779..b28ebbcfd 100644
 +          if (proof.valid) return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
 +          if (!proof.attachment.mime.startsWith("image/"))
 +            return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
-+          return image.normalize(proof.attachment).pipe(Effect.exit)
++          return image.normalize(proof.attachment, options).pipe(Effect.exit)
 +        })
 +        const omitted = normalized.filter(Exit.isFailure).length
 +        const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
@@ -698,39 +783,34 @@ index 4eb462779..b28ebbcfd 100644
        const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
          toolCallID: string,
          output: {
-@@ -286,7 +317,12 @@ const layer = Layer.effect(
+@@ -328,15 +359,18 @@ const layer = Layer.effect(
+           metadata: Record<string, any>
            output: string
            attachments?: SessionV1.FilePart[]
          },
 +        prepared = false,
        ) {
-+        // #534：abort/provider-executed 等直达 completion 的路径也必须经过同一准备函数；普通 result 已准备时复用同一 snapshot。
-+        // prepared 标志只区分本函数内部已完成的普通事件路径，不是调用方可伪造的持久化 metadata。
-+        // direct 路径默认 false，因此取消时正常返回的 Tool 也无法绕过图片失败降级。
-+        const result = prepared ? output : yield* prepareToolOutput(output)
-         // [local-smark] 终态写入串行化：read-check-write 必须原子，防止 late
-         // metadata/result 或 cleanup 与正常完成路径竞争覆盖终态
-         return yield* toolPermit.withPermits(1)(
-@@ -306,30 +342,30 @@ const layer = Layer.effect(
+         const match = yield* readToolCall(toolCallID)
+         if (!match) return
+         // #139：DB 已终态时仍 settle deferred，避免 LLM 死等
+         if (match.part.state.status !== "running") {
+           yield* settleToolCall(toolCallID)
+           return
+         }
++        // direct completion也在既有permit内准备；普通事件复用已准备snapshot及Read预算。
++        const result = prepared ? output : yield* prepareToolOutput(output, match.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
+         yield* session.updatePart({
+           ...match.part,
+           state: {
+@@ -345,20 +379,20 @@ const layer = Layer.effect(
              // edits 整表替换（丢弃 legacy 顶层字段）优先于旧 content 覆盖语义。
              input: resolveCompletedToolInput(
                match.part.state.input as Record<string, unknown>,
 -              output.metadata as Record<string, unknown> | undefined,
 +              result.metadata as Record<string, unknown> | undefined,
              ),
-             // [local-smark] 所有工具 ≥120s 完成时追加中性耗时 Notice：completeToolCall
-             // 是全部工具类型（local/MCP/Task/bash）唯一完成汇聚点。shell 的 outcome
-             // Notice 由 formatShellExecutionNotice 单点承载（单一 outcome 不变量），
-             // 此处仅非 shell 工具追加，避免 bash 长任务双 completed Notice
-             output: match.part.tool === "bash"
--              ? output.output
-+              ? result.output
-               : (() => {
-                   const elapsed = Date.now() - match.part.state.time.start
-                   const longNotice = formatLongExecutionNotice("tool", elapsed)
--                  return longNotice ? `${output.output}\n\n${longNotice}` : output.output
-+                  return longNotice ? `${result.output}\n\n${longNotice}` : result.output
-                 })(),
+-            output: output.output,
++            output: result.output,
              // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
              // #514：strip 真值临时字段（_formattedContent/_syncInput），避免进持久化 metadata
              metadata: (() => {
@@ -741,21 +821,20 @@ index 4eb462779..b28ebbcfd 100644
                  : rest
              })(),
 -            title: output.title,
-+            title: typeof result.title === "string" ? result.title : "",
++            title: result.title,
              time: { start: match.part.state.time.start, end: Date.now() },
 -            attachments: output.attachments,
 +            attachments: result.attachments,
            },
          })
          yield* settleToolCall(toolCallID)
-@@ -622,23 +658,8 @@ const layer = Layer.effect(
-               return
-             }
+@@ -650,20 +684,4 @@ const layer = Layer.effect(
              const rawOutput = toolResultOutput(value)
 -            const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
 -              // #485：fail-closed——resizer 不可用时该附件失败省略（omitted 计数），不再回退原图
 -              attachment.mime.startsWith("image/")
--                ? image.normalize(attachment).pipe(Effect.exit)
+-                // 沿用唯一附件归一化分支，只有实际 Read 调用携带源预算。
+-                ? image.normalize(attachment, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(Effect.exit)
 -                : Effect.succeed(Exit.succeed<SessionV1.FilePart>(attachment)),
 -            )
 -            const omitted = normalized.filter(Exit.isFailure).length
@@ -769,11 +848,9 @@ index 4eb462779..b28ebbcfd 100644
 -              attachments: attachments.length ? attachments : undefined,
 -            }
 -            yield* completeToolCall(value.id, output)
-+            const output = yield* prepareToolOutput(rawOutput)
++            const output = yield* prepareToolOutput(rawOutput, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
 +            yield* completeToolCall(value.id, output, true)
              return
-           }
- 
 
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index 9a0d3178f..053cfbf2f 100644
@@ -815,17 +892,17 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 index c5ff8db3d..868c747ac 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -12,7 +12,7 @@ import { readOutline, readOutlineCached, type Outline } from "./read-outline"
+@@ -14,7 +14,7 @@
  import { InstanceState } from "@/effect/instance-state"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import { Instruction } from "../session/instruction"
--import { isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
-+import { isImageAttachment, isPdfAttachment, sniffAttachmentMime, formatSize } from "@/util/media"
- // #277：read 的图片附件处理收敛到 Image.Service，替换 read 独占的 processImageWithTokenBudget
+-import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
++import { isImageAttachment, isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+ // #277：复用 Image.Service；media 已仅有 MIME 辅助函数，不恢复旧压缩路径。
  import { Image } from "@/image/image"
  import { PartID } from "@/session/schema"
-@@ -30,7 +30,8 @@ const DEFAULT_READ_LIMIT = 200
- const MAX_BYTES = 16 * 1024 // #178：默认输出上限 24KiB→16KiB
+@@ -29,7 +29,8 @@ const DEFAULT_READ_LIMIT = 200
+ const MAX_BYTES = 16 * 1024
  const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
  const SAMPLE_BYTES = 4096
 -const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
@@ -834,65 +911,78 @@ index c5ff8db3d..868c747ac 100644
  
  const MAX_CONTENT_TOKENS = 16000
  // #142：单行展示上限
-@@ -757,7 +758,10 @@ export const ReadTool = Tool.define<
-       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
- 
+@@ -728,18 +729,7 @@ export const ReadTool = Tool.define<
        const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
--      const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
-+      // #534：图像判定并入目标唯一谓词 owner（util/media.isImageAttachment）——
-+      // #534：Photon decoder 域外格式（svg+xml 等矢量文本）不进 Image.Service，保持文本读取，
-+      // #534：与 webfetch/粘贴附件共用同一判定，避免 read 单独维护第二套 MIME 域规则。
+-      // BMP 需具备完整文件头和 DIB 头，避免把 BM 开头的纯文本当图片。
+-      const header = new DataView(sample.buffer, sample.byteOffset, sample.byteLength)
+-      const isImage =
+-        SUPPORTED_IMAGE_MIMES.has(mime) ||
+-        (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(mime) &&
+-          sniffAttachmentMime(sample, "") === mime) ||
+-        (mime === "image/bmp" &&
+-          sample.length >= 26 &&
+-          sample[0] === 0x42 &&
+-          sample[1] === 0x4d &&
+-          header.getUint32(14, true) >= 12 &&
+-          14 + header.getUint32(14, true) <= sample.length &&
+-          header.getUint32(10, true) >= 14 + header.getUint32(14, true) &&
+-          header.getUint32(10, true) < Number(stat.size))
++      // MIME只分类，完整header/像素检查统一留给Image；坏BMP也应得到省略文本。
++      // SVG及fastbidsheet沿目标共享谓词继续作为文本，不恢复独立格式白名单。
 +      const isImage = isImageAttachment(mime)
  
        if (isImage || isPdfAttachment(mime)) {
          const bytes = yield* fs.readFile(filepath)
-@@ -778,23 +782,38 @@ export const ReadTool = Tool.define<
-               // #277：read 结果立即进入模型上下文，预算对齐既有图片 token 上限
-               { tokenBudget: 1600 },
-             )
--          // #485：fail-closed 反转 #277 的回退决策——resizer 不可用时读取直接失败，
--          // 不再把未经压缩的原始字节交给模型
-+            // #534：图片失败是该 tool 的可恢复内容错误——返回有界文本并继续，不把原始坏 bytes 交给 provider；
-+            // omission 不带 attachment，Processor 后续没有可被再次发送或落库的失败 payload；
-+            // loaded metadata 仍照常保留，让调用方知道文件读取动作已经完成而不是权限或路径失败。
-+            .pipe(Effect.option)
-+          if (Option.isNone(attachment)) {
-+            const msg = "Image omitted: could not be decoded or resized within the image size limit."
-+            return {
-+              title,
-+              output: msg,
-+              metadata: readToolMetadata({
-+                preview: msg,
-+                truncated: false,
-+                loaded: loaded.map((item) => item.filepath),
-+              }),
-+            }
+@@ -752,33 +742,36 @@ export const ReadTool = Tool.define<
+         const attachment = isImage
+           ? yield* image
+               .normalize(
+                 {
+                   ...input,
+                   // #277：内部规整使用本次请求身份，不能借用缓存或其他会话的 ID。
+                   id: PartID.ascending(),
+                   messageID: ctx.messageID,
+                   sessionID: ctx.sessionID,
+                 },
+                 { tokenBudget: 1600 },
+-              )
+-              // 不可用与解码失败均不发送原图；下方PDF分支仍原样返回。
+-          : input
++              ).pipe(Effect.option)
++          : Option.some(input)
++        // 图片typed失败仅省略该payload；loaded仍记录真实读盘动作，PDF不经过decoder。
++        if (Option.isNone(attachment)) {
++          const msg = "Image omitted: could not be decoded or resized within the image size limit."
++          return {
++            title,
++            output: msg,
++            metadata: readToolMetadata({ preview: msg, truncated: false, loaded: loaded.map((item) => item.filepath) }),
 +          }
-           const msg = `Image read successfully (${formatSize(bytes.length)} → compressed for model)`
-           return {
-             title,
-             output: msg,
--            metadata: {
-+            metadata: readToolMetadata({
-               preview: msg,
-               truncated: false,
-               loaded: loaded.map((item) => item.filepath),
++        }
+         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
++        // proof只标记图片当前MIME/URL；PDF与返回附件身份保持原合同。
++        const media = { type: "file" as const, mime: attachment.value.mime, url: attachment.value.url }
+         return {
+           title,
+           output: msg,
+-          metadata: {
++          metadata: readToolMetadata({
+             preview: msg,
+             truncated: false,
+             loaded: loaded.map((item) => item.filepath),
+-          },
+-          // #277：工具附件仅投影 MIME 与 URL，内部 ID 不进入返回契约。
+-          attachments: [
+-            {
+-              type: "file" as const,
+-              mime: attachment.mime,
+-              url: attachment.url,
 -            },
-+            }),
-             attachments: [
--              {
-+              // #534：proof 标记同一 MIME/URL 已 decode——后续 prompt/processor 不重复解码，改写后自动失效。
-+              Image.markNormalized({
-                 type: "file" as const,
--                mime: attachment.mime,
--                url: attachment.url,
--              },
-+                mime: attachment.value.mime,
-+                url: attachment.value.url,
-+              }),
-             ],
-           }
+-          ],
++          }),
++          attachments: [isImage ? Image.markNormalized(media) : media],
          }
+       }
 
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 index 942c83d3f..abd1a4e5e 100644
@@ -1041,13 +1131,16 @@ index 942c83d3f..abd1a4e5e 100644
 +  { git: true },
 +)
 +
-+// #534：极小 token 预算下的坏像素——decode 必须先于 size 判定；
++// #534：禁用缩放且仅允许1字节时，坏像素仍须先归属decode失败；
 +// metadata-only 顺序会先报 SizeError，真实像素损坏必须拥有更早的 DecodeError。
 +it.instance(
 +  "decodes before reporting size when the token budget is minimal",
 +  () =>
 +    Effect.gen(function* () {
-+      yield* useServerConfig(providerCfg)
++      yield* useServerConfig((url) => ({
++        ...providerCfg(url),
++        attachment: { image: { auto_resize: false, max_base64_bytes: 1 } },
++      }))
 +      const image = yield* Image.Service
 +      const png = Buffer.from(tinyPng, "base64")
 +      const idat = png.indexOf(Buffer.from("IDAT"))
@@ -1062,7 +1155,7 @@ index 942c83d3f..abd1a4e5e 100644
 +            mime: "image/png",
 +            url: `data:image/png;base64,${png.toString("base64")}`,
 +          },
-+          // 预算 1 换算出的字节上限极小；若实现先做 size 检查，这里会得到 SizeError 而非 DecodeError。
++          // 配置的1字节上限小于样本；若实现先拒绝尺寸，这里会得到SizeError而非DecodeError。
 +          { tokenBudget: 1 },
 +        )
 +        .pipe(Effect.exit)
@@ -1070,9 +1163,7 @@ index 942c83d3f..abd1a4e5e 100644
 +      if (Exit.isFailure(pngResult)) {
 +        expect(Cause.squash(pngResult.cause)).toBeInstanceOf(Image.DecodeError)
 +      }
-+      // 多帧向量锁定反向顺序：目标 Photon 首帧语义（pages:-1 全帧校验为 source 能力，目标无等价物，
-+      // 见 record 残差）下首帧合法即 decode 成功，随后才被极小预算拒绝为 SizeError——
-+      // 与坏 png 的 DecodeError 共同证明 decode 先于 size，而非 metadata-only 提前拒绝。
++      // 后帧损坏必须由全页解码拒绝，不能因首帧可读或预算判断而成功透传。
 +      const gif = Buffer.from(twoFrameGif, "base64")
 +      gif[89] = 0
 +      const gifResult = yield* image
@@ -1088,9 +1179,8 @@ index 942c83d3f..abd1a4e5e 100644
 +          { tokenBudget: 1 },
 +        )
 +        .pipe(Effect.exit)
-+      expect(Exit.isFailure(gifResult)).toBe(false)
-+      // 目标 Photon 首帧语义（record 残差）：后帧损坏不阻塞首帧 decode，且 72B 小图通过极小预算；
-+      // source 的 pages:-1 全帧拒绝在目标无等价物，此处锁定目标实际行为防回归。
++      expect(Exit.isFailure(gifResult)).toBe(true)
++      if (Exit.isFailure(gifResult)) expect(Cause.squash(gifResult.cause)).toBeInstanceOf(Image.DecodeError)
 +    }),
 +  { git: true },
 +)
@@ -1177,6 +1267,37 @@ index 942c83d3f..abd1a4e5e 100644
      }),
    { git: true },
  )
+
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -397,2 +397,2 @@
+-  // #485：反转旧回退契约——resizer 不可用时 fail-closed，与 V1 read 工具行为一致
+-  itWithoutResizer.effect("fails closed when the resizer is unavailable", () =>
++  // #534：图片内容错误变为文本省略，不发送原始bytes；读取与权限错误仍失败。
++  itWithoutResizer.effect("omits the image when the resizer is unavailable", () =>
+@@ -416,1 +416,1 @@
+-      ).toEqual({ type: "error", value: "Image resizer is unavailable" })
++      ).toMatchObject({ type: "json", value: { encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." } })
+@@ -420,1 +420,1 @@
+-  it.effect("rejects invalid image data returned by the filesystem", () =>
++  it.effect("omits invalid image data returned by the filesystem", () =>
+@@ -437,1 +437,1 @@
+-      ).toEqual({ type: "error", value: "Image could not be decoded: truncated.png" })
++      ).toMatchObject({ type: "json", value: { encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." } })
+@@ -441,1 +441,1 @@
+-  it.effect("rejects oversized images when resizing is disabled", () =>
++  it.effect("omits oversized images when resizing is disabled", () =>
+@@ -471,2 +471,2 @@
+-      expect(result.type).toBe("error")
+-      if (result.type === "error") expect(result.value).toContain("exceeding configured limits 4x2000")
++      expect(result.type).toBe("json")
++      if (result.type === "json") expect(result.value).toMatchObject({ encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." })
+@@ -543,2 +543,2 @@
+-      expect(result.type).toBe("error")
+-      if (result.type === "error") expect(result.value).toContain("/1 bytes")
++      expect(result.type).toBe("json")
++      if (result.type === "json") expect(result.value).toMatchObject({ encoding: "utf8", mime: "text/plain", content: "Image omitted: could not be decoded or resized within the image size limit." })
 
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
 index e88f2e2c1..4ad57dbe1 100644
@@ -1367,17 +1488,15 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 index fd3133e05..45973abf1 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -676,6 +676,8 @@ describe("tool.read truncation", () => {
-       expect(result.attachments?.[0]).not.toHaveProperty("id")
-       expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
-       expect(result.attachments?.[0]).not.toHaveProperty("messageID")
-+      // #534：未超限图片虽保持原 bytes，也必须先完整 decode；精确相等锁定无损 pass-through 合同。
-+      expect(result.attachments?.[0].url).toBe(`data:image/png;base64,${png.toString("base64")}`)
-     }),
-   )
- 
-@@ -702,18 +704,163 @@ describe("tool.read truncation", () => {
-       // 图片读取输出可能包含附加信息，使用 toStartWith 避免严格匹配
+@@ -791,4 +791,6 @@ describe("tool.read truncation", () => {
+       expect(attachment).not.toHaveProperty("id")
+       expect(attachment).not.toHaveProperty("sessionID")
+       expect(attachment).not.toHaveProperty("messageID")
++      // 原PNG保持逐字bytes；BMP/TIFF/AVIF继续遵守目标转码合同。
++      if (name === "image.png") expect(attachment.url).toBe(`data:image/png;base64,${png.toString("base64")}`)
+       const normalized = yield* provideInstance(dir)(
+@@ -835,18 +837,162 @@ describe("tool.read truncation", () => {
+       // 图片文案允许附加说明；原生附件 MIME 与 data URL 断言继续保留。
        expect(result.output).toStartWith("Image read successfully")
        expect(result.attachments?.[0].mime).toBe("image/jpeg")
 -      expect(result.attachments?.[0].url.startsWith("data:image/jpeg;base64,")).toBe(true)
@@ -1461,8 +1580,8 @@ index fd3133e05..45973abf1 100644
 +    }),
 +  )
 +
-+  // #534：GIF 容器合法时必须保留动画容器和逐字 bytes——
-+  // 合法与损坏只差后帧字节的目标差异见 record（Photon 首帧语义 vs source pages:-1）。
++  // #534：GIF容器合法时保留动画容器和逐字bytes；后帧损坏由同一全页decoder拒绝。
++  // 下面的有效样本与prompt中的坏后帧样本共享原始GIF，只改变错误样本一个字节。
 +  it.live("passes a valid multi-frame GIF through with exact bytes", () =>
 +    Effect.gen(function* () {
 +      const dir = yield* tmpdirScoped()
@@ -1471,7 +1590,7 @@ index fd3133e05..45973abf1 100644
 +        "base64",
 +      )
 +      yield* put(path.join(dir, "valid.gif"), gif)
-+      // 双帧 GIF 只验证合法 pass-through；后帧损坏的目标语义差异由 prompt.test 的 decode 顺序用例覆盖。
++      // 双帧GIF锁定合法pass-through；prompt用例另外锁定坏后帧不能透传。
 +      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.gif") })
 +      // 全帧验证成功后必须保留原始逐字 bytes，不能把 GIF 压成首帧或其他格式。
 +      expect(valid.attachments?.[0].mime).toBe("image/gif")
@@ -1499,10 +1618,9 @@ index fd3133e05..45973abf1 100644
 +      yield* put(path.join(dir, "valid.bmp"), bmp)
 +
 +      const valid = yield* exec(dir, { filePath: path.join(dir, "valid.bmp") })
-+      // 目标 normalize 解码后无损 pass-through（不转 PNG）：mime 与逐字 bytes 都保持原容器；
-+      // 解码事实由四个坏 header 变异向量锁定（不 decode 则它们不会被拒绝）。
-+      expect(valid.attachments?.[0].mime).toBe("image/bmp")
-+      expect(valid.attachments?.[0].url).toBe(`data:image/bmp;base64,${bmp.toString("base64")}`)
++      // BMP由Photon完整open并转换成模型可用PNG，不把原容器交回provider。
++      expect(valid.attachments?.[0].mime).toBe("image/png")
++      expect(valid.attachments?.[0].url.startsWith("data:image/png;base64,")).toBe(true)
 +
 +      const badSize = Buffer.from(bmp)
 +      badSize.writeUInt32LE(1, 2)
@@ -1545,7 +1663,7 @@ index fd3133e05..45973abf1 100644
      }),
    )
  
-@@ -736,9 +883,9 @@ describe("tool.read truncation", () => {
+@@ -868,9 +1014,9 @@ describe("tool.read truncation", () => {
      }),
    )
  
@@ -1558,7 +1676,7 @@ index fd3133e05..45973abf1 100644
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
        const png = Buffer.from(
-@@ -747,9 +894,9 @@ describe("tool.read truncation", () => {
+@@ -879,9 +1025,9 @@ describe("tool.read truncation", () => {
        )
        yield* put(path.join(dir, "image.png"), png)
  
@@ -1571,7 +1689,7 @@ index fd3133e05..45973abf1 100644
      }),
    )
  
-@@ -774,7 +921,7 @@ root_type Monster;`
+@@ -906,7 +1052,7 @@ root_type Monster;`
      }),
    )
  
@@ -1580,7 +1698,7 @@ index fd3133e05..45973abf1 100644
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
        const cases = [
-@@ -786,8 +933,10 @@ root_type Monster;`
+@@ -918,8 +1064,10 @@ root_type Monster;`
        for (const item of cases) {
          yield* put(path.join(dir, item[0]), item[1])
          const result = yield* exec(dir, { filePath: path.join(dir, item[0]) })
@@ -1592,3 +1710,80 @@ index fd3133e05..45973abf1 100644
        }
      }),
    )
+
+diff --git a/packages/core/package.json b/packages/core/package.json
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -133,1 +133,1 @@
+-    "sharp": "0.33.5"
++    "sharp": "0.34.5"
+
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -61,1 +61,1 @@
+-    "sharp": "0.33.5",
++    "sharp": "0.34.5",
+
+diff --git a/packages/opencode/script/sharp-native.ts b/packages/opencode/script/sharp-native.ts
+--- a/packages/opencode/script/sharp-native.ts
++++ b/packages/opencode/script/sharp-native.ts
+@@ -16,1 +16,1 @@
+-  // 0.33.5未发布Windows ARM64 addon；保留该平台原有Photon能力，不伪造Sharp支持或阻断整个发布。
++  // 支持矩阵取自当前Sharp包声明，未发布的目标不伪造addon或阻断其他平台构建。
+@@ -40,3 +40,6 @@
+-      // 精确匹配当前0.33.5 loader；该版没有0.34.5的x64-v2 guard，不移入不存在的第二锚点。
++      // 0.34.5的绝对释放路径也必须执行Linux x64 CPU检查，不能因改写require路径绕过原guard。
++      const guard = "path.startsWith('@img/sharp-linux-x64')"
+       if (source.indexOf(before) === -1 || source.indexOf(before) !== source.lastIndexOf(before)) throw new Error(`Sharp ${metadata.version} loader changed`)
+-      return { contents: source.replace(before, "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,"), loader: "js" }
++      if (source.indexOf(guard) === -1 || source.indexOf(guard) !== source.lastIndexOf(guard)) throw new Error(`Sharp ${metadata.version} CPU guard changed`)
++      return { contents: source.replace(before, "const paths = [globalThis.__OPENCODE_SHARP_NATIVE_PATH,")
++        .replace(guard, "runtimePlatform === 'linux-x64'"), loader: "js" }
+@@ -52,1 +55,1 @@
+-  // TIFF强制经过共享Sharp adapter；PNG在目标走Photon，不能拿来认证这条原生加载链。
++  // TIFF强制经过共享Sharp adapter，编译验证不能只检查图片metadata或绕过真实归一化服务。
+
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -390,1 +390,1 @@
+-        "sharp": "0.33.5",
++        "sharp": "0.34.5",
+@@ -699,1 +699,1 @@
+-        "sharp": "0.33.5",
++        "sharp": "0.34.5",
+@@ -5078,1 +5078,1 @@
+-    "sharp": ["sharp@0.33.5", "", { "dependencies": { "color": "^4.2.3", "detect-libc": "^2.0.3", "semver": "^7.6.3" }, "optionalDependencies": { "@img/sharp-darwin-arm64": "0.33.5", "@img/sharp-darwin-x64": "0.33.5", "@img/sharp-libvips-darwin-arm64": "1.0.4", "@img/sharp-libvips-darwin-x64": "1.0.4", "@img/sharp-libvips-linux-arm": "1.0.5", "@img/sharp-libvips-linux-arm64": "1.0.4", "@img/sharp-libvips-linux-s390x": "1.0.4", "@img/sharp-libvips-linux-x64": "1.0.4", "@img/sharp-libvips-linuxmusl-arm64": "1.0.4", "@img/sharp-libvips-linuxmusl-x64": "1.0.4", "@img/sharp-linux-arm": "0.33.5", "@img/sharp-linux-arm64": "0.33.5", "@img/sharp-linux-s390x": "0.33.5", "@img/sharp-linux-x64": "0.33.5", "@img/sharp-linuxmusl-arm64": "0.33.5", "@img/sharp-linuxmusl-x64": "0.33.5", "@img/sharp-wasm32": "0.33.5", "@img/sharp-win32-ia32": "0.33.5", "@img/sharp-win32-x64": "0.33.5" } }, "sha512-haPVm1EkS9pgvHrQ/F3Xy+hgcuMV0Wm9vfIBSiwZ05k+xgb0PkBQpGsAA/oWdDobNaZTH5ppvHtzCFbnSEwHVw=="],
++    "sharp": ["sharp@0.34.5", "", { "dependencies": { "@img/colour": "^1.0.0", "detect-libc": "^2.1.2", "semver": "^7.7.3" }, "optionalDependencies": { "@img/sharp-darwin-arm64": "0.34.5", "@img/sharp-darwin-x64": "0.34.5", "@img/sharp-libvips-darwin-arm64": "1.2.4", "@img/sharp-libvips-darwin-x64": "1.2.4", "@img/sharp-libvips-linux-arm": "1.2.4", "@img/sharp-libvips-linux-arm64": "1.2.4", "@img/sharp-libvips-linux-ppc64": "1.2.4", "@img/sharp-libvips-linux-riscv64": "1.2.4", "@img/sharp-libvips-linux-s390x": "1.2.4", "@img/sharp-libvips-linux-x64": "1.2.4", "@img/sharp-libvips-linuxmusl-arm64": "1.2.4", "@img/sharp-libvips-linuxmusl-x64": "1.2.4", "@img/sharp-linux-arm": "0.34.5", "@img/sharp-linux-arm64": "0.34.5", "@img/sharp-linux-ppc64": "0.34.5", "@img/sharp-linux-riscv64": "0.34.5", "@img/sharp-linux-s390x": "0.34.5", "@img/sharp-linux-x64": "0.34.5", "@img/sharp-linuxmusl-arm64": "0.34.5", "@img/sharp-linuxmusl-x64": "0.34.5", "@img/sharp-wasm32": "0.34.5", "@img/sharp-win32-arm64": "0.34.5", "@img/sharp-win32-ia32": "0.34.5", "@img/sharp-win32-x64": "0.34.5" } }, "sha512-Ou9I5Ft9WNcCbXrU9cMgPBcCK8LiwLqcbywW3t4oDV37n1pzpuNLsYiAV8eODnjbtQlSDwZ2cUEeQz4E54Hltg=="],
+@@ -6508,1 +6508,30 @@
++    "astro/sharp": ["sharp@0.33.5", "", { "dependencies": { "color": "^4.2.3", "detect-libc": "^2.0.3", "semver": "^7.6.3" }, "optionalDependencies": { "@img/sharp-darwin-arm64": "0.33.5", "@img/sharp-darwin-x64": "0.33.5", "@img/sharp-libvips-darwin-arm64": "1.0.4", "@img/sharp-libvips-darwin-x64": "1.0.4", "@img/sharp-libvips-linux-arm": "1.0.5", "@img/sharp-libvips-linux-arm64": "1.0.4", "@img/sharp-libvips-linux-s390x": "1.0.4", "@img/sharp-libvips-linux-x64": "1.0.4", "@img/sharp-libvips-linuxmusl-arm64": "1.0.4", "@img/sharp-libvips-linuxmusl-x64": "1.0.4", "@img/sharp-linux-arm": "0.33.5", "@img/sharp-linux-arm64": "0.33.5", "@img/sharp-linux-s390x": "0.33.5", "@img/sharp-linux-x64": "0.33.5", "@img/sharp-linuxmusl-arm64": "0.33.5", "@img/sharp-linuxmusl-x64": "0.33.5", "@img/sharp-wasm32": "0.33.5", "@img/sharp-win32-ia32": "0.33.5", "@img/sharp-win32-x64": "0.33.5" } }, "sha512-haPVm1EkS9pgvHrQ/F3Xy+hgcuMV0Wm9vfIBSiwZ05k+xgb0PkBQpGsAA/oWdDobNaZTH5ppvHtzCFbnSEwHVw=="],
++    "astro/sharp/detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
++    "miniflare/sharp": ["sharp@0.33.5", "", { "dependencies": { "color": "^4.2.3", "detect-libc": "^2.0.3", "semver": "^7.6.3" }, "optionalDependencies": { "@img/sharp-darwin-arm64": "0.33.5", "@img/sharp-darwin-x64": "0.33.5", "@img/sharp-libvips-darwin-arm64": "1.0.4", "@img/sharp-libvips-darwin-x64": "1.0.4", "@img/sharp-libvips-linux-arm": "1.0.5", "@img/sharp-libvips-linux-arm64": "1.0.4", "@img/sharp-libvips-linux-s390x": "1.0.4", "@img/sharp-libvips-linux-x64": "1.0.4", "@img/sharp-libvips-linuxmusl-arm64": "1.0.4", "@img/sharp-libvips-linuxmusl-x64": "1.0.4", "@img/sharp-linux-arm": "0.33.5", "@img/sharp-linux-arm64": "0.33.5", "@img/sharp-linux-s390x": "0.33.5", "@img/sharp-linux-x64": "0.33.5", "@img/sharp-linuxmusl-arm64": "0.33.5", "@img/sharp-linuxmusl-x64": "0.33.5", "@img/sharp-wasm32": "0.33.5", "@img/sharp-win32-ia32": "0.33.5", "@img/sharp-win32-x64": "0.33.5" } }, "sha512-haPVm1EkS9pgvHrQ/F3Xy+hgcuMV0Wm9vfIBSiwZ05k+xgb0PkBQpGsAA/oWdDobNaZTH5ppvHtzCFbnSEwHVw=="],
++    "miniflare/sharp/detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
++    "sharp/@img/colour": ["@img/colour@1.1.0", "", {}, "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ=="],
++    "sharp/@img/sharp-darwin-arm64": ["@img/sharp-darwin-arm64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-darwin-arm64": "1.2.4" }, "os": "darwin", "cpu": "arm64" }, "sha512-imtQ3WMJXbMY4fxb/Ndp6HBTNVtWCUI0WdobyheGf5+ad6xX8VIDO8u2xE4qc/fr08CKG/7dDseFtn6M6g/r3w=="],
++    "sharp/@img/sharp-darwin-x64": ["@img/sharp-darwin-x64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-darwin-x64": "1.2.4" }, "os": "darwin", "cpu": "x64" }, "sha512-YNEFAF/4KQ/PeW0N+r+aVVsoIY0/qxxikF2SWdp+NRkmMB7y9LBZAVqQ4yhGCm/H3H270OSykqmQMKLBhBJDEw=="],
++    "sharp/@img/sharp-libvips-darwin-arm64": ["@img/sharp-libvips-darwin-arm64@1.2.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-zqjjo7RatFfFoP0MkQ51jfuFZBnVE2pRiaydKJ1G/rHZvnsrHAOcQALIi9sA5co5xenQdTugCvtb1cuf78Vf4g=="],
++    "sharp/@img/sharp-libvips-darwin-x64": ["@img/sharp-libvips-darwin-x64@1.2.4", "", { "os": "darwin", "cpu": "x64" }, "sha512-1IOd5xfVhlGwX+zXv2N93k0yMONvUlANylbJw1eTah8K/Jtpi15KC+WSiaX/nBmbm2HxRM1gZ0nSdjSsrZbGKg=="],
++    "sharp/@img/sharp-libvips-linux-arm": ["@img/sharp-libvips-linux-arm@1.2.4", "", { "os": "linux", "cpu": "arm" }, "sha512-bFI7xcKFELdiNCVov8e44Ia4u2byA+l3XtsAj+Q8tfCwO6BQ8iDojYdvoPMqsKDkuoOo+X6HZA0s0q11ANMQ8A=="],
++    "sharp/@img/sharp-libvips-linux-arm64": ["@img/sharp-libvips-linux-arm64@1.2.4", "", { "os": "linux", "cpu": "arm64" }, "sha512-excjX8DfsIcJ10x1Kzr4RcWe1edC9PquDRRPx3YVCvQv+U5p7Yin2s32ftzikXojb1PIFc/9Mt28/y+iRklkrw=="],
++    "sharp/@img/sharp-libvips-linux-ppc64": ["@img/sharp-libvips-linux-ppc64@1.2.4", "", { "os": "linux", "cpu": "ppc64" }, "sha512-FMuvGijLDYG6lW+b/UvyilUWu5Ayu+3r2d1S8notiGCIyYU/76eig1UfMmkZ7vwgOrzKzlQbFSuQfgm7GYUPpA=="],
++    "sharp/@img/sharp-libvips-linux-riscv64": ["@img/sharp-libvips-linux-riscv64@1.2.4", "", { "os": "linux", "cpu": "none" }, "sha512-oVDbcR4zUC0ce82teubSm+x6ETixtKZBh/qbREIOcI3cULzDyb18Sr/Wcyx7NRQeQzOiHTNbZFF1UwPS2scyGA=="],
++    "sharp/@img/sharp-libvips-linux-s390x": ["@img/sharp-libvips-linux-s390x@1.2.4", "", { "os": "linux", "cpu": "s390x" }, "sha512-qmp9VrzgPgMoGZyPvrQHqk02uyjA0/QrTO26Tqk6l4ZV0MPWIW6LTkqOIov+J1yEu7MbFQaDpwdwJKhbJvuRxQ=="],
++    "sharp/@img/sharp-libvips-linux-x64": ["@img/sharp-libvips-linux-x64@1.2.4", "", { "os": "linux", "cpu": "x64" }, "sha512-tJxiiLsmHc9Ax1bz3oaOYBURTXGIRDODBqhveVHonrHJ9/+k89qbLl0bcJns+e4t4rvaNBxaEZsFtSfAdquPrw=="],
++    "sharp/@img/sharp-libvips-linuxmusl-arm64": ["@img/sharp-libvips-linuxmusl-arm64@1.2.4", "", { "os": "linux", "cpu": "arm64" }, "sha512-FVQHuwx1IIuNow9QAbYUzJ+En8KcVm9Lk5+uGUQJHaZmMECZmOlix9HnH7n1TRkXMS0pGxIJokIVB9SuqZGGXw=="],
++    "sharp/@img/sharp-libvips-linuxmusl-x64": ["@img/sharp-libvips-linuxmusl-x64@1.2.4", "", { "os": "linux", "cpu": "x64" }, "sha512-+LpyBk7L44ZIXwz/VYfglaX/okxezESc6UxDSoyo2Ks6Jxc4Y7sGjpgU9s4PMgqgjj1gZCylTieNamqA1MF7Dg=="],
++    "sharp/@img/sharp-linux-arm": ["@img/sharp-linux-arm@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linux-arm": "1.2.4" }, "os": "linux", "cpu": "arm" }, "sha512-9dLqsvwtg1uuXBGZKsxem9595+ujv0sJ6Vi8wcTANSFpwV/GONat5eCkzQo/1O6zRIkh0m/8+5BjrRr7jDUSZw=="],
++    "sharp/@img/sharp-linux-arm64": ["@img/sharp-linux-arm64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linux-arm64": "1.2.4" }, "os": "linux", "cpu": "arm64" }, "sha512-bKQzaJRY/bkPOXyKx5EVup7qkaojECG6NLYswgktOZjaXecSAeCWiZwwiFf3/Y+O1HrauiE3FVsGxFg8c24rZg=="],
++    "sharp/@img/sharp-linux-ppc64": ["@img/sharp-linux-ppc64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linux-ppc64": "1.2.4" }, "os": "linux", "cpu": "ppc64" }, "sha512-7zznwNaqW6YtsfrGGDA6BRkISKAAE1Jo0QdpNYXNMHu2+0dTrPflTLNkpc8l7MUP5M16ZJcUvysVWWrMefZquA=="],
++    "sharp/@img/sharp-linux-riscv64": ["@img/sharp-linux-riscv64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linux-riscv64": "1.2.4" }, "os": "linux", "cpu": "none" }, "sha512-51gJuLPTKa7piYPaVs8GmByo7/U7/7TZOq+cnXJIHZKavIRHAP77e3N2HEl3dgiqdD/w0yUfiJnII77PuDDFdw=="],
++    "sharp/@img/sharp-linux-s390x": ["@img/sharp-linux-s390x@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linux-s390x": "1.2.4" }, "os": "linux", "cpu": "s390x" }, "sha512-nQtCk0PdKfho3eC5MrbQoigJ2gd1CgddUMkabUj+rBevs8tZ2cULOx46E7oyX+04WGfABgIwmMC0VqieTiR4jg=="],
++    "sharp/@img/sharp-linux-x64": ["@img/sharp-linux-x64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linux-x64": "1.2.4" }, "os": "linux", "cpu": "x64" }, "sha512-MEzd8HPKxVxVenwAa+JRPwEC7QFjoPWuS5NZnBt6B3pu7EG2Ge0id1oLHZpPJdn3OQK+BQDiw9zStiHBTJQQQQ=="],
++    "sharp/@img/sharp-linuxmusl-arm64": ["@img/sharp-linuxmusl-arm64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linuxmusl-arm64": "1.2.4" }, "os": "linux", "cpu": "arm64" }, "sha512-fprJR6GtRsMt6Kyfq44IsChVZeGN97gTD331weR1ex1c1rypDEABN6Tm2xa1wE6lYb5DdEnk03NZPqA7Id21yg=="],
++    "sharp/@img/sharp-linuxmusl-x64": ["@img/sharp-linuxmusl-x64@0.34.5", "", { "optionalDependencies": { "@img/sharp-libvips-linuxmusl-x64": "1.2.4" }, "os": "linux", "cpu": "x64" }, "sha512-Jg8wNT1MUzIvhBFxViqrEhWDGzqymo3sV7z7ZsaWbZNDLXRJZoRGrjulp60YYtV4wfY8VIKcWidjojlLcWrd8Q=="],
++    "sharp/@img/sharp-wasm32": ["@img/sharp-wasm32@0.34.5", "", { "dependencies": { "@emnapi/runtime": "^1.7.0" }, "cpu": "none" }, "sha512-OdWTEiVkY2PHwqkbBI8frFxQQFekHaSSkUIJkwzclWZe64O1X4UlUjqqqLaPbUpMOQk6FBu/HtlGXNblIs0huw=="],
++    "sharp/@img/sharp-win32-arm64": ["@img/sharp-win32-arm64@0.34.5", "", { "os": "win32", "cpu": "arm64" }, "sha512-WQ3AgWCWYSb2yt+IG8mnC6Jdk9Whs7O0gxphblsLvdhSpSTtmu69ZG1Gkb6NuvxsNACwiPV6cNSZNzt0KPsw7g=="],
++    "sharp/@img/sharp-win32-ia32": ["@img/sharp-win32-ia32@0.34.5", "", { "os": "win32", "cpu": "ia32" }, "sha512-FV9m/7NmeCmSHDD5j4+4pNI8Cp3aW+JvLoXcTUo0IqyjSfAZJ8dIUmijx1qaJsIiU+Hosw6xM5KijAWRJCSgNg=="],
++    "sharp/@img/sharp-win32-x64": ["@img/sharp-win32-x64@0.34.5", "", { "os": "win32", "cpu": "x64" }, "sha512-+29YMsqY2/9eFEiW93eqWnuLcWcufowXewwSNIT6UwZdUUCrM3oFjMWH/Z6/TMmb4hlFenmfAVbpWeup2jryCw=="],
+     "sharp/detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],

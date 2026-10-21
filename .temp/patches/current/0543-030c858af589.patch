@@ -441,8 +441,8 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 index a4954ca6e..87b0251ac 100644
 --- a/packages/opencode/src/cli/cmd/db.ts
 +++ b/packages/opencode/src/cli/cmd/db.ts
-@@ -585,7 +585,8 @@ const maintenanceDB = Effect.fn("Cli.db.maintenanceDB")(function* () {
-   return sync as ColdStorage.TxOrDb
+@@ -590,7 +590,8 @@ const maintenanceDB = Effect.fn("Cli.db.maintenanceDB")(function* () {
+   return yield* Database.Service
  })
  
 -// compress 默认只改变满足 30 天或 compact boundary 的白名单字段；--session 只是缩小 owner scope。
@@ -451,7 +451,7 @@ index a4954ca6e..87b0251ac 100644
  // batch 默认值来自本机实测，不在 CLI 复制魔法数字，daemon JSON 缺省也使用同一常量。
  const CompressCommand = effectCmd({
    command: "compress",
-@@ -594,7 +595,7 @@ const CompressCommand = effectCmd({
+@@ -599,7 +600,7 @@ const CompressCommand = effectCmd({
    builder: (yargs: Argv) =>
      yargs
        .option("session", { type: "string" })
@@ -585,7 +585,7 @@ index 013f666f3..a97aaccf2 100644
  import { eq } from "drizzle-orm"
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { LLMEvent, Usage } from "@opencode-ai/llm"
-@@ -3399,6 +3399,87 @@ describe("ColdStorage compact eligibility", () => {
+@@ -3139,6 +3139,87 @@ describe("ColdStorage compact eligibility", () => {
        })
        expect(ColdStorage.isEligibleOwner(sync, { type: "part", id: recentPart.id })).toBe(false)
        yield* ssn.remove(recentSession.id)

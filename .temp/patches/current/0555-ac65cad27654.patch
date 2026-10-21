@@ -475,9 +475,9 @@ index 0000000000000000000000000000000000000000..5c8b4fddafde73df595f158e233a5f20
 +
 +Applies only to plan R1 and the production/test diff of `precheck.ts` + `precheck.test.ts`. Auditor independent verification: precheck+auto tests 125 pass / 0 fail.
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -481,12 +481,9 @@ function splitCommands(command: string): { segments: string[]; opaque: boolean }
      }
      if (quote) {
@@ -552,7 +552,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
-@@ -1168,4 +1168,43 @@ describe("permission precheck bash classifier", () => {
+@@ -1168,4 +1168,47 @@ describe("permission precheck bash classifier", () => {
      // $ 展开整段 opaque → general（回归守卫，不退化）
      expect(bash("echo $HOME")).toMatchObject({ level: "general" })
    })
@@ -574,6 +574,10 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect(bash('git -C "$REPO" apply --index file.patch')).toMatchObject({ level: "cautious" })
 +    expect(bash('git -C "$REPO" reset --hard')).toMatchObject({ level: "cautious" })
 +    expect(bash('git -C "$REPO" checkout main')).toMatchObject({ level: "cautious" })
++    // 不带-C验证真正保留了变更子命令，不能靠全局参数先行升级制造假绿。
++    expect(bash('git apply "$PATCH"')).toMatchObject({ level: "cautious" })
++    expect(bash("git reset $REV --quiet")).toMatchObject({ level: "cautious" })
++    expect(bash("git reset `printf HEAD` --quiet")).toMatchObject({ level: "cautious" })
 +    // 动态展开仍禁止整条升 safe
 +    expect(bash("echo $HOME")).toMatchObject({ level: "general" })
 +    expect(bash('echo "$HOME"')).toMatchObject({ level: "general" })

@@ -6,26 +6,27 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-适配：源后像经 0485 适配基线重建（docs 头部保留 4 行 Photon WASM 等价承载适配注；
-migrate 脚本 imports 与目标一致——Image.layer 目标已由 #485 导出；read.test 块替换
-保留 #485 的 imports 与 noResizer 反转，仅换 migration describe 块）。
+适配：复用目标统一 Image.Service，普通格式保留 Photon，扩展格式保留共享 Core Sharp；
+迁移用例接到 #485 分离的 attachment-migration.test.ts，保留原生 bundle 测试，避免 Read 的应用级清理 hook。
+按源授权由单 Part 外部原件恢复演进为显式数据库路径的 preview/apply 自动规范化，不接入运行期。
 diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Proposal/tui-image-validation-and-history-repair.md
 --- a/docs/Proposal/tui-image-validation-and-history-repair.md
 +++ b/docs/Proposal/tui-image-validation-and-history-repair.md
-@@ -1,477 +1,408 @@
+@@ -1,477 +1,407 @@
 -# TUI Sharp 打包链恢复与历史图片无损迁移方案
 +# Canonical Implementation Plan: TUI 历史图片自动规范化
  
 -Status: approved after independent audit; user selected a distributable repository migration script and authorized implementation
 -
--> **适配说明（#485 落地于 v1.18.32 目标谱系）**：本文 A 部分（TUI Sharp 原生打包链）不适用于目标——目标 image 后端为
+-> **适配说明（#485 落地于 v1.18.32 目标谱系）**：普通格式沿用Photon WASM；TIFF/AVIF/HEIF/HEIC仍由共享Core Sharp处理。
 +> Status: verified
 +>
-+> **适配说明（#485/#488 落地于 v1.18.32 目标谱系）**：本文 A 部分（TUI Sharp 原生打包链）不适用于目标——目标 image 后端为
- > Photon WASM（`photon_rs_bg.wasm` 静态嵌入），compiled 打包问题在目标谱系不存在，Sharp 打包链修复被目标方案等价承载。
--> 本 patch 在目标落地范围为 B（消费端 fail-closed）与 C（`script/migrate-image-attachment.ts` 历史图片迁移工具），
-+> 本 patch 在目标落地范围为 B（消费端 fail-closed）与 C（`script/migrate-image-attachment.ts` 历史图片自动规范化工具），
- > 以及下文引用的 fail-closed 回归测试。涉及 `lib/sharp.js` 打包细节的小节仅作源谱系历史记录。
+-> A的原生资源打包与加载落在现有正式build和Core adapter，保持目标Sharp 0.33.5及既有平台支持范围。
+-> 三处fail-closed属于新附件生产边界；B历史消费不增加修复器，C仍为显式离线维护脚本。
+-> 本文涉及Sharp 0.34.5 loader细节保留为源谱系记录，实际实现按目标版本精确适配。
++> **目标适配（#485/#488）**：普通格式复用Photon，TIFF/AVIF/HEIF/HEIC复用共享Core Sharp 0.33.5及既有原生打包链。
++> C改为显式路径的自动preview/apply迁移；B历史消费不增加修复器，正常图片不重编码、坏Tool图片按授权弃用。
++> 下文Sharp 0.34.5及原扫描数字保留为源谱系证据，目标输出以同一Image.Service的实际结果为准。
 -Date: 2026-07-14
 -
 -## 0. 推荐方案摘要
@@ -1307,10 +1308,10 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 -  return result
 -}
 
-diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
---- a/packages/opencode/test/tool/read.test.ts
-+++ b/packages/opencode/test/tool/read.test.ts
-@@ -1396,118 +1396,146 @@ describe("tool.read visible context stubs", () => {
+diff --git a/packages/opencode/test/image/attachment-migration.test.ts b/packages/opencode/test/image/attachment-migration.test.ts
+--- a/packages/opencode/test/image/attachment-migration.test.ts
++++ b/packages/opencode/test/image/attachment-migration.test.ts
+@@ -33,118 +33,146 @@
  })
  
  describe("image attachment migration", () => {
@@ -1351,7 +1352,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +          attachments: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${large}`, filename: "large.png" }],
          },
 -      })
--      const db = new SQLite(dbPath)
+-      const db = new Database(dbPath)
 -      // WAL模式与生产库一致：备份快照必须包含未checkpoint的已提交页。
 -      db.run("PRAGMA journal_mode = WAL")
 -      // 最小真实SQLite表保留脚本依赖的四列，让测试聚焦Part行为而非复制生产schema。
@@ -1377,7 +1378,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 -      expect(dryRun.exitCode).toBe(0)
 -      const report = JSON.parse(dryRun.stdout.slice(dryRun.stdout.lastIndexOf('{\n  "status"')))
 -      expect(report.status).toBe("dry-run")
--      const dryRunDb = new SQLite(dbPath, { readonly: true })
+-      const dryRunDb = new Database(dbPath, { readonly: true })
 -      expect(dryRunDb.query("SELECT data FROM part").get()).toEqual({ data: original })
 -      dryRunDb.close()
 -
@@ -1410,25 +1411,25 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 -      // Apply成功必须留下可独立恢复的一致master及其manifest，而不是只证明目标行已改变。
 -      expect(await Bun.file(path.join(appliedReport.backup, "master", "opencode.db")).exists()).toBe(true)
 -      expect(await Bun.file(path.join(appliedReport.backup, "manifest.json")).exists()).toBe(true)
--      const master = new SQLite(path.join(appliedReport.backup, "master", "opencode.db"), { readonly: true })
+-      const master = new Database(path.join(appliedReport.backup, "master", "opencode.db"), { readonly: true })
 -      // 保持另一个WAL连接存活，确认一致快照包含已提交WAL中的无关行且仍保留迁移前目标值。
 -      expect(master.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
 -      expect(master.query("SELECT data FROM part WHERE id = 'prt_migrate'").get()).toEqual({ data: original })
 -      master.close()
--      const migratedDb = new SQLite(dbPath)
+-      const migratedDb = new Database(dbPath)
 -      // 直接回读数据库而非相信stdout，确认实际存储的是Sharp生成且hash匹配的附件。
 -      const migrated = JSON.parse((migratedDb.query<{ data: string }, []>("SELECT data FROM part").get() as { data: string }).data)
--      expect(migrated.state.attachments[0].mime).toBe("image/jpeg")
+-      expect(migrated.state.attachments[0].mime).toBe(report.new_mime)
 -      expect(hash(Buffer.from(migrated.state.attachments[0].url.split(",")[1], "base64"))).toBe(report.new_sha256)
 -      expect(migratedDb.query("SELECT count(*) AS count FROM part").get()).toEqual({ count: 2 })
 -
--      // 第二次运行应在读取source和创建大备份前幂等退出，避免恢复命令重试产生副作用。
+-      // 重跑仍验证source与确定性输出，随后在创建备份前幂等退出。
 -      const repeated = await migrateImageAttachment(applyArgs)
 -      expect(repeated.exitCode).toBe(0)
 -      expect(repeated.stdout).toContain('"status": "already migrated"')
 -
 -      // 相同bytes但错误MIME不能走幂等短路，避免provider按错误媒体类型解释正确payload。
--      migrated.state.attachments[0].mime = "image/png"
+-      migrated.state.attachments[0].mime = report.new_mime === "image/png" ? "image/jpeg" : "image/png"
 -      migratedDb.query("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify(migrated), "prt_migrate")
 -      const mismatchedMime = await migrateImageAttachment(applyArgs)
 -      expect(mismatchedMime.exitCode).not.toBe(0)
@@ -1458,7 +1459,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +        },
 +      }),
 +    ]
-+    const db = new SQLite(dbPath)
++    const db = new Database(dbPath)
 +    // 最小真实表只保留脚本使用的Part列，测试不复制无关生产schema。
 +    db.run("CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL)")
 +    rows.forEach((data, index) =>
@@ -1491,7 +1492,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +      database_file_shrinks_without_vacuum: false,
 +    })
 +    expect(previewReport.unavailable_items).toEqual([{ part: "prt_3", location: "tool", index: 0 }])
-+    const previewDb = new SQLite(dbPath, { readonly: true })
++    const previewDb = new Database(dbPath, { readonly: true })
 +    // preview不仅报告为只读，四行原始JSON也必须逐字不变，防止隐藏的落库副作用。
 +    expect(previewDb.query<{ data: string }, []>("SELECT data FROM part ORDER BY id").all().map((row) => row.data)).toEqual(input.rows)
 +    previewDb.close()
@@ -1502,7 +1503,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +    const report = JSON.parse(applied.stdout.slice(applied.stdout.lastIndexOf('{\n  "status"')))
 +    expect(report.status).toBe("applied")
 +    // apply断言重新读取SQLite，而不是复用CLI内存计划，确保验证的是实际持久化结果。
-+    const db = new SQLite(dbPath, { readonly: true })
++    const db = new Database(dbPath, { readonly: true })
 +    const storedText = db.query<{ data: string }, []>("SELECT data FROM part ORDER BY id").all().map((row) => row.data)
 +    const stored = storedText.map((data) => JSON.parse(data))
 +    db.close()
@@ -1552,7 +1553,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +    await using tmp = await tmpdir()
 +    const dbPath = path.join(tmp.path, "opencode.db")
 +    const input = await fixture(dbPath)
-+    const db = new SQLite(dbPath)
++    const db = new Database(dbPath)
 +    // 只拒绝最后一行，确保测试证明前面成功执行的UPDATE也随事务回滚。
 +    db.run("CREATE TRIGGER reject_last_update BEFORE UPDATE OF data ON part WHEN OLD.id = 'prt_3' BEGIN SELECT RAISE(IGNORE); END")
 +    db.close()
@@ -1560,7 +1561,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +    const result = await migrateImageAttachment([dbPath, "--apply"])
 +    // 非零退出是事务失败的外部契约；随后逐行比对证明没有留下部分成功状态。
 +    expect(result.exitCode).not.toBe(0)
-+    const check = new SQLite(dbPath, { readonly: true })
++    const check = new Database(dbPath, { readonly: true })
 +    expect(check.query<{ data: string }, []>("SELECT data FROM part ORDER BY id").all().map((row) => row.data)).toEqual(input.rows)
 +    check.close()
 +  }, 120_000)

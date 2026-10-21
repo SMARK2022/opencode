@@ -34,7 +34,7 @@ diff --git a/CONTEXT.md b/CONTEXT.md
 +
 +# opencode (SMARK fork)
 +
-+The domain language of opencode — an open-source AI coding agent. This is the SMARK enhanced fork (`dev-smark`, v1.15.9-smark), based on upstream `anomalyco/opencode`; core logic lives in `packages/opencode`. Use these terms verbatim in any output (issue titles, refactor proposals, hypotheses, test names) and do not drift to the synonyms in _Avoid_.
++The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above.
 +
 +## Language
 +
@@ -162,7 +162,7 @@ diff --git a/CONTEXT.md b/CONTEXT.md
 +
 +A descriptive index of current structure and each area's responsibility — **not** a design spec and **not** a statement of future direction. It indexes what exists now so skills (e.g. `zoom-out`) can navigate; the glossary above is the canonical vocabulary.
 +
-+### `packages/opencode/src/`
++### Runtime module map (V1 entries relative to `packages/opencode/src/`)
 +
 +| Directory          | Role                                                  |
 +| ------------------ | ----------------------------------------------------- |
@@ -191,9 +191,9 @@ diff --git a/CONTEXT.md b/CONTEXT.md
 +| `share/`, `sync/`  | Session sharing + synchronization                     |
 +| `worktree/`, `git/`| Git worktree + git operations                         |
 +| `image/`, `file/`  | Image processing + file handling                      |
-+| `v2/`              | In-flight v2 migration (see below)                    |
++| `packages/core/src/session/` | Native V2 admission, execution and projection (see below) |
 +
-+Other packages (`app`, `desktop`, `desktop-electron`, `web`, `console`, `sdk`, `plugin`, `core`, `ui`, `shared`) are consumers/facades of the core domain; canonical definitions live in `packages/opencode`.
++Canonical schemas live in `packages/schema`, runtime domains in `packages/core`, HTTP contracts in `packages/protocol`, and handlers in `packages/server`. Client runtime depends on Schema and Protocol, never Core or Server; `sdk-next` composes Client, Core and Server. `packages/opencode` retains V1 services and compatibility adapters, while `packages/tui` owns the terminal UI.
 +
 +## SMARK fork delta (`[local-smark]`)
 +
@@ -212,7 +212,7 @@ diff --git a/CONTEXT.md b/CONTEXT.md
 +
 +## v2 transition (in-flight)
 +
-+A v2 refactor is in progress under `src/v2/` and the shared `@opencode-ai/core` package, moving Session/Message/Event/Model/Provider toward a shared schema (`@opencode-ai/core/session-message`, `-session-prompt`, `-session-event`, `-v2-schema`, `event`, `model`, `provider`) with an `EventV2`/`EventV2Bridge` and a `Delivery` concept (`immediate` | `deferred`). `src/v2/session.ts` is the v2 Session; `src/v2/provider-parity-checklist.md` tracks provider parity. v1 (`session/`) is current production and v2 is the in-progress migration target — do not assume parity. (Descriptive of current migration state, not a future design plan.)
++Native V2 Session admission lives in `packages/core/src/session.ts`; its Session-ID coordinator and execution service drain durable inputs through the Location-scoped runner. Delivery is `steer` | `queue`, defined by `packages/schema/src/session-delivery.ts`: steers promote at a safe provider-turn boundary, queues when the Session would otherwise become idle. EventV2 and EventV2Bridge project shared history into V1 adapters. V1 and V2 remain distinct execution paths; inspect their real owners rather than assuming parity or restoring the removed `src/v2/` layout.
 diff --git a/docs/adr/0001-triage-labels-and-team-assignment-coexist.md b/docs/adr/0001-triage-labels-and-team-assignment-coexist.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..6dcb2f00db5c7878e244c37c236835f2eb3100e7
@@ -228,7 +228,7 @@ index 0000000000000000000000000000000000000000..6dcb2f00db5c7878e244c37c236835f2
 +
 +This repo has two triage concerns that look superficially similar but operate on different axes:
 +
-+1. A pre-existing automation agent at `.opencode/agent/triage.md` runs on incoming GitHub issues and **assigns an owner** by team (`tui`, `desktop_web`, `core`, `inference`, `windows`). It explicitly does **not** add labels — it only assigns.
++1. The pre-existing `.opencode/agent/triage.md` **assigns an owner** by team (`tui`, `desktop_web`, `core`, `inference`, `windows`) and does not add labels. Its current tool targets upstream `anomalyco/opencode`; fork assignments use `gh issue edit --repo SMARK2022/opencode` rather than assuming that tool is fork-aware.
 +2. The mattpocock `triage` skill uses a **5-label lifecycle state machine** (`needs-triage` → `needs-info` → `ready-for-agent` → `ready-for-human` → `wontfix`) to track issue state.
 +
 +A future explorer could reasonably assume one system replaces the other — e.g. that adding lifecycle labels makes the team-assignment agent redundant, or that the team-assignment agent's "do not add labels" rule forbids the mattpocock skill entirely.
@@ -328,7 +328,7 @@ index 0000000000000000000000000000000000000000..2cb5bcf49e49eb5d8bf567550ee598da
 +
 +## Layout: single-context
 +
-+This repo uses a **single-context** layout. One `CONTEXT.md` and one `docs/adr/` live at the repo root and cover the whole opencode domain. Although this is a Bun monorepo (`packages/*`), the domain language (session, provider, tool, agent, message, snapshot, …) is shared across the product, and `packages/opencode` is the core that holds it. There is no `CONTEXT-MAP.md`.
++This repo uses a **single-context** layout. One `CONTEXT.md` and one `docs/adr/` live at the repo root and cover the whole opencode domain. The domain language is shared across `packages/*`: Schema, Core, Protocol, Server and Client own the native layers, while `packages/opencode` retains V1 services and adapters. There is no `CONTEXT-MAP.md`.
 +
 +```
 +/
@@ -341,7 +341,7 @@ index 0000000000000000000000000000000000000000..2cb5bcf49e49eb5d8bf567550ee598da
 +    └── opencode/
 +        ├── AGENTS.md     ← package-local rules (DB, module shape, Effect)
 +        ├── specs/effect/ ← Effect migration patterns (guide.md, migration.md, …)
-+        └── src/          ← core implementation
++        └── src/          ← V1 services and compatibility adapters
 +```
 +
 +## Before exploring, read these
@@ -365,7 +365,7 @@ index 0000000000000000000000000000000000000000..2cb5bcf49e49eb5d8bf567550ee598da
 +
 +## Monorepo orientation
 +
-+When a skill (e.g. `zoom-out`) asks for a map of modules and callers, use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index of current structure and responsibilities, not a design spec. Other packages (`app`, `desktop`, `desktop-electron`, `web`, `console`, `sdk`, `plugin`, `core`, `ui`, `shared`) are consumers/facades of the core domain; canonical definitions live in `packages/opencode`.
++When a skill (e.g. `zoom-out`) asks for a map of modules and callers, use the **Module map** in `CONTEXT.md` and its glossary vocabulary. The map is a descriptive index, not a design spec. Follow Schema → Core/Protocol → Server dependencies; Client runtime may use Schema and Protocol, never Core or Server. The native Session owner is `packages/core/src/session`, and terminal components live in `packages/tui`.
 diff --git a/docs/agents/issue-tracker.md b/docs/agents/issue-tracker.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..ed11c0e6272ab2e70df457995dd15ac2feab0452
@@ -431,7 +431,7 @@ index 0000000000000000000000000000000000000000..ed11c0e6272ab2e70df457995dd15ac2
 +
 +## Coexistence with the team-assignment triage agent
 +
-+A separate automation agent (`.opencode/agent/triage.md`) runs on incoming issues and **assigns an owner** by team (`tui`, `desktop_web`, `core`, `inference`, `windows`). It explicitly does not add labels. The mattpocock `triage` skill operates on a **different axis** — lifecycle labels (see `docs/agents/triage-labels.md`). The two are orthogonal and must not be confused: one routes ownership, the other tracks issue state.
++The existing `.opencode/agent/triage.md` assigns an owner by team and does not add labels; its current tool targets `anomalyco/opencode`. Use `gh issue edit --repo SMARK2022/opencode` for fork assignments. The mattpocock `triage` skill owns lifecycle labels (see `docs/agents/triage-labels.md`); ownership and lifecycle remain separate axes without changing the upstream assignment tool.
 diff --git a/docs/agents/triage-labels.md b/docs/agents/triage-labels.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..c08a380526f3da5c0a058daf7284d17f3d72b8fc
@@ -454,7 +454,7 @@ index 0000000000000000000000000000000000000000..c08a380526f3da5c0a058daf7284d17f
 +
 +## Coexistence with the team-assignment triage agent
 +
-+This repo already has a separate automation agent at `.opencode/agent/triage.md` that triages incoming issues by **assigning an owner** from one of five teams (`tui`, `desktop_web`, `core`, `inference`, `windows`). That agent explicitly **does not add labels** — it only assigns.
++The existing `.opencode/agent/triage.md` assigns an owner from five teams (`tui`, `desktop_web`, `core`, `inference`, `windows`) and does not add labels. Its tool targets upstream `anomalyco/opencode`; use explicit `gh issue edit --repo SMARK2022/opencode` for fork assignments. This documentation does not retarget that tool.
 +
 +The two triage systems operate on orthogonal axes and must not be conflated:
 +

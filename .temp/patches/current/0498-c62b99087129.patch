@@ -1211,80 +1211,73 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
  import { httpError, raw, reply, TestLLMServer } from "../lib/llm-server"
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { ProviderV2 } from "@opencode-ai/core/provider"
-@@ -873,17 +873,19 @@ it.live("session.processor retries a real first-progress timeout", () =>
+@@ -885,13 +885,14 @@ it.live("session.processor retries a real first-progress timeout", () =>
+         const { processors, session, provider } = yield* boot()
          const gate = defer<void>()
          const retry = defer<{ attempt: number; message: string }>()
++        // 失败与中断也释放 headers 前的唯一 gate，避免 fixture 的 handler 逃逸当前 scope。
++        yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve(undefined)))
  
--        // 闸门让首个 HTTP response 永远晚于 25ms；只有 Provider 的 dispatch deadline 能先发布 retry。
-+        // 闸门让首个 HTTP response 永远晚于 chunkTimeout（现 500ms，CI 稳定值）；只有 Provider 的 dispatch deadline 能先发布 retry。
-         // 第一项是延迟的 HTTP error，第二项是同一 Provider 的成功响应，不引入备用 Provider 或 hedging。
-         // 这条顺序把 first-progress timeout 放在真实 HTTP producer 与现有 retry consumer 之间验证。
-         // 503 仍保留原有服务器错误形状，只有新增的 progress deadline 改变 failure 的产生时机。
-         // 目标 0434 态的 llm-server 尚无 gate 形参；闸门由 raw() 的 wait 承载（llm-server 内建能力），
--        // 首块永远晚于 25ms progress deadline，同时保留"延迟的 HTTP error + 同 Provider 成功响应"的源顺序。
-+        // 首块永远晚于 progress deadline（chunkTimeout=500），同时保留"延迟的 HTTP error + 同 Provider 成功响应"的源顺序。
-         const gated = defer<void>()
+         // 闸门停在 HTTP headers 之前；若没有 dispatch deadline，503 只能在释放后触发重试。
+         // 第二项仍是同一 Provider 的成功响应，不改变既有 retry 分类和 backoff。
 -        yield* llm.push(
--          raw({ wait: gated.promise, error: { message: "delayed" } }),
+-          httpError(503, { error: { message: "delayed" } }, gate.promise),
 -          reply().text("after"),
 -        )
-+        // #498：scope finalizer 兜底释放 gate——断言路径提前失败也不能让后续 provider 请求永久挂起。
-+        yield* Effect.addFinalizer(() => Effect.sync(() => gated.resolve(undefined)))
-+        yield* llm.push(raw({ wait: gated.promise, error: { message: "delayed" } }))
-+        // #498：成功响应以 repeat 形式入队——每次 retry 请求都由同一 queued 响应服务，
-+        // 固定 calls 计数断言不再成立（repeat 是可重放契约，count 由行为而非次数证明）。
++        yield* llm.push(httpError(503, { error: { message: "delayed" } }, gate.promise))
++        // 成功响应显式 repeat；后续 retry 仍消费同一 Provider 结果，不借 queue-miss 默认值自证恢复。
 +        yield* llm.pushRepeat(reply().text("after"))
  
          const chat = yield* session.create({})
          const parent = yield* user(chat.id, "first progress")
-@@ -897,6 +899,8 @@ it.live("session.processor retries a real first-progress timeout", () =>
+@@ -905,6 +906,7 @@ it.live("session.processor retries a real first-progress timeout", () =>
            retry.resolve({ attempt: data.status.attempt, message: data.status.message })
            return Effect.void
          })
-+        // #498：订阅退订由 scope finalizer 持有——断言提前退出也不泄漏 Status 监听。
 +        yield* Effect.addFinalizer(() => off)
          // 监听真实 Status bus，而不是读取 processor 内部 retry counter，保护用户可见的行为契约。
          // 订阅在 process fork 前建立，避免 retry event 已发布后测试才开始等待。
-         // retry Status 的 attempt/message 是 Session 用户可见合同，也是没有 retry cap 的可观测边界。
-@@ -921,17 +925,25 @@ it.live("session.processor retries a real first-progress timeout", () =>
-           })
-           .pipe(Effect.forkIn(scope, { startImmediately: true }))
- 
+-        // retry Status 的 attempt/message 是 Session 用户可见合同，也是没有 retry cap 的可观测边界。
++        // retry Status 的 attempt/message 是用户可见合同，不把观察信号改成内部重试计数。
+@@ -932,25 +934,24 @@ it.live("session.processor retries a real first-progress timeout", () =>
+-        // 从真实 HTTP 到达再观察期限，排除冷启动和配置加载对百毫秒判别窗口的占用。
+-        yield* llm.wait(1)
 -        const observed = yield* Effect.promise(() =>
 -          Promise.race([retry.promise, new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100))]),
-+        // #498：readiness 等待以已发布信号为准——llm.wait(1) 证明首个请求已到达 fixture，
-+        // 再无限等待 retry promise（包级 20s 只防挂死，不构成计时断言）。
-+        const observed = yield* awaitWithTimeout(
-+          Effect.gen(function* () {
-+            yield* llm.wait(1)
-+            return yield* Effect.promise(() => retry.promise)
-+          }),
-+          "first-progress retry was not published",
-+          "20 seconds",
-         )
+-        )
 -        // 100ms 只是 red-capable readiness gate，不是产品 timeout；正常路径应在 25ms 附近先发布 retry。
-         // 释放延迟服务器，确保第二次真实 Provider 请求可以完成并验证现有 retry 路径。
-         gated.resolve(undefined)
-         const result = yield* Fiber.join(fiber)
-         // gate 只释放服务器 fixture；SessionRetry 的既有 backoff 和 retryable 分类保持真实执行。
+-        // 释放延迟服务器，确保第二次真实 Provider 请求可以完成并验证现有 retry 路径。
+-        gate.resolve(undefined)
+-        const result = yield* Fiber.join(fiber)
+-        // gate 只释放服务器 fixture；SessionRetry 的既有 backoff 和 retryable 分类保持真实执行。
 -        // 第二次响应沿着同一 processor 成功完成，证明 timeout 没有把 Session 降级为终态失败。
 -        // llm.calls=2 同时确认失败请求和重试请求都实际到达 fixture，而不是测试直接 resolve fiber。
 -        yield* off
++        // request、Status 和恢复完成共用失败边界；成功仍由真实信号及消息内容决定。
++        const { observed, result } = yield* awaitWithTimeout(
++          Effect.gen(function* () {
++            yield* llm.wait(1)
++            const observed = yield* Effect.promise(() => retry.promise)
++            gate.resolve(undefined)
++            return { observed, result: yield* Fiber.join(fiber) }
++          }),
++          "first-progress timeout did not publish retry status and recover",
++          "20 seconds",
++        )
 +        const parts = yield* MessageV2.parts(msg.id)
-+        // #498：成功终态以最终消息内容证明（repeat 响应真实完成），次数断言随 repeat 契约移除。
-+        expect(
-+          parts.some((part) => part.type === "text" && part.text === "after"),
-+        ).toBe(true)
  
          expect(observed?.attempt).toBe(1)
          // message 必须来自真实 Provider progress producer，不能由测试手工构造 APIError 冒充。
-@@ -939,9 +951,8 @@ it.live("session.processor retries a real first-progress timeout", () =>
-         // attempt=1 只证明现有 retry 状态可见，不规定总次数，也不引入新的 attempt cap。
-         // 该断言故意不检查“最多一次”，以防测试把已删除的 RP-04 重新固化成产品行为。
+         expect(observed?.message).toBe("SSE read timed out")
+-        // attempt=1 只证明现有 retry 状态可见，不规定总次数，也不引入新的 attempt cap。
+-        // 该断言故意不检查“最多一次”，以防测试把已删除的 RP-04 重新固化成产品行为。
++        // 最终文本而非固定请求次数证明恢复，生产 retry 的上限与退避策略不变。
          expect(result).toBe("continue")
 -        expect(yield* llm.calls).toBe(2)
++        expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
        }),
 -    { git: true, config: (url) => providerCfg(url, { chunkTimeout: 25 }) },
++    // source 的 500ms 保留 loopback 后续响应调度余量；首次响应仍被 gate 阻塞至真实 deadline 触发。
 +    { git: true, config: (url) => providerCfg(url, { chunkTimeout: 500 }) },
    ),
  )

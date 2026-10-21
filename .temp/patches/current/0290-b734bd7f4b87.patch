@@ -41,16 +41,34 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
-@@ -202,2 +203,3 @@
+@@ -556,4 +556,4 @@
+     emit(global({ id: "evt_usage", type: "session.updated", properties: { sessionID, info: current } }))
+-    // 200 条窗口仍需越界，持久 usage 的正确性不能靠取消 transcript 淘汰保证。
+-    for (let index = 0; index < 201; index++) {
++    // 300 条窗口仍需越界，持久 usage 的正确性不能靠取消 transcript 淘汰保证。
++    for (let index = 0; index < 301; index++) {
+       const info = { ...assistant, id: `msg_usage_${index}`, time: { created: index, completed: index + 1 } }
+@@ -565,3 +565,3 @@
+-    // 窗口满后长度不再增长，等待第 201 条证明淘汰实际发生。
+-    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_200") ?? false)
++    // 窗口满后长度不再增长，等待第 301 条证明淘汰实际发生。
++    await wait(() => sync.data.message[sessionID]?.some((item) => item.id === "msg_usage_300") ?? false)
+     // GET 保留旧零值；若 hydration 覆盖了较新事件，本断言会观察到倒退。
+@@ -571,3 +571,3 @@
+     expect(sync.session.get(sessionID)?.cost).toBe(1)
+-    expect(sync.data.message[sessionID]).toHaveLength(200)
++    expect(sync.data.message[sessionID]).toHaveLength(300)
+     // 连 parts 也必须随最老消息回收，不能把完整 transcript 偷藏在 part store。
+@@ -581,2 +581,3 @@
  // #162：窗口扩大后仍必须真正越界，验证实时合并与最旧 parts 的淘汰。
 -test("live messages merged during hydration retain the 200 message window", async () => {
 +// #290：窗口 300 后越界种子同步升至 300，断言仍锁定最旧淘汰
 +test("live messages merged during hydration retain the 300 message window", async () => {
-@@ -229,2 +230,2 @@
+@@ -608,2 +609,2 @@
        json(
 -        Array.from({ length: 200 }, (_, index) => {
 +        Array.from({ length: 300 }, (_, index) => {
-@@ -240,3 +241,3 @@
+@@ -618,3 +619,3 @@
        await hydrate
  
 -    expect(sync.data.message[sessionID]).toHaveLength(200)

@@ -312,6 +312,118 @@ index 0000000000000000000000000000000000000000..b3ff53e7ffc2deba08d7e1b4dac9ca42
 +4. `src/tool/shell.ts`：注释更新
 +5. `test/tool/task.inspected-files.test.ts`：15 个行为级测试
 +6. `test/session/compaction.test.ts`：3 个测试更新（标题、git status 不再过滤、unsafe 命令不再过滤但 redaction 仍生效）
+diff --git a/packages/opencode/test/session/file-evidence.test.ts b/packages/opencode/test/session/file-evidence.test.ts
+--- a/packages/opencode/test/session/file-evidence.test.ts
++++ b/packages/opencode/test/session/file-evidence.test.ts
+@@ -28,2 +28,18 @@
+   }),
+ )
++
++it.live("renders all executed commands with credentials redacted", () =>
++  Effect.gen(function* () {
++    const fs = yield* FSUtil.Service
++    const commands = ["OPENAI_API_KEY=sk-secret node --check plain.js", "node --check piped-sentinel.js | tee out.txt", "node --check redirected-sentinel.js > out.txt", "node --check $(echo subcommand-sentinel).js", "bun test && echo dangerous-sentinel", `node --check ${"a".repeat(160)}.js --token=sk-token`]
++    const parts = commands.map(command => ({ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit: 0 } } }))
++    const messages = [{ info: { role: "assistant" }, parts }] as unknown as SessionV1.WithParts[]
++    const text = yield* CompactionFileEvidence.render(messages, fs, ".", 1)
++    expect(text).toContain("### Executed Commands")
++    for (const marker of ["piped-sentinel", "redirected-sentinel", "subcommand-sentinel", "dangerous-sentinel"]) expect(text).toContain(marker)
++    expect(text).toContain("OPENAI_API_KEY=[redacted]")
++    expect(text).not.toContain("sk-secret")
++    expect(text).not.toContain("sk-token")
++    expect(text).toContain("[cmd:")
++  }),
++)
+diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
+--- a/packages/opencode/src/session/file-evidence.ts
++++ b/packages/opencode/src/session/file-evidence.ts
+@@ -3,3 +3,5 @@
+ import path from "path"
++import { createHash } from "crypto"
++import { mergeRanges } from "../util/range"
+ import { Effect, Option, Schema } from "effect"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -24,10 +26,30 @@
+   compactionCount = 1,
++  directory = worktree,
+ ) {
+   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
+   const searches = new Map<string, { tool: string; pattern: string; path: string; matches: number }>()
++  const commands = new Map<string, { command: string; cwd: string; exit: string }>()
+   for (const message of messages) {
+     for (const part of message.parts) {
++      if (part.type === "tool" && part.tool === "bash" && part.state.status === "completed") {
++        const command = part.state.input.command
++        if (typeof command === "string" && command.trim()) {
++          const input = part.state.input
++          const cwd = typeof input.cwd === "string" ? path.resolve(directory, input.cwd)
++            : path.resolve(directory, typeof input.workdir === "string" ? input.workdir : ".")
++          let normalized = command.trim()
++          // 只对去重键剥离环境变量；渲染保留命令原文并独立脱敏，不筛选命令类型。
++          while (true) {
++            const match = normalized.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
++            if (!match) break
++            normalized = normalized.slice(match[0].length).trimStart()
++          }
++          const key = `${process.platform === "win32" ? cwd.toLowerCase() : cwd}\0${normalized}`
++          commands.delete(key)
++          commands.set(key, { command, cwd, exit: typeof part.state.metadata.exit === "number" ? String(part.state.metadata.exit) : "unknown" })
++        }
++      }
+       if (part.type === "tool" && part.state.status === "completed" && (part.tool === "grep" || part.tool === "glob")) {
+         const pattern = part.state.input.pattern
+         if (typeof pattern === "string" && pattern) {
+           const location = typeof part.state.input.path === "string" ? part.state.input.path : "."
+@@ -49,11 +71,4 @@
+-      const ranges = [...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }]
+-        .sort((a, b) => a.start - b.start || a.end - b.end)
+-        .reduce<{ start: number; end: number }[]>((result, range) => {
+-          const last = result.at(-1)
+-          if (!last || range.start > last.end + 1) result.push({ ...range })
+-          else last.end = Math.max(last.end, range.end)
+-          return result
+-        }, [])
++      const ranges = mergeRanges([...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }])
+       // 删除再插入让Map顺序代表最近读取，避免文件修改时间影响证据优先级。
+       files.delete(key)
+       files.set(key, { ...read, canonicalPath: absolute, ranges })
+@@ -62,3 +76,3 @@
+-  if (files.size === 0 && searches.size === 0) return undefined
++  if (files.size === 0 && searches.size === 0 && commands.size === 0) return undefined
+   // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
+   const visible = [...files.values()].toReversed().slice(0, 20)
+@@ -90,3 +104,9 @@
+     ...(files.size > visible.length ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`] : []),
++    ...(commands.size ? ["", "### Executed Commands", "| command | cwd | exit |", "|---|---|---:|", ...[...commands.values()].toReversed().slice(0, 10).map(item => {
++      const relative = path.relative(worktree, item.cwd)
++      const cwd = !relative.startsWith("..") && !path.isAbsolute(relative) ? relative || "." : item.cwd
++      return `| ${commandDisplay(item.command)} | ${cell(cwd.replaceAll("\\", "/"))} | ${item.exit} |`
++    })] : []),
++    ...(commands.size > 10 ? [`Omitted: ${commands.size - 10} executed commands due to evidence budget.`] : []),
+     ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern)} | ${cell(search.path)} | ${search.matches} |`)] : []),
+     ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
+@@ -104,2 +124,15 @@
++function commandDisplay(input: string) {
++  // 沿用 source 凭据模式；截断前脱敏，短标记只用于区分被缩短的公开命令。
++  const redacted = input
++    .replace(/(authorization:\s*bearer\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
++    .replace(/((?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
++    .replace(/(--(?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
++    .replace(/(--(?:api[_-]?key|token|password|secret)\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
++    .replace(/\s+/g, " ").trim()
++  const clean = cell(redacted)
++  if (clean.length <= 120) return clean
++  return `${clean.slice(0, 102).trimEnd()}... [cmd:${createHash("sha256").update(clean).digest("hex").slice(0, 8)}]`
++}
++
+ function formatModified(ms: number) {
+   // 与Read输出使用同一种本地时间，不把UTC字符串与历史凭证混比。
+diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
+--- a/packages/opencode/src/session/compaction.ts
++++ b/packages/opencode/src/session/compaction.ts
+@@ -618,1 +618,1 @@
+-        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1)
++        const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1, ctx.directory)
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
@@ -329,8 +441,8 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 +++ b/packages/opencode/src/tool/task.ts
 @@ -15,13 +15,18 @@ import { EffectBridge } from "@/effect/bridge"
  import { RuntimeFlags } from "@/effect/runtime-flags"
- // #280：task_id 恢复需要 compact 后的完整子权限集合并回写 session
  import { Permission } from "@/permission"
+ import { Database } from "@opencode-ai/core/database/database"
 +import path from "path"
 +import { InstanceState } from "@/effect/instance-state"
 +import { mergeRanges } from "@/util/range"

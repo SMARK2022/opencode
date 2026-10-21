@@ -440,6 +440,88 @@ index 0000000000000000000000000000000000000000..1bf020c1dee6fbfdaf929f53d6bf030b
 +`No blocking findings` for the current implementation and approved plan
 +revision.
 
+diff --git a/packages/tui/src/routes/session/permission.tsx b/packages/tui/src/routes/session/permission.tsx
+--- a/packages/tui/src/routes/session/permission.tsx
++++ b/packages/tui/src/routes/session/permission.tsx
+@@ -119,5 +119,7 @@
+   const pathFormatter = usePathFormatter()
+ 
+   const session = createMemo(() => sync.data.session.find((s) => s.id === props.request.sessionID))
++  // project范围的请求可能属于另一workspace；回复必须优先命中该Session的owner。
++  const workspace = () => session()?.workspaceID ?? project.workspace.current()
+ 
+   const input = createMemo(() => {
+@@ -169,6 +171,6 @@
+             void sdk.client.permission.reply({
+               reply: "always",
+               requestID: props.request.id,
+               directory: props.directory,
+-              workspace: project.workspace.current(),
++              workspace: workspace(),
+             })
+@@ -181,7 +183,7 @@
+             void sdk.client.permission.reply({
+               reply: "reject",
+               requestID: props.request.id,
+               directory: props.directory,
+               message: message || undefined,
+-              workspace: project.workspace.current(),
++              workspace: workspace(),
+             })
+@@ -419,6 +421,6 @@
+                   void sdk.client.permission.reply({
+                     reply: "reject",
+                     requestID: props.request.id,
+                     directory: props.directory,
+-                    workspace: project.workspace.current(),
++                    workspace: workspace(),
+                   })
+@@ -427,6 +429,6 @@
+                 void sdk.client.permission.reply({
+                   reply: "once",
+                   requestID: props.request.id,
+                   directory: props.directory,
+-                  workspace: project.workspace.current(),
++                  workspace: workspace(),
+                 })
+diff --git a/packages/tui/src/routes/session/question.tsx b/packages/tui/src/routes/session/question.tsx
+--- a/packages/tui/src/routes/session/question.tsx
++++ b/packages/tui/src/routes/session/question.tsx
+@@ -6,3 +6,5 @@
+ import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
+ import { useSDK } from "../../context/sdk"
++import { useProject } from "../../context/project"
++import { useSync } from "../../context/sync"
+ import { SplitBorder } from "../../ui/border"
+@@ -19,4 +21,8 @@
+ export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
+   const sdk = useSDK()
++  const project = useProject()
++  const sync = useSync()
++  // 与directory使用同一请求的Session，避免项目当前workspace覆盖跨目录问答的归属。
++  const workspace = () => sync.session.get(props.request.sessionID)?.workspaceID ?? project.workspace.current()
+   const { theme } = useTheme()
+   const renderer = useRenderer()
+@@ -106,5 +112,6 @@
+     void sdk.client.question.reply({
+       requestID: props.request.id,
+       directory: props.directory,
++      workspace: workspace(),
+       answers,
+     })
+@@ -114,4 +121,5 @@
+     void sdk.client.question.reject({
+       requestID: props.request.id,
+       directory: props.directory,
++      workspace: workspace(),
+     })
+@@ -130,5 +138,6 @@
+       void sdk.client.question.reply({
+         requestID: props.request.id,
+         directory: props.directory,
++        workspace: workspace(),
+         answers: [[answer]],
+       })
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
 index 6f1bc5341..632d3025d 100644
 --- a/packages/opencode/test/permission/next.test.ts

@@ -442,54 +442,61 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 index 3eec9c7d7..a8e5aa4b5 100644
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -9,7 +9,6 @@ import { tokenAccounting } from "../../util/token-accounting"
+@@ -10,6 +10,5 @@ import { tokenAccounting } from "../../util/token-accounting"
  // #122：subagent footer 共用 accounting
  import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { activeTurnPair } from "../../util/session-pending"
 -import { useTerminalDimensions } from "@opentui/solid"
  import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
  
  export function SubagentFooter() {
-@@ -43,12 +42,10 @@ export function SubagentFooter() {
-   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
+@@ -46,7 +45,7 @@ export function SubagentFooter() {
+   // 子代理用数值分开两方向，使仅有工具输入增长时不会同时点亮输出箭头。
+-  // 子代理主值与括号使用自己的请求/全局范围，不能读父会话请求投影。
++  // 子代理只显示自己的当前 step；请求累计交给 sidebar，不借父会话投影。
+   // 保留数值输入输出字段，节流和箭头脉冲仍消费原来契约。
+-  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
++  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
  
-   // 将 flow 字符串替换为 input/output 数值，支持脉冲信号按字段控制颜色
--  // input/output 展示"本次请求"累计；totalInput/totalOutput 展示会话总累计
-+  // #506：与主面板宽屏 compact 同构——只投影当前 step，request 累积由 sidebar 承载。
-   type UsageInfo = {
-     input: number
-     output: number
--    totalInput: number
--    totalOutput: number
-     context: string | undefined
-     cost: string | undefined
-   }
-@@ -77,22 +74,14 @@ export function SubagentFooter() {
- 
-     if (stepTotal <= 0 && requestTotal <= 0) {
+   const usageRaw = createMemo((): UsageInfo | undefined => {
+     // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
+@@ -60,4 +59,4 @@ export function SubagentFooter() {
        if (!isRunning) return
--      return {
--        input: 0,
--        output: 0,
--        totalInput: acc.request.totalInput,
--        totalOutput: acc.request.totalOutput,
--        context: undefined,
--        cost: undefined,
--      }
-+      // #506：running 占位仅维持流量脉冲，不携带 request 累积字段。
+       // 零值仍是有效运行快照，随后增长能与零基线比较。
+-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
 +      return { input: 0, output: 0, context: undefined, cost: undefined }
      }
- 
-     const pct = acc.contextPercent != null ? `${acc.contextPercent}%` : undefined
-     return {
-       input: acc.step.input,
-       output: acc.step.output,
--      totalInput: acc.request.totalInput,
--      totalOutput: acc.request.totalOutput,
-       context: stepTotal > 0 ? (pct ? `${Locale.number(stepTotal)} (${pct})` : Locale.number(stepTotal)) : undefined,
-       cost: acc.request.cost > 0 ? money.format(acc.request.cost) : undefined,
+@@ -69,4 +68,4 @@ export function SubagentFooter() {
+     if (!request || (!request.assistantID && !isRunning)) {
+       if (!isRunning) return
+-      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
++      return { input: 0, output: 0, context: undefined, cost: undefined }
      }
-@@ -110,9 +99,6 @@ export function SubagentFooter() {
+@@ -73,8 +72,8 @@ export function SubagentFooter() {
+     const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
+     const last = requestAssistants.at(-1)
+-    // 主值属于当前 step；括号与费用都属于该子代理的完整当前请求。
++    // 主值属于当前 step，费用仍属于该子代理的完整当前请求。
+ 
+     // footer 的缓存只供未确认尾部，助手淘汰后不能丢掉已确认请求累计。
+     const lastParts = last ? (sync.data.part[last.id] ?? []) : []
+-    // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
++    // 保留 step/request 区别；累计仍参与可见性判断，但不再追加到箭头后。
+     // 子会话的 prepared 密度只随它自己的请求读取，父会话与旧模型确认样本不参与。
+@@ -86,4 +85,4 @@ export function SubagentFooter() {
+     if (requestTokens <= 0 && totalTokens <= 0) {
+       if (!isRunning) return
+-      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
++      return { input: 0, output: 0, context: undefined, cost: undefined }
+     }
+@@ -99,7 +98,5 @@ export function SubagentFooter() {
+     return {
+       input: currentInput,
+       output: currentOutput,
+-      totalInput,
+-      totalOutput,
+       context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
+       cost: cost > 0 ? money.format(cost) : undefined,
+@@ -120,9 +117,6 @@ export function SubagentFooter() {
    const previousShortcut = useCommandShortcut("session.child.previous")
    const nextShortcut = useCommandShortcut("session.child.next")
    const [hover, setHover] = createSignal<"parent" | "prev" | "next" | null>(null)
@@ -499,15 +506,14 @@ index 3eec9c7d7..a8e5aa4b5 100644
  
    return (
      <box flexShrink={0}>
-@@ -140,9 +126,10 @@ export function SubagentFooter() {
+@@ -150,9 +144,10 @@ export function SubagentFooter() {
              <Show when={usage()}>
                {(item) => (
                  <text fg={theme.textMuted} wrapMode="none">
--                  {/* 使用脉冲信号控制箭头颜色，token 增加时短暂高亮 */}
+                   {/* Show 提供有效 item 后才格式化计数，undefined 的清空快照不进入这段文本。 */}
 -                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{showCumulative() ? `(${Locale.number(item().totalInput)})` : ""} ·{" "}
 -                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}{showCumulative() ? `(${Locale.number(item().totalOutput)})` : ""}
-+                  {/* #506：箭头空格与主面板 compact 同构；只显示当前 step，不再追加 request 累计括号。
-+                      ↑↓ 之间用空格内聚（不用 ·）——与主面板 live flow 及 formatUsageStats 的 flow.join(" ") 一致。 */}
++                  {/* 两方向用空格内聚并保留独立脉冲；context/cost 仍以中点分组。 */}
 +                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}
 +                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
                    {item().context ? ` · ${item().context}` : ""}
@@ -518,10 +524,17 @@ diff --git a/packages/tui/test/util/presentation.test.ts b/packages/tui/test/uti
 index 32460fd08..97f0a0f19 100644
 --- a/packages/tui/test/util/presentation.test.ts
 +++ b/packages/tui/test/util/presentation.test.ts
-@@ -8,12 +8,35 @@ test("formats session continuation summary", () => {
- })
+@@ -1,3 +1,4 @@
+ import { describe, expect, test } from "bun:test"
+ import { formatUsageStats, sessionEpilogue } from "../../src/util/presentation"
++import { tokenAccounting } from "../../src/util/token-accounting"
  
- describe("formatUsageStats", () => {
+@@ -10,3 +11,3 @@ test("formats session continuation summary", () => {
+-  expect(populated).toContain("↑12.3K ↓1.0K · $0.01")
++  expect(populated).toContain("↑ 12.3K ↓ 1.0K · $0.01")
+   expect(populated).toContain("Stats")
+   expect(populated.indexOf("Stats")).toBeGreaterThan(populated.indexOf("Session"))
+@@ -18,11 +19,48 @@ describe("formatUsageStats", () => {
 -  // #490：字段单独门控——input-only 不出现零 output/cost；flow 与 cost 的分隔符随组形态变化。
 +  // #490/#506：字段单独门控 + 箭头后空格（对齐主面板 live compact flow ↑ n ↓ n）；
 +  // normal fixture 同时锁定 flow/cost 分隔符，而不是只验证字段存在。
@@ -539,12 +552,18 @@ index 32460fd08..97f0a0f19 100644
 +    expect(formatUsageStats({ input: 0, output: 1_000, cost: 0 })).toBe("↓ 1.0K")
      expect(formatUsageStats({ input: 0, output: 0, cost: 0.25 })).toBe("$0.25")
      expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
+-    expect(formatUsageStats({ input: 100, output: 0, cost: 0.25 })).toBe("↑100 · $0.25")
+-    expect(formatUsageStats({ input: 0, output: 100, cost: 0.25 })).toBe("↓100 · $0.25")
++    expect(formatUsageStats({ input: 100, output: 0, cost: 0.25 })).toBe("↑ 100 · $0.25")
++    expect(formatUsageStats({ input: 0, output: 100, cost: 0.25 })).toBe("↓ 100 · $0.25")
    })
 +
 +  // #506：epilogue 集成——usage 经 sessionEpilogue 输出 Stats 行（源 session-exit stdout 路径的
 +  // 目标等价承载；970 output + 30 reasoning 由调用方 projection 合并为 1.0K 后进入 formatter）。
 +  test("session epilogue renders compact spaced flow stats line", () => {
-+    const epilogue = sessionEpilogue({ title: "Usage session", sessionID: "ses_u", usage: { input: 12_300, output: 1_000, cost: 0.01 } })
++    const tokens = { input: 12_300, output: 970, reasoning: 30, cache: { read: 100, write: 50 } }
++    const usage = tokenAccounting([{ id: "a", role: "assistant", tokens, cost: 0.01, time: { completed: 1 } }], () => [{ type: "step-finish", tokens, cost: 0.01 }]).session
++    const epilogue = sessionEpilogue({ title: "Usage session", sessionID: "ses_u", usage: { input: usage.input, output: usage.output + usage.reasoning, cost: usage.cost } })
 +    expect(epilogue).toContain("Stats")
 +    // 箭头后空格是用户可见 compact 形态，与 message footer 共用 formatUsageStats。
 +    expect(epilogue).toContain("↑ 12.3K ↓ 1.0K · $0.01")
@@ -553,7 +572,19 @@ index 32460fd08..97f0a0f19 100644
 +  // #506：multi-step request 累计经调用方聚合后仍走同一 compact 模板；
 +  // subagent footer 只投影当前 step（组件内部形态），formatter 层锁定模板本身。
 +  test("multi-step accumulated usage renders through the same compact template", () => {
-+    expect(formatUsageStats({ input: 12_300, output: 1_100, cost: 0.01 })).toBe("↑ 12.3K ↓ 1.1K · $0.01")
++    const tokens = [
++      { input: 6_000, output: 100, reasoning: 0, cache: { read: 100, write: 50 } },
++      { input: 6_300, output: 900, reasoning: 100, cache: { read: 100, write: 50 } },
++    ]
++    const messages = [{ id: "u", role: "user" }, ...tokens.map((tokens, index) => ({
++      id: `a${index}`, role: "assistant", parentID: "u", tokens, cost: 0.005, time: { completed: index + 1 },
++    }))]
++    const parts = new Map(tokens.map((tokens, index) => [`a${index}`, [{ type: "step-finish", tokens, cost: 0.005 }]]))
++    const usage = tokenAccounting(messages, (id) => parts.get(id) ?? [])
++    // 当前 step 含缓存且只取最后一步；永久记录取 pure input 和含 reasoning 的请求累计。
++    expect(usage.step).toEqual({ input: 6450, output: 1000, confirmed: true })
++    expect(usage.request).toMatchObject({ totalInput: 12600, totalInputPure: 12300, totalOutput: 1100, cost: 0.01 })
++    expect(formatUsageStats({ input: usage.request.totalInputPure, output: usage.request.totalOutput, cost: usage.request.cost })).toBe("↑ 12.3K ↓ 1.1K · $0.01")
 +    // 累计为零字段仍被独立门控，禁止空格箭头后的零值噪声。
 +    expect(formatUsageStats({ input: 0, output: 0, cost: 0 })).toBe("")
 +  })
@@ -564,15 +595,13 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000
 --- /dev/null
 +++ b/packages/tui/test/routes/session/subagent-footer-flow.test.ts
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,27 @@
 +import { describe, expect, test } from "bun:test"
 +import { readFileSync } from "node:fs"
 +import path from "node:path"
 +
-+// #506 R1 B-01 回归：subagent footer 箭头行的 ↑/↓ 分隔符是 JSX 模板合同，
-+// formatter 级测试（presentation.test）探测不到 JSX 内的差异（曾漏检 ` · ` 中点）。
-+// 目标暂无 withRenderedSession 等价渲染 harness；此处以源码模板合同断言兜底：
-+// 锁定「input 与 output 之间是纯空格（无中点），context/cost 仍用 ` · ` 追加」。
++// JSX 模板合同覆盖 formatter 无法观察的箭头分隔符与累计括号；不冒称真实子会话导航帧验证。
++// 数值侧另经 accounting→formatter 验证，context/cost 仍用中点追加。
 +const source = readFileSync(
 +  path.join(import.meta.dir, "..", "..", "..", "src", "routes", "session", "subagent-footer.tsx"),
 +  "utf8",
@@ -589,5 +618,8 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +    expect(usageRow).not.toContain(` ·{" "}`)
 +    // 可选段（context/cost）仍以 ` · ` 前缀追加，总量段保留中点层级
 +    expect(source).toContain("{item().context ? ` · ${item().context}` : \"\"}")
++    expect(source).toContain("{item().cost ? ` · ${item().cost}` : \"\"}")
++    expect(source).not.toContain("item().totalInput")
++    expect(source).not.toContain("item().totalOutput")
 +  })
 +})

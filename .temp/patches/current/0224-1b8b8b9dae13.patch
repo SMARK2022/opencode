@@ -277,7 +277,7 @@ index c5d9253352..aa5dd1fe60 100644
      }),
      vscode_notebook_run: tool({
        description: VscodeNotebookDescriptions.run,
-@@ -148,21 +360,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+@@ -148,20 +360,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
        execute: async (args, context) => {
          await ask(context, "vscode_notebook_run", args)
          const timeoutMs = args.timeoutMs ?? 300_000
@@ -294,7 +294,6 @@ index c5d9253352..aa5dd1fe60 100644
        description: VscodeNotebookDescriptions.output,
        args: outputArgs,
 -      execute: async (args, context) => ({
--        // 30s 覆盖 activate+restart；短于通用工具会误超时
 -        output: await call("/notebook/output", args, context, 30_000),
 -        metadata: { endpoint: "/notebook/output" },
 -      }),
@@ -314,19 +313,15 @@ index c5d9253352..aa5dd1fe60 100644
        },
      }),
      vscode_notebook_env: tool({
-@@ -200,11 +402,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+@@ -193,7 +396,4 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
          await ask(context, "vscode_notebook_env", args)
-         // SMARK 统一 120s：configure 选核 UI + restart 不可用短窗
-         const timeout = 120_000
 -        return {
--          output: await call("/notebook/env", args, context, timeout),
--          // metadata 带回 operation，便于 agent 对账
+-          output: await call("/notebook/env", args, context, 120_000),
 -          metadata: { endpoint: "/notebook/env", operation: args.operation },
 -        }
-+        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, timeout))
++        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
        },
      }),
- 
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
@@ -689,8 +684,8 @@ index 8a24e2adf5..4d4a6ebfdb 100644
 +import { useVscodeNotebookToolView } from "./notebook-tool"
  // #154：pending/streaming 判定抽到 util，便于单测与去重
  import { hasStreamingAssistant, pendingAssistantIndex, shouldRefreshStaleBusyStatus } from "../../util/session-pending"
-@@ -2107,6 +2109,11 @@ function previewText(input: string, maxLines: number) {
-   return rows.slice(0, maxLines).join("\n") + "\n…"
+@@ -2089,6 +2091,11 @@ function previewText(input: string, maxLines: number, maxChars: number) {
+   return collapseToolOutput(input, maxLines, maxChars).output
  }
  
 +// #224：工具标题只承担单行摘要职责，不能承载多行源码。这个阈值只影响
@@ -701,13 +696,11 @@ index 8a24e2adf5..4d4a6ebfdb 100644
  function GenericTool(props: ToolProps) {
    const { theme } = useTheme()
    const ctx = use()
-@@ -2121,37 +2128,86 @@ function GenericTool(props: ToolProps) {
+@@ -2116,33 +2123,83 @@ function GenericTool(props: ToolProps) {
      if (expanded() || !collapsed().overflow) return output()
-     return collapsed().output
+     return collapseToolOutput(output(), maxLines, maxChars()).output
    })
-+  // #224：notebook 工具视图 seam——完成态从 metadata.vscodeNotebook 派生 block/inline 描述；
-+  // #224：pending 态从 streaming raw parser 派生 inline 摘要。非 notebook 工具返回 undefined。
-+  // #224：useVscodeNotebookToolView 是纯 derived memo——不读 VS Code，不产生副作用
++  // Notebook完成态消费紧凑元数据，流式参数只用于pending摘要，不访问VS Code。
 +  const pendingStats = createPendingToolInputStats(() => props.part)
 +  const notebook = useVscodeNotebookToolView({
 +    tool: () => props.tool,
@@ -729,6 +722,11 @@ index 8a24e2adf5..4d4a6ebfdb 100644
 +    const view = notebook()
 +    return view?.mode === "block" ? view : undefined
 +  })
++  // 外层沿用同一展开状态；小卡片直接显示正文，超预算时才使用Notebook预览。
++  const notebookOverflow = createMemo(() => {
++    const view = notebookBlock()
++    return Boolean(view?.preview) && ((view?.totalLines ?? 0) > (view?.threshold ?? 20) || (view?.totalChars ?? 0) > maxChars() * 2)
++  })
  
    return (
 -    <Show
@@ -749,10 +747,8 @@ index 8a24e2adf5..4d4a6ebfdb 100644
 +          <BlockTool
 +            title={view().title}
 +            part={props.part}
-+            maxLines={view().maxLines ?? 10}
-+            threshold={view().threshold ?? 20}
-+            totalLines={view().totalLines}
-+            preview={view().preview}
++            onClick={notebookOverflow() ? () => setExpanded((prev) => !prev) : undefined}
++            preview={notebookOverflow() && !expanded() ? view().preview : undefined}
 +          >
 +            {view().body}
 +          </BlockTool>
@@ -764,13 +760,9 @@ index 8a24e2adf5..4d4a6ebfdb 100644
 +          title={`# ${props.tool} ${input(props.input)}`}
 +          part={props.part}
 +          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
-+          // #144：武装 BlockTool 内置折叠以启用 preview 主路径
-+          maxLines={10}
-+          threshold={20}
-+          totalLines={output().split(String.fromCharCode(10)).length}
 +          // #144：通用工具折叠预览
 +          preview={
-+            collapsed().overflow ? <text fg={theme.text}>{previewText(output(), 10)}</text> : undefined
++            collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
 +          }
 +        >
 +          <box gap={1}>
@@ -792,13 +784,9 @@ index 8a24e2adf5..4d4a6ebfdb 100644
 -        title={`# ${props.tool} ${input(props.input)}`}
 -        part={props.part}
 -        onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
--        // #144：武装 BlockTool 内置折叠以启用 preview 主路径
--        maxLines={10}
--        threshold={20}
--        totalLines={output().split(String.fromCharCode(10)).length}
 -        // #144：通用工具折叠预览
 -        preview={
--          collapsed().overflow ? <text fg={theme.text}>{previewText(output(), 10)}</text> : undefined
+-          collapsed().overflow && !expanded() ? <text fg={theme.text}>{previewText(limited(), 10, maxChars())}</text> : undefined
 -        }
 -      >
 -        <box gap={1}>
@@ -1436,81 +1424,45 @@ index dac6c9a7fa..ad6d2393e9 100644
    })
  }
  
-@@ -148,7 +152,9 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
-   // notebook 结构编辑：等待 notebook.version 推进
-   const applied = await applyNotebookEditAndWait(notebook, edit)
-   const shiftedCell = shiftedOldIdx !== undefined ? notebook.cellAt(shiftedOldIdx + 1) : undefined
--  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
-+  // #224：insert 的 beforeSource 为空（插入前无 cell），afterSource 是新 cell 源码
-+  // #224：affectedCellIndex=insertIndex 让 notebookResult 能标记插入位置的 cN 标签
-+  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, affectedCellIndex: insertIndex, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
+@@ -144,3 +148,4 @@
+-  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source })
++  // 新格差分以空源码为起点；实际位置、身份与失败状态沿用结构编辑结果。
++  return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
  }
  
- // ---------------------------------------------------------------------------
-@@ -199,6 +205,9 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
-     const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
-   if (sourceRaw === undefined) throw new Error("newCode is required for edit")
+@@ -191,4 +196,6 @@
    const source = targetCell.kind === vscode.NotebookCellKind.Code ? stripCodeFence(sourceRaw) : sourceRaw
-+  // #224：记录编辑前源码，供 notebookResult 生成 diff
-+  // #224：getText 获取编辑前完整 cell 源码
++  // 应用前捕获完整源码，不能从修改后的文档反推差分左侧。
 +  const beforeSource = targetCell.document.getText()
+ 
    const edit = new vscode.WorkspaceEdit()
-   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
-   // 整 cell 源码替换：与当前文档不同才等文本版本
-@@ -213,6 +222,10 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
-     kind: cellTypeLabel(targetCell.kind),
-     language: targetCell.document.languageId,
-     sourcePreview: source,
-+    // #224：before/after 源码供 opencode TUI 生成 diff card
-+    // #224：before 是编辑前完整 cell 文本，after 是编辑后完整 cell 文本
-+    beforeSource,
-+    afterSource: source,
-   })
+   // TextEdit 作用于格文档 URI，NotebookEdit 作用于 notebook URI，不能交换二者。
+@@ -199,3 +206,3 @@
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source })
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
  }
  
-@@ -236,7 +249,9 @@ async function handleTypeChange(
-   let newSource: string
-   let contextSummary: string | undefined
- 
+@@ -216,2 +223,4 @@
    const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
-+  // #224：类型变更前源码——beforeSource 用于 diff 生成
++  // 类型替换产生新格身份，差分左侧必须在原格还可读取时捕获。
 +  const beforeSource = targetCell.document.getText()
  
-   if (oldCode) {
-     // 类型变更路径：oldCode 可选匹配，再以新 kind 重建 cell
-@@ -273,6 +288,10 @@ async function handleTypeChange(
-     oldLang,
-     sourcePreview: newSource,
-     contextSummary,
-+    // #224：类型变更前后的完整源码
-+    // #224：beforeSource 是变更前源码，afterSource 是重建后的新 cell 源码
-+    beforeSource,
-+    afterSource: newSource,
-   })
+@@ -244,3 +253,3 @@
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(anchorCellIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary })
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(anchorCellIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
  }
  
-@@ -289,7 +308,9 @@ async function handleTypeChange(
- 
- // string oldCode/newCode 主路径：替代 #78 的 range 编辑
- // applyEdit 失败时 applied=false 仍返回 compact，禁止吞掉失败状态
- async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number) {
-+  // #224：字符串编辑前源码——beforeSource 用于 diff 生成
+@@ -247,2 +256,4 @@
+ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number, input: Record<string, unknown>) {
++  // 片段替换的差分仍比较完整源码，Preview不代替合成结果。
 +  const beforeSource = targetCell.document.getText()
    const result = matchAndReplace(targetCell, oldCode, newCode)
-   const contextSummary = buildContext(notebook, targetCell, result, newCode)
- 
-@@ -309,6 +330,10 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
-     language: targetCell.document.languageId,
-     sourcePreview: newCode,
-     contextSummary,
-+    // #224：字符串替换前后的完整源码
-+    // #224：result.source 是 matchAndReplace 后的完整替换结果
-+    beforeSource,
-+    afterSource: result.source,
-   })
+@@ -259,3 +270,3 @@
+-  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary })
++  return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
  }
  
-@@ -561,6 +586,9 @@ function compactEditResult(
+@@ -513,5 +524,8 @@ function compactEditResult(
      shiftedOldIdx?: number
      sourcePreview?: string
      contextSummary?: string
@@ -1519,21 +1471,16 @@ index dac6c9a7fa..ad6d2393e9 100644
 +    afterSource?: string
    },
  ) {
-   const lines: Array<string | undefined> = [
-@@ -612,10 +640,18 @@ async function handleTypeChange(
+@@ -572,10 +586,14 @@
        cellCountBefore: info.beforeCount,
        cellCountAfter: info.afterCount,
-       anchorCellIndex: info.anchorCell?.index,
-+      // #224：deletedCellIndex 供 notebookResult 计算删除操作的 cell 标签
-+      // #224：beforeSource 是删除前源码，afterSource 为空——diff 显示全删除
+       anchorCellIndex: info.anchorCellIndex,
 +      deletedCellIndex: info.deletedCellIndex,
        affectedCellIndex: info.affectedCellIndex,
        dirty: notebook.isDirty,
        kind: info.kind,
        language: info.language,
-+      // #224：opencode TUI 只从 data 派生展示 metadata，不改变 bridge 给模型的 summary。
-+      // before/after 保持 cell 级源文本，确保 notebook edit 完成态能渲染真实 diff，
-+      // pending 态仍只能显示参数行数估算，不能在 UI 线程重新读 VS Code 文档。
++      // 桥接返回格级差分输入，插件仅持久化有界diff；模型summary保持原样。
 +      beforeSource: info.beforeSource,
 +      afterSource: info.afterSource,
      },

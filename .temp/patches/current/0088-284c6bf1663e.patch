@@ -18,12 +18,12 @@ diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/ba
      // 首尾及哈希只读取已脱敏正文，不从 raw 重新截取样例。
      const replacement = `<high-entropy ${type} omitted: ${byteLen(line)} bytes, hash=${simpleHash(line)}, prefix=${JSON.stringify(line.slice(0, 20) + "...")}, suffix=${JSON.stringify("..." + line.slice(-20))}>`
      // 首尾样例与标签本身也计费，净增长摘要继续原样通过。
-@@ -941,6 +942,23 @@ export function shouldCompressOutput(text: string) {
+@@ -941,6 +942,22 @@ export function shouldCompressOutput(text: string) {
    return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
  }
  
 +// 保留源 CLIXML 节点提取与转义规则，ANSI 清洗复用现有实现。
-+function transformPowerShellClixml(text: string, config: CompressionConfig) {
++function transformPowerShellClixml(text: string) {
 +  const trimmed = text.trimStart()
 +  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
 +  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
@@ -35,20 +35,19 @@ diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/ba
 +  if (parts.length === 0) return null
 +  const plain = stripAnsi(parts.join("")).replace(/\r\n/g, "\n").trimEnd()
 +  if (!plain) return null
-+  const replacement = `<high-entropy powershell-clixml>${plain}</high-entropy>`
-+  return scoreReplacement(text, replacement, config).profitable ? replacement : null
++  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
 +}
 +
  /**
   * 主入口：压缩传入的可见文本，返回压缩后的文本以及详细的统计信息
   */
-@@ -967,11 +985,14 @@ export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
+@@ -967,11 +984,14 @@ export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
    // 源 opt-out 保持逐字原样；启用后脱敏不受长度预筛或压缩收益支配。
    if (!config.enabled) return { text, stats: emptyStats }
    // VT可能把ANSI分隔的片段重组成密钥；规范化完成后只执行一次canonical脱敏。
 -  const cr = collapseCarriageReturns(text, config)
-+  // CLIXML 解码沿用收益门槛，提交后继续 VT 与脱敏。
-+  const clixml = transformPowerShellClixml(text, config)
++  // CLIXML 解码属于呈现规范化，收益门槛只约束后续可选压缩。
++  const clixml = transformPowerShellClixml(text)
 +  const cr = collapseCarriageReturns(clixml ?? text, config)
    const redaction = redactSecrets(cr.text)
    const redactedBytes = byteLen(redaction.text)
@@ -59,7 +58,7 @@ diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/ba
      compressedBytes: redactedBytes, savedBytes: originalBytes - redactedBytes,
      savingRatio: originalBytes ? (originalBytes - redactedBytes) / originalBytes : 0, secretsRedacted: redaction.redacted }
    if (!shouldCompressOutput(redaction.text)) return { text: redaction.text, stats: redactedStats }
-@@ -1014,11 +1035,11 @@ export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
+@@ -1014,11 +1034,11 @@ export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
      repeatedLineGroups: same.groups,
      inlinePatternGroups: inline.groups,
      templateGroups: template.groups,
@@ -73,14 +72,27 @@ diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/ba
    }
  
    return {
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -310,7 +310,7 @@
+                 : undefined
+               return {
+-                // 脱敏即使未压缩也要求原文；既有 capture 的 lazy flush 与失败传播不变。
+-                retain: compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
++                // 呈现变化即使没有净压缩也要求原文；既有 capture 与失败传播不变。
++                retain: compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
+                 value: {
+                 exit: result.exitCode,
+                 output: notice ? `${output}\n\n${notice}` : output,
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -769,6 +769,19 @@
+@@ -769,6 +769,27 @@
          const entropy = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(16)
          expect(compressVisibleOutput(entropy).text).toContain("high-entropy base64 omitted: 1024 bytes")
          expect(compressVisibleOutput(entropy).stats.highEntropyLines).toBe(1)
-+        // CLIXML 解码仍走同一入口，覆盖脱敏、禁用、收益与后续重复压缩。
++        // CLIXML 解码仍走同一入口，覆盖脱敏、禁用、低收益与后续重复压缩。
 +        const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">_x001B_[31merror: _x0073_k-abcdefghijklmnopqrstuvwxyz012345_x001B_[0m_x000D__x000A_</S><S S="Error">_x4E2D__x6587__x000D__x000A_</S></Objs>'
 +        const decoded = compressVisibleOutput(clixml)
 +        expect(decoded.text).toBe("<high-entropy powershell-clixml>error: <REDACTED_API-KEY>\n中文</high-entropy>")
@@ -88,15 +100,42 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +        expect(decoded.stats.savedBytes).toBe(Buffer.byteLength(clixml) - Buffer.byteLength(decoded.text))
 +        expect(decoded.stats.savingRatio).toBe(decoded.stats.savedBytes / Buffer.byteLength(clixml))
 +        expect(compressVisibleOutput(clixml, { enabled: false })).toMatchObject({ text: clixml, stats: { applied: false, highEntropyLines: 0, secretsRedacted: 0 } })
-+        expect(compressVisibleOutput(clixml, { minSavedBytes: 100000 }).text).toBe(clixml)
++        expect(compressVisibleOutput(clixml, { minSavedBytes: 100000 })).toEqual(decoded)
++        // 普通正文只省两个字节，解码不应受默认50%压缩收益门槛阻断。
++        const ordinary = Array.from({ length: 20 }, (_, i) => `ordinary output row ${i}: task completed successfully`).join("\n")
++        const ordinaryClixml = `<Objs Version="1.1.0.1"><S S="Output">${ordinary}</S></Objs>`
++        const ordinaryDecoded = compressVisibleOutput(ordinaryClixml)
++        expect(ordinaryDecoded.text).toBe(`<high-entropy powershell-clixml>${ordinary}</high-entropy>`)
++        expect(ordinaryDecoded.stats).toMatchObject({ applied: true, highEntropyLines: 1, secretsRedacted: 0 })
++        expect(ordinaryDecoded.stats.savedBytes).toBe(2)
++        expect(ordinaryDecoded.stats.savingRatio).toBe(2 / Buffer.byteLength(ordinaryClixml))
 +        const clixmlRun = `<Objs><S S="Output">${"repeatable ordinary output_x000D__x000A_".repeat(20)}</S></Objs>`
-+        const repeatedClixml = compressVisibleOutput(clixmlRun, { minSavingRatio: 0 })
++        const repeatedClixml = compressVisibleOutput(clixmlRun)
 +        expect(repeatedClixml.stats).toMatchObject({ applied: true, highEntropyLines: 1, repeatedLineGroups: 1 })
 +        expect(repeatedClixml.text).toContain("high-entropy powershell-clixml")
          const template = Array.from({ length: 20 }, (_, i) => `12:00:${String(i).padStart(2, "0")} worker completed a substantial ordinary task`).join("\n")
          expect(compressVisibleOutput(template).stats.templateGroups).toBe(1)
          expect(compressVisibleOutput(template, { templateNormalizationLevel: "off" }).stats.templateGroups).toBe(0)
-@@ -947,7 +960,7 @@
+@@ -777,7 +798,9 @@
+           ["redaction-only", sensitive, "<REDACTED_API-KEY>"],
+           ["terminal-redaction", decoratedSecret, "<REDACTED_API-KEY>"],
+           ["crossline-redaction", crossline, "<REDACTED_CREDENTIAL>"],
++          ["clixml-low-savings", ordinaryClixml, ordinaryDecoded.text],
++          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "<high-entropy powershell-clixml>ordinary</high-entropy>"],
+         ]) {
+           // 禁用适配器或收益拒绝仍走同一入口，不用私有适配函数作为测试 oracle。
+-          if (command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
++          if (!command.startsWith("clixml-") && command !== "redaction-only" && command !== "terminal-redaction" && command !== "crossline-redaction") {
+             expect(compressVisibleOutput(output, { enableCommandAdapters: false }, command).text).not.toContain(marker)
+@@ -796,6 +819,7 @@
+             if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
+             if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
++            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
+             if (command === "docker build .") {
+               // 不用adapter计算预期值，直接指定步骤摘要与失败详情的归属。
+               expect(text).toContain("#2 compile: FAILED")
+               expect(text).toContain("#3 package: DONE")
+@@ -947,7 +971,7 @@
          }), LayerNode.compile(AppProcess.node))
          // 正文恰好占满字节预算，中间错误会被最终状态与恢复标记挤出 head/tail。
          reset()

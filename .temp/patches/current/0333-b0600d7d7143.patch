@@ -1,6 +1,6 @@
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -383,6 +383,27 @@ function evaluateCommand(command: string, depth: number): Decision {
    if (risk) return risk
    // #197：通过只读不变量验证的命令才 safe——安全命令必须直接、本地且只读
@@ -70,9 +70,9 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
    if (RE_C_GIT_HOOKS_WRITE.test(normalized)) return "git hook modification runs code on git operations"
 
 
-diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packages/opencode/src/permission/reviewer/policy/policy.md
---- a/packages/opencode/src/permission/reviewer/policy/policy.md
-+++ b/packages/opencode/src/permission/reviewer/policy/policy.md
+diff --git a/packages/core/src/permission/reviewer/policy/policy.md b/packages/core/src/permission/reviewer/policy/policy.md
+--- a/packages/core/src/permission/reviewer/policy/policy.md
++++ b/packages/core/src/permission/reviewer/policy/policy.md
 @@ -4,6 +4,7 @@ Default opencode auto-review policy:
  - Deny credential exfiltration, secret reads sent to a network destination, reverse shells, remote download piped to interpreters, protected-root deletion, disk formatting, system shutdown, and attempts to weaken security controls.
  - Deny attempts to retry a rejected outcome through shell indirection, generated scripts, interpreter evals, encoded commands, alternate tools, MCP tools, or remote hosts.

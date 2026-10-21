@@ -110,16 +110,15 @@ diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/ap
    "message.part.removed",
    "message.part.delta",
    "permission.asked",
-@@ -260,6 +261,7 @@ export function applyDirectoryEvent(input: {
+@@ -318,5 +319,6 @@ export function applyDirectoryEvent(input: {
        break
      }
 -    case "message.part.updated": {
 +    case "message.part.updated":
 +    case "message.part.progress": {
-       // #98：part 软隐藏时从 UI store 移除
-       const _part0 = (event.properties as { part: Part }).part
-       if ((_part0 as unknown as { hidden?: unknown }).hidden) {
-@@ -283,9 +283,6 @@ export function applyDirectoryEvent(input: {
+       const part = (event.properties as { part: Part }).part
+       if ((part as unknown as { hidden?: unknown }).hidden) {
+@@ -329,9 +331,6 @@ export function applyDirectoryEvent(input: {
        if (SKIP_PARTS.has(part.type)) break
 -      // 单调守卫：防止 pending 阶段的短快照覆盖已通过 delta 累积的长文本。
 -      // daemon 的 message.part.updated 通过 fire-and-forget 发送
@@ -133,7 +132,7 @@ diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/ap
 +      // 也不应清除 accum_delta（UI 优先读 accum_delta 显示流式内容）。
 +      // 终态（time.end 存在）不进入此守卫，正常执行覆盖和 accum_delta 清除。
        if ((part.type === "text" || part.type === "reasoning") && !part.time?.end) {
-@@ -312,5 +311,14 @@ export function applyDirectoryEvent(input: {
+@@ -358,5 +357,14 @@ export function applyDirectoryEvent(input: {
        const result = Binary.search(parts, part.id, (item) => item.id)
        if (result.found) {
 -        input.setStore("part", part.messageID, result.index, reconcile(part))
@@ -339,31 +338,29 @@ diff --git a/packages/app/src/context/server-session.test.ts b/packages/app/src/
 +})
 +
  const response = (data: MessageResponse["data"] = [], cursor?: string): MessageResponse => ({
-@@ -448,1 +448,28 @@
-+  test("does not regress a running tool part when a stale initial page arrives", async () => {
-+    const pending = deferredResponse()
+@@ -448,1 +448,26 @@
++  test("does not regress a running tool part when a stale refresh page arrives", async () => {
 +    const fetched = userMessage("message")
 +    const livePart = toolPart(fetched.id, "part", 3)
 +    const stalePart = toolPart(fetched.id, "part", 1)
-+    const store = createServerSession(messageClient(pending.promise))
-+    const loading = store.sync("child")
++    const client = messageClient(response([{ info: fetched, parts: [livePart] }]), response([{ info: fetched, parts: [stalePart] }]))
++    const store = createServerSession(client)
++    await store.sync("child")
++    await store.sync("child", { force: true })
 +
-+    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: livePart, time: 2 } })
-+    pending.resolve(response([{ info: fetched, parts: [stalePart] }]))
-+    await loading
-+
-+    // page 携带旧 progressVersion 时不得回退 live running tool part——mergePartSnapshot 单调合同
++    // v3 在刷新前已存在，刷新期间没有 live 更新；不能靠 touchedParts 掩盖页面合并回退。
++    expect(client.requests).toHaveLength(2)
 +    expect(store.data.part[fetched.id]).toEqual([livePart])
 +  })
 +
 +  test("does not regress a running tool part from a stale part.updated event", async () => {
-+    const store = createServerSession(messageClient(deferredResponse().promise))
-+    void store.sync("child")
++    const store = createServerSession(messageClient(response([{ info: userMessage("message"), parts: [] }])))
++    await store.sync("child")
 +    const livePart = toolPart("message", "part", 3)
 +    const stalePart = toolPart("message", "part", 1)
-+    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: livePart, time: 2 } })
++    store.apply({ type: "message.part.progress", properties: { sessionID: "child", part: livePart, time: 2 } })
 +    store.apply({ type: "message.part.updated", properties: { sessionID: "child", part: stalePart, time: 3 } })
-+    // 同一 updated 通道的后到 stale 事件同样不得回退——事件路径与 page 路径共用单调合同
++    // progress 和 updated 的到达顺序不能回退展示；事件与 page 共用同一单调合同。
 +    expect(store.data.part["message"]).toEqual([livePart])
 +  })
 +

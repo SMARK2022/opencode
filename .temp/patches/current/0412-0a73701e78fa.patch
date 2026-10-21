@@ -319,8 +319,9 @@ index 0000000000000000000000000000000000000000..df8f941a3239b6071d546ffe28e63fed
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1,5 +1,9 @@
+@@ -1,6 +1,10 @@
  import { SessionID, MessageID } from "./schema"
+ import { CompactionFileEvidence } from "./file-evidence"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
 +
 +// [local-smark] 测试与 prompt.ts 通过 MessageV2 命名空间引用 WithParts/Part；
@@ -329,10 +330,9 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  import { ProviderV2 } from "@opencode-ai/core/provider"
  import {
    APIError,
-@@ -28,7 +32,7 @@ import { iife } from "@/util/iife"
+@@ -29,6 +33,6 @@ import { iife } from "@/util/iife"
  import { errorMessage } from "@/util/error"
  import { isMedia } from "@/util/media"
- // #282：compaction 清理后改用统一 notice 信封，替代旧的硬编码英文标记
 -import { formatCompactionClearedNotice } from "@/util/output-notice"
 +import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
  import type { SystemError } from "bun"
@@ -376,11 +376,6 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -7,3 +7,4 @@ import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema } from "effect"
- import * as Stream from "effect/Stream"
- import { Agent } from "@/agent/agent"
- import { Config } from "@/config/config"
-+import { formatLongExecutionNotice } from "@/util/output-notice"
 @@ -37,12 +37,18 @@ const DOOM_LOOP_THRESHOLD = 3
  // #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
  export const TOOL_ABORTED_ERROR = "Tool execution aborted"
@@ -414,79 +409,71 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
          yield* session.updatePart({
            ...match.part,
            state: {
-@@ -294,14 +303,10 @@ const layer = Layer.effect(
+@@ -329,9 +338,9 @@ const layer = Layer.effect(
              error: toolAborted ? TOOL_ABORTED_ERROR : reason,
              // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
              // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
--            // #209：error 分支不合并 output.metadata——失败时无工具输出，仅保留 autoReview 注解使 UI 能渲染审查结论与导航链接
--            // #216：中止且有 autoReview 时用 interruptedToolMetadata 标记 aborted 状态——UI 从 reviewing 切换到 aborted 终态行
--            metadata: match.part.state.metadata?.autoReview
--              ? toolAborted
--                ? interruptedToolMetadata(match.part.state.metadata)
--                : { autoReview: match.part.state.metadata.autoReview }
-+            metadata: toolAborted
-+              ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart)
-               : match.part.state.metadata,
+             // 中止时只更新审查终态，其他运行进度和普通错误metadata均保持完整。
+-            metadata: toolAborted ? interruptedToolMetadata(match.part.state.metadata) : match.part.state.metadata,
++            metadata: toolAborted ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart) : match.part.state.metadata,
 -            time: { start: match.part.state.time.start, end: Date.now() },
 +            time: { start: failStart, end: Date.now() },
            },
          })
          if (error instanceof PermissionV1.RejectedError || error instanceof Question.RejectedError) {
-@@ -895,7 +901,8 @@ const layer = Layer.effect(
+@@ -909,7 +918,8 @@ const layer = Layer.effect(
                // 非 abort 的未完成属于上游流异常收尾，不标记 interrupted 以免重试逻辑误判
                // #216：cleanup 路径也用 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持文案/metadata 一致
                error: aborted ? TOOL_ABORTED_ERROR : "Tool execution did not complete before stream ended",
--              metadata: aborted ? interruptedToolMetadata(metadata) : metadata,
+-              metadata: { ...(aborted ? interruptedToolMetadata(metadata) : metadata),
 +              // [local-smark] abort 时写入 elapsed marker，供下一轮回放追加 Notice
-+              metadata: aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata,
++              metadata: { ...(aborted ? interruptedToolMetadata(metadata, end - ("time" in part.state ? part.state.time.start : end)) : metadata),
+                 ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
+               },
                time: { start: "time" in part.state ? part.state.time.start : end, end },
-             },
-           })
-@@ -258,7 +265,17 @@ const layer = Layer.effect(
-             input: output.metadata?._formattedContent
-               ? { ...match.part.state.input, content: output.metadata._formattedContent }
-               : match.part.state.input,
--            output: output.output,
-+            // [local-smark] 所有工具 ≥120s 完成时追加中性耗时 Notice：completeToolCall
-+            // 是全部工具类型（local/MCP/Task/bash）唯一完成汇聚点。shell 的 outcome
-+            // Notice 由 formatShellExecutionNotice 单点承载（单一 outcome 不变量），
-+            // 此处仅非 shell 工具追加，避免 bash 长任务双 completed Notice
-+            output: match.part.tool === "bash"
-+              ? output.output
-+              : (() => {
-+                  const elapsed = Date.now() - match.part.state.time.start
-+                  const longNotice = formatLongExecutionNotice("tool", elapsed)
-+                  return longNotice ? `${output.output}\n\n${longNotice}` : output.output
-+                })(),
-             // #209：auto-review 注解在 running 状态附加——completion 替换 metadata 时保留 autoReview 信封
-             // 从持久化 metadata 中 strip 掉 _formattedContent，避免冗余存储
-             metadata: (() => {
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
 @@ -66 +66 @@
 -import { formatExecutionNotice } from "@/util/output-notice"
 +import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
-@@ -193,13 +193,16 @@ function interruptedToolState(
-   // #173：running 保留 start；pending 用 now 作 start
-   // #173：error 文案与 processor 中断路径对齐
-   // #216：复用 processor 的 TOOL_ABORTED_ERROR 和 interruptedToolMetadata 保持跨路径一致
-+  // [local-smark] 保留原始 start 并传 elapsed 给 interruptedToolMetadata，
-+  // 使下一轮模型回放能看到 user_abort + elapsed_ms
-+  const start = state.status === "running" ? state.time.start : now
-   return {
-     status: "error",
-     input: state.input,
-     error: SessionProcessor.TOOL_ABORTED_ERROR,
-     // #173：interrupted 标记供 UI/用量识别非模型失败
--    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined),
--    time: { start: state.status === "running" ? state.time.start : now, end: now },
-+    metadata: SessionProcessor.interruptedToolMetadata(state.status === "running" ? state.metadata : undefined, now - start),
-+    time: { start, end: now },
-   }
- }
- 
-@@ -809,8 +812,16 @@ const layer = Layer.effect(
+@@ -339,6 +339,8 @@ const layer = Layer.effect(
+           if (part.type !== "tool") return Effect.void
+           if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
++          // 修复只记录本次取消的真实起点，旧记录不追溯伪造耗时。
++          const start = part.state.status === "running" ? part.state.time.start : now
+           // 重读 parts 保留运行时已提交的 input 与 metadata，不使用取消前的工具快照。
+           // 退出发布沿用同一 durable part 事件，跳过可能阻塞的普通 listener，实时流仍收到终态。
+           return events.publish(SessionV1.Event.PartUpdated, {
+             sessionID,
+@@ -351,6 +353,6 @@ const layer = Layer.effect(
+                 // #216：空闲修复与活动processor共用中止信封，reviewing必须变成aborted。
+                 error: SessionProcessor.TOOL_ABORTED_ERROR,
+-                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined),
++                metadata: SessionProcessor.interruptedToolMetadata(part.state.status === "running" ? part.state.metadata : undefined, now - start),
+                 // pending 尚无真实 start，使用取消时刻；running 的计时起点保持不变。
+                 time: {
+-                  start: part.state.status === "running" ? part.state.time.start : now,
++                  start,
+@@ -619,14 +621,16 @@ const layer = Layer.effect(
+       if (result && part.state.status === "running") {
++        // 独立subtask不经过普通adapter，在最终写入点追加长成功提示。
++        const taskNotice = formatLongExecutionNotice("tool", Date.now() - part.state.time.start)
+         yield* sessions.updatePart({
+           ...part,
+           state: {
+             status: "completed",
+             input: part.state.input,
+             title: result.title,
+             metadata: result.metadata,
+-            output: result.output,
++            output: taskNotice ? result.output + "\n\n" + taskNotice : result.output,
+             attachments,
+             time: { ...part.state.time, end: Date.now() },
+           },
+         } satisfies SessionV1.ToolPart)
+       }
+@@ -763,8 +767,16 @@ const layer = Layer.effect(
            const finish = Effect.uninterruptible(
              Effect.gen(function* () {
 -              if (aborted) {
@@ -511,36 +498,33 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -16,7 +16,7 @@ import { Shell } from "@opencode-ai/core/shell"
+@@ -15,7 +15,7 @@ import { Shell } from "@opencode-ai/core/shell"
  import { ShellID } from "./shell/id"
- import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
+ import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
  // #282：超时/中止/截断改用统一 notice 信封
 -import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 +import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } from "@/util/output-notice"
  
- import * as Truncate from "./truncate"
+ import { Truncate } from "./truncate"
  import { Plugin } from "@/plugin"
-@@ -1104,15 +1104,8 @@ export const ShellTool = Tool.define(
+@@ -716,13 +716,8 @@ export const ShellTool = Tool.define(
          }),
        ).pipe(Effect.orDie)
  
 -      const meta: string[] = []
 -      if (expired) {
 -        meta.push(
--          // #282：机器可解析 timeout notice；重试建议由调用方文档承接
 -          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
 -        )
 -      }
--      // #282：abort 同样走 notice，去掉旧的自然语言包装
 -      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
 +      // [local-smark] 统一调用 pure outcome policy，保证一个 Bash 结果只生成一种系统 Notice
 +      const shellElapsedMs = Date.now() - started
-       // #215：模型输出由原始环形缓冲拼接，不经显示渲染，保证 result.output 忠实于子进程字节流
        const raw = list.map((item) => item.text).join("")
-       // #130：Windows PowerShell 先 normalize CLIXML 为纯文本
-@@ -1190,23 +1183,18 @@ export const ShellTool = Tool.define(
-       if (diagnosticAppendix) output += "\n\n" + diagnosticAppendix
-       // #293：exit notice 只描述进程如何结束；它与隐藏输出诊断互相独立，不能互相抑制。
+       // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
+       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
+@@ -794,19 +789,15 @@ export const ShellTool = Tool.define(
+       // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
        // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
 -      const exitNotice =
 -        code === null
@@ -557,7 +541,6 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 -      if (exitNotice) meta.push(exitNotice)
 -
 -      if (meta.length > 0) {
--        // #282：notice 本身自带结构化标记，不再加 <shell_metadata> 包装
 -        output += "\n\n" + meta.join("\n")
 +      // [local-smark] outcome policy 在 emptyOutput 确定后统一处理
 +      // timeout/abort/exit/long-completed，优先级固定不叠加
@@ -572,8 +555,102 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +      if (shellNotice) {
 +        output += "\n\n" + shellNotice
        }
-       // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
-       const displayOutput = preview(display.value())
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -9,6 +9,8 @@
+ import { ToolJsonSchema } from "@/tool/json-schema"
+ import { ToolRegistry } from "@/tool/registry"
+ import { ToolSelection } from "@/tool/selection"
++import { ShellID } from "@/tool/shell/id"
++import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
+ import { Truncate } from "@/tool/truncate"
+ 
+ import { Plugin } from "@/plugin"
+@@ -159,6 +161,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+         return run.promise(
+           Effect.gen(function* () {
+             const ctx = context(args, options)
++            const adapterStartedAt = Date.now()
+             const timing = {
+               source: "local" as const,
+               tool: item.id,
+@@ -185,8 +188,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+               output,
+             )
++            // 包含plugin前后hook的实际adapter耗时；Bash自行装饰，不能重复追加。
++            const adapterElapsedMs = Date.now() - adapterStartedAt
+             if (options.abortSignal?.aborted) {
++              if (item.id !== ShellID.ToolID) output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: adapterElapsedMs })
+               yield* input.processor.completeToolCall(options.toolCallId, output)
++            } else if (item.id !== ShellID.ToolID) {
++              const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
++              if (notice) output.output += "\n\n" + notice
+             }
+             return output
+           }),
+@@ -462,6 +471,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+       run.promise(
+         Effect.gen(function* () {
+           const ctx = context(args, opts)
++          const mcpStartedAt = Date.now()
+           const timing = {
+             source: "mcp" as const,
+             tool: key,
+@@ -552,8 +562,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
+             })),
+             content: result.content,
+           }
++          // 先保留MCP附件和截断结果，再对最终模型文本追加唯一执行提示。
++          const elapsedMs = Date.now() - mcpStartedAt
+           if (opts.abortSignal?.aborted) {
++            output.output += "\n\n" + formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: elapsedMs })
+             yield* input.processor.completeToolCall(opts.toolCallId, output)
++          } else {
++            const notice = formatLongExecutionNotice("tool", elapsedMs)
++            if (notice) output.output += "\n\n" + notice
+           }
+           return output
+         }),
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -91,7 +91,9 @@
+ const modelOutput = (output: Output) => {
+   const warnings = output.warnings?.length
+     ? `\n\nWarnings:\n${output.warnings.map((warning) => `- ${warning}`).join("\n")}`
+     : ""
+-  if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.`
+-  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.`
++  // 原生Bash已有可信durationMs，模型也需看到异常或长成功耗时；短成功正文保持原样。
++  const elapsed = output.durationMs !== undefined && (output.timeout || output.exit !== 0 || output.durationMs >= 120_000) ? `\nElapsed: ${Math.max(0, Math.floor(output.durationMs))}ms.` : ""
++  if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.${elapsed}`
++  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.${elapsed}`
+ }
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -420,7 +420,9 @@ describe("BashTool", () => {
+               const actualStatus = second.text
+               expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
+               expect(text).not.toContain("\uFFFD")
+-              expect(actualStatus).toBe(status)
++              // 仍逐字检查原授权警告与退出状态，只允许尾部增加本项耗时。
++              expect(actualStatus.replace(/\nElapsed: \d+ms\.$/, "")).toBe(status)
++              expect(actualStatus).toMatch(/\nElapsed: \d+ms\.$/)
+               for (const expected of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
+                 expect(text).toContain(expected)
+               }
+@@ -695,7 +695,7 @@ describe("BashTool", () => {
+             Effect.sync(() => {
+               expect(settled.output?.content[1]).toMatchObject({
+                 type: "text",
+-                text: expect.stringContaining("Command timed out"),
++                text: expect.stringMatching(/Command timed out before completion\.\nElapsed: \d+ms\./),
+               })
+               expect(settled.output?.structured).toMatchObject({
+                 timeout: true,
 diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
 --- a/packages/opencode/src/util/output-notice.ts
 +++ b/packages/opencode/src/util/output-notice.ts
@@ -817,7 +894,7 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 +      ]
 +      const result = await MessageV2.toModelMessages(input, model)
 +      const toolResult = result[2]?.content?.[0] as { type: string; output?: { type: string; value: string } }
-+      expect(toolResult.output!.value).not.toContain("opencode_notice")
++      expect(toolResult.output!.value).toBe("Tool execution aborted")
 +    }
 +  })
    test("filters out messages with no parts", async () => {
@@ -826,16 +903,16 @@ diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/openco
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -883,6 +883,9 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
+@@ -1026,6 +1026,9 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
          if (call?.state.status === "error") {
            expect(call.state.error).toBe("Tool execution aborted")
            expect(call.state.metadata?.interrupted).toBe(true)
 +          // [local-smark] 新 abort 记录携带 server-owned executionElapsedMs marker
 +          expect(call.state.metadata?.executionElapsedMs).toBeDefined()
 +          expect(typeof call.state.metadata?.executionElapsedMs).toBe("number")
+           // 查询编码后的持久化 error，而非 callback 内存对象；raw 必须跨 schema 边界保留。
+           expect(call.state.metadata?.raw).toBe('{"cmd"')
            expect(call.state.time.end).toBeDefined()
-         }
-       }),
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
@@ -898,17 +975,17 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
          )
        }),
      ),
-@@ -1589,7 +1594,7 @@ describe("tool.shell abort", () => {
+@@ -1862,6 +1867,6 @@ describe("tool.shell abort", () => {
          expect(result.output).toContain("<bash_high_signal_excerpt>")
-         // #293：隐藏诊断不再抑制 exit notice——只有真正的空输出才省略退出码
          expect(result.output).toContain(
 -          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
 +          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
          )
        }),
      ),
-@@ -1616,7 +1621,7 @@ describe("tool.shell abort", () => {
-         // <bash_high_signal_excerpt>，但执行状态 notice 仍然独立保留 exit code。
+@@ -1886,8 +1891,8 @@ describe("tool.shell abort", () => {
+         expect(result.output).toContain("fatal: visible root cause")
+         // 可见 fatal 不进入隐藏摘录，失败退出码仍需独立回放。
          expect(result.output).not.toContain("<bash_high_signal_excerpt>")
          expect(result.output).toContain(
 -          '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9" />',
@@ -916,12 +993,12 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
          )
        }),
      ),
-@@ -2625,5 +2629,83 @@
-         ),
+@@ -2682,5 +2687,83 @@
+         }),
        ),
-     )
-   }
+   )
  })
+ 
 +
 +// [local-smark] execution notice policy 纯函数测试：不依赖真实子进程，
 +// 确定性验证 Bash outcome 优先级、elapsed_ms 和 120 秒阈值
@@ -990,13 +1067,13 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 +    expect(notice).toContain('elapsed_ms="0"')
 +  })
 +
-+  test("formatLongExecutionNotice 低于阈值返回 undefined", () => {
-+    expect(formatLongExecutionNotice("tool", 60_000)).toBeUndefined()
++  test("formatLongExecutionNotice 119999ms 返回 undefined", () => {
++    expect(formatLongExecutionNotice("tool", 119999)).toBeUndefined()
 +  })
 +
-+  test("formatLongExecutionNotice 达到阈值返回 completed", () => {
-+    const notice = formatLongExecutionNotice("tool", 121_000)
++  test("formatLongExecutionNotice 120000ms 返回 completed", () => {
++    const notice = formatLongExecutionNotice("tool", 120000)
 +    expect(notice).toContain('reason="completed"')
-+    expect(notice).toContain('elapsed_ms="121000"')
++    expect(notice).toContain('elapsed_ms="120000"')
 +  })
 +})

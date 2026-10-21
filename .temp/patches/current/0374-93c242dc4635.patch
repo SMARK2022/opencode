@@ -32,7 +32,7 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
  const BaseParameterFields = {
    description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
    prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
-@@ -337,8 +342,28 @@
+@@ -337,8 +342,41 @@
          let text = result.parts.findLast((item) => item.type === "text")?.text ?? ""
 -        // [local-smark] 空结果验证：子 agent 未产出任何文本时返回提示，
 -        // 返回裸字符串由调用方统一包裹，避免 <task_result> 双重嵌套。
@@ -43,14 +43,27 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 +        // 双条件：文本为空才值得 nudge；abort 后不再发起新回合（已无法取消）。
 +        // 空文本判定用 trim()：纯空白输出对主 agent 同样没有信息量。
 +        if ((!text || text.trim().length === 0) && !ctx.abort.aborted) {
-+          // synthetic 标记：nudge 轮不进入用户可见历史，仅作为模型输入。
++          // synthetic 提醒沿正常持久化与计费路径执行，只在界面隐藏。
 +          const retry = yield* ops.prompt({
 +            messageID: MessageID.ascending(),
 +            sessionID: nextSession.id,
 +            model: { modelID: model.modelID, providerID: model.providerID },
++            variant: next.model ? undefined : variant,
 +            agent: next.name,
 +            parts: [{ type: "text" as const, text: NO_OUTPUT_NUDGE, synthetic: true }],
 +          })
++          // 第二轮与首轮遵守同一错误契约，不能把部分文本或空结果当成成功。
++          if (retry.info.role === "assistant" && retry.info.error) {
++            const message =
++              "message" in retry.info.error.data && typeof retry.info.error.data.message === "string"
++                ? retry.info.error.data.message
++                : retry.info.error.name
++            return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${message}`))
++          }
++          const failed = retry.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
++          if (failed?.type === "tool" && failed.state.status === "error") {
++            return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
++          }
 +          // 重读 findLast：nudge 回合的最后一个 text 才是子 agent 的最终答复。
 +          text = retry.parts.findLast((item) => item.type === "text")?.text ?? ""
 +        }
@@ -69,7 +82,7 @@ diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/t
 index d43b3e24709eba7902090ef4fb633017c1ec6a2c..a0bdd2bf6fe38589d926766c4e85fd390e667db3 100644
 --- a/packages/opencode/test/tool/task.test.ts
 +++ b/packages/opencode/test/tool/task.test.ts
-@@ -951,4 +951,196 @@
+@@ -951,4 +951,243 @@
        expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
      }),
    )
@@ -87,12 +100,14 @@ index d43b3e24709eba7902090ef4fb633017c1ec6a2c..a0bdd2bf6fe38589d926766c4e85fd39
 +      let promptCalls = 0
 +      // 首次 prompt 返回空文本模拟子 agent 探索后未产出；
 +      // nudge 注入后第二次返回有效文本
++      const inputs: SessionPrompt.PromptInput[] = []
 +      const promptOps: TaskPromptOps = {
 +        cancel: () => Effect.void,
 +        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
 +        prompt: (input) =>
 +          Effect.sync(() => {
 +            promptCalls++
++            inputs.push(input)
 +            return reply(input, promptCalls === 1 ? "" : "forced summary")
 +          }),
 +      }
@@ -118,6 +133,51 @@ index d43b3e24709eba7902090ef4fb633017c1ec6a2c..a0bdd2bf6fe38589d926766c4e85fd39
 +      // nudge 触发：prompt 被调用两次，结果含 nudge 产出的文本
 +      expect(promptCalls).toBe(2)
 +      expect(result.output).toContain("forced summary")
++      expect(inputs[1]).toMatchObject({
++        sessionID: inputs[0]?.sessionID,
++        model: inputs[0]?.model,
++        agent: inputs[0]?.agent,
++        variant: "xhigh",
++        parts: [{ type: "text", synthetic: true, text: "No text output was produced in your previous turn. Please provide a text response to the task above." }],
++      })
++      expect(inputs[1]?.messageID).not.toBe(inputs[0]?.messageID)
++    }),
++  )
++
++  // 补提醒也必须传播既有错误，部分文本不能掩盖模型或工具失败。
++  it.instance("propagates assistant and tool errors from the nudge round", () =>
++    Effect.gen(function* () {
++      for (const toolError of [false, true]) {
++        const { chat, assistant } = yield* seed()
++        const tool = yield* TaskTool
++        const def = yield* tool.init()
++        let promptCalls = 0
++        const promptOps: TaskPromptOps = {
++          cancel: () => Effect.void,
++          resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
++          prompt: (input) =>
++            Effect.sync(() => {
++              promptCalls++
++              if (promptCalls === 1) return reply(input, "")
++              return reply(
++                input,
++                "partial response",
++                toolError ? undefined : new SessionV1.APIError({ message: "nudge failed", isRetryable: false }).toObject(),
++                toolError ? "nudge failed" : undefined,
++              )
++            }),
++        }
++        const exit = yield* def.execute(
++          { description: "inspect bug", prompt: "inspect the cache", subagent_type: "general" },
++          { sessionID: chat.id, messageID: assistant.id, agent: "build", abort: new AbortController().signal, extra: { promptOps }, messages: [], metadata: () => Effect.void, ask: () => Effect.void },
++        ).pipe(Effect.exit)
++        expect(promptCalls).toBe(2)
++        expect(Exit.isFailure(exit)).toBe(true)
++        if (Exit.isFailure(exit)) {
++          expect(Cause.pretty(exit.cause)).toContain("nudge failed")
++          expect(Cause.pretty(exit.cause)).toContain("Subagent failed (task_id:")
++        }
++      }
 +    }),
 +  )
 +

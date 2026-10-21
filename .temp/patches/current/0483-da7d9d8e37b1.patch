@@ -137,7 +137,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
      // #176：明细过滤选项
      .option("session", {
        describe: "filter by session id/title/directory substring",
-@@ -179,10 +185,73 @@ const withDetailOptions = (yargs: Argv) =>
+@@ -179,10 +185,81 @@ const withDetailOptions = (yargs: Argv) =>
        type: "string",
      })
  
@@ -204,6 +204,14 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +    default: "tokens",
 +  })
 +
++// 预测需要显式开启，默认观察页不计算或展示预测。
++const withInsightsOptions = (yargs: Argv) =>
++  withFilterOptions(yargs).option("forecast", {
++    describe: "include run-rate projection charts",
++    type: "boolean",
++    default: false,
++  })
++
  // #174：loadReport 是唯一聚合入口
  // #174：loadReport 把 CLI 参数映射为过滤条件后聚合
  const withBreakdownOptions = (yargs: Argv) =>
@@ -266,8 +274,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 -  builder: withDetailOptions,
 +  // #483：Timeline 不暴露 sort/limit，避免命令行接受后又静默忽略
 +  builder: withTimelineOptions,
-   handler: Effect.fn("Cli.stats.timeline")(function* (args: DetailArgs) {
-     console.log(renderTimeline(yield* loadReport(args), renderOptions(args)))
+-  handler: Effect.fn("Cli.stats.timeline")(function* (args: DetailArgs) {
+-    console.log(renderTimeline(yield* loadReport(args), renderOptions(args)))
++  handler: Effect.fn("Cli.stats.timeline")(function* (args: DetailArgs & { heatmap?: boolean }) {
++    console.log(renderTimeline(yield* loadReport(args), { ...renderOptions(args), heatmap: args.heatmap }))
    }),
 @@ -315,7 +398,8 @@ export const StatsSessionsCommand = effectCmd({
    command: "sessions",
@@ -292,16 +302,6 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
        return
      }
      console.log(renderDashboard(yield* loadReport(args), renderOptions(args)))
-@@ -375,7 +457,8 @@ export const StatsCostsCommand = effectCmd({
-   command: "costs",
-   aliases: ["cost"],
-   describe: "show cost-only curves, waterfalls, and distributions",
--  builder: withDetailOptions,
-+  // #483：costs 页固定 cost 指标，metric/sort 无消费路径
-+  builder: withLimitOptions,
-   handler: Effect.fn("Cli.stats.costs")(function* (args: DetailArgs) {
-     console.log(renderCosts(yield* loadReport(args), renderOptions(args)))
-   }),
 @@ -385,7 +468,7 @@ export const StatsTokensCommand = effectCmd({
    command: "tokens",
    aliases: ["token"],
@@ -319,12 +319,13 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 -  builder: withDetailOptions,
 +  // #483：insights 只呈现定量证据与 outliers，不输出主观建议
 +  describe: "show quantitative usage shape, attribution, outliers, and run-rate",
-+  // #483：Insights 只展示观测事实；行数固定，不接受 limit
-+  builder: withFilterOptions,
-   handler: Effect.fn("Cli.stats.insights")(function* (args: DetailArgs) {
++  // #483：Insights 不接受排行裁剪，Forecast由独立开关控制。
++  builder: withInsightsOptions,
+-  handler: Effect.fn("Cli.stats.insights")(function* (args: DetailArgs) {
++  handler: Effect.fn("Cli.stats.insights")(function* (args: DetailArgs & { forecast?: boolean }) {
 -    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), limit: args.limit }))
-+    // #483：只传 color——观察页行数由数据决定，不再接受行数裁剪参数
-+    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color) }))
++    // 显式转发到唯一Insights渲染入口，独立forecast命令仍保留。
++    console.log(renderInsights(yield* loadReport(args), { color: colorMode(args.color), forecast: args.forecast }))
    }),
  })
  
@@ -369,7 +370,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
        })
              // #176：注册 breakdown 子命令
        .command(StatsBreakdownCommand)
-@@ -452,117 +544,182 @@ export const StatsCommand = effectCmd({
+@@ -452,117 +544,186 @@ export const StatsCommand = effectCmd({
        .command(StatsInsightsCommand)
        .command(StatsForecastCommand),
    handler: Effect.fn("Cli.stats")(function* (args: DashboardArgs) {
@@ -388,6 +389,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit: toolLimit, by: "tool" }))
        return
      }
++    if (args.models !== undefined) {
++      console.log(renderBreakdown(yield* loadReport(args), { color: colorMode(args.color), limit, by: "model" }))
++      return
++    }
      console.log(renderDashboard(yield* loadReport(args), { color: colorMode(args.color), limit }))
    }),
  })
@@ -698,16 +703,52 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
  
  // #174：waterfall 步进表示增量而非绝对值
  export const renderWaterfall = (input: { title?: string; steps: { label: string; delta: number }[] }) => {
-@@ -408,7 +407,7 @@ export const renderDayLabels = (daily: DailyUsage[], step = 1) => daily.filter((
+@@ -412,8 +411,21 @@
+-export const renderPercentStack = (input: { title?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
+-  const lines = input.title ? [input.title] : []
+-  for (const col of input.columns) {
+-    const sum = Math.max(1, col.parts.reduce((a, p) => a + p.value, 0))
+-    lines.push(col.label + " " + col.parts.map((p) => `${p.label}:${((p.value / sum) * 100).toFixed(0)}%`).join(" "))
+-  }
+-  return lines
+-}
++export const renderPercentStack = (input: { title?: string; color?: string; columns: { label: string; parts: { label: string; value: number }[] }[] }) => {
++  const lines = input.title ? [input.title] : []
++  const labelWidth = Math.max(1, ...input.columns.map((column) => visibleLength(terminalText(column.label))))
++  const width = Math.max(8, Math.min(32, statsContentWidth() - labelWidth - 4))
++  const colors: Record<string, ChartColor> = { input: "blue", output: "green", reasoning: "magenta", cacheread: "yellow", cachewrite: "cyan" }
++  for (const col of input.columns) {
++    const sum = col.parts.reduce((total, part) => total + part.value, 0)
++    let consumed = 0
++    let cells = 0
++    // 按累计占比分配字符，不强制每个非零分量占格，防止极小reasoning扭曲组成。
++    const bar = col.parts.map((part) => {
++      consumed += part.value
++      const end = sum > 0 ? Math.round(consumed / sum * width) : 0
++      const chunk = paint("█".repeat(Math.max(0, end - cells)), colors[part.label.toLowerCase().replaceAll(" ", "")] ?? "white", renderContext(input.color))
++      cells = end
++      return chunk
++    }).join("")
++    lines.push(`${padEndVisible(terminalText(col.label), labelWidth)} [${bar}${" ".repeat(Math.max(0, width - cells))}]`, col.parts.map((part) => `${terminalText(part.label)} ${formatNumber(part.value)} ${(sum > 0 ? part.value / sum * 100 : 0).toFixed(1)}%`).join(" · "))
++  }
++  return lines
++}
+@@ -422,7 +435,13 @@ export const renderDayLabels = (daily: DailyUsage[], step = 1) => daily.filter((
  // #174：callout 标题与正文靠样式分层而非第二数据源
  export const renderCallout = (title: string, body: string) => [`▸ ${title}`, `  ${body}`]
  // #174：列宽按可见字符最大值决定
 -export const renderComparisonTable = (rows: string[][]) => rows.map((r) => r.map((c) => fitVisible(c, 12)).join("  "))
-+export const renderComparisonTable = (rows: string[][]) => rows.map((r) => r.map((c) => fitVisible(terminalText(c), 12)).join("  "))
++export const renderComparisonTable = (rows: string[][]) => {
++  // 终端窄时增加行数，不能让固定十二列吞掉身份、金额或归因分母。
++  const cells = rows.map((row) => row.map(terminalText))
++  const widths = cells[0]?.map((_, index) => Math.max(...cells.map((row) => visibleLength(row[index] ?? "")))) ?? []
++  const fits = widths.reduce((sum, width) => sum + width, 0) + Math.max(0, widths.length - 1) * 3 <= statsContentWidth()
++  return cells.flatMap((row) => wrapVisible(row.map((cell, index) => fits ? padEndVisible(cell, widths[index]) : cell).join(" │ "), statsContentWidth()))
++}
  // #174：无数据输出 empty，保持管道可解析成功路径
  export const renderEmptyState = (msg = "no data") => [`(empty) ${msg}`]
  
-@@ -429,15 +428,5 @@ export const dailyCostPoints = (report: StatsReport): HeatPoint[] =>
+@@ -429,15 +428,31 @@ export const dailyCostPoints = (report: StatsReport): HeatPoint[] =>
      const dt = new Date(d.day)
      return [{ day: d.day, dow: (dt.getDay() + 6) % 7, value: d.cost, label: d.label }]
    })
@@ -723,12 +764,41 @@ diff --git a/packages/opencode/src/cli/cmd/stats-charts.ts b/packages/opencode/s
 -  })
 -  return { rows: models, cols: providers, values }
 -}
-+// #483：modelProviderMatrix 与 renderMatrix 一同退役——编号矩阵要求读者在身份与数值间来回对照，
-+// issuing runtime mix 直接从 toolCalls tuple 构建真实实体名视图，不再保留兼容层
++// 编号矩阵退役，token portfolio由原有group明细承接，工具发起方则独立按calls统计。
++
++// 最终边界按终端列换行，保留可信样式序列和全部码点，不静默截断实体名。
++export const wrapAnsiVisible = (text: string, width = statsContentWidth()) => {
++  const lines = [""]
++  let used = 0
++  for (const token of text.match(/\x1b\[[0-?]*[ -/]*[@-~]|[\s\S]/gu) ?? []) {
++    if (token.startsWith("\x1b[")) { lines[lines.length - 1] += token; continue }
++    if (token === "\n") { lines.push(""); used = 0; continue }
++    const columns = charWidth(token.codePointAt(0) ?? 0)
++    if (used > 0 && used + columns > width) { lines.push(""); used = 0 }
++    lines[lines.length - 1] += token
++    used += columns
++  }
++  return lines
++}
++export const wrapVisible = (text: string, width = statsContentWidth()) => {
++  // 语义文本优先按词换行，过长ID再按显示列拆开，避免把标签和值拆成不可读片段。
++  const lines = [""]
++  for (const word of terminalText(text).split(/\s+/)) {
++    for (const part of wrapAnsiVisible(word, width)) {
++      const last = lines.length - 1
++      if (lines[last] && visibleLength(`${lines[last]} ${part}`) > width) lines.push(part)
++      else lines[last] += `${lines[last] ? " " : ""}${part}`
++    }
++  }
++  return lines
++}
 
 diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
+@@ -2,1 +2,1 @@
+-import { Effect, Schema } from "effect"
++import { DateTime, Effect, Schema } from "effect"
 @@ -14,13 +14,30 @@ import { eq, sql, gte } from "drizzle-orm"
  // #174：SessionTable 只用于枚举，不在此写用量
  import { SessionTable } from "@opencode-ai/core/session/sql"
@@ -811,7 +881,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
    statusSeries: UsageSeries[]
    projectSeries: UsageSeries[]
 -  modelProviderTokens: { providerID: string; modelID: string; tokens: number }[]
-+  // #483：工具调用归因列表取代模型×供应矩阵；issuing runtime mix 由 renderer 从 tuple 直接构建
++  // 工具发起方按调用计量；模型和供应商的token组合仍由UsageGroup明细提供。
 +  toolCalls: ToolCallAttribution[]
    // #177：工具上下文 token 时间序列
    toolSeries: UsageSeries[]
@@ -842,7 +912,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  }
  
  // #174：addUsage 同步 cost 与次数
--const addUsage = (target: UsageTotals, event: UsageEvent) => {
+-const addUsage = (target: UsageTotals, event: UsageTotals | UsageEvent) => {
 +// #483：汇总只依赖数值字段，不要求伪造 session/provider 等身份；这也避免非法品牌值进入运行时
 +const addUsage = (target: UsageTotals, event: UsageTotals) => {
    addTokens(target.tokens, event.tokens)
@@ -982,25 +1052,30 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  // #176：tip ToolPart 状态机上的输入字符
  // #176：pending 用 raw，其余序列化 input
  const toolInputChars = (part: { state: { status: string; raw?: string; input?: unknown } }) => {
-@@ -606,6 +679,14 @@ const toolOutputChars = (part: {
+@@ -609,3 +679,11 @@ const toolOutputChars = (part: {
    return 0
  }
  
 +// #483：pending/running 没有完整结束时间；调用仍计数，但不能用当前时间伪造耗时
-+const toolDuration = (part: { state: any }) => {
++const toolDuration = (part: { state: { status: string; time?: { start: number; end?: number } } }) => {
 +  if (part.state.status !== "completed" && part.state.status !== "error") return 0
 +  const time = part.state.time
 +  if (!time) return 0
-+  return Math.max(0, time.end - time.start)
++  return Math.max(0, (time.end ?? time.start) - time.start)
 +}
 +
- // #176：截至 time 的各工具 IO 字符（用于上下文归因权重）
- // #176：时间截点前工具 IO 权重
- const toolCharsByName = (messages: any[], time: number) => {
-@@ -785,6 +866,40 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
-   const { db } = yield* Database.Service
-   const requestUsageRows = yield* db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all().pipe(Effect.orDie)
-   const assistantUsageRows = yield* db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
+@@ -805,3 +886,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+           type: "tool" as const, tool: part.name, state: {
+             status: part.state.status, input: part.state.input,
++            // 原生时间经Schema解码为DateTime，在此统一成旧投影的毫秒契约。
++            time: {
++              start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
++              end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
++            },
+             raw: typeof part.state.input === "string" ? part.state.input : undefined,
+@@ -816,5 +902,39 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+   })
+   const visibleMessages = [...legacyMessages, ...nativeMessages].filter((message) => includeTime(cutoff, message.info.time.created))
 +  // #483：ToolPart ownership 与 context consumption 在同一次 Message 扫描中建立，避免第二次读取 Session；
 +  // 两个索引都以原始行为准，cutoff 只影响事件投影不影响 ownership 关联
 +  const storedRequestsByID = new Map(requestUsageRows.map((row) => [row.request_id, row]))
@@ -1038,7 +1113,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
    const totalEvents: UsageEvent[] = []
    const breakdownEvents: UsageEvent[] = []
  
-@@ -817,6 +932,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -847,6 +932,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
          source: request?.source ?? "assistant",
          agent: request?.agent ?? session.agent ?? "unknown",
          status: row.status,
@@ -1047,7 +1122,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
          components: componentsFromAssistant(messagesByID.get(row.assistant_message_id)),
          errors: 0,
          aborted: 0,
-@@ -838,14 +955,12 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -868,14 +955,12 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
            source: row.source,
            agent: row.agent || session.agent || "unknown",
            status: row.status,
@@ -1064,7 +1139,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
            time: row.time_created,
            sessionID: session.id,
            providerID: row.provider_id,
-@@ -858,13 +973,17 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -888,13 +973,17 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
            source: row.source,
            agent: row.agent || session.agent || "unknown",
            status: row.status,
@@ -1084,7 +1159,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      } else {
        const requestEvents = requestRows.map((row) => ({
          time: row.time_created,
-@@ -879,6 +998,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -909,6 +998,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
          source: row.source,
          agent: row.agent || session.agent || "unknown",
          status: row.status,
@@ -1092,7 +1167,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
          components: emptyComponents(),
          ...statusCounts(row.status, 1),
          durationMs: rowDuration(row),
-@@ -946,7 +1066,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -976,7 +1066,8 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
            modelID: row.model_id,
            source: request?.source ?? "assistant",
            agent: request?.agent ?? session.agent ?? "unknown",
@@ -1102,7 +1177,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
          },
        }
      })
-@@ -980,7 +1101,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -1010,7 +1101,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
      event.status = event.status ?? "completed"
    }
  
@@ -1111,7 +1186,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  })
  
  // #174：aggregateStats 唯一写路径
-@@ -1028,11 +1149,14 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -1058,11 +1149,14 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
    const sources = new Map<string, UsageGroupAccumulator>()
    const statuses = new Map<string, UsageGroupAccumulator>()
    const projects = new Map<string, UsageGroupAccumulator>()
@@ -1123,11 +1198,11 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
    const statusSeries = new Map<string, Map<number, DailyUsage>>()
    const projectSeries = new Map<string, Map<number, DailyUsage>>()
 -  const modelProviderTokens = new Map<string, number>()
-+  // #483：modelProviderTokens 矩阵已由 toolCalls owner tuple 取代
++  // 编号矩阵退役；token portfolio继续使用各UsageGroup的models/providers明细。
    // #177：按日累加工具 contextTokens
    const toolSeries = new Map<string, Map<number, DailyUsage>>()
    const sessionsWithUsage: SessionUsage[] = []
-@@ -1050,8 +1174,28 @@ const filteredAggregates =
+@@ -1080,8 +1174,28 @@ const filteredAggregates =
            Object.values(aggregate.toolUsage).some((tool) => textMatches(tool.id, input.toolFilter)),
          )
  
@@ -1157,7 +1232,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      const sessionUsage: SessionUsage = {
        id: aggregate.session.id,
        title: aggregate.session.title,
-@@ -1060,7 +1204,7 @@ const filteredAggregates =
+@@ -1090,7 +1204,7 @@ const filteredAggregates =
        created: aggregate.session.time.created,
        updated: aggregate.session.time.updated,
        messages: aggregate.messageCount,
@@ -1166,7 +1241,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
        providers: [],
        models: [],
        ...emptyUsage(),
-@@ -1070,8 +1214,17 @@ const filteredAggregates =
+@@ -1100,8 +1214,17 @@ const filteredAggregates =
  
      totalMessages += aggregate.messageCount
      totalTools += sessionUsage.tools
@@ -1186,17 +1261,16 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      // #176：上下文 token 由 toolEvents 叠加，避免与 count 双计字符
      aggregate.toolEvents
        .filter((event) => toolEventMatches(event, input))
-@@ -1088,6 +1241,9 @@ const filteredAggregates =
+@@ -1125,5 +1241,8 @@ const filteredAggregates =
        })
  
      for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
 +      // #483：Request shell 的 requests 为 1、Assistant usage 为 0；由同一事件同时维护总量和小时投影才能闭合；
 +      // 时间取 RequestUsage.time_created 的本地小时，与行内健康指标同一时间戳
 +      if (event.requests > 0) requestsByHour[new Date(event.time).getHours()] += event.requests
-       addUsage(total, event)
        addUsage(sessionUsage, event)
        addUsage(getDaily(daily, event.time), event)
-@@ -1100,18 +1256,18 @@ const filteredAggregates =
+@@ -1130,18 +1256,18 @@ const filteredAggregates =
        addGroup(agents, event.agent ?? "unknown", event.agent ?? "unknown", event)
        // #176：source 维分组
        addGroup(sources, event.source ?? "unknown", event.source ?? "unknown", event)
@@ -1222,7 +1296,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
        sessionProviders.add(event.providerID)
        sessionModels.add(event.modelID)
      }
-@@ -1130,15 +1286,17 @@ const filteredAggregates =
+@@ -1160,15 +1286,17 @@ const filteredAggregates =
      Date.now(),
    )
    const fallbackLatest = filteredSessions.reduce((latest, session) => Math.max(latest, session.time.updated), 0)
@@ -1242,7 +1316,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
    const mid = Math.floor(sortedSessionTotals.length / 2)
    const medianTokensPerSession =
      sortedSessionTotals.length === 0
-@@ -1164,14 +1322,23 @@ const filteredAggregates =
+@@ -1194,14 +1322,23 @@ const filteredAggregates =
      agents: finalizeGroups(agents),
      sources: finalizeGroups(sources),
      statuses: finalizeGroups(statuses),
@@ -1268,7 +1342,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      tokenPartSeries: tokenPartSeries(completeDaily),
      sessions: sessionsWithUsage.sort((a, b) => b.tokens.total - a.tokens.total || b.cost - a.cost),
      // #176：默认按 contextTokens 再按 count
-@@ -1180,10 +1347,8 @@ const filteredAggregates =
+@@ -1210,10 +1347,8 @@ const filteredAggregates =
      // #176：模型×供应矩阵供热图/对比
      // #177：输出 toolSeries 供渲染
      toolSeries: finalizeSeries(toolSeries, completeDaily),
@@ -1285,11 +1359,14 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/cli/cmd/stats-insights.ts b/packages/opencode/src/cli/cmd/stats-insights.ts
 --- a/packages/opencode/src/cli/cmd/stats-insights.ts
 +++ b/packages/opencode/src/cli/cmd/stats-insights.ts
-@@ -17,11 +17,14 @@ import {
+@@ -17,11 +17,17 @@ import {
    paint,
    padEndVisible,
    padStartVisible,
 +  terminalText,
++  wrapAnsiVisible,
++  wrapVisible,
++  renderPercentStack,
    type ChartColor,
    type ChartSeries,
  } from "./stats-charts"
@@ -1499,45 +1576,112 @@ diff --git a/packages/opencode/src/cli/cmd/stats-insights.ts b/packages/opencode
      projectedMonthEnd,
      confidence,
      points,
-@@ -477,11 +498,24 @@ function providerMomentumRows(report: StatsReport) {
- 
- // insights 面板分三段双栏：卡片+雷达/建议、双动量表、置信仪表+方差直方
- export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number } = {}) {
-+  // #483：与全空报告共有的门槛——Tool-only 部分数据不属于全空；Session 数本身不构成 usage；
-+  // Insights 不应对零值生成趋势、阈值卡片或 Forecast，避免伪建议与伪造精度
-+  const hasUsage =
-+    report.total.tokens.total > 0 ||
-+    report.total.cost > 0 ||
-+    report.total.requests > 0 ||
-+    report.total.assistantCalls > 0
-+  if (!hasUsage) {
-+    return renderPanel("opencode stats insights", [
-+      ...renderCallout("opencode stats insights", "No usage data for the selected range."),
-+    ]).join("\n")
-+  }
-   const cards = buildInsights(report)
-   const forecast = buildForecast(report)
-   const lines = [
+@@ -479,43 +500,57 @@
+-export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number } = {}) {
+-  const cards = buildInsights(report)
+-  const forecast = buildForecast(report)
+-  const lines = [
 -    // 面板头 callout 说明数据口径（所选时间范围），避免跨范围误读
 -    ...renderCallout("opencode stats insights", "Signals, recommendations, and outlier analysis derived from the selected stats range."),
-+    // 面板头 callout 说明数据口径（所选时间范围），避免跨范围误读；
-+    // #483：文案与退役后的页面契约一致——定量证据页不再宣告 recommendations
-+    ...renderCallout("opencode stats insights", "Quantitative usage shape, attribution, outliers, and run-rate derived from the selected stats range."),
-     "",
-     ...renderInsightCards(cards, options.color),
-     "",
-@@ -494,8 +528,9 @@ export function renderInsights(report: StatsReport, options: { color?: ColorMode
-         width: compactBarWidth(),
-       }),
-       renderComparisonTable([
+-    "",
+-    ...renderInsightCards(cards, options.color),
+-    "",
+-    // 双栏布局：短侧留白优于溢出换行
+-    ...renderTwoColumn(
+-      // 目标条形 API 不接受 formatter：数值预格式化为金额字符串
+-      renderRankBars({
+-        title: "Session outlier radar",
+-        rows: sessionOutlierRows(report.sessions).map((row) => ({ label: row.label, value: row.value })),
+-        width: compactBarWidth(),
+-      }),
+-      renderComparisonTable([
 -        ["signal", "action"],
 -        ...noRecommendationRows(cards),
-+        // #483：observation 列是卡片 body 的定量陈述——不含动作指令
-+        ["signal", "observation"],
-+        ...observationRows(cards),
-       ]),
-     ),
-     "",
+-      ]),
+-    ),
+-    "",
+-    ...renderTwoColumn(
+-      renderComparisonTable([
+-        ["model", "tokens", "trend", "dir"],
+-        ...modelMomentumRows(report),
+-      ]),
+-      renderComparisonTable([
+-        ["provider", "cost", "trend", "dir"],
+-        ...providerMomentumRows(report),
+-      ]),
+-    ),
+-    "",
+-    ...renderTwoColumn(
+-      // 置信仪表以百分比展示，宽度与右栏直方图对齐
+-      renderGauge({ title: "Forecast confidence", value: forecast.confidence }),
+-      renderHistogram({ title: "Daily cost variance", values: dailyValues(report.daily, "cost") }),
+-    ),
+-  ]
+-  // 统一经 renderPanel 包装：边框/内边距/主题由 charts 层单点控制；join 与其他视图的 string 返回合同一致
+-  return renderPanel("opencode stats insights", lines).join("\n")
+-}
++export function renderInsights(report: StatsReport, options: { color?: ColorMode; limit?: number; forecast?: boolean } = {}) {
++  // 工具独立存在也是用量；仅有Session数量则不能产生使用结论。
++  const hasUsage = report.total.tokens.total > 0 || report.total.cost > 0 || report.total.requests > 0 || report.total.assistantCalls > 0 || report.toolUsage.some((tool) => tool.count > 0 || tool.contextTokens > 0)
++  if (!hasUsage) return renderPanel("opencode stats insights", ["No usage data for the selected range."]).join("\n")
++  const section = (title: string) => ["", paint(`━━━ ${title}`, "magenta", renderContext(options.color), true), ""]
++  const components = Object.entries({ system: report.total.components.system, instructions: report.total.components.instructions, skills: report.total.components.skills, schemas: report.total.components.toolSchemas, user: report.total.components.userMessages, assistant: report.total.components.assistantText, reasoning: report.total.components.reasoning, "tool calls": report.total.components.toolCalls, "tool results": report.total.components.toolResults, attach: report.total.components.attachments })
++  // 十类输入共享完整分母，不能把未展示的部分删除后重新归一化。
++  const inputTotal = sum(components.map(([, value]) => value))
++  const attribution = [
++    { dimension: "model", groups: report.models, series: report.modelSeries },
++    { dimension: "provider", groups: report.providers, series: report.providerSeries },
++    { dimension: "agent", groups: report.agents, series: report.agentSeries },
++    { dimension: "source", groups: report.sources, series: report.sourceSeries },
++    { dimension: "project", groups: report.projects, series: report.projectSeries },
++    { dimension: "status", groups: report.statuses.filter((group) => group.id !== "unattributed"), series: report.statusSeries },
++  ].map((entry) => {
++    const leader = entry.groups.toSorted((a, b) => b.tokens.total - a.tokens.total)[0]
++    const item = trend(entry.series.find((series) => series.id === leader?.id)?.points.map((point) => point.cost) ?? [])
++    return [entry.dimension, leader?.label ?? "—", percent(leader?.tokens.total ?? 0, report.total.tokens.total), money(leader?.cost ?? 0), `${item.ratio >= 0 ? "+" : ""}${(item.ratio * 100).toFixed(1)}%`, percent((leader?.errors ?? 0) + (leader?.aborted ?? 0), leader?.requests ?? 0)]
++  })
++  const costs = dailyValues(report.daily, "cost")
++  // 零费用可能表示未定价，不参与正费用会话分位数。
++  const sessionCosts = report.sessions.map((session) => session.cost).filter((value) => value > 0)
++  const p95 = percentile(sessionCosts, 95)
++  const top = report.sessions.toSorted((a, b) => b.cost - a.cost)[0]
++  const model = report.models[0]
++  const provider = report.providers[0]
++  const actions = [
++    ...(model && safeDivide(model.tokens.total, report.total.tokens.total) > 0.55 ? [`Model ${terminalText(model.label)} share ${percent(model.tokens.total, report.total.tokens.total)} > 55% · inspect breakdown model`] : []),
++    ...(provider && safeDivide(provider.tokens.total, report.total.tokens.total) > 0.55 ? [`Provider ${terminalText(provider.label)} share ${percent(provider.tokens.total, report.total.tokens.total)} > 55% · inspect breakdown provider`] : []),
++    ...(top && top.cost > p95 * 1.5 ? [`Session ${terminalText(top.title || top.id)} costs ${money(top.cost)} vs p95 ${money(p95)} · inspect sessions --sort cost`] : []),
++    ...(safeDivide(report.total.errors + report.total.aborted, report.total.requests) > 0.02 ? [`Failure rate ${percent(report.total.errors + report.total.aborted, report.total.requests)} > 2% · inspect breakdown status`] : []),
++    // ToolPart不是Assistant token分母，tool-only不能生成低缓存行动项。
++    ...(report.total.tokens.total > 0 && safeDivide(report.total.tokens.cache.read, report.total.tokens.total) < 0.2 ? [`Cache read ${percent(report.total.tokens.cache.read, report.total.tokens.total)} < 20% · compare reusable prompt prefixes`] : []),
++  ].slice(0, 3)
++  const unattributed = report.statuses.find((group) => group.id === "unattributed")
++  const lines = [
++    ...section("Usage shape"),
++    ...renderPercentStack({ columns: [{ label: "tokens", parts: [{ label: "input", value: report.total.tokens.input }, { label: "output", value: report.total.tokens.output + report.total.tokens.reasoning }, { label: "cache read", value: report.total.tokens.cache.read }, { label: "cache write", value: report.total.tokens.cache.write }] }] }),
++    ...(inputTotal > 0 ? wrapVisible(components.map(([label, value]) => `${label} ${percent(value, inputTotal)}`).join(" · ")) : []),
++    `efficiency ${report.total.cost > 0 ? `${money(efficiency(report).costPerMillionTokens)}/M tok · ${formatNumber(efficiency(report).tokensPerDollar)} tok/$` : "cost/M — · tok/$ —"} · ${percent(report.total.tokens.cache.read, report.total.tokens.total)} cache read · ${safeDivide(report.total.assistantCalls, report.total.requests).toFixed(1)} calls/request`,
++    ...section("Attribution"),
++    ...renderComparisonTable([["dimension", "leader", "token share", "cost", "recent cost change", "owner fail"], ...attribution]),
++    `Status leader excludes unattributed usage; ${formatNumber(unattributed?.tokens.total ?? 0)} tokens without request outcome are reported separately.`,
++    ...section("Variability & outliers"),
++    ...(report.total.cost > 0 ? [
++      `Daily cost avg ${money(average(costs))} · p95 ${money(percentile(costs, 95))} · peak ${money(Math.max(0, ...costs))} · coefficient of variation ${(safeDivide(stddev(costs), average(costs)) * 100).toFixed(0)}% · active ${costs.filter((value) => value > 0).length}/${costs.length} days`,
++      sessionCosts.length > 0 ? `Session cost p50 ${money(percentile(sessionCosts, 50))} · p95 ${money(p95)} · max ${money(top?.cost ?? 0)} · max/p95 ${safeDivide(top?.cost ?? 0, p95).toFixed(1)}x` : "Session cost unavailable · no positive Session cost recorded in this range.",
++    ] : ["Daily cost unavailable · no positive cost recorded in this range.", `Session token distribution · p50 ${formatNumber(percentile(report.sessions.map((session) => session.tokens.total), 50))} · p95 ${formatNumber(percentile(report.sessions.map((session) => session.tokens.total), 95))}`]),
++    `Session tokens mean ${formatNumber(report.tokensPerSession)} · median ${formatNumber(report.medianTokensPerSession)} · mean/median ${safeDivide(report.tokensPerSession, report.medianTokensPerSession).toFixed(1)}x · top 2 share ${percent(sum(report.sessions.toSorted((a, b) => b.tokens.total - a.tokens.total).slice(0, 2).map((session) => session.tokens.total)), report.total.tokens.total)}`,
++    ...(top ? [`Top session: ${terminalText(top.title || top.id)}`] : []),
++    ...section("Actions"),
++    ...(actions.length ? actions.map((action) => `! ${action}`) : ["No material threshold crossings in this range."]),
++  ]
++  // 仅显式请求预测时调用同一个Forecast入口，不在默认路径生成隐藏预测。
++  return [...renderPanel("opencode stats insights", lines.flatMap((line) => line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line))), ...(options.forecast ? [renderForecast(report, options)] : [])].join("\n")
++}
+@@ -524,2 +565,4 @@
+ export function renderForecast(report: StatsReport, options: { color?: ColorMode } = {}) {
++  // 没有正费用观测就不生成预测线或伪造稳定置信度。
++  if (report.total.cost <= 0) return renderPanel("Forecast", ["Forecast unavailable: no positive cost recorded in the selected range."]).join("\n")
+   const forecast = buildForecast(report)
 @@ -548,9 +583,10 @@ export function renderForecast(report: StatsReport, options: { color?: ColorMode
      "",
      ...renderComparisonTable([
@@ -1551,11 +1695,30 @@ diff --git a/packages/opencode/src/cli/cmd/stats-insights.ts b/packages/opencode
        ["projected month-end", money(forecast.projectedMonthEnd)],
        ["confidence", `${(forecast.confidence * 100).toFixed(0)}%`],
      ]),
+@@ -559,10 +600,13 @@
+     ...renderComparisonTable([
+       ["provider", "first third", "last third"],
+-      ...report.providers.slice(0, 8).map((provider) => {
+-        const series = report.providerSeries.find((item) => item.id === provider.id)
+-        const item = trend(series?.points.map((point) => point.cost) ?? [])
+-        return [provider.label, money(item.first), money(item.last)]
++      ...report.providerSeries.toSorted((a, b) => b.cost - a.cost).slice(0, 4).map((series) => {
++        const item = trend(series.points.map((point) => point.cost))
++        return [series.label, money(item.first), money(item.last)]
+       }),
+     ]),
+   ]
+-  return renderPanel("opencode stats forecast", lines).join("\n")
++  // driver按费用排序，置信带与方法保留在同一个公开预测页面。
++  const endpoint = forecast.points.at(-1)
++  lines.splice(lines.findIndex((line) => line.includes("provider")), 0, "Forecast drivers")
++  lines.push(`endpoint confidence band ${endpoint ? `${money(endpoint.lower)}-${money(endpoint.upper)}` : "—"}`, "Projection uses only the selected window and observed active-day frequency; month-end uses the latest date's local month.")
++  return renderPanel("opencode stats forecast", lines.flatMap((line) => line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line))).join("\n")
 
 diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -9,21 +9,21 @@ import {
+@@ -9,21 +9,24 @@ import {
    dailyTokenPoints,
    fitVisible,
    layersFromTokenParts,
@@ -1574,19 +1737,36 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +  terminalText,
    visibleLength,
    truncateVisible,
++  renderComparisonTable,
++  wrapAnsiVisible,
++  wrapVisible,
  } from "./stats-charts"
 +// #483：renderMatrix 编号矩阵退役——身份与数值需来回对照，改真实实体名视图
  
  // #174：ColorMode 仅 auto/always/never
  export type ColorMode = "auto" | "always" | "never"
-@@ -103,13 +103,27 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+@@ -63,1 +65,2 @@
+   `sessions=${report.totalSessions} cost=${formatNumber(report.total.cost)} tokens=${formatNumber(report.total.tokens.total)} days=${report.days}`,
++  report.requestedDays === undefined ? "All time" : report.requestedDays === 0 ? "Today" : `Last ${report.requestedDays} days`,
+@@ -80,1 +83,1 @@
+-    `${group.label || group.id} cost=${formatNumber(group.cost)} tokens=${formatNumber(group.tokens.total)} calls=${group.assistantCalls} requests=${group.requests} sessions=${group.sessions} $/call=${formatNumber(group.assistantCalls ? group.cost / group.assistantCalls : 0)}`,
++    `${terminalText(group.label || group.id)} cost=${formatNumber(group.cost)} tokens=${formatNumber(group.tokens.total)} calls=${group.assistantCalls} requests=${group.requests} sessions=${group.sessions} $/call=${formatNumber(group.assistantCalls ? group.cost / group.assistantCalls : 0)}`,
+@@ -91,1 +94,1 @@
+-  const metric = options.metric ?? "tokens"
++  const metric = options.metric ?? (by === "provider" ? "cost" : "tokens")
+@@ -119,17 +119,31 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
                    }))
                  : report.models
  
 +  // #483：ranking 行同时携带绝对值与全局占比，读者不再需要心算 share
 +  // #483：占比分母用完整分组集合而非可见行——limit 只裁剪展示，不改变份额语义
 +  const grandTotal = groups.reduce((sum, g) => sum + (metric === "cost" ? g.cost : g.tokens.total), 0)
-   const rows = limitRows(groups, options.limit).map((group) => {
+   // #177：显式 cost 先排序再限行，避免 tokens-first 漏掉高成本分组
+   const rows = limitRows(
+-    options.sort === "cost" ? [...groups].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...groups].sort((a, b) => b.assistantCalls - a.assistantCalls) : groups,
++    (options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : "tokens")) === "cost" ? [...groups].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...groups].sort((a, b) => by === "tool" ? b.requests - a.requests : b.assistantCalls - a.assistantCalls) : groups,
+     options.limit,
+   ).map((group) => {
      const value = metric === "cost" ? group.cost : group.tokens.total
 -    return { label: group.label || group.id, value }
 +    // share 紧跟绝对值：空数据集合不输出 0%，避免与真实零用量混淆
@@ -1604,12 +1784,12 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    ...renderRankBars({
 +      title: `${by} ranking`,
 +      rows,
-+      labelWidth: Math.max(24, Math.min(120, ...rows.map((r) => visibleLength(r.label)), visibleLength(rows[0]?.label ?? ""))),
++      labelWidth: Math.max(24, ...rows.map((row) => visibleLength(row.label))),
 +    }),
    ]
      // #176：tool 维附加 context/count/IO 明细
    if (by === "tool") {
-@@ -129,12 +143,51 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+@@ -148,10 +162,50 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
        )
      }
      lines.push("")
@@ -1620,6 +1800,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +      lines.push("Context estimate unavailable for these records; call share remains separate.")
 +    }
 +    lines.push("Tool footprint")
++    lines.push("Calls, IO characters, errors and duration come from ToolPart; estimated context is not tool cost or billed tokens.")
 +    // #483：errors/duration 来自过滤后的 toolCalls，分母始终是同一行的真实调用数
 +    const callStats = new Map<string, { errors: number; durationMs: number }>()
 +    let totalCalls = 0
@@ -1630,19 +1811,20 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +      callStats.set(call.toolID, item)
 +      totalCalls += call.calls
 +    }
-     for (const tool of limitRows(report.toolUsage ?? [], options.limit)) {
+-    for (const tool of limitRows(report.toolUsage ?? [], options.limit)) {
++    for (const tool of limitRows(options.sort === "calls" ? report.toolUsage.toSorted((a, b) => b.count - a.count) : report.toolUsage, options.limit)) {
 +      const calls = callStats.get(tool.id) ?? { errors: 0, durationMs: 0 }
 +      // 分母始终是同一行的真实调用数：per-call 列回答“单次调用多大/多慢”，
 +      // 总量列回答“累计多少”；call share 分母同样来自过滤后 tuple 总和
-+      const share = totalCalls > 0 ? ` (${Math.round((tool.count / totalCalls) * 100)}%)` : ""
++      const share = totalCalls > 0 ? ` call share=${percentage(tool.count, totalCalls)}` : ""
 +      const avgMs = tool.count > 0 ? Math.round(calls.durationMs / tool.count) : 0
 +      const inPerCall = Math.round(tool.inputChars / Math.max(1, tool.count))
 +      const outPerCall = Math.round(tool.outputChars / Math.max(1, tool.count))
-+      const ctx = hasContextTokens ? ` ctx=${tool.contextTokens}` : ""
++      const ctx = hasContextTokens ? ` ctx=${tool.contextTokens} context share=${percentage(tool.contextTokens, report.toolUsage.reduce((sum, item) => sum + item.contextTokens, 0))}` : ""
 +      // #483：tool 名同样经终端协议清洗——内部受限词表不是省略清洗的理由
        lines.push(
 -        `  ${tool.id.padEnd(24)} ctx=${tool.contextTokens} count=${tool.count} in=${tool.inputChars} out=${tool.outputChars}`,
-+        `  ${terminalText(tool.id).padEnd(24)} calls=${tool.count}${share} in/c=${inPerCall} out/c=${outPerCall} errors=${calls.errors} avg/call=${avgMs}ms${ctx}`,
++        `  ${terminalText(tool.id).padEnd(24)} calls=${tool.count}${share} in=${tool.inputChars}chars out=${tool.outputChars}chars in/c=${inPerCall} out/c=${outPerCall} errors=${calls.errors} avg/call=${avgMs}ms${ctx}`,
        )
      }
 +    // #483：footprint 与 runtime mix 都从过滤后 toolCalls 构建，不能混入 Session 级未过滤 count；
@@ -1657,10 +1839,16 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +      lines.push("Issuing runtime mix (calls by owning assistant)")
 +      for (const [key, calls] of Array.from(mix.entries()).sort((a, b) => b[1] - a[1]).slice(0, options.limit ?? 8)) {
 +        // #483：mix 行是 provider/model/agent/project 拼接的持久化实体标签，输出前清洗
-+        lines.push(`  ${truncateVisible(terminalText(key), Math.max(32, statsContentWidth() - 12))} calls=${calls}`)
++        lines.push(`  ${terminalText(key)} calls=${calls}`)
 +      }
 +    }
    }
+@@ -162,1 +215,2 @@
+-    lines.push("", ...renderUsageSeries(series, options, `${by} usage over time`))
++    // Outcome趋势按每日请求分母计算，未归因Assistant token不进入结果比率。
++    lines.push("", ...(by === "status" ? renderRoundedLineChart({ title: "Request outcome trend", series: report.statusSeries.filter((group) => group.id !== "unattributed").map((group) => ({ id: group.id, label: terminalText(group.label), style: { color: group.id === "completed" ? "green" as const : group.id === "error" ? "red" as const : group.id === "aborted" ? "yellow" as const : "cyan" as const }, points: group.points.map((point) => ({ x: point.label, y: ratio(point.requests, report.daily.find((day) => day.day === point.day)?.requests ?? 0) * 100 })) })) }) : renderUsageSeries(series, options, `${by} usage over time`)))
+@@ -171,2 +224,3 @@
++  if (by !== "tool") lines.push(...renderDimensionAnalysis(report, groups, by, options))
      // #181：只返回本表行，由 dashboard 负责段间距
    return lines.join("\n")
 @@ -217,8 +270,8 @@ const dashboardTopTable = (
@@ -1674,7 +1862,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      // #183：per-call = tokens/assistantCalls，便于单次调用效率扫读
      const perCall = row.calls > 0 ? Math.round(row.tokens / row.calls) : 0
      const cols = [
-@@ -263,7 +316,15 @@ const renderDayOfWeekShare = (report: StatsReport) => {
+@@ -297,7 +350,16 @@ const renderDayOfWeekShare = (report: StatsReport) => {
  
  // #182：小时活跃粗条
  const renderHourOfDayStrip = (report: StatsReport) => {
@@ -1685,12 +1873,13 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +  if (fromReport && fromReport.length === 24 && fromReport.some((h) => h > 0)) {
 +    const max = Math.max(1, ...fromReport)
 +    const glyphs = fromReport.map((h) => "·░▒▓█"[Math.min(4, Math.round((h / max) * 4))]).join("")
-+    return ["Hour of day (requests)", `  ${glyphs}`, "  00  04  08  12  16  20"]
++    const active = fromReport.map((value, hour) => ({ value, hour })).filter((item) => item.value > 0).toSorted((a, b) => a.value - b.value)
++    return ["Hour of day (requests)", `  ${glyphs}`, "  00  04  08  12  16  20", `peak ${String(active.at(-1)!.hour).padStart(2, "0")}:00 / ${active.at(-1)!.value} req`, `low ${String(active[0].hour).padStart(2, "0")}:00 / ${active[0].value} req`]
 +  }
 +  // #182：24 小时活跃（无 request 数据时的 legacy 回退，仍基于会话活跃）
    const hours = Array.from({ length: 24 }, () => 0)
    for (const s of report.sessions) {
-     hours[new Date(s.updated).getUTCHours()] += 1
+     hours[new Date(s.updated).getHours()] += Math.max(1, s.requests)
 @@ -355,7 +416,7 @@ const renderInsightsCallout = (report: StatsReport) => {
    const top2 = sorted.slice(0, 2).reduce((acc, s) => acc + s.tokens.total, 0)
    const share = report.total.tokens.total > 0 ? Math.round((top2 / report.total.tokens.total) * 100) : 0
@@ -1700,17 +1889,14 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      failure.failed > 0
        ? `Failed/aborted requests: ${failure.failed} (${failure.rate}%). Inspect stats timeline for bursts.`
        : "No failed/aborted requests in window.",
-@@ -409,7 +470,8 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
-     const sorted = [...report.sessions].sort((a, b) => b.tokens.total - a.tokens.total).slice(0, options.limit ?? 5)
-     lines.push("  Top sessions by tokens")
+@@ -463,4 +525,5 @@ export const renderDashboard = (report: StatsReport, options: StatsRenderOptions
      for (const s of sorted) {
 -      lines.push(`  ${(s.title || s.id).slice(0, 24).padEnd(24)} ${s.tokens.total}`)
-+      // #483：session title 是用户可控自由文本，输出前清洗协议序列
-+      lines.push(`  ${truncateVisible(terminalText(s.title || s.id), 24).padEnd(24)} ${s.tokens.total}`)
++      lines.push(...wrapAnsiVisible(`  ${terminalText(s.title || s.id)} ${s.tokens.total}`))
++      lines.push(...wrapAnsiVisible(`  models ${s.models.map(terminalText).join(", ")} · providers ${s.providers.map(terminalText).join(", ")}`))
      }
    }
-   lines.push("")
-@@ -426,7 +488,7 @@ export const renderOverview = (report: StatsReport, options: StatsRenderOptions
+@@ -478,7 +541,7 @@ export const renderOverview = (report: StatsReport, options: StatsRenderOptions
      ...header(report, "stats overview", options.color),
      `messages=${report.totalMessages} tools=${report.totalTools} medianTokens/session=${formatNumber(report.medianTokensPerSession)}`,
      "tools:",
@@ -1719,23 +1905,131 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
    ].join("\n")
  
  // #174：models 页按 metric 选 cost 或 tokens
-@@ -470,7 +532,7 @@ export const renderSessions = (report: StatsReport, options: StatsRenderOptions
-   })
-   return [
-     ...header(report, "stats sessions", options.color),
+@@ -485,13 +540,2 @@
+-export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
+-  [
+-    ...header(report, "stats models", options.color),
+-    ...renderRankBars({
+-      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
+-      rows: limitRows(
+-        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
+-        options.limit,
+-      ).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
+-    }),
+-    ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
+-    ...renderGroupDetails(report.models, options),
+-  ].join("\n")
++export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
++  [...header(report, "stats models", options.color), renderBreakdown(report, { ...options, by: "model" })].join("\n")
+@@ -500,13 +544,2 @@
+-export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
+-  [
+-    ...header(report, "stats providers", options.color),
+-    ...renderRankBars({
+-      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
+-      rows: limitRows(
+-        options.sort === "cost" ? [...report.providers].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers,
+-        options.limit,
+-      ).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
+-    }),
+-    ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
+-    ...renderGroupDetails(report.providers, options),
+-  ].join("\n")
++export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
++  [...header(report, "stats providers", options.color), renderBreakdown(report, { ...options, by: "provider" })].join("\n")
+@@ -518,8 +560,31 @@
+-export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) =>
+-  [
+-    ...header(report, "stats timeline", options.color),
+-    ...renderRoundedLineChart({ series: [dailySeries(report.daily, (d) => ((options.metric ?? "tokens") === "cost" ? d.cost : d.tokens.total))] }),
+-    ...renderStackedAreaChart({ daily: report.daily, layers: layersFromTokenParts() }),
+-    // 每日结局与时长来自同一报告，保留错误/中止集中日期的诊断能力。
+-    ...report.daily.map((day) => `${day.label} completed=${Math.max(0, day.requests - day.errors - day.aborted)} error=${day.errors} aborted=${day.aborted} avg=${Math.round(day.durationMs / Math.max(1, day.requests))}ms`),
+-  ].join("\n")
++export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) => {
++  const metric = options.metric ?? "tokens"
++  const values = report.daily.map((day) => metric === "cost" ? day.cost : day.tokens.total)
++  const peak = Math.max(0, ...values)
++  const peakDay = report.daily[values.indexOf(peak)]
++  const total = metric === "cost" ? report.total.cost : report.total.tokens.total
++  const format = metric === "cost" ? priced : formatNumber
++  const lines = [...header(report, "stats timeline", options.color)]
++  if (metric === "cost" && report.total.cost <= 0) lines.push("No positive cost recorded in this range.")
++  else {
++    lines.push(`━━━ ${metric === "cost" ? "Daily cost" : "Daily token volume"}`, "", ...renderRoundedLineChart({ series: [dailySeries(report.daily, (day) => metric === "cost" ? day.cost : day.tokens.total)], width: Math.max(12, statsContentWidth() - 8), height: 8 }))
++    lines.push(metric === "cost" ? `total ${format(total)} · avg ${format(ratio(total, report.days))}/day · peak ${format(peak)}${peakDay ? ` on ${new Date(peakDay.day).toLocaleDateString()}` : ""} · ${values.filter((value) => value > 0).length}/${report.days} active days` : `total ${format(total)} · peak ${format(peak)}/day · avg ${format(ratio(total, report.days))}/day`)
++  }
++  if (metric === "tokens") {
++    // 各组件独立归一化只表示形状，旁边的绝对量、占比和峰值承担量级比较。
++    lines.push("Token components · each trend independently normalized")
++    for (const layer of layersFromTokenParts()) {
++      const points = report.daily.map(layer.value)
++      const amount = layer.value({ ...report.total, day: report.dateRange.latest, label: "total" })
++      lines.push(`${layer.label === "Output" ? "Output + Reasoning" : layer.label} ${formatNumber(amount)} ${percentage(amount, report.total.tokens.total)} · peak ${formatNumber(Math.max(0, ...points))}/day`, sparkline(points, Math.max(8, Math.min(32, statsContentWidth() - 2))))
++    }
++  }
++  lines.push("━━━ Health and efficiency", ...renderCostHealthSection(report), ...report.daily.map((day) => `${day.label} completed=${Math.max(0, day.requests - day.errors - day.aborted)} error=${day.errors} aborted=${day.aborted} avg=${Math.round(ratio(day.durationMs, day.requests))}ms`))
++  lines.push(metric === "cost" ? "Top cost days" : "Top active days", ...renderComparisonTable([["date", metric, "requests", "failed"], ...report.daily.filter((day) => (metric === "cost" ? day.cost : day.tokens.total) > 0).toSorted((a, b) => metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total).slice(0, 5).map((day) => [day.label, format(metric === "cost" ? day.cost : day.tokens.total), String(day.requests), percentage(day.errors + day.aborted, day.requests)])]))
++  lines.push(metric === "cost" ? "Cost drivers" : "Entity trends")
++  for (const [title, series] of [["Models", report.modelSeries], ["Providers", report.providerSeries]] as const) {
++    lines.push(title, ...series.toSorted((a, b) => metric === "cost" ? b.cost - a.cost : b.tokens.total - a.tokens.total).slice(0, 3).map((item) => `${terminalText(item.label)} ${sparkline(item.points.map((point) => metric === "cost" ? point.cost : point.tokens.total), 14)} ${format(metric === "cost" ? item.cost : item.tokens.total)}`))
++  }
++  if (options.heatmap) lines.push(...renderHeatmap({ title: metric === "cost" ? "Cost heatmap · calendar view" : "Token heatmap · calendar view", points: metric === "cost" ? dailyCostPoints(report) : dailyTokenPoints(report), color: options.color }))
++  return lines.flatMap((line) => line.includes("\x1b[") ? wrapAnsiVisible(line) : wrapVisible(line)).join("\n")
++}
+@@ -529,13 +600,31 @@
+-export const renderSessions = (report: StatsReport, options: StatsRenderOptions = {}) => {
+-  const sort = options.sort ?? "tokens"
+-  const rows = [...report.sessions].sort((a, b) => {
+-    if (sort === "tokens") return b.tokens.total - a.tokens.total
+-    if (sort === "calls") return b.assistantCalls - a.assistantCalls
+-    if (sort === "updated") return b.updated - a.updated
+-    return b.cost - a.cost
+-  })
+-  return [
+-    ...header(report, "stats sessions", options.color),
 -    ...limitRows(rows, options.limit).map((s) => `${fitVisible(s.title || s.id, 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)} avg=${Math.round(s.durationMs / Math.max(1, s.requests))}ms`),
-+    ...limitRows(rows, options.limit).map((s) => `${fitVisible(terminalText(s.title || s.id), 28)} cost=${formatNumber(s.cost)} tokens=${formatNumber(s.tokens.total)} avg=${Math.round(s.durationMs / Math.max(1, s.requests))}ms`),
-   ].join("\n")
- }
- 
-@@ -500,13 +562,21 @@ export const renderCharts = (report: StatsReport, options: StatsRenderOptions =
+-  ].join("\n")
+-}
++export const renderSessions = (report: StatsReport, options: StatsRenderOptions = {}) => {
++  const sort = options.sort ?? "tokens"
++  const rows = report.sessions.toSorted((a, b) => sort === "tokens" ? b.tokens.total - a.tokens.total : sort === "calls" ? b.assistantCalls - a.assistantCalls : sort === "updated" ? b.updated - a.updated : b.cost - a.cost)
++  const percentile = (values: number[], q: number) => values.toSorted((a, b) => a - b)[Math.floor(Math.max(0, values.length - 1) * q)] ?? 0
++  const positive = report.sessions.filter((session) => session.cost > 0)
++  const lines = [...header(report, "stats sessions", options.color), "━━━ Session population", ""]
++  // 总体分位数和分布使用全部样本，limit仅约束下面的明细。
++  for (const q of [0.5, 0.9, 0.95, 0.99]) lines.push(`p${Math.round(q * 100)} ${formatNumber(percentile(report.sessions.map((session) => session.tokens.total), q))} tokens · ${priced(percentile(positive.map((session) => session.cost), q))}`)
++  const bands = (title: string, values: number[], limits: number[], labels: string[]) => {
++    const counts = labels.map((_, index) => values.filter((value) => value >= limits[index] && value < (limits[index + 1] ?? Infinity)).length)
++    const max = Math.max(1, ...counts)
++    const width = Math.max(8, statsContentWidth() - 24)
++    return [title, ...counts.map((count, index) => `${labels[index]} ${"█".repeat(Math.round(count / max * width))}${"░".repeat(width - Math.round(count / max * width))} ${count} ${percentage(count, values.length)}`)]
++  }
++  lines.push(...bands("Session size distribution · tokens", report.sessions.map((session) => session.tokens.total), [0, 100_000, 1_000_000, 5_000_000, 50_000_000], ["<100K", "100K-1M", "1M-5M", "5M-50M", ">50M"]))
++  // 零费用既可能是免费也可能是未定价，不能冒充正费用分布的低值样本。
++  lines.push(...(positive.length ? bands(`Session cost distribution · positive recorded cost (${positive.length} sessions)`, positive.map((session) => session.cost), [0, 0.1, 1, 5, 10], ["<$0.10", "$0.10-$1", "$1-$5", "$5-$10", ">$10"]) : ["Cost distribution unavailable: no positive cost recorded in this range."]))
++  if (positive.length < report.sessions.length) lines.push(`No positive recorded cost · ${report.sessions.length - positive.length} sessions`)
++  lines.push(`Session leaderboard · sorted by ${sort} · bar = token share`)
++  const selected = limitRows(rows, options.limit ?? (statsContentWidth() < 60 ? 3 : 5))
++  for (const session of selected) {
++    const share = ratio(session.tokens.total, report.total.tokens.total)
++    const width = Math.max(8, statsContentWidth() - 40)
++    lines.push(terminalText(session.title || session.id), `token share ${"█".repeat(Math.round(share * width))}${"░".repeat(Math.max(0, width - Math.round(share * width)))} ${percentage(session.tokens.total, report.total.tokens.total)} ${formatNumber(session.tokens.total)}`)
++    lines.push(`project ${terminalText(report.projects.find((project) => project.id === session.projectID)?.label ?? session.projectID)} · ${priced(session.cost)} · ${session.requests} req / ${session.assistantCalls} calls · ${session.messages} msg / ${session.tools} tools`)
++    lines.push(`cache ${percentage(session.tokens.cache.read, session.tokens.total)} · fail ${session.errors + session.aborted} · ${Math.round(ratio(session.durationMs, session.requests))}ms avg/request`)
++    lines.push(`models ${session.models.map(terminalText).join(", ") || "unknown"} · providers ${session.providers.map(terminalText).join(", ") || "unknown"}`, "")
++  }
++  lines.push(`Visible ${selected.length} of ${rows.length} usage sessions · use -n to change rows`)
++  return lines.flatMap((line) => wrapVisible(line)).join("\n")
++}
+@@ -570,13 +590,22 @@ export const renderCharts = (report: StatsReport, options: StatsRenderOptions =
  // #174：页面组合双热力与矩阵，禁止转调 timeline
  // #174：renderHeatmapPage 输出密度格/矩阵语义，供 heatmap 命令使用
  export const renderHeatmapPage = (report: StatsReport, options: StatsRenderOptions = {}) => {
 -// #174：matrix 构造 provider×model 交叉表
 -  const matrix = modelProviderMatrix(report)
-+  // #483：编号矩阵退役后，provider×model 交叉信息改由 toolCalls tuple 的真实实体名排行承载；
-+  // 只有存在工具调用时才输出该段，空数据不占版面
++  // token portfolio与工具发起方独立计量，不可用工具次数取代没有工具的token用量。
++  const portfolio = report.providers.flatMap((provider) => provider.models.map((model) => [`${provider.label || provider.id}/${model.id}`, formatNumber(model.tokens)]))
 +  const mix = new Map<string, number>()
 +  for (const call of report.toolCalls ?? []) {
 +    const key = `${call.providerID}/${call.modelID}`
@@ -1750,9 +2044,91 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    ...(topMix.length > 0
 +      ? renderRankBars({ title: "provider/model by tool calls", rows: topMix.map(([label, calls]) => ({ label, value: calls })) })
 +      : []),
++    ...(portfolio.length ? ["Model portfolio by provider (tokens)", ...renderComparisonTable([["provider/model", "tokens"], ...portfolio])] : []),
    ].join("\n")
  }
  
+@@ -622,4 +795,80 @@
+       points: s.points.map((p) => ({ x: p.label, y: p.tokens.total })),
+     })),
+   }).join("\n")
+ }
++
++const ratio = (value: number, total: number) => total > 0 ? value / total : 0
++const percentage = (value: number, total: number) => `${(ratio(value, total) * 100).toFixed(1)}%`
++const priced = (value: number) => value > 0 ? money(value) : "—"
++const mixText = (items: { id: string; value: number }[], limit = 3) => {
++  // 长尾明确归入other；分母先取完整集合，不随可见项数变化。
++  const sorted = items.filter((item) => item.value > 0).toSorted((a, b) => b.value - a.value)
++  const total = sorted.reduce((sum, item) => sum + item.value, 0)
++  const other = sorted.slice(limit).reduce((sum, item) => sum + item.value, 0)
++  return total > 0 ? [...sorted.slice(0, limit), ...(other > 0 ? [{ id: "other", value: other }] : [])].map((item) => `${terminalText(item.id)} ${percentage(item.value, total)}`).join(" · ") : "—"
++}
++const highOutlier = (value: number, population: number[], format: (value: number) => string) => {
++  // 异常基线取完整过滤后总体，不能因limit缩小而改变同一个Provider的标记。
++  const mean = population.reduce((sum, item) => sum + item, 0) / Math.max(1, population.length)
++  const sigma = Math.sqrt(population.reduce((sum, item) => sum + (item - mean) ** 2, 0) / Math.max(1, population.length))
++  const z = sigma > 0 && population.length >= 3 ? (value - mean) / sigma : 0
++  return `${format(value)}${z >= 3 ? "!" : z >= 2 ? "^" : ""}`
++}
++
++const renderDimensionAnalysis = (report: StatsReport, all: StatsReport["models"], by: Exclude<BreakdownDimension, "tool">, options: StatsRenderOptions) => {
++  const groups = limitRows(all.toSorted((a, b) => (options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : "tokens")) === "cost" ? b.cost - a.cost : options.sort === "calls" ? b.assistantCalls - a.assistantCalls : b.tokens.total - a.tokens.total), options.limit ?? (statsContentWidth() < 100 ? 3 : 5))
++  const table = (title: string, columns: string[], rows: string[][]) => ["", `━━━ ${title}`, "", ...renderComparisonTable([columns, ...rows])]
++  const tokenMix = (items: { id: string; tokens: number }[]) => mixText(items.map((item) => ({ id: item.id, value: item.tokens })))
++  const series = { model: report.modelSeries, provider: report.providerSeries, agent: report.agentSeries, source: report.sourceSeries, project: report.projectSeries, status: report.statusSeries }[by]
++  const key = { model: "modelID", provider: "providerID", agent: "agent", source: "source", project: "projectID", status: "status" }[by] as "modelID" | "providerID" | "agent" | "source" | "projectID" | "status"
++  const callMix = (id: string) => {
++    const totals = new Map<string, number>()
++    for (const call of report.toolCalls.filter((call) => call[key] === id)) totals.set(call.toolID, (totals.get(call.toolID) ?? 0) + call.calls)
++    return mixText(Array.from(totals, ([id, value]) => ({ id, value })))
++  }
++  // RequestUsage只拥有请求健康，Assistant行拥有token/cost；secondary usage的零请求不是缺失数据。
++  const health = (group: StatsReport["models"][number]) => [group.requests > 0 ? percentage(group.errors + group.aborted, group.requests) : "—", group.requests > 0 ? `${Math.round(group.durationMs / group.requests)}ms` : "—"]
++  const components = (group: StatsReport["models"][number]) => Object.entries({ system: group.components.system, instructions: group.components.instructions, skills: group.components.skills, schemas: group.components.toolSchemas, user: group.components.userMessages, assistant: group.components.assistantText, reasoning: group.components.reasoning, "tool calls": group.components.toolCalls, "tool results": group.components.toolResults, attach: group.components.attachments })
++  const lines: string[] = []
++  if (by === "model") {
++    lines.push(...table("Model portfolio", ["model", "tokens", "share", "cost", "owned req", "calls", "tok/call", "sessions", "owner fail", "owner avg"], groups.map((group) => [group.label, formatNumber(group.tokens.total), percentage(group.tokens.total, report.total.tokens.total), priced(group.cost), String(group.requests), String(group.assistantCalls), formatNumber(ratio(group.tokens.total, group.assistantCalls)), String(group.sessions), ...health(group)])))
++    lines.push("owned req / owner fail / owner avg follow RequestUsage owner; tokens, cost and calls follow Assistant usage.")
++    lines.push("━━━ Token composition", ...renderPercentStack({ columns: groups.map((group) => ({ label: terminalText(group.label), parts: [{ label: "input", value: group.tokens.input }, { label: "output", value: group.tokens.output }, { label: "reasoning", value: group.tokens.reasoning }, { label: "cache read", value: group.tokens.cache.read }, { label: "cache write", value: group.tokens.cache.write }] })) }))
++    lines.push(...table("Routing & tools", ["model", "provider mix by tokens", "issued tool calls"], groups.map((group) => [group.label, tokenMix(group.providers), callMix(group.id)])))
++  }
++  if (by === "provider") {
++    const perCall = report.providers.filter((group) => group.cost > 0 && group.assistantCalls > 0).map((group) => group.cost / group.assistantCalls)
++    const failures = report.providers.filter((group) => group.requests > 0).map((group) => (group.errors + group.aborted) / group.requests)
++    const durations = report.providers.filter((group) => group.requests > 0).map((group) => group.durationMs / group.requests)
++    lines.push(...table("Provider economics", ["provider", "tokens", "share", "cost", "cost share", "owned req", "calls", "$/call", "cache", "owner fail", "owner avg"], groups.map((group) => [group.label, formatNumber(group.tokens.total), percentage(group.tokens.total, report.total.tokens.total), priced(group.cost), group.cost > 0 ? percentage(group.cost, report.total.cost) : "—", String(group.requests), String(group.assistantCalls), group.cost > 0 && group.assistantCalls > 0 ? highOutlier(group.cost / group.assistantCalls, perCall, money) : "—", percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total), group.requests > 0 ? highOutlier((group.errors + group.aborted) / group.requests, failures, (value) => percentage(value, 1)) : "—", group.requests > 0 ? highOutlier(group.durationMs / group.requests, durations, (value) => `${Math.round(value)}ms`) : "—"])))
++    lines.push("Risk marks compare the full provider population: ! >=3σ, ^ >=2σ. Cache >=95% is highlighted as healthy.")
++    lines.push(...table("Model portfolio by provider", ["provider", "models by tokens"], groups.map((group) => [group.label, tokenMix(group.models)])))
++    lines.push(...table("Capacity & reliability", ["provider", "tok/$", "tok/call", "output", "errors", "aborted", "completed", "recent cost/day"], groups.map((group) => [group.label, group.cost > 0 ? formatNumber(group.tokens.total / group.cost) : "—", formatNumber(ratio(group.tokens.total, group.assistantCalls)), percentage(group.tokens.output + group.tokens.reasoning, group.tokens.total), highOutlier(group.errors, report.providers.map((item) => item.errors), formatNumber), highOutlier(group.aborted, report.providers.map((item) => item.aborted), formatNumber), String(Math.max(0, group.requests - group.errors - group.aborted)), sparkline(series.find((item) => item.id === group.id)?.points.map((point) => point.cost) ?? [], 12)])))
++  }
++  if (by === "agent" || by === "source") {
++    lines.push(...table(by === "agent" ? "Agent workload" : "Source workload", [by, "tokens", "sessions", "cost", "owned req", "calls", "calls/req", "tok/session", "tok/req*", "cost/req*", "cache", "owner fail", "owner avg"], groups.map((group) => [group.label, formatNumber(group.tokens.total), String(group.sessions), priced(group.cost), String(group.requests), String(group.assistantCalls), group.requests > 0 ? ratio(group.assistantCalls, group.requests).toFixed(1) : "—", formatNumber(ratio(group.tokens.total, group.sessions)), group.requests > 0 ? formatNumber(group.tokens.total / group.requests) : "—", group.requests > 0 ? priced(group.cost / group.requests) : "—", percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total), ...health(group)])))
++    // Source缺旧组件归因时明确不可用；Agent仍逐一展示十类，共用行内完整分母。
++    lines.push(...table("Input context composition", [by, "input components"], groups.map((group) => { const parts = components(group); const total = parts.reduce((sum, [, value]) => sum + value, 0); return [group.label, total > 0 ? by === "source" ? mixText(parts.map(([id, value]) => ({ id, value })), 5) : parts.map(([label, value]) => `${label} ${percentage(value, total)}`).join(" · ") : "component attribution unavailable for these records"] })))
++    lines.push("* request-owner denominator and health; legacy Assistant usage has no owned request.")
++  }
++  if (by === "project") {
++    lines.push(...table("Project portfolio", ["project", "path", "tokens", "share", "cost", "sessions", "requests", "calls", "active days", "owner fail", "owner avg"], groups.map((group) => [group.label, report.projects.find((item) => item.id === group.id)?.path || "Path unavailable", formatNumber(group.tokens.total), percentage(group.tokens.total, report.total.tokens.total), priced(group.cost), String(group.sessions), String(group.requests), String(group.assistantCalls), String(series.find((item) => item.id === group.id)?.points.filter((point) => point.tokens.total > 0 || point.cost > 0 || point.requests > 0).length ?? 0), ...health(group)])))
++    // 使用稳定project ID找会话，同名目录或Project标签不能混合归属。
++    lines.push(...table("Largest sessions inside each project", ["project", "session", "tokens", "cost", "requests"], groups.map((group) => { const session = report.sessions.filter((item) => item.projectID === group.id).toSorted((a, b) => b.tokens.total - a.tokens.total)[0]; return [group.label, session?.title ?? "—", formatNumber(session?.tokens.total ?? 0), priced(session?.cost ?? 0), String(session?.requests ?? 0)] })))
++  }
++  if (by !== "status") lines.push(...table(by === "model" ? "Runtime mix" : "Routing mix", [by, "models by tokens", "providers by tokens", "tools by calls"], groups.map((group) => [group.label, tokenMix(group.models), tokenMix(group.providers), callMix(group.id)])))
++  if (by === "status") {
++    const outcomes = all.filter((group) => group.id !== "unattributed")
++    const total = outcomes.reduce((sum, group) => sum + group.requests, 0)
++    const count = (id: string) => outcomes.find((group) => group.id === id)?.requests ?? 0
++    lines.push(`Request outcomes · ${total} total · ${count("completed")} completed · ${count("error")} error · ${count("aborted")} aborted · ${count("running")} running`)
++    lines.push(...table("Outcome distribution", ["status", "requests", "req share", "tokens", "cost"], outcomes.map((group) => [group.label, String(group.requests), percentage(group.requests, total), formatNumber(group.tokens.total), priced(group.cost)])))
++    lines.push(...table("Status efficiency", ["status", "tokens/req", "cost/req", "calls/req", "cache", "output", "sessions"], outcomes.map((group) => [group.label, group.requests > 0 ? formatNumber(group.tokens.total / group.requests) : "—", group.requests > 0 ? priced(group.cost / group.requests) : "—", group.requests > 0 ? (group.assistantCalls / group.requests).toFixed(1) : "—", percentage(group.tokens.cache.read + group.tokens.cache.write, group.tokens.total), percentage(group.tokens.output + group.tokens.reasoning, group.tokens.total), String(group.sessions)])))
++    const unattributed = all.find((group) => group.id === "unattributed")
++    if (unattributed) lines.push(`Unattributed usage · ${formatNumber(unattributed.tokens.total)} tokens · ${priced(unattributed.cost)} · no owning request outcome`)
++    const failures = report.total.errors + report.total.aborted
++    lines.push(...table("Failure leaders within each dimension", ["dimension", "leader", "failed req", "rate in leader", "share of all failures"], [{ label: "model", groups: report.models }, { label: "provider", groups: report.providers }, { label: "source", groups: report.sources }, { label: "agent", groups: report.agents }, { label: "project", groups: report.projects }].map((dimension) => { const leader = dimension.groups.toSorted((a, b) => b.errors + b.aborted - a.errors - a.aborted)[0]; const failed = (leader?.errors ?? 0) + (leader?.aborted ?? 0); return [dimension.label, leader?.label ?? "—", String(failed), percentage(failed, leader?.requests ?? 0), percentage(failed, failures)] })))
++    lines.push("Outcome ratios exclude unattributed usage. Each leader row is an independent query, not a partition.")
++  }
++  return lines.flatMap((line) => wrapVisible(line))
++}
 
 diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/test/cli/stats-data.test.ts
 --- a/packages/opencode/test/cli/stats-data.test.ts
@@ -1769,7 +2145,7 @@ diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/t
  // #236：renderBreakdown 渲染统计报告——验证 Tool context tokens 文案
  import { renderBreakdown } from "@/cli/cmd/stats-render"
 +// #483：CLI 契约测试需要公开命令对象
-+import { StatsCommand, StatsTimelineCommand } from "@/cli/cmd/stats"
++import { StatsBreakdownCommand, StatsCommand, StatsInsightsCommand, StatsSessionsCommand, StatsTimelineCommand } from "@/cli/cmd/stats"
  // #236：Session.Service 提供 create/updateMessage/updatePart 接口
  import { Session } from "@/session/session"
  import { MessageID, PartID } from "@/session/schema"
@@ -1820,7 +2196,7 @@ diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/t
      // #236：step-finish part 播种——inputBreakdown 的 tools=10 + messages.toolInput=30 + toolOutput=20
      yield* session.updatePart({ id: stepPartID, sessionID: info.id, messageID: assistant.id, ...stepData })
  
-@@ -120,10 +145,274 @@ const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean } = {})
+@@ -120,10 +145,301 @@ const seedToolBreakdownReport = (input: { legacyEmptyMessages?: boolean } = {})
      }
  
      // #236：aggregateStats 从 session+part 数据计算工具归因统计
@@ -2001,6 +2377,33 @@ diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/t
 +    expect(() => negative.parse()).toThrow()
 +  })
 +
++  test("rejects options that a stats endpoint does not consume", async () => {
++    if (typeof StatsCommand.builder !== "function" || typeof StatsBreakdownCommand.builder !== "function" || typeof StatsTimelineCommand.builder !== "function" || typeof StatsSessionsCommand.builder !== "function" || typeof StatsInsightsCommand.builder !== "function") throw new Error("stats detail command builders are unavailable")
++    const rootBuilder = StatsCommand.builder
++    const parser = (args: string[]) => yargs(args).exitProcess(false).showHelpOnFail(false).strictOptions().fail((message, error) => { throw error ?? new Error(message) })
++    const timeline = await StatsTimelineCommand.builder(parser(["--sort", "cost"]))
++    const sessions = await StatsSessionsCommand.builder(parser(["--metric", "cost"]))
++    const insights = await StatsInsightsCommand.builder(parser(["--limit", "5"]))
++    const breakdown = await StatsBreakdownCommand.builder(parser(["--sort", "updated"]))
++    const toolCost = await StatsBreakdownCommand.builder(parser(["--by", "tool", "--metric", "cost"]))
++    expect(() => timeline.parse()).toThrow()
++    expect(() => sessions.parse()).toThrow()
++    expect(() => insights.parse()).toThrow()
++    expect(() => breakdown.parse()).toThrow()
++    expect(() => toolCost.parse()).toThrow()
++    let called = false
++    let failure: unknown
++    // 保留真实builder，只替换执行入口；错误参数被放行时也不会触发AppRuntime。
++    const publicParser = yargs(["stats", "--limit", "5", "insights"]).exitProcess(false).showHelpOnFail(false).fail((message, error) => { throw error ?? new Error(message) }).command({
++      ...StatsCommand,
++      builder: async (root) => (await rootBuilder(root)).command({ ...StatsInsightsCommand, handler: () => { called = true } }),
++      handler: () => {},
++    }).demandCommand().strict()
++    try { await publicParser.parse() } catch (error) { failure = error }
++    expect(String(failure)).toContain("limit")
++    expect(called).toBe(false)
++  })
++
 +  // #483：事件落在滚动 60×24 小时范围内、但早于第一个完整自然日，必须被排除
 +  it.instance("uses complete natural days for positive windows", () =>
 +    Effect.gen(function* () {
@@ -2155,17 +2558,24 @@ diff --git a/packages/opencode/test/cli/stats-data.test.ts b/packages/opencode/t
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
 --- a/packages/opencode/test/cli/stats-render-width.test.ts
 +++ b/packages/opencode/test/cli/stats-render-width.test.ts
-@@ -1,7 +1,8 @@
+@@ -1,7 +1,9 @@
  import { describe, expect, test } from "bun:test"
  import { fitVisible, paint, renderContext, renderHeatmap, stripAnsi, truncateVisible, visibleLength } from "../../src/cli/cmd/stats-charts"
--import { renderBreakdown, renderCosts, renderDashboard, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
--import { renderInsights } from "../../src/cli/cmd/stats-insights"
-+import { renderBreakdown, renderCosts, renderDashboard, renderHeatmapPage, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
-+import { renderInsights, renderForecast } from "../../src/cli/cmd/stats-insights"
+ import { renderBreakdown, renderCharts, renderCosts, renderDashboard, renderHeatmapPage, renderModels, renderOverview, renderProviders, renderSessions, renderTimeline, renderTokens } from "../../src/cli/cmd/stats-render"
+ import { renderForecast, renderInsights } from "../../src/cli/cmd/stats-insights"
 +import { buildForecast } from "../../src/cli/cmd/stats-insights"
  import type { StatsReport } from "../../src/cli/cmd/stats-data"
++import { emptyComponents } from "../../src/cli/cmd/stats-data"
  
  // #176：CJK 显示列宽与 breakdown 冒烟
+@@ -41,5 +42,5 @@
+-      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups,
++      models: groups, providers: groups, agents: groups, sources: groups, statuses: groups, projects: groups.map((group) => ({ ...group, path: "/project" })),
+       daily: [], modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [],
+-      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], modelProviderTokens: [],
++      tokenPartSeries: [], sessions: [], toolUsage: [], toolSeries: [], toolCalls: [], requestsByHour: [],
+       tokensPerSession: 110, medianTokensPerSession: 110,
+     } satisfies StatsReport
 @@ -111,6 +112,358 @@ describe("stats render width (#176)", () => {
      // #177：主路径必须出现系列标题
      expect(text).toContain("Tool context tokens over time")
@@ -2426,7 +2836,7 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +      medianTokensPerSession: 0,
 +    } as unknown as StatsReport
 +    const text = renderForecast(report, {})
-+    expect(text).toContain("—")
++    expect(text).toContain("Forecast unavailable")
 +    // $0.00 出现即表示伪造精度回归：零费用与无计费数据必须可区分；
 +    // 不可用标注与伪造零值的区别正是本轮修复的核心语义
 +    expect(text).not.toContain("$0.00")
@@ -2514,7 +2924,7 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
 +        durationMs: 0,
 +      },
 +    ]
-+    const hostileReport = { ...report, total: { ...report.total, cost: 1, tokens: { ...report.total.tokens, total: 15 } }, sessions: hostileSessions } as unknown as StatsReport
++    const hostileReport = { ...report, total: { ...report.total, components: emptyComponents(), cost: 1, tokens: { ...report.total.tokens, total: 15 } }, sessions: hostileSessions } as unknown as StatsReport
 +    const insights = renderInsights(hostileReport, {})
 +    // insights 卡片 body 出口与表格出口共享同一清洗契约：session title 内插不泄漏协议序列
 +    expect(insights).not.toContain("]8;;")
@@ -2525,17 +2935,120 @@ diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/op
  })
  
  describe("stats dashboard responsive top tables (#181)", () => {
+@@ -624,3 +978,65 @@
+       else process.env.NO_COLOR = originalNoColor
+     }
+   })
++
++test("#483 preserves quantitative sections, complete identities and independent denominators", async () => {
++  const { emptyComponents } = await import("../../src/cli/cmd/stats-data")
++  const components = { system: 8, instructions: 5, skills: 4, toolSchemas: 12, userMessages: 24, assistantText: 10, reasoning: 4, toolCalls: 6, toolResults: 22, attachments: 5 }
++  const tokens = (value: number) => ({ input: value * 0.007, output: value * 0.002, reasoning: 0, cache: { read: value * 0.99, write: value * 0.001 }, total: value })
++  const usage = { tokens: tokens(130_000), components, cost: 30, requests: 100, assistantCalls: 200, errors: 12, aborted: 7, durationMs: 1000 }
++  const mix = [{ id: "first", tokens: 70 }, { id: "second", tokens: 10 }, { id: "third", tokens: 10 }, { id: "fourth", tokens: 10 }]
++  const group = (id: string) => ({ ...usage, id, label: id, sessions: 2, providers: mix, models: mix })
++  const daily = [1, 2, 1, 3, 2, 4].map((value, index) => ({ ...usage, day: new Date(2026, 3, index + 1).getTime(), label: `04-0${index + 1}`, tokens: tokens(value * 10_000), cost: index === 0 ? 30 : 0 }))
++  const report: StatsReport = {
++    totalSessions: 2, sessionsWithUsage: 2, totalMessages: 4, totalTools: 1, days: 6, dateRange: { earliest: daily[0].day, latest: daily.at(-1)!.day }, total: usage,
++    models: [group("claude-opus-complete-model-name")], providers: [group("production-complete-provider-name")], agents: [group("build")], sources: [group("prompt")], projects: [{ ...group("project"), path: "/projects/完整目录/name with spaces" }],
++    statuses: [{ ...group("completed"), requests: 80, tokens: tokens(1000) }, { ...group("error"), requests: 12, tokens: tokens(0) }, { ...group("aborted"), requests: 7, tokens: tokens(0) }, { ...group("running"), requests: 1, tokens: tokens(0) }, { ...group("unattributed"), requests: 0, tokens: tokens(129_000) }],
++    daily, modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], statusSeries: [], projectSeries: [], tokenPartSeries: [],
++    sessions: [{ ...usage, id: "ses_priced" as StatsReport["sessions"][number]["id"], title: "中文完整会话标题", projectID: "project", directory: "/project", created: daily[0].day, updated: daily[0].day, messages: 2, tools: 1, providers: ["provider"], models: ["model-one", "model-two", "complete-third-session-model"] }, { ...usage, tokens: tokens(0), cost: 0, id: "ses_unpriced" as StatsReport["sessions"][number]["id"], title: "unpriced", projectID: "project", directory: "/project", created: daily[0].day, updated: daily[0].day, messages: 2, tools: 0, providers: [], models: [] }],
++    toolUsage: [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }], toolSeries: [],
++    toolCalls: [{ toolID: "read", modelID: "claude-opus-complete-model-name", providerID: "production-complete-provider-name", agent: "build", projectID: "project", source: "prompt", status: "completed", calls: 1, inputChars: 10, outputChars: 20, errors: 0, durationMs: 10 }],
++    requestsByHour: Array.from({ length: 24 }, (_, hour) => hour === 4 ? 12 : hour === 6 ? 3 : 0), tokensPerSession: 65_000, medianTokensPerSession: 65_000,
++  }
++  const insights = stripAnsi(renderInsights(report, { color: "never" })).replace(/^│ ?/gm, "").replace(/\s+/g, " ")
++  for (const section of ["Usage shape", "Attribution", "Variability & outliers", "Actions"]) expect(insights).toContain(section)
++  for (const value of ["system 8.0%", "instructions 5.0%", "skills 4.0%", "schemas 12.0%", "user 24.0%", "assistant 10.0%", "reasoning 4.0%", "tool calls 6.0%", "tool results 22.0%", "attach 5.0%"]) expect(insights).toContain(value)
++  expect(insights).toContain("status │ completed")
++  expect(insights).toContain("Session cost p50 $30.0")
++  expect(insights).not.toContain("Forecast")
++  expect(insights).toContain("share 100.0% > 55%")
++  const model = renderBreakdown(report, { color: "never", by: "model" })
++  for (const value of ["Model portfolio", "Token composition", "Routing & tools", "owned req", "tok/call", "other 10.0%", "claude-opus-complete-model-name"]) expect(model).toContain(value)
++  const provider = renderBreakdown(report, { color: "never", by: "provider" })
++  for (const value of ["Provider economics", "Model portfolio by provider", "Capacity & reliability", "cost share", "tok/$"]) expect(provider).toContain(value)
++  for (const dimension of ["agent", "source", "project"] as const) expect(renderBreakdown(report, { by: dimension, color: "never" })).toContain("by tokens")
++  const project = renderBreakdown(report, { by: "project", color: "never" })
++  for (const value of ["Project portfolio", "/projects/完整目录/name with spaces", "Largest sessions", "中文完整会话标题"]) expect(project).toContain(value)
++  const status = renderBreakdown(report, { by: "status", color: "never" }).replace(/\s+/g, " ")
++  expect(status).toContain("100 total · 80 completed · 12 error · 7 aborted · 1 running")
++  expect(status).toContain("Unattributed usage")
++  expect(status).toContain("Failure leaders within each dimension")
++  const timeline = renderTimeline(report, { color: "never" }).replace(/\s+/g, " ")
++  for (const value of ["Daily token volume", "total 130.0K · peak 40.0K/day · avg 21.7K/day", "each trend independently normalized", "Cache Read 128.7K 99.0% · peak 39.6K/day", "Input 910 0.7% · peak 280/day", "Cache Write 130 0.1% · peak 40/day", "Output + Reasoning 260 0.2% · peak 80/day"]) expect(timeline).toContain(value)
++  expect(renderTimeline(report, { color: "never", heatmap: true })).toContain("calendar view")
++  expect(renderTimeline(report, { color: "never" })).not.toContain("calendar view")
++  const sessions = renderSessions(report, { color: "never", limit: 1 }).replace(/\s+/g, " ")
++  for (const value of ["p90", "p99", "positive recorded cost (1 sessions)", "No positive recorded cost · 1 sessions", "token share", "中文完整会话标题", "complete-third-session-model", "Visible 1 of 2"]) expect(sessions).toContain(value)
++  expect(sessions).not.toContain("Top tools")
++  report.providerSeries = [{ ...usage, id: "token-first", label: "token-first", cost: 1, points: daily.map((point) => ({ ...point, cost: 1 })) }, { ...usage, id: "cost-first", label: "cost-first", cost: 100, points: daily.map((point) => ({ ...point, cost: 10 })) }]
++  const forecast = renderInsights(report, { color: "never", forecast: true })
++  const drivers = forecast.slice(forecast.indexOf("Forecast drivers"))
++  expect(forecast).toContain("30-day run-rate")
++  expect(forecast).toContain("endpoint confidence band")
++  expect(drivers.indexOf("cost-first")).toBeLessThan(drivers.indexOf("token-first"))
++  const empty: StatsReport = { ...report, total: { ...usage, tokens: tokens(0), components: emptyComponents(), cost: 0, requests: 0, assistantCalls: 0, errors: 0, aborted: 0 }, models: [], providers: [], agents: [], sources: [], statuses: [], projects: [], sessions: [], daily: [], providerSeries: [], toolCalls: [], toolUsage: [] }
++  empty.toolUsage = [{ id: "read", count: 1, inputChars: 10, outputChars: 20, contextTokens: 0 }]
++  const toolOnly = renderInsights(empty, { color: "never" })
++  expect(toolOnly).toContain("Usage shape")
++  expect(toolOnly).not.toContain("Cache read 0.0% < 20%")
++  expect(renderBreakdown(empty, { by: "tool", color: "never" })).toContain("Tool footprint")
++  expect(renderBreakdown(empty, { by: "tool", color: "never" })).not.toContain("0 estimated context tokens")
++  expect(renderForecast(empty)).toContain("Forecast unavailable")
++  expect(renderTimeline(empty, { metric: "cost" })).toContain("No positive cost recorded")
++  empty.toolUsage = []
++  expect(renderInsights(empty)).toContain("No usage data")
++})
+
+diff --git a/packages/opencode/test/cli/stats-background-ansi.test.ts b/packages/opencode/test/cli/stats-background-ansi.test.ts
+--- a/packages/opencode/test/cli/stats-background-ansi.test.ts
++++ b/packages/opencode/test/cli/stats-background-ansi.test.ts
+@@ -4,1 +4,2 @@
+ import type { StatsReport } from "../../src/cli/cmd/stats-data"
++import { emptyComponents } from "../../src/cli/cmd/stats-data"
+@@ -42,1 +43,1 @@
+-  total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0 },
++  total: { tokens: { input: 20, output: 5, reasoning: 0, cache: { read: 0, write: 0 }, total: 25 }, components: emptyComponents(), cost: 1, requests: 1, assistantCalls: 5, errors: 0, aborted: 0, durationMs: 0 },
+
+diff --git a/packages/opencode/test/cli/stats-money.test.ts b/packages/opencode/test/cli/stats-money.test.ts
+--- a/packages/opencode/test/cli/stats-money.test.ts
++++ b/packages/opencode/test/cli/stats-money.test.ts
+@@ -3,1 +3,2 @@
+ import type { StatsReport } from "../../src/cli/cmd/stats-data"
++import { emptyComponents } from "../../src/cli/cmd/stats-data"
+@@ -11,7 +12,9 @@
+-    totalSessions: 1, days: 1, total: { cost: 0.25, tokens },
+-    models: [{ id: "sample-model", label: "sample-model", cost: 0.25, tokens, assistantCalls: 2, requests: 1, sessions: 1 }],
+-    providers: [{ id: "sample-provider", label: "sample-provider", cost: 0.25, tokens }],
+-    modelSeries: [], providerSeries: [],
+-    daily: [{ day: 0, label: "day", cost: 0.25, tokens }],
+-    sessions: [{ id: "sample-session", title: "sample-session", cost: 0.25, tokens }],
++    totalSessions: 1, sessionsWithUsage: 1, days: 1, dateRange: { earliest: 0, latest: 0 }, total: { cost: 0.25, tokens, components: emptyComponents(), requests: 1, assistantCalls: 2, errors: 0, aborted: 0, durationMs: 0 },
++    models: [{ id: "sample-model", label: "sample-model", cost: 0.25, tokens, components: emptyComponents(), assistantCalls: 2, requests: 1, sessions: 1, errors: 0, aborted: 0, durationMs: 0, models: [], providers: [] }],
++    providers: [{ id: "sample-provider", label: "sample-provider", cost: 0.25, tokens, components: emptyComponents(), models: [], providers: [] }],
++    modelSeries: [], providerSeries: [], agentSeries: [], sourceSeries: [], projectSeries: [], statusSeries: [],
++    agents: [], sources: [], projects: [], statuses: [], toolCalls: [], toolUsage: [], toolSeries: [],
++    tokensPerSession: 100, medianTokensPerSession: 100,
++    daily: [{ day: 0, label: "day", cost: 0.25, tokens, requests: 1, errors: 0, aborted: 0, durationMs: 0 }],
++    sessions: [{ id: "sample-session", title: "sample-session", projectID: "project", cost: 0.25, tokens, models: [], providers: [], requests: 1, assistantCalls: 2, messages: 1, tools: 0, errors: 0, aborted: 0, durationMs: 0 }],
+   } as unknown as StatsReport
+@@ -22,1 +26,1 @@
+-  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[^\n]*cost=0\.25/)
++  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[\s\S]*\$0\.2500/)
 
 diff --git a/packages/web/src/content/docs/cli.mdx b/packages/web/src/content/docs/cli.mdx
 --- a/packages/web/src/content/docs/cli.mdx
 +++ b/packages/web/src/content/docs/cli.mdx
-@@ -452,15 +452,45 @@ Show token usage and cost statistics for your OpenCode sessions.
+@@ -452,15 +452,56 @@ Show token usage and cost statistics for your OpenCode sessions.
  opencode stats
  ```
  
 +Stats use the latest 60 calendar days by default. Pass `--days 0` for today or
 +`--all-time` for the complete history. In interactive mode, `r` and `R` move
-+forward and backward through 60 days, 30 days, 7 days, today, and all time.
++forward and backward through 60 days, 30 days, 7 days, today, and all time;
++each range is loaded only when first opened.
 +
 +The default dashboard summarizes activity, token components, health, models,
 +providers, and sessions. Detailed views keep separate responsibilities:
@@ -2544,9 +3057,13 @@ diff --git a/packages/web/src/content/docs/cli.mdx b/packages/web/src/content/do
 +opencode stats timeline [--metric tokens|cost]
 +opencode stats breakdown [model|provider|agent|source|project|tool|status]
 +opencode stats sessions
-+opencode stats insights
++opencode stats insights [--forecast]
 +opencode stats forecast
 +```
++
++Timeline uses a full-width total trend and independently normalized token
++component trends. Compare component magnitude using the printed total, share,
++and peak values rather than sparkline height.
 +
 +Breakdown pages show complete entity names instead of numbered matrix keys.
 +Project rows use the stored project name and worktree when available.
@@ -2554,8 +3071,14 @@ diff --git a/packages/web/src/content/docs/cli.mdx b/packages/web/src/content/do
 +Tool calls, input/output character counts, errors, and duration come from the
 +stored ToolPart. "Estimated context tokens" is a separate estimate of how much
 +earlier tool content appears in later assistant input; it is not tool cost or
-+billed token usage. Colors use the terminal's ANSI palette and do not paint a
++billed token usage. If a selected range has no positive recorded cost, stats
++continue to show token and health data and mark cost-derived analysis as
++unavailable. Colors use the terminal's ANSI palette and do not paint a
 +custom background, so light and dark terminal themes remain authoritative.
++
++The Sessions view shows population percentiles, full-width token and positive-
++cost distribution bars, and a per-Session token-share bar with Project, Model,
++Provider, request, call, message, Tool, cache, failure, and latency details.
 +
  #### Flags
  
@@ -2581,12 +3104,12 @@ diff --git a/packages/web/src/content/docs/cli.mdx b/packages/web/src/content/do
 diff --git a/packages/web/src/content/docs/zh-cn/cli.mdx b/packages/web/src/content/docs/zh-cn/cli.mdx
 --- a/packages/web/src/content/docs/zh-cn/cli.mdx
 +++ b/packages/web/src/content/docs/zh-cn/cli.mdx
-@@ -417,15 +417,41 @@ opencode session list
+@@ -417,15 +417,48 @@ opencode session list
  opencode stats
  ```
  
 +统计默认展示最近 60 个自然日。传 `--days 0` 只看今天，传 `--all-time` 查看全部
-+历史。交互模式下 `r` 与 `R` 在 60 天、30 天、7 天、今天与全部时间之间前后切换。
++历史。交互模式下 `r` 与 `R` 在 60 天、30 天、7 天、今天与全部时间之间前后切换；各范围仅在首次打开时加载。
 +
 +默认仪表盘汇总活跃度、Token 组成、健康度、模型、供应方与会话。细分视图各司其职：
 +
@@ -2594,17 +3117,24 @@ diff --git a/packages/web/src/content/docs/zh-cn/cli.mdx b/packages/web/src/cont
 +opencode stats timeline [--metric tokens|cost]
 +opencode stats breakdown [model|provider|agent|source|project|tool|status]
 +opencode stats sessions
-+opencode stats insights
++opencode stats insights [--forecast]
 +opencode stats forecast
 +```
++
++Timeline 使用全宽总量趋势，并为各 Token 组成提供独立归一化趋势。比较组成量级时，
++应读取同一行的总量、占比和峰值，而不是比较 sparkline 高度。
 +
 +Breakdown 页面使用完整实体名，不再使用编号矩阵键。Project 行在存储中存在
 +名称与工作树时直接展示。
 +
 +工具调用次数、输入/输出字符数、错误与耗时来自存储的 ToolPart。"估算上下文
 +Token"是另一条独立估算：更早的工具内容在后续 assistant 输入中出现了多少；
-+它不是工具费用，也不是计费 Token。颜色使用终端 ANSI 调色板且不绘制自定义
++它不是工具费用，也不是计费 Token。所选范围没有正费用记录时，仍显示 Token 与健康数据，并把费用派生分析标为不可用。
++颜色使用终端 ANSI 调色板且不绘制自定义
 +背景，亮色与暗色终端主题始终保持权威。
++
++Sessions 展示总体分位数、全宽 Token/正费用分布横条，并为每个 Session 绘制 Token 占比条，
++同时保留 Project、Model、Provider、请求、调用、Message、Tool、缓存、失败与延迟明细。
 +
  #### 标志
  

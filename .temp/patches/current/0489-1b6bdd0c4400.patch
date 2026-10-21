@@ -6,14 +6,12 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-适配：目标的 OpenTUI 版本决策为 registry 0.4.5（#146），源 patch 的 smark.1 release-closure
-政策（11 个 GitHub tarball、overrides URL 化、solid-js 1.9.12、verify-closure 脚本与对应
-workflow job、upgrade 测试）被该决策整体取代，均不落地；4 个 TUI 源码修复（dialog factory、
-structured error 渲染、rationale 收窄、errorMessage）已由目标 packages/tui 独立承载（SATISFIED）；
-session-v2 feature-plugin 宿主在目标不存在（SKIP）。落地范围：build.ts 构建证据链、严格版本
-smoke、release archive 冒烟脚本（pty owner 重定向 @opencode-ai/core/pty/pty.bun）、workflow
-smoke/consumer-gate jobs、@xterm/headless devDep（bun.lock 同步条目）、upgrade-opentui 的
-thirdparty 写保护 cherry-pick、consumer 测试重表达（factory-description + Goal CJK 边界）。
+适配：registry 0.4.5 实测缺少源 Goal CJK 修复，恢复 source 的 11 个 immutable release 包，
+不通过 skip、改断言、caller clipping 或手工换行掩盖 native 缺陷；目标 Solid 补丁暂保留。
+dialog factory、structured error、rationale 与 errorMessage 复用 packages/tui 的既有实现；
+独立 session-v2 debug 宿主不恢复。构建保留目标 Sharp 接线，补齐证据、archive smoke 与 consumer gate。
+升级命令保留目标 registry/snapshot 接口，同时支持 source 已发布 family 及 thirdparty 写保护。
+source gitlink 验证器的未提供子仓库/精确 Solid 版本门禁不机械移入，安装锁与真实 consumer 回归承担目标验证。
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
@@ -216,14 +214,82 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
-@@ -689,6 +689,7 @@
+@@ -693,6 +693,7 @@
          "@types/turndown": "5.0.5",
          "@types/yargs": "17.0.33",
          "@typescript/native-preview": "catalog:",
 +        "@xterm/headless": "6.0.0",
          "drizzle-orm": "catalog:",
          "prettier": "3.6.2",
-         "typescript": "catalog:",
+         "sharp": "0.33.5",
+@@ -724,3 +725,3 @@
+-        "@opentui/core": ">=0.4.5",
+-        "@opentui/keymap": ">=0.4.5",
+-        "@opentui/solid": ">=0.4.5",
++        "@opentui/core": ">=0.4.3-smark.1",
++        "@opentui/keymap": ">=0.4.3-smark.1",
++        "@opentui/solid": ">=0.4.3-smark.1",
+@@ -1103,7 +1104,15 @@
+   "overrides": {
+     "@ai-sdk/anthropic": "3.0.111",
+-    "@opentui/core": "catalog:",
+-    "@opentui/keymap": "catalog:",
+-    "@opentui/solid": "catalog:",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz",
+     "@types/bun": "catalog:",
+     "@types/node": "catalog:",
+@@ -1125,3 +1134,3 @@
+-    "@opentui/core": "0.4.5",
+-    "@opentui/keymap": "0.4.5",
+-    "@opentui/solid": "0.4.5",
++    "@opentui/core": "0.4.3-smark.1",
++    "@opentui/keymap": "0.4.3-smark.1",
++    "@opentui/solid": "0.4.3-smark.1",
+@@ -2062,23 +2071,23 @@
+ 
+-    "@opentui/core": ["@opentui/core@0.4.5", "", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.5", "@opentui/core-darwin-x64": "0.4.5", "@opentui/core-linux-arm64": "0.4.5", "@opentui/core-linux-arm64-musl": "0.4.5", "@opentui/core-linux-x64": "0.4.5", "@opentui/core-linux-x64-musl": "0.4.5", "@opentui/core-win32-arm64": "0.4.5", "@opentui/core-win32-x64": "0.4.5" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-JsgRTPkA6e+Vxmumxai6SElOSlRQkbzNKHlCfemlArRiLhfC1IZ9RXJo2QH4xSu+uBOWAM90uss73/pPlkdEig=="],
++    "@opentui/core": ["@opentui/core@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3-smark.1", "@opentui/core-darwin-x64": "0.4.3-smark.1", "@opentui/core-linux-arm64": "0.4.3-smark.1", "@opentui/core-linux-arm64-musl": "0.4.3-smark.1", "@opentui/core-linux-x64": "0.4.3-smark.1", "@opentui/core-linux-x64-musl": "0.4.3-smark.1", "@opentui/core-win32-arm64": "0.4.3-smark.1", "@opentui/core-win32-x64": "0.4.3-smark.1" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-YHeIqCyVue4WBYyPDmkwLjlnlEZ+mXTVuuw2kNHVsw7xI1rrtS9TV6BDj0sU6k7o6gR13gkGqzMSg89M3NtQEA=="],
+ 
+-    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@0.4.5", "", { "os": "darwin", "cpu": "arm64" }, "sha512-8KUG0oRidnR+oW1RSZJ72/PhZLl+qRRMk5U/mieF4c0SJ5V3tYACpBZAKzQfHNd1f7QzD8FHZct1lPpQgtmkWg=="],
++    "@opentui/core-darwin-arm64": ["@opentui/core-darwin-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz", {}, "sha512-my+I90bvPBXhitJArO4JxR/TahmdD/Vf5XgOz86eOLmS6+XvZgCzG/5y5AJH+17qrvdtNf96hjxfLGSYYjHG4g=="],
+ 
+-    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@0.4.5", "", { "os": "darwin", "cpu": "x64" }, "sha512-R2bocsg55gwjOqCp/MWFgFYzRmsduKegB6nzgFAPCvAD/L5Jf30xpWJWFlSg3x8vxe1L9WJ84dfqa4M7mZZ3wA=="],
++    "@opentui/core-darwin-x64": ["@opentui/core-darwin-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz", {}, "sha512-OGWB0+GZeoP0g8XHEzFayXoak3dPoLUxonswes0UoipSELS+4fupEzLZVF5K46XeEV535lgqSjL0nBg1fTeJwA=="],
+ 
+-    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@0.4.5", "", { "os": "linux", "cpu": "arm64" }, "sha512-R4MZ25a4CzOAGVjW9aj1hUfzQGVfCJwrwBDbNs2SXaIvzcZqkxCVtU4FoQ5LsaD0j/BdNQVg2CIfFkFsm1fDuQ=="],
++    "@opentui/core-linux-arm64": ["@opentui/core-linux-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz", {}, "sha512-Ag6rZPcXJzqWWiDkfoM2ZyKOr7JE51FkWSCFRspq3l9o37JV6Eri9EiVAHKxSB+mNe0H9aN0RJunflrAhzf8FQ=="],
+ 
+-    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@0.4.5", "", { "os": "linux", "cpu": "arm64" }, "sha512-ieqdyKI6EIYPalYAETB2wsdP83hr5Ifi+dFnBFUmdEEFHsoKwBmn2S7bsTOYlX7Bg03F4/YPIg+IvRpeC+cUJw=="],
++    "@opentui/core-linux-arm64-musl": ["@opentui/core-linux-arm64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz", {}, "sha512-VOFKE8FyycfkxYib1tT4WqfGT3yGh1yqAJ4KVdIXUFfVn9blcRhcz0UHGNlRV0gaZ4+Vh+5UAWAD5AU+5F0Frg=="],
+ 
+-    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@0.4.5", "", { "os": "linux", "cpu": "x64" }, "sha512-SNyuQoxMKI1vuJhgxSSW96adWM6LqFl2SoS3GM4tGeneGOanVVG2Y06PvlytXvF4cKik97t0rqkVMRetmOs93w=="],
++    "@opentui/core-linux-x64": ["@opentui/core-linux-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz", {}, "sha512-5otc+5eyBXWrSaITt2huJHk+DKCrnXBERvw022biUcDknjXJBzY4BJBnC0LjKxEYncFRgH1FF1stNdJ71qp8Rg=="],
+ 
+-    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@0.4.5", "", { "os": "linux", "cpu": "x64" }, "sha512-mKVKcIcPiSVVZZsdPSBoWwoa2/TCeQAaMDeHF7PFw2kt5bTXZPP7xxWfRQLCNIcA1eaGl59UuwUWHDR2Ve548Q=="],
++    "@opentui/core-linux-x64-musl": ["@opentui/core-linux-x64-musl@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz", {}, "sha512-EQ186xFOwtLiy0r+QxOQQ7fiGsS3Pki+0MY1cfvlG+E3CsOKPtdzH+ZLX3U6+hxhRxnMAri8jKbALzmn5xjs/w=="],
+ 
+-    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@0.4.5", "", { "os": "win32", "cpu": "arm64" }, "sha512-GHTTsqeR45q2Iek9Rb7ty+x/hAKn2jZ1ujlCgPR8LBKyF7h0E1dNFryoZ7ehMc3kJndP1sKn836IemKFqxuDdQ=="],
++    "@opentui/core-win32-arm64": ["@opentui/core-win32-arm64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz", {}, "sha512-2/qmJ6htJomHLzwERdT9235LK/wuwvGP4VlpybA7uTWGflyuAUDGDRh22osC0/i7Yn5XFk6MkjHeOG4k4g5FLA=="],
+ 
+-    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@0.4.5", "", { "os": "win32", "cpu": "x64" }, "sha512-Y8T/yXCDGagRGiQrtmuB6AhRcPucKFs/Dre3v8kJwNYqDccI4FzUPKclZ7djfmRZNjl7JUqPhZZP/PwDpQocMg=="],
++    "@opentui/core-win32-x64": ["@opentui/core-win32-x64@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz", {}, "sha512-BSSIzIOR0LRki9JpAF/ol3Tf+lHOuBvgj6+pPQhC1U3kbZ7WGikm1lD4y9UEoe9qxkS/4PSZvwAyhf6J10d5gA=="],
+ 
+-    "@opentui/keymap": ["@opentui/keymap@0.4.5", "", { "dependencies": { "@opentui/core": "0.4.5" }, "peerDependencies": { "@opentui/react": "0.4.5", "@opentui/solid": "0.4.5", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-S1wzKHhF70zT6bH+VBFY+lSeTImLcIFW28JNQiME8MoPcy6KGPs7rKFSHrb/U7P8rsTJeRfW5A4d1Cy6PKodDg=="],
++    "@opentui/keymap": ["@opentui/keymap@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz", { "dependencies": { "@opentui/core": "0.4.3-smark.1" }, "peerDependencies": { "@opentui/react": "0.4.3-smark.1", "@opentui/solid": "0.4.3-smark.1", "react": ">=19.2.0", "solid-js": "1.9.12" }, "optionalPeers": ["@opentui/react", "@opentui/solid", "react", "solid-js"] }, "sha512-CAbaqWF+nIStVPv83TL+iSk+bDFKTVSMeO+G4NWZT47g5oWbGc6VtlXkGSbSkBRoZTaFELjYIK3j0eVmKxhWVA=="],
+ 
+-    "@opentui/solid": ["@opentui/solid@0.4.5", "", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.5", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-B0RSkXnrtPVfEJOX+Hj+axjLJ3lzbG1BZw5I7Pvb9OPp48Vzg2cW2a3cSa86/q48ndLt647i/XwFPIw/jqnI5g=="],
++    "@opentui/solid": ["@opentui/solid@https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz", { "dependencies": { "@babel/core": "7.28.0", "@babel/preset-typescript": "7.27.1", "@opentui/core": "0.4.3-smark.1", "babel-plugin-module-resolver": "5.0.2", "babel-preset-solid": "1.9.12", "entities": "7.0.1", "s-js": "^0.4.9" }, "peerDependencies": { "solid-js": "1.9.12" } }, "sha512-i90xdvrwaS0HORGEiLrvl2lzaUKUu/C0CWXJIs6wJpfsvCHznZlRIDfLKCZc5xwq2HsiT8rJ0QCRqMd9K7TQ4w=="],
+ 
 @@ -3043,6 +3044,8 @@
  
      "@xmldom/xmldom": ["@xmldom/xmldom@0.8.13", "", {}, "sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw=="],
@@ -242,10 +308,10 @@ new file mode 100644
 +# Canonical Implementation Plan: OpenTUI 0.4.3 SMARK 分支、CJK 修复与独立分发
 +
 +> Status: verified
-+> **适配说明（#489 落地于 v1.18.32 目标谱系）**：本文的 smark.1 release-closure 政策（11 个 GitHub tarball、
-+> overrides URL 化、solid-js 1.9.12 升级）未在目标落地——目标已按 registry 0.4.5 决策承载 OpenTUI（#146）。
-+> 本 patch 在目标落地范围为：构建证据链（build.ts）、release archive 冒烟（smoke 脚本 + workflow jobs）、
-+> consumer 回归测试与 thirdparty submodule 写保护。涉及 release-closure 的小节仅作源谱系历史记录。
++> **目标适配（#489）**：保留修复 CJK word-wrap 的 11 包同版本 immutable release，不以 registry 0.4.5 取代未承载的修复。
++> TUI源码修复由目标既有 owner 承载，构建与 archive smoke 保留，升级命令兼容目标 registry/snapshot 接口。
++> 目标仍使用带既有修复的 Solid 1.9.10；不要求恢复未提供的 submodule 源码，相关 source provenance 小节作为历史证据。
++> 目标验证使用 frozen 安装、实际 consumer 解析、类型与 headless 行为回归；下文旧源码路径及先前审计不代替本轮验证。
 +>
 +> Revision: R12
 +>
@@ -1801,7 +1867,7 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 +    "@xterm/headless": "6.0.0",
      "drizzle-orm": "catalog:",
      "prettier": "3.6.2",
-     "typescript": "catalog:",
+     "sharp": "0.33.5",
 
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
@@ -2557,24 +2623,23 @@ diff --git a/packages/tui/test/routes/session/session-layout.test.ts b/packages/
  import { createTestRenderer } from "@opentui/core/testing"
  import { SpinnerRenderable } from "opentui-spinner"
  
-@@ -178,3 +178,46 @@ describe("reasoning layout shares message width pipeline (#0414)", () => {
-     expect(sessionSource.slice(providerAt, providerAt + 120)).toContain("messageContentWidth()")
-   })
- })
+@@ -148,3 +148,45 @@
+     setup.renderer.destroy()
+   }
+ }
 +
 +describe("Goal sidebar CJK boundary", () => {
-+  // #489：目标以 registry 0.4.5 承载 OpenTUI；实测该 renderer 仍复现边界重复字形
-+  // （frame 中“查”出现 3 次），源 fork 的修复未进上游——在目标上无法作为通过性回归钉扎，
-+  // 保留用例待上游修复后解除 skip（skip 原因与验证证据见 record 0489）。
-+  test.skip("Goal sidebar does not duplicate a CJK glyph across the 35-cell wrap boundary", async () => {
++  test("Goal sidebar does not duplicate a CJK glyph across the 35-cell wrap boundary", async () => {
 +    // #489：Goal 文案沿用生产 green literal；两个"查"必须恰出现两次，
 +    // 边界 virtual chunk 回退到旧 byte offset 时会渲染出第三个重复字形。
-+    // 解除 skip 前置条件：上游 renderer 修复该 bug 后，本用例应直接转正而不需改断言。
 +    const objective = "检查log，请你自行独立完整完成相应的调研与检查，并进行多轮的负载并发、高压"
 +    // 42-cell 外框故意比 35-cell 文本盒更宽，让越界双宽 cell 留下可观察证据。
 +    const setup = await createTestRenderer({
 +      width: 42,
 +      height: 6,
++      footerHeight: 0,
++      useThread: false,
++      consoleMode: "disabled",
 +    })
 +    try {
 +      // 两层 padding 后 Goal 文本真实可用宽度 35 格；外层 framebuffer 更宽，越界 cell 直接暴露。
@@ -2608,7 +2673,7 @@ diff --git a/packages/tui/test/routes/session/session-layout.test.ts b/packages/
 diff --git a/script/upgrade-opentui.ts b/script/upgrade-opentui.ts
 --- a/script/upgrade-opentui.ts
 +++ b/script/upgrade-opentui.ts
-@@ -35,7 +35,8 @@ if (snapshotArg === "--snapshot=") {
+@@ -35,7 +35,23 @@ if (snapshotArg === "--snapshot=") {
  const ver = raw.replace(/^v/, "")
  const root = path.resolve(import.meta.dir, "..")
  const lockfile = path.join(root, "bun.lock")
@@ -2616,6 +2681,169 @@ diff --git a/script/upgrade-opentui.ts b/script/upgrade-opentui.ts
 +// thirdparty/opentui 是独立 Git 仓库；root 依赖维护命令只能读取其 release 身份，不能改写源码 manifest。
 +const skip = new Set([".git", ".opencode", ".turbo", "dist", "node_modules", "thirdparty"])
  const keys = ["@opentui/core", "@opentui/keymap", "@opentui/solid"] as const
++const release = !snapshot && ver === "0.4.3-smark.1" ? `https://github.com/SMARK2022/opentui/releases/download/v${ver}` : undefined
++// 仅映射 source 已发布的完整 family；普通 registry/snapshot 继续沿目标既有入口维护。
++const assets = {
++  "@opentui/core": "opentui-core",
++  "@opentui/keymap": "opentui-keymap",
++  "@opentui/solid": "opentui-solid",
++  "@opentui/core-darwin-arm64": "opentui-core-darwin-arm64",
++  "@opentui/core-darwin-x64": "opentui-core-darwin-x64",
++  "@opentui/core-linux-arm64": "opentui-core-linux-arm64",
++  "@opentui/core-linux-arm64-musl": "opentui-core-linux-arm64-musl",
++  "@opentui/core-linux-x64": "opentui-core-linux-x64",
++  "@opentui/core-linux-x64-musl": "opentui-core-linux-x64-musl",
++  "@opentui/core-win32-arm64": "opentui-core-win32-arm64",
++  "@opentui/core-win32-x64": "opentui-core-win32-x64",
++} as const
  
  // Windows 上 Bun.Glob 返回的路径可能使用 \ 分隔符，必须同时处理 / 和 \
+@@ -84,14 +100,20 @@
+ const editOverrides = (obj: unknown) => {
+   if (!obj || typeof obj !== "object") return false
+   const map = obj as Record<string, unknown>
+-  return keys
+-    .map((key) => {
++  // 离开 fork 时同步移除它的 native overrides，不能把 registry JS 配到旧 fork ABI。
++  return Object.entries(assets)
++    .map(([key, asset]) => {
++      if (!release && !keys.some((name) => name === key)) {
++        if (!(key in map)) return false
++        delete map[key]
++        return true
++      }
+       const cur = map[key]
+-      if (typeof cur !== "string") return false
+-      const next = snapshot ? ver : "catalog:"
++      if (!release && typeof cur !== "string") return false
++      const next = release ? `${release}/${asset}-${ver}.tgz` : snapshot ? ver : "catalog:"
+       if (next === cur) return false
+       map[key] = next
+       return true
+     })
+     .some(Boolean)
+ }
+@@ -185,9 +207,12 @@
+ function findStaleLockfileEntriesInText(txt: string) {
+   return Array.from(txt.matchAll(/^    "([^"]+)": \["(@opentui\/(?:core(?:-[^@"]+)?|keymap|solid))@([^"]+)"/gm))
+     .map((match) => ({
+       entry: match[1]!,
+       pkg: match[2]!,
+       version: match[3]!,
+     }))
+-    .filter((item) => item.version !== ver)
++    // URL 是此 family 的锁定身份，不把 canonical release 当作陈旧 semver 再删除。
++    .filter(
++      (item) => item.version !== ver && item.version !== (release ? `${release}/${item.pkg.slice(1).replace("/", "-")}-${ver}.tgz` : ver),
++    )
+ }
+
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -45,3 +45,3 @@
+-      "@opentui/core": "0.4.5",
+-      "@opentui/keymap": "0.4.5",
+-      "@opentui/solid": "0.4.5",
++      "@opentui/core": "0.4.3-smark.1",
++      "@opentui/keymap": "0.4.3-smark.1",
++      "@opentui/solid": "0.4.3-smark.1",
+@@ -140,7 +140,15 @@
+   "overrides": {
+     "@ai-sdk/anthropic": "3.0.111",
+-    "@opentui/core": "catalog:",
+-    "@opentui/keymap": "catalog:",
+-    "@opentui/solid": "catalog:",
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz",
+     "opentui-spinner": "catalog:",
+     "@types/bun": "catalog:",
+
+diff --git a/packages/plugin/package.json b/packages/plugin/package.json
+--- a/packages/plugin/package.json
++++ b/packages/plugin/package.json
+@@ -29,5 +29,5 @@
+   "peerDependencies": {
+-    "@opentui/core": ">=0.4.5",
+-    "@opentui/keymap": ">=0.4.5",
+-    "@opentui/solid": ">=0.4.5"
++    "@opentui/core": ">=0.4.3-smark.1",
++    "@opentui/keymap": ">=0.4.3-smark.1",
++    "@opentui/solid": ">=0.4.3-smark.1"
+   },
+
+diff --git a/packages/opencode/test/script/upgrade-opentui.test.ts b/packages/opencode/test/script/upgrade-opentui.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/test/script/upgrade-opentui.test.ts
+@@ -0,0 +1,60 @@
++import { expect, test } from "bun:test"
++import fs from "node:fs/promises"
++import path from "node:path"
++import { tmpdir } from "../fixture/fixture"
++
++test("upgrade-opentui preserves the release family and thirdparty boundary", async () => {
++  await using tmp = await tmpdir()
++  await Promise.all(["script", "packages/plugin", "thirdparty/opentui"].map((directory) => fs.mkdir(path.join(tmp.path, directory), { recursive: true })))
++  await Bun.write(path.join(tmp.path, "package.json"), JSON.stringify({
++    name: "opentui-upgrade-fixture", private: true,
++    workspaces: { catalog: { "@opentui/core": "0.4.5", "@opentui/keymap": "0.4.5", "@opentui/solid": "0.4.5" } },
++    // 真实最小安装保证目标原有的 lock 检查也执行，而非只测试 JSON 编辑算法。
++    devDependencies: { "@opentui/core": "catalog:" },
++    overrides: { "@opentui/core": "catalog:", "@opentui/keymap": "catalog:", "@opentui/solid": "catalog:" },
++  }, null, 2) + "\n")
++  await Bun.write(path.join(tmp.path, "packages/plugin/package.json"), JSON.stringify({
++    peerDependencies: { "@opentui/core": ">=0.4.5", "@opentui/keymap": ">=0.4.5", "@opentui/solid": ">=0.4.5" },
++  }, null, 2) + "\n")
++  const nested = '{"name":"@opentui/core","version":"0.4.3-smark.1"}\n'
++  await Bun.write(path.join(tmp.path, "thirdparty/opentui/package.json"), nested)
++  await Bun.write(path.join(tmp.path, "script/upgrade-opentui.ts"), await Bun.file(path.join(import.meta.dir, "../../../../script/upgrade-opentui.ts")).text())
++
++  const run = async (version: string) => {
++    const child = Bun.spawn([process.execPath, "run", "script/upgrade-opentui.ts", version], { cwd: tmp.path, stdout: "pipe", stderr: "pipe" })
++    const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
++    // 安装器可能输出正常诊断；以退出码和真实落盘结果验证升级，不要求 stderr 完全为空。
++    expect({ code, stdout, stderr }).toMatchObject({ code: 0 })
++  }
++  await run("0.4.3-smark.1")
++  const root = await Bun.file(path.join(tmp.path, "package.json")).json()
++  expect(root.workspaces.catalog).toEqual({
++    "@opentui/core": "0.4.3-smark.1",
++    "@opentui/keymap": "0.4.3-smark.1",
++    "@opentui/solid": "0.4.3-smark.1",
++  })
++  // 期望 URL 使用 source literal，不能引用升级器自己的 asset 表来自证。
++  expect(root.overrides).toEqual({
++    "@opentui/core": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-0.4.3-smark.1.tgz",
++    "@opentui/keymap": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-keymap-0.4.3-smark.1.tgz",
++    "@opentui/solid": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-solid-0.4.3-smark.1.tgz",
++    "@opentui/core-darwin-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-darwin-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-darwin-x64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-arm64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-arm64-musl-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-0.4.3-smark.1.tgz",
++    "@opentui/core-linux-x64-musl": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-linux-x64-musl-0.4.3-smark.1.tgz",
++    "@opentui/core-win32-arm64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-arm64-0.4.3-smark.1.tgz",
++    "@opentui/core-win32-x64": "https://github.com/SMARK2022/opentui/releases/download/v0.4.3-smark.1/opentui-core-win32-x64-0.4.3-smark.1.tgz",
++  })
++  const plugin = await Bun.file(path.join(tmp.path, "packages/plugin/package.json")).json()
++  expect(Object.values(plugin.peerDependencies)).toEqual([">=0.4.3-smark.1", ">=0.4.3-smark.1", ">=0.4.3-smark.1"])
++  expect(await Bun.file(path.join(tmp.path, "thirdparty/opentui/package.json")).text()).toBe(nested)
++
++  // 升级到正常 registry 版本时，必须同时退出旧 fork 的 native 闭包，而非只替换三个 JS 包。
++  await run("0.4.5")
++  const registry = await Bun.file(path.join(tmp.path, "package.json")).json()
++  expect(registry.workspaces.catalog).toEqual({ "@opentui/core": "0.4.5", "@opentui/keymap": "0.4.5", "@opentui/solid": "0.4.5" })
++  expect(registry.overrides).toEqual({ "@opentui/core": "catalog:", "@opentui/keymap": "catalog:", "@opentui/solid": "catalog:" })
++  expect(await Bun.file(path.join(tmp.path, "thirdparty/opentui/package.json")).text()).toBe(nested)
++})
 

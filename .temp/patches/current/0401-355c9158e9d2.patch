@@ -3886,52 +3886,83 @@ diff --git a/sdks/vscode/src/bridge-registry.ts b/sdks/vscode/src/bridge-registr
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -33,6 +33,8 @@ import { runNotebook } from "./notebook/run"
+@@ -26,9 +26,14 @@ import { runNotebook } from "./notebook/run"
  import { editNotebook } from "./notebook/edit"
  import { readNotebookCellOutput } from "./notebook/output"
  import { notebookEnv } from "./notebook/env"
 +// [local-smark] LSP bridge 端点：通过 VSCode API 获取诊断/hover/定义等 LSP 能力
 +import { lspTouch, lspDiagnostics, lspHover, lspDefinition, lspReferences, lspDocumentSymbol, lspWorkspaceSymbol } from "./lsp"
  
- // 强制 127.0.0.1 监听，不暴露 0.0.0.0
  const BRIDGE_HOST = "127.0.0.1"
-@@ -47,7 +49,12 @@ let registry: RegistryHandle | undefined
- // 只读路由跳过 withFileLock：summary/source/output 只读取 VS Code 文档状态，
- // 不修改 notebook/kernel，与并发 run/edit 不冲突。
- // cell-output 是 output 的路由别名（routeRequest 中 case fallthrough）。
--const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
-+// [local-smark] LSP 路由只读（不修改 notebook/kernel），加入 READONLY_ROUTES 避免不必要串行化
-+const READONLY_ROUTES = new Set([
-+  "/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output",
-+  "/lsp/touch", "/lsp/diagnostics", "/lsp/hover", "/lsp/definition",
-+  "/lsp/references", "/lsp/document-symbol", "/lsp/workspace-symbol",
-+])
- const fileLocks = new Map<string, Promise<void>>()
- // 锁表键为 notebook filePath，跨 handler 共享
- /** Per-filePath mutex: serializes notebook requests that target the same document. */
-@@ -224,6 +231,22 @@ async function routeRequest(
-       // bridge 只转发 body；operation 校验在 env
-       return await notebookEnv(body)
+ // 桥接服务仅绑定本机回环地址，杜绝网络暴露
  
-+    // [local-smark] LSP bridge 端点路由
-+    case "/lsp/touch":
-+      return await lspTouch(body as { filePath: string })
-+    case "/lsp/diagnostics":
-+      return await lspDiagnostics(body as { filePath?: string })
-+    case "/lsp/hover":
-+      return await lspHover(body as { filePath: string; line: number; character: number })
-+    case "/lsp/definition":
-+      return await lspDefinition(body as { filePath: string; line: number; character: number })
-+    case "/lsp/references":
-+      return await lspReferences(body as { filePath: string; line: number; character: number })
-+    case "/lsp/document-symbol":
-+      return await lspDocumentSymbol(body as { filePath: string })
-+    case "/lsp/workspace-symbol":
-+      return await lspWorkspaceSymbol(body as { query: string })
+ // 路由集合先决定是否读取请求体，未知路径不能因无关 JSON 内容从 404 变成 500。
+ const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env"])
++// LSP也经过同一鉴权和JSON边界，全局查询不能被Notebook路径要求挡住。
++const LSP_ROUTES = new Set(["/lsp/touch", "/lsp/diagnostics", "/lsp/hover", "/lsp/definition", "/lsp/references", "/lsp/document-symbol", "/lsp/workspace-symbol"])
 +
-     // 路由到内核重启 handler，body 已在 filePath 锁内读入
-     // 独立 kernel 端点（#91 中间态；#92 将并入 env）
+@@ -45,7 +51,7 @@ let closing = true
+ // 在既有 filePath 必填检查后加锁，同文档处理串行，失败也必须释放后继请求。
+ const fileLocks = new Map<string, Promise<void>>()
+ // 只读操作沿同一路由owner旁路，不占用长run持有的文档锁。
+-const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output"])
++const READONLY_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/output", "/notebook/cell-output", ...LSP_ROUTES])
+ 
+ 
+ function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+@@ -141,7 +147,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
+       }
+ 
+       // 保留源未知路由的 404；即使 body 是 null、数组或坏 JSON，也不启动解析器。
+-      if (request.method !== "POST" || !NOTEBOOK_ROUTES.has(url.pathname)) return writeJson(response, 404, { ok: false, error: "Not found" })
++      if (request.method !== "POST" || !(NOTEBOOK_ROUTES.has(url.pathname) || LSP_ROUTES.has(url.pathname))) return writeJson(response, 404, { ok: false, error: "Not found" })
+       // 只解析一次请求体；鉴权先完成，语法错误仍由原 500 边界处理。
+       const body = await readJson(request)
+       // env 也需要提交明确路径，非对象请求与其它 notebook 路由共用既有 400 边界。
+@@ -213,16 +219,17 @@ async function routeRequest(
+   body: unknown,
+   output: { appendLine(value: string): void },
+ ) {
+-  if (method !== "POST" || !NOTEBOOK_ROUTES.has(pathname)) return undefined
++  if (method !== "POST" || !(NOTEBOOK_ROUTES.has(pathname) || LSP_ROUTES.has(pathname))) return undefined
+   // undefined 是未匹配路由的判别值，不能被 HTTP 层序列化成成功的空结果。
+ 
+   if (!isRecord(body)) {
+     throw new Error("Expected JSON object body")
    }
+ 
+-  const filePath = stringProp(body, "filePath")
++  const filePath = stringProp(body, "filePath") ?? ""
+   // 已鉴权路由共享必填路径检查，不能用类型断言把缺失路径送入新的严格接口。
+-  if (!filePath) throw new Error("filePath is required")
++  // 两个全局LSP查询没有目标文档，其余端点仍要求明确路径。
++  if (!filePath && pathname !== "/lsp/diagnostics" && pathname !== "/lsp/workspace-symbol") throw new Error("filePath is required")
+ 
+   const handler = async () => {
+     switch (pathname) {
+@@ -250,6 +257,22 @@ async function routeRequest(
+         return await readNotebookCellOutput(filePath, undefined, cellId)
+       }
+ 
++      // LSP处理器只访问编辑器状态，不排队等待Notebook执行锁。
++      case "/lsp/touch":
++        return await lspTouch(body as { filePath: string })
++      case "/lsp/diagnostics":
++        return await lspDiagnostics(body as { filePath?: string })
++      case "/lsp/hover":
++        return await lspHover(body as { filePath: string; line: number; character: number })
++      case "/lsp/definition":
++        return await lspDefinition(body as { filePath: string; line: number; character: number })
++      case "/lsp/references":
++        return await lspReferences(body as { filePath: string; line: number; character: number })
++      case "/lsp/document-symbol":
++        return await lspDocumentSymbol(body as { filePath: string })
++      case "/lsp/workspace-symbol":
++        return await lspWorkspaceSymbol(body as { query: string })
++
+     }
+ 
+     return undefined
 diff --git a/sdks/vscode/src/lsp.ts b/sdks/vscode/src/lsp.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..c7681bb4bb7efda2b9fc077e18758159f78d4ed2

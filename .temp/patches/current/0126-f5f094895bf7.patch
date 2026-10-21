@@ -5,12 +5,14 @@ Subject: [PATCH] =?UTF-8?q?feat(text-decoding):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E8=87=AA=E5=8A=A8=E6=96=87=E6=9C=AC=E8=A7=A3=E7=A0=81=E5=99=A8?=
  =?UTF-8?q?=EF=BC=8C=E6=94=AF=E6=8C=81UTF-8=E5=92=8CUTF-16LE=E7=BC=96?=
 
-diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
+diff --git a/packages/core/src/text-decoding.ts b/packages/core/src/text-decoding.ts
 new file mode 100644
 index 0000000000..b1e14aba7f
 --- /dev/null
-+++ b/packages/opencode/src/util/text-decoding.ts
-@@ -0,0 +1,139 @@
++++ b/packages/core/src/text-decoding.ts
+@@ -0,0 +1,141 @@
++import { TextDecoder } from "node:util"
++
 +// #126：自动文本解码支持的编码集合
 +export type TextEncoding = "utf-8" | "utf-16le" | "utf-16be" | "gb18030"
 +
@@ -150,19 +152,20 @@ index 0000000000..b1e14aba7f
 +    },
 +  }
 +}
+diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/util/text-decoding.ts
+@@ -0,0 +1,1 @@
++export { createAutoTextDecoder, decodeText, detectTextEncoding, type TextEncoding } from "@opencode-ai/core/text-decoding"
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 index c7cea5405f..c7d1c15e4f 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -22,6 +22,8 @@ import { ChildProcess } from "effect/unstable/process"
- import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
- import { ShellPrompt, type Parameters } from "./shell/prompt"
+@@ -24,1 +24,3 @@
  import { BashArity } from "@/permission/arity"
 +import { createAutoTextDecoder } from "@/util/text-decoding"
 +// #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
- 
- // Git 写操作的子命令集合：这些命令会修改仓库状态，需要用户明确授权
- // Git 写操作集合：修改 refs/index/工作树，须最新用户明确授权
 @@ -665,53 +667,63 @@ export const ShellTool = Tool.define(
            yield* Effect.addFinalizer(closeSink)
            const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
@@ -171,7 +174,7 @@ index c7cea5405f..c7d1c15e4f 100644
 -            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
 -              const size = Buffer.byteLength(chunk, "utf-8")
 -              list.push({ text: chunk, size })
--              // 收集诊断信息用于压缩后的附录生成
+-              // 采样容量独立于 capture 限额，无换行输出也不能无限积累。
 -              diag.push(chunk)
 -              used += size
 -              while (used > keep && list.length > 1) {
@@ -346,9 +349,11 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 index 56fe38fbea..c04bc45cc7 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1239,3 +1239,41 @@ describe("tool.shell windows encoding", () => {
-     )
-   }
+@@ -1285,5 +1285,43 @@
+         expect(lines[lineCount - 1]).toBe(String(lineCount))
+       }),
+     ),
+   )
  })
 +
 +
@@ -388,3 +393,73 @@ index 56fe38fbea..c04bc45cc7 100644
 +  )
 +})
 +
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -19,4 +19,5 @@
+ import { Shell } from "../shell"
+ import { ToolOutputStore } from "../tool-output-store"
+ import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
++import { createAutoTextDecoder } from "../text-decoding"
+ 
+@@ -163,1 +164,1 @@
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
+@@ -243,3 +244,6 @@
+               const diag = new BashDiagnosticCollector({ enabled })
+-              const decoder = new TextDecoder()
++              const decoder = createAutoTextDecoder()
++              const preview = createAutoTextDecoder()
++              const parts: string[] = []
++              let captured = 0
+               const started = yield* Clock.currentTimeMillis
+@@ -270,1 +274,10 @@
+-                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => diag.push(decoder.decode(chunk, { stream: true }))))),
++                  onOutput: (chunk) => write(chunk).pipe(
++                    Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })),
++                    Effect.andThen(Effect.sync(() => {
++                      diag.push(decoder.write(chunk))
++                      if (captured >= MAX_CAPTURE_BYTES) return
++                      const end = Math.min(chunk.byteLength, MAX_CAPTURE_BYTES - captured)
++                      parts.push(preview.write(chunk.subarray(0, end)))
++                      captured += end
++                    })),
++                  ),
+@@ -277,3 +290,3 @@
+-              diag.push(decoder.decode())
++              diag.push(decoder.end())
+               diag.end()
+               const diagnostic = diag.snapshot()
+@@ -299,3 +312,4 @@
+-              const output = result.output?.toString("utf8") || "(no output)"
++              const text = parts.join("") + preview.end()
++              const output = text || "(no output)"
+               // 传真实调用 command，不使用描述或重新解析执行命令。
+               const compressed = compressVisibleOutput(output, { enabled }, input.command)
+@@ -313,1 +327,1 @@
+-                retain: compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
++                retain: (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -418,5 +418,20 @@
+               expect((yield* settleTool(registry, call({ command: "Write-Output '中文'" }))).output?.structured).toMatchObject({ exit: 0 })
+               expect((yield* settleTool(registry, call({ command: "Write-Output '中文'; exit 9" }))).output?.structured).toMatchObject({ exit: 9 })
+             }), LayerNode.compile(AppProcess.node), shell)
++            const raw = Buffer.from("warning: 默认分发: Ubuntu-22.04\r\n", "utf16le")
++            const bytesCommand = `$bytes = [byte[]](${Array.from(raw)}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)`
++            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++              const settled = yield* settleTool(registry, call({ command: bytesCommand, compress_output: false }))
++              expect(settled.result.type).toBe("content")
++              const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++              expect(text).toContain("warning: 默认分发: Ubuntu-22.04")
++              expect(text).not.toContain("\u0000")
++              expect(text).not.toContain("\uFFFD")
++              expect(settled.output?.structured).toMatchObject({ exit: 0, truncated: false, diagnosticWarningLikeLines: 1 })
++              const retained = settled.outputPaths?.[0]
++              if (!retained) throw new Error("expected retained UTF-16LE output")
++              expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(raw)
++              expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
++            }), LayerNode.compile(AppProcess.node), shell)
+           }
+         }),

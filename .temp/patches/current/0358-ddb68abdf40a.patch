@@ -30,12 +30,12 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +++ b/packages/opencode/src/provider/provider.ts
 @@ -37,4 +37,5 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
  const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
--// 请求默认超时 5 分钟：覆盖无显式 timeout 的 provider 请求
+-// 总超时约束握手后的整个请求，不能靠连续首包或分块活动无限续期。
 -const DEFAULT_TIMEOUT_MS = 300_000
 +// [local-smark] 整请求绝对超时:从 fetch 发起计时的硬死线,到点即中断(即使仍在持续来 chunk)。
 +// 默认 10 分钟;其触发的 AbortSignal.timeout 错误在 message-v2 transportError 中归类为可重试。
 +const DEFAULT_TIMEOUT_MS = 600_000
- 
+ // #168：归一化 provider 请求头；剥离非 string / 原 UA 后再写入权威 User-Agent
 @@ -2109,5 +2111,7 @@ for (const [id, provider] of configProviders) {
  
         const customFetch = options["fetch"]
@@ -45,6 +45,93 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 +        const chunkTimeout = options["chunkTimeout"] ?? 180_000
         const headerTimeout = options["headerTimeout"] ?? 300_000
         delete options["chunkTimeout"]
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -131,1 +131,2 @@
+-            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 300_000).pipe(
++            // 同一provider的native入口也使用十分钟缺省，显式值与false不变。
++            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 600_000).pipe(
+diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/opencode/test/session/llm-native.test.ts
+--- a/packages/opencode/test/session/llm-native.test.ts
++++ b/packages/opencode/test/session/llm-native.test.ts
+@@ -5,2 +5,3 @@
+-import { Effect, Fiber, Layer, Stream } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
++import { TestClock } from "effect/testing"
+ import { FetchHttpClient } from "effect/unstable/http"
+@@ -606,1 +607,45 @@
++  it.effect("native provider deadlines default to ten minutes and honor overrides", () =>
++    Effect.gen(function* () {
++      for (const timeout of [undefined, 120_000, false] as const) {
++        const started = yield* Deferred.make<void>()
++        const state = { ended: false }
++        const native = LLMNativeRuntime.stream({
++          model: baseModel,
++          provider: { ...providerInfo, options: { ...providerInfo.options, timeout } },
++          auth: undefined,
++          llmClient: {
++            prepare: () => Effect.die("unused"),
++            // 只替换运输：让真实native期限包裹一个已开始、尚未结束的provider流。
++            stream: () => Stream.fromEffect(Deferred.succeed(started, undefined)).pipe(Stream.flatMap(() => Stream.never)),
++            generate: () => Effect.die("unused"),
++          },
++          messages: [], tools: {}, headers: {}, abort: new AbortController().signal,
++        })
++        if (native.type === "unsupported") throw new Error(native.reason)
++        const running = yield* native.stream.pipe(
++          Stream.runDrain,
++          Effect.exit,
++          Effect.onExit(() => Effect.sync(() => { state.ended = true })),
++          Effect.forkChild,
++        )
++        yield* Deferred.await(started)
++        // 默认跨过旧五分钟截断点；false则跨过十分钟，不能只测试快速成功。
++        const before = timeout === false ? 1_200_000 : timeout === undefined ? 300_001 : timeout - 1
++        yield* TestClock.adjust(before)
++        expect(state.ended).toBe(false)
++        if (timeout === false) {
++          yield* Fiber.interrupt(running)
++          continue
++        }
++        // 继续推进到实际死线，显式两分钟和缺省十分钟均须返回真实超时失败。
++        yield* TestClock.adjust((timeout ?? 600_000) - before)
++        const exit = yield* Fiber.join(running)
++        expect(Exit.isFailure(exit)).toBe(true)
++        if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toMatchObject({
++          reason: { message: "Provider request timed out", kind: "timeout" },
++        })
++      }
++    }),
++  )
++
+   it.effect("compiles through the native OpenAI Responses route", () =>
+diff --git a/packages/core/src/aisdk.ts b/packages/core/src/aisdk.ts
+--- a/packages/core/src/aisdk.ts
++++ b/packages/core/src/aisdk.ts
+@@ -86,3 +86,4 @@ function prepareOptions(model: ModelV2.Info, pkg: string) {
+   const customFetch = options.fetch
+-  const chunkTimeout = options.chunkTimeout
++  // 缺省启用三分钟SSE空闲期限，显式false仍沿原分支禁用。
++  const chunkTimeout = options.chunkTimeout ?? 180_000
+   delete options.chunkTimeout
+@@ -96,1 +97,1 @@
+-        ? AbortSignal.timeout(typeof options.timeout === "number" ? options.timeout : 300_000)
++        ? AbortSignal.timeout(typeof options.timeout === "number" ? options.timeout : 600_000)
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -393,1 +393,2 @@
+-          duration: model.timeout ?? 300_000,
++          // 原生provider turn与AISDK使用相同的十分钟缺省总期限。
++          duration: model.timeout ?? 600_000,
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -695,1 +695,2 @@
+-        const minutes = timeout === false ? 7 : (timeout ?? 300_000) / 60_000
++        // 默认期限改为十分钟；虚拟时钟仍验证持续有chunk时也按总期限结束。
++        const minutes = timeout === false ? 7 : (timeout ?? 600_000) / 60_000
 diff --git a/packages/sdk/js/src/gen/types.gen.ts b/packages/sdk/js/src/gen/types.gen.ts
 --- a/packages/sdk/js/src/gen/types.gen.ts
 +++ b/packages/sdk/js/src/gen/types.gen.ts

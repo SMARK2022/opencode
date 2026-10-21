@@ -1163,66 +1163,61 @@ new file mode 100644
 +| P08 | 解码工具管道按编码/解码模式细分 | `base64 file \| sh` | dangerous，`decoded/decompressed payload piped to interpreter` | 编码模式保持普通general/原可见载荷规则；仅解码模式保留dangerous | 原规则按工具族，此项改变模式范围；本轮保留原工具族匹配 | |
 +| P09 | 已识别os.remove或fs.unlinkSync成员调用，目标为变量名 | `python -c 'os.remove(path)'`；`node -e 'fs.unlinkSync(path)'` | general，`interpreter eval command requires explicit approval` | cautious；Python为`Python file deletion requires explicit approval`，Node为`interpreter file deletion requires explicit approval` | 用户明确指定这两个调用进入普通删除审查；复用现有事实与分级流程，其他API和政策沿用既定范围 | A：用户本轮明确授权 |
 
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
-@@ -64,11 +64,11 @@ export function evaluate(
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -318,6 +318,7 @@
+         "@ai-sdk/vercel": "2.0.39",
+         "@ai-sdk/xai": "3.0.102",
+         "@aws-sdk/credential-providers": "3.1057.0",
++        "@babel/core": "7.28.4",
+         "@effect/opentelemetry": "catalog:",
+         "@effect/platform-node": "catalog:",
+         "@effect/sql-sqlite-bun": "catalog:",
+diff --git a/packages/core/package.json b/packages/core/package.json
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -83,6 +83,7 @@
+     "@ai-sdk/xai": "3.0.102",
+     "@aws-sdk/credential-providers": "3.1057.0",
++    "@babel/core": "7.28.4",
+     "@effect/opentelemetry": "catalog:",
+     "@effect/platform-node": "catalog:",
+     "@effect/sql-sqlite-bun": "catalog:",
+     "@lydell/node-pty": "catalog:",
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
+@@ -63,9 +63,9 @@ export function evaluate(
    }) => Effect.Effect<void>,
  ) {
    return Effect.gen(function* () {
 -    // #203：路由顺序：precheck 先于 reviewer——确定性层按四级分层拦截
 -    const precheck = PermissionPrecheck.evaluate(input)
--    // #232：shell-origin 与 tool-origin external_directory 不再单独分支——统一由
--    // #232：precheck 的 externalDirectoryEffect 提升为 cautious 或保持 dangerous deny。
 +    // 等待共享grammar取得原level/reason，后续审批与授权政策保持原分支。
 +    const precheck = yield* Effect.promise(() => PermissionPrecheck.evaluate(input))
-     // [local-smark] auto 五级预审路由开始（R2 五级拆分）
-+    // safe/general/cautious/dangerous/forbidden 是 LLM 负载边界：safe 和 general
-+    // 默认直接允许；cautious 与 dangerous（可授权高风险）进入 reviewer/user
-     // #232：safe/general/cautious/dangerous/forbidden 是 LLM 负载边界——safe 和 general 默认直接
-     // #232：允许；cautious 与 dangerous（可授权高风险）进入 reviewer/user
-     // #232：fallback；forbidden（不可逆灾难）终审拒绝，reviewer 不可见、授权不可放行。strict 是
+     // 五级路由：forbidden终审拒绝；cautious/dangerous进入既有reviewer及失败回退。
+     // safe/general默认直过，strict仍保留低风险也审的用户配置，不新增权限执行owner。
+     if (precheck.level === "forbidden") return { action: "deny", reason: precheck.reason, source: "precheck" } satisfies Decision
+     if (precheck.level === "safe" && !input.strict) {
 
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
-@@ -1,14 +1,33 @@
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
+@@ -1,13 +1,11 @@
+ // membership仅作同步词法判定，不读取真实目录或引入另一套仓库发现机制。
+ import { normalize, resolve, sep } from "node:path"
++import { ShellParse } from "../shell/parse"
+ 
 -// #220：precheck.ts — shell 命令静态启发式预分类器
 -// #220：设计哲学：fail-closed。无法理解的语法/动态展开/编码混淆都降级为 general 或更高风险层级
 -// #220：分层：raw 扫描 → 包装器递归 → 结构解析 → token 分类 → 聚合
-+// ============================================================
-+// precheck.ts — shell 命令静态语义预分类器
-+// ============================================================
-+
-+import * as nodePath from "node:path"
-+import { ShellParse } from "@/shell/parse"
-+//
-+// 设计哲学：fail-closed（失败保守）。任何无法理解的语法、动态展开、
-+// 编码混淆都降级为 general 或更高风险层级，绝不猜测为 safe。
-+//
-+// 分层架构：
-+//   Phase 1 — 语法事实提取：共享grammar确定命令、引用、重定向与管道边界，
-+//             输入文件和输出文件单独保存，避免被误作删除操作数
-+//   Phase 2 — 包装器载荷提取与递归：shell/PowerShell/cmd/ssh/wsl 等
-+//             包装器的内层脚本提取后递归预审，内层风险向外传播
-+//   Phase 3 — 参数角色绑定：选项消费自己的值，源码按对应语言识别调用与数据
-+//   Phase 4 — token 启发式分类：基于命令名 + 参数谓词的结构化规则，
-+//             按威胁类别组织（删除、权限、持久化、网络、包管理等）
-+//   Phase 5 — 多段聚合：取所有分段中的最高风险层级
-+//
-+// 核心不变量：
-+//   • 包装器永远不是 safe（内层 safe 仍回 general）
-+//   • 语法问题与普通动态参数沿用general，已确定风险继续参与聚合
-+//   • 最高等级优先，同级具体原因去重保留，审批政策仍由原路由负责
-+// ============================================================
- 
 -// #220：不变量：包装器永不 safe；splitCommands 未建模语法降级；dangerous 短路
 -// #202：四级预审分层——safe/general/cautious/dangerous 替代 allow/prompt/deny 三态
- // [local-smark] 五级词汇（R2 计划）：dangerous 与 forbidden 拆分——dangerous 是
- // 可授权高风险（进 reviewer，显式授权可 allow）；forbidden 是终审拒绝
- // （不可逆灾难，任何授权不可放行）。maxRisk 依赖本数组顺序作为严重度序。
- // membership 判定用 node:path 的 resolve/normalize/sep（同步纯词法，无 I/O）。
--import { normalize, resolve, sep } from "node:path"
++// 语法层分离命令、数据和重定向角色；分类器只消费事实，不执行命令或源码。
++// 语法不完整维持general下限，实际风险与同层原因继续聚合，审批沿原路由。
+ // 五级顺序直接用于maxRisk：dangerous可授权但逐次审查，forbidden终审拒绝。
+ // 不把预审层级混入模型的risk_level或user_authorization词汇。
  export const LEVELS = ["safe", "general", "cautious", "dangerous", "forbidden"] as const
  export type Level = (typeof LEVELS)[number]
  export type Decision = { level: Level; reason: string }
@@ -1270,12 +1265,12 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
  
  // [local-smark] R3 reason 语义化：明示删除对象层级与终局性（forbidden 授权不可
  // 放行 / dangerous 需显式授权），替换 "critical recursive delete" 黑话。
-@@ -96,83 +81,72 @@ const DANGEROUS_INTERPRETER_DELETE =
+@@ -96,82 +81,71 @@ const DANGEROUS_INTERPRETER_DELETE =
  // [local-smark] 解释器族共享路径交替组（R3 审计 B-01）：旧版裸 `\/` 分支匹配任意
  // 绝对路径（os.remove("/tmp/x") 都被 forbidden）。真实矩阵：forbidden 根/家/系统根
  // 一级；dangerous 恰好二级；任意路径由 cautious 兑底（RE_C_*）。边界前瞻前必须
 -// 容忍可选尾斜杠（tab 补全形态 "/etc/ssl/"），该族无 token 层兑底。
--const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
+-const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
 -const INTERPRETER_DANGEROUS_PATH = String.raw`\/(?:${POSIX_SYSTEM_ROOTS})\/[^\/\s"']+\/[^\/\s"']+\/?(?=["'\s)])`
 -const RE_D_CURL_PIPE_INTERPRETER = /\b(?:curl|wget)\b[^|;]*\|\s*(?:(?:sudo|doas|env)\s+)*(?:sh|bash|zsh|python|node|ruby|perl|pwsh|powershell|cmd|iex|invoke-expression)\b/i
 -const RE_D_PS_DOWNLOAD_EXEC = /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|;]*\|\s*(?:iex|Invoke-Expression)\b/i
@@ -1351,9 +1346,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +// -H '--data=@.env'整体是header值；列入此表不代表该选项会读取文件或触发审查。
 +const CURL_VALUES = ["-d", "--data", "--data-binary", "--data-raw", "--data-urlencode", "-F", "--form", "--form-string", "-T", "--upload-file", "-H", "--header", "--proxy-header", "-u", "--user", "-U", "--proxy-user", "-o", "--output", "-A", "--user-agent", "-e", "--referer", "-X", "--request", "--url", "-x", "--proxy", "-K", "--config"]
 +
- // [local-smark] 磁盘格式化/分区族 → forbidden：盘上数据不可逆（用户决策：格式化等
- // 磁盘操作归 Forbidden）。mkfs 不走封闭集合：`mkfs` / `mkfs.*` 前缀族判定
- // （R2 GAP-1：vfat/ntfs/exfat/f2fs/msdos 等变体曾因枚举缺失而 general 直通）。
+ // 磁盘格式化/分区属于forbidden；mkfs.*按前缀分类，避免封闭枚举漏过文件系统变体。
+ // 关机族另行可授权审查，不能继续共用旧SYSTEM_DESTRUCTIVE_COMMANDS集合。
 +// 仅在路径包含安全相关上下文时才判定为敏感（见 isSensitiveKeyFile）。
 +const SENSITIVE_PATH_CORE_PATTERN = String.raw`(?:\.env(?:\.[^\s|;]+)?|${WINDOWS_HOME_SENSITIVE_PATH_PATTERN}|(?:~|[^\s|;]+)\/\.ssh(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.aws(?:\/credentials)?|(?:~|[^\s|;]+)\/\.config\/gcloud(?:\/[^\s|;]+)?|(?:~|[^\s|;]+)\/\.kube\/config|(?:~|[^\s|;]+)\/\.npmrc|(?:~|[^\s|;]+)\/\.netrc|(?:~|[^\s|;]+)\/\.git-credentials|credentials\.json|${SSH_PRIVATE_KEY_NAME_PATTERN})`
 +
@@ -1390,7 +1384,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +// 绝对路径（os.remove("/tmp/x") 都被 forbidden）。真实矩阵：forbidden 根/家/系统根
 +// 一级；dangerous 恰好二级；普通字面路径删除保持cautious。路径边界前必须
 +// 容忍可选尾斜杠（tab补全形态"/etc/ssl/"），并沿用解释器独立的路径集合。
-+const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
++const INTERPRETER_FORBIDDEN_PATH = String.raw`\/(?=["'\s)])|~\/?(?=["'\s)])|\$HOME\/?(?=["'\s)])|\/(?:${POSIX_SYSTEM_ROOTS})(?:\/[^\/\s"']+)?\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS}|root)\/?(?=["'\s)])|\/(?:${POSIX_USER_DATA_ROOTS})\/[^\/\s"']+\/?(?=["'\s)])`
 +const INTERPRETER_DANGEROUS_PATH = String.raw`\/(?:${POSIX_SYSTEM_ROOTS})\/[^\/\s"']+\/[^\/\s"']+\/?(?=["'\s)])`
 +
 +// 原持久化写入规则只接收已绑定的输出路径；正文中的同名路径保持普通数据。
@@ -1432,9 +1426,9 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
    patterns: readonly string[]
    metadata: Readonly<Record<string, unknown>>
  }) {
-@@ -301,60 +275,207 @@ function bashEffect(input: {
-   // metadata 必带 cwd；缺失时（pattern 直评路径等）向下传 undefined，
-   // classifyGit 按 fail-closed 保守判 outside。
+@@ -301,56 +275,207 @@ function bashEffect(input: {
+   // cwd来自实际审批metadata；缺失时保守判outside，不猜测进程当前目录。
+   // 原始命令、canonical与inline源码沿同一基准分类，不削弱已有最高风险。
    const cwd = typeof input.metadata.cwd === "string" ? input.metadata.cwd : undefined
 -  // #285：metadata.command 缺省时退化为 patterns 拼接，保持与旧 evaluateShell 兼容；
 -  // 存在原始命令时始终以其为最低基线
@@ -1442,9 +1436,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -  if (!command) return evaluateShell(patternCommand, 0, cwd)
 +  if (!command) return evaluateShell(patternCommand, 0, cwd, shellDialect(input.metadata.shell))
  
--  // [local-smark] 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据
--  // 风险取 max。inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的
--  // 源码证据，只能提高风险不能降低：forbidden/dangerous source 在任何 gate 都不可被弱化
+-  // 原始命令、canonical与最终inline源码取最高风险，附加证据不能降低既有判断。
 -  const raw = shellEvidenceRisk(command, input.metadata, cwd)
 +  // 原始命令风险 + canonical pattern 风险 + inline_scripts 附加证据风险取 max。
 +  // inline_scripts 是 ShellTool 规范化 PowerShell inline Python 时附加的源码证据，
@@ -1454,16 +1446,14 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -  // #285：canonical 与原始命令相同时无需二次评估，避免重复解析
 -
 -  // #285：shell metadata 是原始审计证据，permission patterns 是 canonical 规则键。
--  // auto precheck 必须同时考虑两个视角并保留更高风险，forbidden/dangerous 载荷不可被削弱，
+-  // 两视角及inline源码取最高风险，forbidden/dangerous载荷不得被规范化pattern削弱，
 -  // 也不能让 env 赋值将 git push --force 从 cautious 降为 general。
 -  return maxRisk(raw, evaluateShell(patternCommand, 0, cwd))
 +  return maxRisk(raw, await evaluateShell(patternCommand, 0, cwd, shellDialect(input.metadata.shell)))
  }
  
--// [local-smark] inline_scripts 附加证据风险：在原命令风险之上单调叠加每个字符串
--// source 的 evaluateShell 结果。inline_scripts 是 Python 源码而非 shell 命令，除
--// evaluateShell 常规模式外还需 RE_C_PYTHON_FILE_REMOVE_CALL：该模式正常需要
--// python -c 前缀才能命中，而 inline_scripts 源码没有该前缀
+-// 附加证据是没有python -c前缀的源码；补单文件删除分类，畸形项不降低原风险。
+-// 复用既有classifier和maxRisk，不建立另一套Python执行或审批路径。
 -function shellEvidenceRisk(command: string, metadata: Readonly<Record<string, unknown>>, cwd?: string): Decision {
 -  const scripts = Array.isArray(metadata.inline_scripts)
 -    ? metadata.inline_scripts.filter((item): item is string => typeof item === "string")
@@ -1686,7 +1676,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
      input.permission === "edit" &&
      // #230：edit 权限的 files 数组含 delete 项即提升 cautious——update/add 不提升
      Array.isArray(input.metadata.files) &&
-@@ -405,42 +528,79 @@ export function canAlwaysAllowPrefix(tokens: string[]) {
+@@ -405,40 +528,79 @@ export function canAlwaysAllowPrefix(tokens: string[]) {
    )
  }
  
@@ -1718,9 +1708,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -
 -  // #217：包装器载荷递归——重定向或不支持分隔符会让整条命令不透明，
 -  // #217：扫描未引用段以发现可见的包装器载荷，破坏性脚本体保留 cautious/dangerous 层级
--  // [local-smark] R2 实现审计 B-01：此处必须含 forbidden——否则
--  // `bash -c 'mkfs.vfat …' > log` 的 token 独有 forbidden 载荷被丢弃，
--  // 重定向致整段 opaque 后回退 general 直通 auto-allow（安全回归实测）。
+-  // wrapper的forbidden必须传播，避免重定向使外层opaque而被降成general直过。
 -  for (const wrapped of rawWrapperScripts(command)) {
 -    const decision = evaluateShell(wrapped, depth + 1, cwd)
 -    if (decision.level === "dangerous" || decision.level === "cautious" || decision.level === "forbidden") return decision
@@ -1796,8 +1784,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -  // #355：cautious 段的审查信号。无任何可分析段（整条 opaque）时回退 general，等价旧行为。
 -  if (opaque) decisions.push({ level: "general", reason: "opaque shell segment requires explicit approval" })
    if (decisions.length === 0) return { level: "general", reason: "opaque shell command requires explicit approval" }
-   // [local-smark] R1 段合并：同层全量收集去重保序后才拼 reason（用户需求：
-   // 「等直到所有的cautious待检项检出之后进行reason的附加」），不再 find(first)
+   // 同层全部reason去重保序，避免find(first)漏掉后续命中规则。
+   // forbidden/dangerous/cautious优先序及safe/general收尾不变，不跨级混入弱信号。
 @@ -453,38 +613,102 @@ function evaluateShell(command: string, depth: number, cwd?: string): Decision {
    }
    const escalated = aggregate("forbidden") ?? aggregate("dangerous") ?? aggregate("cautious")
@@ -1954,7 +1942,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
      if (strippedPrefix?.level === "cautious") {
        const inner = normalizeCommandName(tokens[1])
        return {
-@@ -523,305 +751,6 @@ function evaluateCommand(command: string, depth: number, cwd?: string): Decision
+@@ -523,303 +751,6 @@ function evaluateCommand(command: string, depth: number, cwd?: string): Decision
    return { level: "general", reason: "unknown shell command" }
  }
  
@@ -2071,10 +2059,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -  return tokenizeRich(command)?.tokens
 -}
 -
--// [local-smark] R1 实现审计 B-01r2：tokenize 的 POSIX 反斜杠转义会剥掉未加
--// 单引号的反斜杠（..\other → ..other），剥损事实只存在于本解析循环——
--// 以 per-token 标记暴露给 -C membership 消费者：目标 token 经历过剥损即
--// 无法与字面量区分，一律保守 outside（多审不漏审），镜像盘符相对剥损 guard。
+-// POSIX转义可能把..\other剥成看似inside的..other，必须在实际分词点记录剥损。
+-// 旧tokenize接口不变；membership只消费逐token标记，不新增解析器或文件系统探测。
 -function tokenizeRich(command: string): { tokens: string[]; stripped: boolean[] } | undefined {
 -  // #197：分词器比完整 shell 解析器更小——保留引号空格和转义字符用于路径参数，但畸形引号或悬空转义强制 general
 -  const out: string[] = []
@@ -2281,7 +2267,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
  function wslScript(tokens: string[]) {
    // #197：WSL 接受 --exec 载荷或 distro/user 选项后的命令——仅提取可见载荷，缺失仍 general 因 WSL 启动另一 OS shell
    const optionsWithValue = new Set(["-d", "--distribution", "-u", "--user", "--cd"])
-@@ -868,267 +783,159 @@ function wslScript(tokens: string[]) {
+@@ -868,262 +783,157 @@ function wslScript(tokens: string[]) {
    }
  }
  
@@ -2324,8 +2310,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -// 多斜杠（/home//user → /home/user）并解析 .. 穿越（/root/../etc → /etc）。
 -function foldProtectedPathText(text: string) {
 -  let out = text.replace(/(?!^)\/{2,}/g, "/")
--  while (/\/[^/]+\/\.\.(?=\/|$)/.test(out)) {
--    out = out.replace(/\/[^/]+\/\.\.(?=\/|$)/, "")
+-  while (/\/[^/\s]+\/\.\.(?=\/|$)/.test(out)) {
+-    out = out.replace(/\/[^/\s]+\/\.\.(?=\/|$)/, "")
 -  }
 -  return out
 -}
@@ -2403,9 +2389,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 -
 -  // ---- sudoers 提权面 ----
 -  if (RE_D_SUDOERS_WRITE.test(normalized)) return "sudoers modification grants privilege escalation"
--  // cp/mv/install 目的位写入 sudoers：sudoers 路径位于段尾（$ / ; / | 前）→ dangerous。
--  // 必须在 raw 层拦：cautiousRaw 的 RAW_FILE_MOVE 会把 `sudo mv ... /etc/sudoers.d/x`
--  // 抢先降为 cautious（R2 GAP-2 实测）。源位形式（sudoers 在前）不匹配。
+-  // sudoers仅目的位写入才dangerous，须先于通用move的cautious规则；源位不命中。
 -  if (RE_D_SUDOERS_COPY_DEST.test(normalized)) return "sudoers modification grants privilege escalation"
 -
 -  // ---- 系统根二级子目录删除（R3 分级：可授权高风险，显式授权可放行）----
@@ -2457,9 +2441,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
  // `host:path`（含 example.com 形态）；单字母盘符 `F:\x` 不匹配（避免 Windows 本地路径误判为远端）。
  const RE_REMOTE_OPERAND = /^(?:[^\s"@]+@[^\s:"]+:|\[[0-9a-fA-F:]+\]:|[A-Za-z][A-Za-z0-9.-]{2,}:)/
  
--// [local-smark] W4 出向判定：剥除 -i / -o IdentityFile 身份参数后，若存在远端
--// 操作数且首个远端操作数之前出现敏感本地路径（非 .pub 后缀）则视为出向外传。
--// 判错方向为 cautious（fail 方向偏严），与既有 token 层 remote transfer 审查衔接。
+-// 身份参数不算出向载荷；首个远端操作数之前的敏感本地文件才归dangerous。
+-// 入向和公钥继续走token层cautious，不额外放行或扩大命令解析范围。
 -function credentialOutboundTransfer(normalized: string): boolean {
 -  const stripped = normalized
 -    .replace(/(?:\s|^)-i\s+\S+/g, " ")
@@ -2479,10 +2462,8 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
    }
    // 无远端操作数则不是凭据外传（token 层另有 cautious 审查）
    if (firstRemote === -1) return false
-   // [local-smark] R2 实现审计 B-02：必须用非锚定包含语义（与旧
-   // RE_D_CREDENTIAL_REMOTE_TRANSFER 一致）：`/home/alice/.env`、`keys/id_rsa` 等
-   // 带路径前缀的敏感文件同样算出向载荷；锚定全 token 匹配会把它们静默降为
-   // cautious 并重新进入会话缓存（授权放大）。.pub 拒绝仍在前置过滤。
+   // 保留旧规则的非锚定包含语义，带目录前缀的私钥/.env不能降级后重新进入缓存。
+   // 公钥后缀仍由下方独立过滤，不能因敏感目录前缀误判为秘密外传。
 -  const sensitive = new RegExp(SENSITIVE_PATH_ARGUMENT_PATTERN, "i")
 +  const sensitive = new RegExp(SENSITIVE_PATH_PATTERN, "i")
    return tokens
@@ -2743,26 +2724,7 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +  return bound.flags.includes("-delete") || ["-exec", "-execdir"].some((flag) => bound.values.get(flag)?.some((name) => normalizeCommandName(name) === "rm"))
  }
  
- // [local-smark] R1 语义二分：-C 只是 cwd 重定向，按目标目录 membership 豁免；
-@@ -1382,14 +1193,14 @@ function redirectsInsideCwd(target: string | undefined, cwd: string | undefined)
-   // 会把未加单引号的 Windows 路径 F:\a\b 剥成 F:ab，恰好落入此形态——一律
-   // 保守 outside，剥损只会导致多审不会导致漏审。
-   if (/^[A-Za-z]:(?:$|[^\\/])/.test(target)) return false
--  const abs = normalize(resolve(cwd, target))
--  const base = normalize(cwd)
-+  const abs = nodePath.normalize(nodePath.resolve(cwd, target))
-+  const base = nodePath.normalize(cwd)
-   if (process.platform === "win32") {
-     const a = abs.toLowerCase()
-     const c = base.toLowerCase()
--    return a === c || a.startsWith(c + sep)
-+    return a === c || a.startsWith(c + nodePath.sep)
-   }
--  return abs === base || abs.startsWith(base + sep)
-+  return abs === base || abs.startsWith(base + nodePath.sep)
- }
- 
- // #220：classifyGit——Git 子命令专项分类器，替代 cautiousGitSubcommand
+ // -C按cwd归属区分；配置/仓库/helper注入不能因路径inside而豁免。
 @@ -1487,37 +1298,6 @@ function classifyGitSubcommand(tokens: string[], i: number): Decision | undefine
  // #203：读取或列出 .env、SSH key、云凭据等本地敏感位置不是立即外传，因此不是
  // #203：dangerous；但它会把密钥内容或密钥存在性暴露给 shell 输出和模型上下文，
@@ -3094,78 +3056,24 @@ diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/sr
 +
 +export * as PermissionPrecheck from "./precheck"
 
-diff --git a/packages/opencode/src/shell/parse.ts b/packages/opencode/src/shell/parse.ts
+diff --git a/packages/core/src/shell/parse.ts b/packages/core/src/shell/parse.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/shell/parse.ts
-@@ -0,0 +1,193 @@
++++ b/packages/core/src/shell/parse.ts
+@@ -0,0 +1,139 @@
 +// Shell 解析事实层：共享工具入口的 grammar，提供参数、重定向和管道的独立记录。
-+// 本模块只解释语法；权限等级、路径保护及授权政策由 permission/precheck 维护。
-+// parse 返回的 Tree 由调用者释放，analyze 则在返回普通数据之前自行释放 Tree。
-+import { Language, type Node } from "web-tree-sitter"
-+import { fileURLToPath } from "node:url"
-+import { lazy } from "@/util/lazy"
++// Tree由调用者或analyze释放；权限等级和路径保护仍由permission/precheck维护。
++import type { Node } from "web-tree-sitter"
++import { Shell } from "../shell"
 +
 +export type Dialect = "bash" | "powershell" | "cmd"
 +export type Word = { value: string; start: number; end: number; quoted: boolean; stripped: boolean; dynamic: boolean }
 +export type Redirect = { operator: string; target?: Word; content?: string }
 +export type Command = { words: Word[]; redirects: Redirect[]; group: number; pipeTo?: number }
 +
-+// 解析Bun内嵌资源与开发目录中的同一WASM引用，保持原ShellTool的路径合同。
-+const resolveWasm = (asset: string) => asset.startsWith("/") || /^[a-z]:/i.test(asset) ? asset : fileURLToPath(new URL(asset, import.meta.url))
-+
-+// grammar只装载一次；每次解析的语法树独立，解析期间没有异步交错。
-+const parsers = lazy(async () => {
-+  const { Parser } = await import("web-tree-sitter")
-+  const { default: wasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, { with: { type: "wasm" } })
-+  await Parser.init({ locateFile: () => resolveWasm(wasm) })
-+  const { default: bash } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, { with: { type: "wasm" } })
-+  const { default: ps } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, { with: { type: "wasm" } })
-+  return Promise.all([bash, ps].map(async (asset) => {
-+    // 两种方言分别持有parser，调用方只保留自己的Tree。
-+    const parser = new Parser()
-+    parser.setLanguage(await Language.load(resolveWasm(asset)))
-+    return parser
-+  }))
-+})
-+
 +// 返回语法树；兼容变换仅作用于分析文本，工具执行始终使用原命令。
 +export async function parse(source: string, dialect: Dialect) {
-+  const tree = (await parsers())[dialect === "powershell" ? 1 : 0].parse(dialect === "powershell" ? normalize(source) : dialect === "cmd" ? normalizeCmd(source) : source)
-+  if (!tree) throw new Error("Failed to parse shell command")
-+  return tree
-+}
-+
-+// [local-smark] 裸 `--` 词法盲区归一化，迁移自ShellTool。
-+// tree-sitter-powershell 0.25.10（package.json钉版）对引号外的独立--缺少词法归类，
-+// 因其前缀预留给自减运算符，command规则会断裂，曾导致三次git commit丢失审批节点。
-+// 紧邻分隔符时也会丢弃所在命令段。解析输入引号化为"--"后，两种形态均可恢复。
-+// 这只改变解析表示，实际执行及审计metadata保持原文，沿用inline-python的分离合同。
-+// 独立Token边界为首尾、空白以及分隔符`;`、`&`、`|`，包括已验证的--;和--&形态。
-+// --%是PowerShell stop-parsing标志，--flag等带后续字符的形式也保持原文。
-+// 引号内--属于数据；引用边界不确定时保持原引用状态，不主动拆开数据。
-+export function normalize(source: string) {
-+  let result = ""
-+  let quote = ""
-+  for (let index = 0; index < source.length; index++) {
-+    const char = source[index]
-+    if (quote) {
-+      // PowerShell反引号和原兼容路径的双引号反斜杠，都可保护关闭引号。
-+      if (char === quote && source[index - 1] !== "`" && !(quote === '"' && source[index - 1] === "\\")) quote = ""
-+      result += char
-+      continue
-+    }
-+    if (["'", '"', "`"].includes(char)) quote = char
-+    if (char === "-" && source[index + 1] === "-" &&
-+      (index === 0 || /[\s;&|]/.test(source[index - 1])) &&
-+      (index + 2 === source.length || /[\s;&|]/.test(source[index + 2]))) {
-+      result += '"--"'
-+      index++
-+      continue
-+    }
-+    result += char
-+  }
-+  return result
++  return Shell.parse(dialect === "cmd" ? normalizeCmd(source) : source, dialect === "powershell")
 +}
 +
 +// cmd复用Bash结构grammar；这里只屏蔽cmd中的字面字符，保留实际连接符。
@@ -3296,154 +3204,30 @@ new file mode 100644
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -6,11 +6,10 @@ import { ToolProgress } from "./progress"
+@@ -6,6 +6,7 @@ import { ToolProgress } from "./progress"
  import path from "path"
  import { containsPath, type InstanceContext } from "../project/instance-context"
  import { InstanceState } from "@/effect/instance-state"
--import { lazy } from "@/util/lazy"
--import { Language, type Node } from "web-tree-sitter"
-+import type { Node } from "web-tree-sitter"
-+import { ShellParse } from "@/shell/parse"
+ import type { Node } from "web-tree-sitter"
++import { ShellParse } from "@opencode-ai/core/shell/parse"
  
  import { FSUtil } from "@opencode-ai/core/fs-util"
--import { fileURLToPath } from "url"
- import { Config } from "@/config/config"
- import { RuntimeFlags } from "@/effect/runtime-flags"
- import { Shell } from "@opencode-ai/core/shell"
-@@ -161,12 +160,6 @@ type Segment = Range & {
-   text: string
- }
- 
--const resolveWasm = (asset: string) => {
--  if (asset.startsWith("file://")) return fileURLToPath(asset)
--  if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
--  const url = new URL(asset, import.meta.url)
--  return fileURLToPath(url)
--}
- 
- function parts(node: Node) {
-   const out: Part[] = []
-@@ -375,8 +368,9 @@ function truncateWindow(text: string, maxLines: number, maxBytes: number, direct
-   return { text: visible, cut: true, hidden }
- }
- 
+@@ -346,3 +347,4 @@ function truncateWindow(text: string, maxLines: number, maxBytes: number, direct
 -const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
--  const tree = yield* Effect.promise(() => parser().then((p) => (ps ? p.ps : p.bash).parse(command)))
+-  return yield* Effect.promise(() => Shell.parse(command, ps))
 +const parse = Effect.fn("ShellTool.parse")(function* (command: string, dialect: ShellParse.Dialect) {
-+  // 工具与预检共享同一grammar加载器，原有调用方继续负责释放自己的Tree。
-+  const tree = yield* Effect.promise(() => ShellParse.parse(command, dialect))
-   if (!tree) throw new Error("Failed to parse command")
-   return tree
++  // 工具与预检共享同一grammar，原执行文本与Tree释放责任保持不变。
++  return yield* Effect.promise(() => ShellParse.parse(command, dialect))
  })
-@@ -716,32 +710,6 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
-     detached: process.platform !== "win32",
-   })
- }
--const parser = lazy(async () => {
--  const { Parser } = await import("web-tree-sitter")
--  const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
--    with: { type: "wasm" },
--  })
--  const treePath = resolveWasm(treeWasm)
--  await Parser.init({
--    locateFile() {
--      return treePath
--    },
--  })
--  const { default: bashWasm } = await import("tree-sitter-bash/tree-sitter-bash.wasm" as string, {
--    with: { type: "wasm" },
--  })
--  const { default: psWasm } = await import("tree-sitter-powershell/tree-sitter-powershell.wasm" as string, {
--    with: { type: "wasm" },
--  })
--  const bashPath = resolveWasm(bashWasm)
--  const psPath = resolveWasm(psWasm)
--  const [bashLanguage, psLanguage] = await Promise.all([Language.load(bashPath), Language.load(psPath)])
--  const bash = new Parser()
--  bash.setLanguage(bashLanguage)
--  const ps = new Parser()
--  ps.setLanguage(psLanguage)
--  return { bash, ps }
--})
- 
- // Windows 下禁止使用的 Unix 文本工具集合
- const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
-@@ -997,51 +965,6 @@ function listCommand(name: string) {
-   return "the shell-native directory listing command"
- }
- 
--// [local-smark] 600 裸 `--` 词法盲区归一化：tree-sitter-powershell 0.25.10 对引号外的
--// 独立 `--` token 没有词法归类，command 规则在其后断裂：单语句形态丢失全部
--// command 节点（生产事故：3 次零权限 ask 的 git commit），紧邻分隔符形态丢弃
--// 所在命令段（审批证据缺段）。引号化为 `"--"` 后两种形态均完整解析，且对
--// bash grammar 无害。仅用于权限解析输入，实际执行命令保持原文（INV-03）。
--// token 边界 = 空白/串首/串尾/分隔符 `;` `&` `|`；豁免 `--%` 与一切 `--x` sequel 形态。
--function normalizeBareDoubleDash(command: string) {
--  // 快路径：无 -- 时零拷贝返回，绝大多数命令不进入状态机。
--  if (!command.includes("--")) return command
--  let out = ""
--  let quote: "" | "'" | '"' | "`" = ""
--  for (let i = 0; i < command.length; i++) {
--    const ch = command[i]!
--    if (quote) {
--      // 双引号内 bash 以反斜杠转义、PowerShell 以反引号转义 closing quote；两者都接受。
--      // 过度保持引号态只会错过改写（fail-safe：不改写就不改写），不会错误改写。
--      const escaped = command[i - 1] === "`" || (quote === '"' && command[i - 1] === "\\")
--      if (ch === quote && !escaped) quote = ""
--      out += ch
--      continue
--    }
--    if (ch === "'" || ch === '"' || ch === "`") {
--      quote = ch
--      out += ch
--      continue
--    }
--    const after = command[i + 2]
--    const before = command[i - 1]
--    // 独立 `--` token：两侧均非 token 字符且非 `--%` 保留字（sequel 为 % 直接豁免）
--    // `--flag` 因 sequel 是字母（token 字符）被左侧否定排除，天然不改写。
--    if (ch === "-" && command[i + 1] === "-" && after !== "%" && !isTokenChar(after) && !isTokenChar(before)) {
--      // i++ 跳过第二个 -，避免第二字符重复进入独立 token 判定。
--      out += '"--"'
--      i++
--      continue
--    }
--    out += ch
--  }
--  return out
--}
--
--// token 字符 = 非空白/非分隔符的可见字符；`--` 两侧均非 token 字符即独立 token
--function isTokenChar(ch: string | undefined) {
--  return ch !== undefined && !/\s/.test(ch) && ch !== ";" && ch !== "&" && ch !== "|"
--}
- 
- export const ShellTool = Tool.define(
-   ShellID.ToolID,
-@@ -1137,7 +1060,7 @@ export const ShellTool = Tool.define(
- 
-       // [local-smark] 600 零 command 节点兜底（INV-01）：grammar 归一化后仍解析不出
-       // 任何 command 节点的非空命令，以解析输入 trim 原文作为 pattern 进入 ask——
--      // 分级由 precheck 手写 tokenizer 精确完成（进入分类的入口，非 cautious 通道）。
-+      // 分级由 precheck 的共享grammar及Token角色规则完成（进入分类的入口，非 cautious 通道）。
-       // 条件限定零节点而非 patterns 空集：CWD 类命令解析正常但有意零 pattern
-       // （cd-only 契约测试锁定），不属于解析失败，不得扩审批面。
-       if (scan.patterns.size === 0 && locals.length === 0 && parseInput.trim()) {
-@@ -1550,12 +1473,12 @@ export const ShellTool = Tool.define(
-               // [local-smark] 600 裸 `--` 归一化仅作用于权限解析输入（INV-03）：实际执行
-               // 与 audit 元数据保持 params.command 原文；ps 分支限定因 bash grammar
-               // 对 `--` 天然免疫，不改无缺陷路径。
--              const parseInput = ps ? normalizeBareDoubleDash(params.command) : params.command
-+              const parseInput = ps ? ShellParse.normalize(params.command) : params.command
-               // 从配置和参数决定是否启用输出压缩，默认启用
+@@ -903,7 +905,7 @@ export const ShellTool = Tool.define(
                const compressOutput = (cfg.tool_output?.bash_compression ?? true) && (params.compress_output ?? true)
                yield* Effect.scoped(
                  Effect.gen(function* () {
--                  const tree = yield* Effect.acquireRelease(parse(parseInput, ps), (tree) =>
-+                  const tree = yield* Effect.acquireRelease(parse(parseInput, ps ? "powershell" : name === "cmd" ? "cmd" : "bash"), (tree) =>
+-                  const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
++                  const tree = yield* Effect.acquireRelease(parse(params.command, ps ? "powershell" : name === "cmd" ? "cmd" : "bash"), (tree) =>
                      Effect.sync(() => tree.delete()),
                    )
-                                 // parse 后检测 Unix 工具误用，不兼容时抛出错误阻止执行
+                   // 检查发生在权限与执行之前，tree 的 acquireRelease 仍负责失败释放。
 
 diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/test/permission/auto.test.ts
 --- a/packages/opencode/test/permission/auto.test.ts
@@ -3512,7 +3296,7 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +++ b/packages/opencode/test/permission/precheck.test.ts
 @@ -1,313 +1,336 @@
  import { describe, expect, test } from "bun:test"
-+import * as nodePath from "node:path"
++import nodePath from "node:path"
  import { resolve, sep } from "node:path"
  import { PermissionPrecheck } from "../../src/permission/precheck"
  
@@ -4376,7 +4160,7 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
          permission: "external_directory",
          patterns: ["/outside/*"],
          metadata: {
-@@ -487,230 +516,307 @@ describe("permission precheck bash classifier", () => {
+@@ -487,239 +516,316 @@ describe("permission precheck bash classifier", () => {
            shell: "pwsh",
            inline_scripts: ["print('hello')"],
          },
@@ -4510,6 +4294,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 -    expect(bash("rm -r /usr")).toMatchObject({ level: "forbidden" })
 -    expect(bash("rm -r /home")).toMatchObject({ level: "forbidden" })
 -    expect(bash("rm -r /usr/local")).toMatchObject({ level: "forbidden" })
+-    // 引号使raw扫描无法匹配标志，确保token分支仍区分保护根与普通目录。
+-    expect(bash('"rm" "-r" "/usr"')).toMatchObject({ level: "forbidden" })
+-    expect(bash('"rm" "--recursive" "node_modules"')).toMatchObject({ level: "cautious" })
 -    // raw 层穿透包装器：rm -r / 在 bash -c / ssh / wsl / 命令替换中均被确定性拦截
 -    expect(bash("/bin/sh -c 'rm -r /'")).toMatchObject({ level: "forbidden" })
 -    expect(bash("ssh example.com 'rm -r /'")).toMatchObject({ level: "forbidden" })
@@ -4520,6 +4307,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect((await bash("rm -r /usr"))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("rm -r /home"))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("rm -r /usr/local"))).toMatchObject({ level: "forbidden" })
++    // 引用不改变实际argv身份，保护根和普通目标仍使用同一分类谓词。
++    expect((await bash('"rm" "-r" "/usr"'))).toMatchObject({ level: "forbidden" })
++    expect((await bash('"rm" "--recursive" "node_modules"'))).toMatchObject({ level: "cautious" })
 +    // 显式包装器载荷递归进入同一grammar；命令替换中的删除由其执行节点独立参与分类。
 +    expect((await bash("/bin/sh -c 'rm -r /'"))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("ssh example.com 'rm -r /'"))).toMatchObject({ level: "forbidden" })
@@ -4584,7 +4374,13 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect((await bash("rm -rf /Users/alice/Downloads/old-app"))).toMatchObject({ level: "cautious" })
      // /root/<deeper> → cautious（root 用户的家目录子路径）
 -    expect(bash("rm -rf /root/old-project")).toMatchObject({ level: "cautious" })
+-    // 引用命令与标志绕过raw匹配，验证token分支保留相同层级语义。
+-    expect(bash('"rm" "-r" "/home/alice"')).toMatchObject({ level: "forbidden" })
+-    expect(bash('"rm" "-r" "/home/alice/old"')).toMatchObject({ level: "cautious" })
 +    expect((await bash("rm -rf /root/old-project"))).toMatchObject({ level: "cautious" })
++    // 引用只移除词法外壳，不改变家目录与深层目录的原保护范围。
++    expect((await bash('"rm" "-r" "/home/alice"'))).toMatchObject({ level: "forbidden" })
++    expect((await bash('"rm" "-r" "/home/alice/old"'))).toMatchObject({ level: "cautious" })
    })
  
 -  test("still protects user-data root and one-level user home as forbidden", () => {
@@ -4613,11 +4409,13 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 -    expect(bash("rm -rf /Users/../etc")).toMatchObject({ level: "forbidden" })
 -    // 深层 .. 穿越到保护目标 → 仍 dangerous
 -    expect(bash("rm -rf /root/../etc")).toMatchObject({ level: "forbidden" })
+-    expect(bash('"rm" "-rf" "/root/../etc"')).toMatchObject({ level: "forbidden" })
 -    expect(bash("rm -rf /home/sunbenteng/../alice")).toMatchObject({ level: "forbidden" })
 +    expect((await bash("rm -rf /home/../etc"))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("rm -rf /Users/../etc"))).toMatchObject({ level: "forbidden" })
 +    // 深层 .. 穿越到保护目标 → 仍 dangerous（/root/../etc → /etc，/home/<user>/../<user> → /home/<user>）
 +    expect((await bash("rm -rf /root/../etc"))).toMatchObject({ level: "forbidden" })
++    expect((await bash('"rm" "-rf" "/root/../etc"'))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("rm -rf /home/sunbenteng/../alice"))).toMatchObject({ level: "forbidden" })
      // /Users 本身和 /Users/<user> → dangerous
 -    expect(bash("rm -rf /Users")).toMatchObject({ level: "forbidden" })
@@ -4632,7 +4430,11 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect((await bash("rm -rf /etc/passwd"))).toMatchObject({ level: "forbidden" })
      // R3 分级：/usr/local/bin 是系统根恰好二级 → dangerous（不再是 forbidden）
 -    expect(bash("rm -rf /usr/local/bin")).toMatchObject({ level: "dangerous" })
+-    // raw的..折叠不能跨操作数空白，否则会把前一个受保护目标拼进普通目录。
+-    expect(bash("rm -rf /home/alice /../tmp/cache")).toMatchObject({ level: "forbidden" })
 +    expect((await bash("rm -rf /usr/local/bin"))).toMatchObject({ level: "dangerous" })
++    // 各操作数独立归一，不能跨参数把前一个保护目录折叠掉。
++    expect((await bash("rm -rf /home/alice /../tmp/cache"))).toMatchObject({ level: "forbidden" })
    })
  
 -  // sudo 包装器应提取内层命令递归评估，而非短路。
@@ -4831,7 +4633,7 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
    test("filters broad always-allow prefixes", () => {
      expect(PermissionPrecheck.canAlwaysAllowPrefix(["git"])).toBe(false)
      expect(PermissionPrecheck.canAlwaysAllowPrefix(["git", "status"])).toBe(true)
-@@ -733,413 +839,434 @@ describe("permission precheck bash classifier", () => {
+@@ -733,411 +839,432 @@ describe("permission precheck bash classifier", () => {
    })
  
    // #220：解码/混淆载荷管道到解释器——载荷不可见，必须阻止
@@ -5518,16 +5320,14 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect((await bash("git --no-pager branch -D foo"))).toMatchObject({ level: "cautious" })
    })
  
-   // [local-smark] R1 git -C 语义二分:inside 按 membership 豁免,outside/注入提升,
-   // 双命中 reason 每条规则一行(用户原文「两行」);无 cwd 元数据时保守 outside。
-   // 基址必须 resolve 锚定成平台绝对路径:POSIX 下硬编码 "F:/..." 是相对路径，
-   // 会被 resolve 前缀 process.cwd() 导致全部误判 outside(实现审计 B-01，CI 红测)。
+   // inside/outside和注入信号独立验证，双命中逐行呈现，不以flag掩盖子命令。
+   // 基址先resolve为平台绝对路径，避免硬编码Windows路径让POSIX全部误判outside。
 -  test("classifies git -C by working-directory membership with full reason signals", () => {
 +  test("classifies git -C by working-directory membership with full reason signals", async () => {
      const cwd = resolve(sep + "work" + sep + "repo")
      // 命令内路径用正斜杠形式：tokenize 的 POSIX 转义会剥反斜杠使 win32 绝对
      // 路径退化为盘符相对剥损形态，这里让 prefix 判定独立受测；剥损形态另测。
-@@ -1148,331 +1275,377 @@ describe("permission precheck bash classifier", () => {
+@@ -1148,339 +1275,385 @@ describe("permission precheck bash classifier", () => {
        PermissionPrecheck.evaluate({ permission: "bash", patterns: [command], metadata: { command, cwd } })
  
      // 双信号:outside + 状态变更,效应类在前、每条规则独占一行
@@ -5972,10 +5772,18 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 -    expect(bash('git -C "$REPO" apply --index file.patch')).toMatchObject({ level: "cautious" })
 -    expect(bash('git -C "$REPO" reset --hard')).toMatchObject({ level: "cautious" })
 -    expect(bash('git -C "$REPO" checkout main')).toMatchObject({ level: "cautious" })
+-    // 不带-C验证真正保留了变更子命令，不能靠全局参数先行升级制造假绿。
+-    expect(bash('git apply "$PATCH"')).toMatchObject({ level: "cautious" })
+-    expect(bash("git reset $REV --quiet")).toMatchObject({ level: "cautious" })
+-    expect(bash("git reset `printf HEAD` --quiet")).toMatchObject({ level: "cautious" })
 +  test("keeps git mutations cautious when argv carries double-quoted expansions", async () => {
 +    expect((await bash('git -C "$REPO" apply --index file.patch'))).toMatchObject({ level: "cautious" })
 +    expect((await bash('git -C "$REPO" reset --hard'))).toMatchObject({ level: "cautious" })
 +    expect((await bash('git -C "$REPO" checkout main'))).toMatchObject({ level: "cautious" })
++    // 没有-C时仍须保留真正的变更子命令，不能依靠其他全局参数制造假绿。
++    expect((await bash('git apply "$PATCH"'))).toMatchObject({ level: "cautious" })
++    expect((await bash("git reset $REV --quiet"))).toMatchObject({ level: "cautious" })
++    expect((await bash("git reset `printf HEAD` --quiet"))).toMatchObject({ level: "cautious" })
      // 动态展开仍禁止整条升 safe
 -    expect(bash("echo $HOME")).toMatchObject({ level: "general" })
 -    expect(bash('echo "$HOME"')).toMatchObject({ level: "general" })
@@ -6049,9 +5857,11 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 -    expect(bash("ri -Recurse /")).toMatchObject({ level: "forbidden" })
 -    expect(bash("Remove-Item -Recurse /")).toMatchObject({ level: "forbidden" })
 -    expect(bash("Remove-Item -Force file.txt")).toMatchObject({ level: "cautious" })
+-    expect(bash("ri -Recurse docs")).toMatchObject({ level: "cautious" })
 +    expect((await bash("ri -Recurse /"))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("Remove-Item -Recurse /"))).toMatchObject({ level: "forbidden" })
 +    expect((await bash("Remove-Item -Force file.txt"))).toMatchObject({ level: "cautious" })
++    expect((await bash("ri -Recurse docs"))).toMatchObject({ level: "cautious" })
    })
  
 -  test("joins PowerShell -Command remaining tokens like cmd /c", () => {
@@ -6072,6 +5882,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 -    expect(bash("env FOO=1 rm file.txt")).toMatchObject({ level: "cautious" })
 -    expect(bash("env git reset --hard")).toMatchObject({ level: "cautious" })
 -    expect(bash("env git apply p.diff")).toMatchObject({ level: "cautious" })
+-    expect(bash("env -i FOO=1 mv old.txt new.txt")).toMatchObject({ level: "cautious" })
+-    expect(bash("env -u HOME git reset --hard")).toMatchObject({ level: "cautious" })
+-    expect(bash("env --unset HOME rm file.txt")).toMatchObject({ level: "cautious" })
 -    expect(bash("env")).toMatchObject({ level: "general" })
 +    // 语法迁移不变量：env 前缀穿透评估保留。
 +  test("pierces env wrapper for inner delete move and git mutations", async () => {
@@ -6079,6 +5892,9 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 +    expect((await bash("env FOO=1 rm file.txt"))).toMatchObject({ level: "cautious" })
 +    expect((await bash("env git reset --hard"))).toMatchObject({ level: "cautious" })
 +    expect((await bash("env git apply p.diff"))).toMatchObject({ level: "cautious" })
++    expect((await bash("env -i FOO=1 mv old.txt new.txt"))).toMatchObject({ level: "cautious" })
++    expect((await bash("env -u HOME git reset --hard"))).toMatchObject({ level: "cautious" })
++    expect((await bash("env --unset HOME rm file.txt"))).toMatchObject({ level: "cautious" })
 +    expect((await bash("env"))).toMatchObject({ level: "general" })
      // 与既有 env git status 守卫一致：wrapper 不得把内层 safe 升成 safe
 -    expect(bash("env git status")).toMatchObject({ level: "general" })

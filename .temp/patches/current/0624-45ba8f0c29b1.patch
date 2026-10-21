@@ -614,19 +614,165 @@ new file mode 100644
 +本计划已实施并通过独立实现审计（第2轮 APPROVE）。提交范围仅限本计划列出的生产与测试路径。
 \ No newline at end of file
 
+diff --git a/packages/core/src/filesystem/search.ts b/packages/core/src/filesystem/search.ts
+--- a/packages/core/src/filesystem/search.ts
++++ b/packages/core/src/filesystem/search.ts
+@@ -5 +5 @@
+-import { Context, Effect, Layer, Scope } from "effect"
++import { Cause, Context, Deferred, Effect, Exit, Layer } from "effect"
+@@ -30,20 +30,33 @@
+-    const scope = yield* Scope.Scope
+-    const state = {
+-      files: [] as string[],
+-      directories: [] as string[],
+-    }
+-    const directories = new Set<string>()
+-    yield* ripgrep
+-      .find({
+-        cwd: location.directory,
+-        pattern: "*",
+-        limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
+-        onEntry: (entry) =>
+-          Effect.sync(() => {
+-            state.files.push(entry.path)
+-            const parts = entry.path.split("/")
+-            parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
+-            state.directories = Array.from(directories)
+-          }),
+-      })
+-      .pipe(Effect.orDie, Effect.asVoid, Effect.forkIn(scope))
++    type Index = { files: string[]; directories: string[] }
++    // Location只共享正在执行的扫描；空闲构建不预扫，完成结果随请求释放。
++    const state: { pending?: Deferred.Deferred<Index, never> } = {}
++    const scan = Effect.fnUntraced(function* () {
++      const files: string[] = []
++      const directories = new Set<string>()
++      yield* ripgrep.find({
++        cwd: location.directory,
++        pattern: "*",
++        limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
++        onEntry: (entry) => Effect.sync(() => {
++          files.push(entry.path)
++          const parts = entry.path.split("/")
++          parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
++        }),
++      }).pipe(Effect.orDie)
++      return { files, directories: Array.from(directories) }
++    })
++    const scanOnce = Effect.fnUntraced(function* () {
++      return yield* Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
++        if (state.pending) return yield* restore(Deferred.await(state.pending))
++        const pending = Deferred.makeUnsafe<Index, never>()
++        state.pending = pending
++        const raw = yield* restore(scan().pipe(Effect.exit))
++        // 延续source扫描失败为空结果；中断原样传给等待者，不伪造成功。
++        const exit = Exit.isFailure(raw) && !Cause.hasInterrupts(raw.cause)
++          ? Exit.succeed({ files: [], directories: [] })
++          : raw
++        state.pending = undefined
++        yield* Deferred.done(pending, exit)
++        return yield* exit
++      }))
++    })
+@@ -104,14 +117,16 @@
+       find: (input) =>
+         Effect.gen(function* () {
++          const index = yield* scanOnce()
+           const items =
+             input.type === "file"
+-              ? state.files
++              ? index.files
+               : input.type === "directory"
+-                ? state.directories
+-                : [...state.files, ...state.directories]
+-          return fuzzysort.go(input.query, items, { limit: input.limit ?? 50 }).map((item) => {
+-            const relative = item.target
++                ? index.directories
++                : [...index.files, ...index.directories]
++          const query = input.query.trim()
++          const paths = query ? fuzzysort.go(query, items, { limit: input.limit ?? 50 }).map((item) => item.target) : items.slice(0, input.limit ?? 50)
++          return paths.map((relative) => {
+             const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
+             return Entry.make({
+               path: RelativePath.make(relative),
+               type,
+diff --git a/packages/core/test/filesystem/search.test.ts b/packages/core/test/filesystem/search.test.ts
+--- a/packages/core/test/filesystem/search.test.ts
++++ b/packages/core/test/filesystem/search.test.ts
+@@ -4 +4 @@
+-import { Effect } from "effect"
++import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+@@ -9,2 +9,6 @@
+ import { testEffect } from "../lib/effect"
++import { FileSystemSearch } from "@opencode-ai/core/filesystem/search"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { Location } from "@opencode-ai/core/location"
++import { location } from "../fixture/location"
+ 
+@@ -43,3 +47,55 @@
+     ),
+   )
+ })
++
++const scans = testEffect(Layer.empty)
++scans.live("building does not scan; searches share only an in-flight index", () => Effect.gen(function* () {
++  let count = 0
++  let gate = Deferred.makeUnsafe<void>()
++  const started = Deferred.makeUnsafe<void>()
++  const built = yield* Layer.build(Layer.fresh(FileSystemSearch.ripgrepLayer).pipe(Layer.provide([
++    LayerNode.compile(FSUtil.node),
++    Layer.succeed(Location.Service, location({ directory: AbsolutePath.make("/test") })),
++    Layer.mock(Ripgrep.Service, { find: (input) => Effect.gen(function* () {
++      count++
++      if (count === 2) yield* Deferred.succeed(started, undefined)
++      yield* Deferred.await(gate)
++      const entries = [{ path: RelativePath.make("src/a.ts"), type: "file" as const }]
++      if (input.onEntry) for (const entry of entries) yield* input.onEntry(entry)
++      return entries
++    }) }),
++  ])))
++  const search = Context.get(built, FileSystemSearch.Service)
++  const find = () => search.find({ query: "", type: "file" }).pipe(Effect.map((entries) => entries.map((entry) => String(entry.path))))
++  // 构建即原init边界，不得因测试mock尚未完成而把预扫误判为零。
++  expect(count).toBe(0)
++  yield* Deferred.succeed(gate, undefined)
++  expect(yield* find()).toEqual(["src/a.ts"])
++  expect(count).toBe(1)
++  gate = Deferred.makeUnsafe<void>()
++  const first = yield* find().pipe(Effect.exit, Effect.forkChild)
++  yield* Deferred.await(started).pipe(Effect.timeout("5 seconds"))
++  const second = yield* find().pipe(Effect.exit, Effect.forkChild)
++  // 等待者先进入已有租约，再打开扫描gate；不使用任意墙钟sleep判断并发。
++  yield* Effect.yieldNow
++  expect(count).toBe(2)
++  yield* Deferred.succeed(gate, undefined)
++  expect(yield* Fiber.join(first)).toEqual(Exit.succeed(["src/a.ts"]))
++  expect(yield* Fiber.join(second)).toEqual(Exit.succeed(["src/a.ts"]))
++  yield* find()
++  expect(count).toBe(3)
++}))
++
++scans.live("probe: mocked ripgrep drives both blank-query results", () => Effect.gen(function* () {
++  const built = yield* Layer.build(Layer.fresh(FileSystemSearch.ripgrepLayer).pipe(Layer.provide([
++    LayerNode.compile(FSUtil.node),
++    Layer.succeed(Location.Service, location({ directory: AbsolutePath.make("/test") })),
++    Layer.mock(Ripgrep.Service, { find: (input) => Effect.gen(function* () {
++      const entries = ["src/a.ts", "src/b.ts"].map((value) => ({ path: RelativePath.make(value), type: "file" as const }))
++      if (input.onEntry) for (const entry of entries) yield* input.onEntry(entry)
++      return entries
++    }) }),
++  ])))
++  const search = Context.get(built, FileSystemSearch.Service)
++  expect((yield* search.find({ query: "", type: "file" })).map((entry) => String(entry.path))).toEqual(["src/a.ts", "src/b.ts"])
++}))
 diff --git a/packages/core/src/session/part-view.ts b/packages/core/src/session/part-view.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/session/part-view.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,34 @@
 +export * as PartView from "./part-view"
 +
-+// TUI viewer 专用纯投影：删除与同 Part 其他字段逐字重复的大字段，减少 wire/store 的重复驻留。
-+// 当前唯一覆盖 edit 类工具的 metadata.filediff.patch（与 metadata.diff 是同一 patch 字符串）。
-+// 完整 SDK、Provider、daemon SummaryCache 都走原数据路径，不经过这里；
-+// 不同值、未知工具与非重复字段必须原样保留。
-+// 归属 core：daemon HTTP 投影（opencode）与 TUI store 投影（tui）共用同一实现，
-+// 两包互不依赖，共享 owner 只能在共同依赖 core 中。
++// viewer连接与TUI共用纯投影；只剪同一工具内逐字重复的patch，完整SDK/Provider路径不调用。
 +
 +// 结构最小约束：daemon 的 MessageV2.Part 与 TUI 的 SDK Part 共用同一 wire 形状，
 +// 但品牌 ID 类型不同；投影只读 type/status/metadata，不改写其余字段。
@@ -635,32 +781,35 @@ new file mode 100644
 +  state?: {
 +    status: string
 +    metadata?: Record<string, unknown>
++    structured?: Record<string, unknown>
 +  }
 +}
 +
 +export function project<T extends Projectable>(part: T): T {
 +  if (part.type !== "tool") return part
 +  if (part.state?.status !== "completed") return part
-+  const metadata = part.state.metadata
-+  if (!metadata) return part
-+  const diff = metadata["diff"]
-+  const filediff = metadata["filediff"]
-+  if (typeof diff !== "string") return part
-+  if (typeof filediff !== "object" || filediff === null || Array.isArray(filediff)) return part
-+  // 上行已排除 null/数组/非对象；Record 收窄只为索引读取，不改写值。
-+  const record = filediff as Record<string, unknown>
-+  if (record["patch"] !== diff) return part
-+  const rest = { ...record }
-+  delete rest["patch"]
-+  // 展开保留输入的完整形状；唯一变化是 filediff 失去与 diff 逐字相同的 patch。
-+  return { ...part, state: { ...part.state, metadata: { ...metadata, filediff: rest } } } as T
++  const metadata = projectFields(part.state.metadata)
++  const structured = projectFields(part.state.structured)
++  if (metadata === part.state.metadata && structured === part.state.structured) return part
++  return { ...part, state: { ...part.state, ...(metadata !== part.state.metadata ? { metadata } : {}), ...(structured !== part.state.structured ? { structured } : {}) } }
++}
++
++export function projectFields<T>(fields: T): T {
++  if (typeof fields !== "object" || fields === null || !("diff" in fields) || !("filediff" in fields)) return fields
++  const filediff = fields.filediff
++  if (typeof fields.diff !== "string" || typeof filediff !== "object" || filediff === null || Array.isArray(filediff)) return fields
++  if (!("patch" in filediff) || filediff.patch !== fields.diff) return fields
++  // V1 metadata与native structured只在正式viewer边界调用；共享事件及存储原对象始终不改写。
++  const rest: Record<string, unknown> = { ...filediff }
++  delete rest.patch
++  return { ...fields, filediff: rest }
 +}
 
 diff --git a/packages/core/test/session/part-view.test.ts b/packages/core/test/session/part-view.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/test/session/part-view.test.ts
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,58 @@
 +import { describe, expect, test } from "bun:test"
 +import { PartView } from "../../src/session/part-view"
 +
@@ -694,6 +843,12 @@ new file mode 100644
 +    expect(projected.state.metadata.diff).toBe(patch)
 +    // 原对象不被改写：投影必须返回副本，共享事件/DB 对象不能就地修改。
 +    expect((part.state.metadata.filediff as Record<string, unknown>).patch).toBe(patch)
++    // native工具使用structured，复用同一投影且重投影幂等，不能只覆盖V1 metadata。
++    const native = { type: "tool", state: { status: "completed", structured: part.state.metadata } }
++    const next = PartView.project(native)
++    expect(next.state.structured.filediff).toEqual({ file: "a.ts", additions: 1, deletions: 0 })
++    expect(PartView.project(next)).toBe(next)
++    expect(native.state.structured.filediff).toMatchObject({ patch })
 +  })
 +
 +  test("keeps filediff.patch when it differs from metadata.diff", () => {
@@ -714,6 +869,164 @@ new file mode 100644
 +  })
 +})
 
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -2495,12 +2495,16 @@
+   return rows.map((row) => {
+     if (!row.cold_ref) {
+       if (row.cold_key) throw new CorruptionError({ message: "Part owner has a key without a ref" })
++      if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot Part has a cold Stats projection" })
+       return row
+     }
+     if (row.cold_key) {
+       const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
+       if (!fields) throw new CorruptionError({ message: "Part inspect key is missing from pack", hash: row.cold_ref })
+-      return { ...row, data: restorePackedPart(row.data, fields, row.cold_ref) }
++      const data = restorePackedPart(row.data, fields, row.cold_ref)
++      // viewer替换thaw后仍保留同一cold_stats核对，不把损坏的投影读成成功。
++      requirePartStats(row, projectPartStats(data))
++      return { ...row, data }
+     }
+     return {
+       ...row,
+diff --git a/packages/server/src/handlers/message.ts b/packages/server/src/handlers/message.ts
+--- a/packages/server/src/handlers/message.ts
++++ b/packages/server/src/handlers/message.ts
+@@ -6,2 +6,4 @@
+ import { InvalidCursorError, SessionNotFoundError, UnknownError } from "@opencode-ai/protocol/errors"
++import { HttpServerRequest } from "effect/unstable/http"
++import { PartView } from "@opencode-ai/core/session/part-view"
+ 
+@@ -33,2 +35,3 @@
+       Effect.fn(function* (ctx) {
++        const request = yield* HttpServerRequest.HttpServerRequest
+         if (ctx.query.cursor && ctx.query.order !== undefined)
+@@ -71,3 +74,8 @@
+         return {
+-          data: messages,
++          // native消息只在私有viewer返回边界剪重复字段，runner/SDK查询及分页cursor保持原合同。
++          data: request.headers["x-opencode-tui-message-projection"] === "viewer"
++            ? messages.map((message) => message.type === "assistant"
++              ? { ...message, content: message.content.map((part) => PartView.project(part)) }
++              : message)
++            : messages,
+           cursor: {
+diff --git a/packages/server/src/handlers/event.ts b/packages/server/src/handlers/event.ts
+--- a/packages/server/src/handlers/event.ts
++++ b/packages/server/src/handlers/event.ts
+@@ -8,2 +8,3 @@
+ import { EventClients } from "../event-clients"
++import { PartView } from "@opencode-ai/core/session/part-view"
+ 
+@@ -12,9 +13,14 @@
+-function eventData(data: unknown): Sse.Event {
++function eventData(data: unknown, viewer: boolean): Sse.Event {
++  const encoded = Schema.encodeUnknownSync(OpenCodeEvent)(data)
++  // 先走正式编码，再投影当前连接的native成功事件；背压、事件身份与完整订阅不变。
++  const projected = viewer && encoded.type === "session.next.tool.success"
++    ? { ...encoded, data: { ...encoded.data, structured: PartView.projectFields(encoded.data.structured) } }
++    : encoded
+   return {
+     _tag: "Event",
+     event: "message",
+     id: undefined,
+-    data: JSON.stringify(Schema.encodeUnknownSync(OpenCodeEvent)(data)),
++    data: JSON.stringify(projected),
+   }
+ }
+ 
+@@ -26,3 +31,4 @@
+-    return handlers.handleRaw("event.subscribe", () =>
++    return handlers.handleRaw("event.subscribe", (ctx) =>
+       Effect.gen(function* () {
++        const viewer = ctx.request.headers["x-opencode-tui-message-projection"] === "viewer"
+         const connected = {
+@@ -41 +47 @@
+-        ).pipe(Stream.map(eventData), Stream.pipeThroughChannel(Sse.encode()))
++        ).pipe(Stream.map((event) => eventData(event, viewer)), Stream.pipeThroughChannel(Sse.encode()))
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -25 +25,2 @@
+ import { createSignal, onCleanup, onMount } from "solid-js"
++import { PartView } from "@opencode-ai/core/session/part-view"
+@@ -85,3 +86,5 @@
+           produce((draft) => {
+-            fn((draft[sessionID] ??= []))
++            // 只有显式刷新过的正文桶接收广播，未使用native历史的界面不被动留存全文。
++            const messages = draft[sessionID]
++            if (messages) fn(messages)
+           }),
+@@ -313 +316,2 @@
+-              structured: event.data.structured,
++              // TUI存储与native viewer传输共用幂等投影；进程内测试注入也不保留重复patch。
++              structured: PartView.projectFields(event.data.structured),
+@@ -430 +434 @@
+-            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
++            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } })
+diff --git a/packages/tui/test/cli/tui/data.test.tsx b/packages/tui/test/cli/tui/data.test.tsx
+--- a/packages/tui/test/cli/tui/data.test.tsx
++++ b/packages/tui/test/cli/tui/data.test.tsx
+@@ -263,3 +263,6 @@
+ test("settles pending tools when a live failure arrives", async () => {
+   const events = createEventSource()
+-  const calls = createFetch(undefined, events)
++  const calls = createFetch(
++    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
++    events,
++  )
+@@ -290,5 +293,6 @@
+   try {
+     await mounted
++    await sync.session.message.refresh("session-1")
+     emitEvent(events, {
+       id: "evt_agent_1",
+       type: "session.next.agent.switched",
+@@ -392,3 +396,6 @@
+ test("renders admitted prompts only after they become model-visible", async () => {
+   const events = createEventSource()
+-  const calls = createFetch(undefined, events)
++  const calls = createFetch(
++    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
++    events,
++  )
+@@ -419,5 +426,6 @@
+   try {
+     await mounted
++    await sync.session.message.refresh("session-1")
+     emitEvent(events, {
+       id: "evt_admitted_1",
+       type: "session.next.prompt.admitted",
+@@ -456,3 +464,6 @@
+ test("projects live context updates with their message ID", async () => {
+   const events = createEventSource()
+-  const calls = createFetch(undefined, events)
++  const calls = createFetch(
++    (url) => url.pathname === "/api/session/session-1/message" ? json({ data: [], cursor: {} }) : undefined,
++    events,
++  )
+@@ -483,3 +494,15 @@
+   try {
+     await mounted
++    await sync.session.message.refresh("session-1")
++    // 同一事件流的已加载消息作屏障：不能因广播先到就为无人使用的Session创建正文桶。
++    emitEvent(events, {
++      id: "evt_context_unloaded",
++      type: "session.next.context.updated",
++      properties: {
++        sessionID: "session-unloaded",
++        messageID: "msg_context_unloaded",
++        timestamp: 1,
++        text: "unloaded context".repeat(65536),
++      },
++    }, "proj_session_owner")
+     emitEvent(events, {
+@@ -496,3 +519,4 @@
+     await wait(() => sync.session.message.list("session-1")?.length === 1)
++    expect(sync.session.message.list("session-unloaded")).toBeUndefined()
+     expect(sync.session.message.list("session-1")?.[0]).toMatchObject({
+       id: "msg_context_1",
 diff --git a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx
 new file mode 100644
 --- /dev/null
@@ -872,66 +1185,397 @@ new file mode 100644
 +  }
 +})
 
-diff --git a/packages/tui/test/routes/session/residency-contract.test.ts b/packages/tui/test/routes/session/residency-contract.test.ts
+diff --git a/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx b/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
 new file mode 100644
 --- /dev/null
-+++ b/packages/tui/test/routes/session/residency-contract.test.ts
-@@ -0,0 +1,57 @@
-+import { describe, expect, test } from "bun:test"
-+import { readFileSync } from "node:fs"
-+import path from "node:path"
++++ b/packages/tui/test/cli/cmd/tui/session-message-render.test.tsx
+@@ -0,0 +1,388 @@
++/** @jsxImportSource @opentui/solid */
++import { expect, test } from "bun:test"
++import { Renderable, ScrollBoxRenderable, engine } from "@opentui/core"
++import { testRender, useRenderer } from "@opentui/solid"
++import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
++import { onCleanup, onMount } from "solid-js"
++import type { Agent, AssistantMessage, GlobalEvent, Model, Part, Provider, UserMessage } from "@opencode-ai/sdk/v2"
++import { Session } from "../../../../src/routes/session"
++import { registerOpencodeSpinner } from "../../../../src/component/register-spinner"
++import { ArgsProvider } from "../../../../src/context/args"
++import { ClipboardProvider } from "../../../../src/context/clipboard"
++import { DataProvider } from "../../../../src/context/data"
++import { EditorContextProvider } from "../../../../src/context/editor"
++import { ExitProvider } from "../../../../src/context/exit"
++import { KVProvider } from "../../../../src/context/kv"
++import { LocalProvider, useLocal } from "../../../../src/context/local"
++import { LocationProvider } from "../../../../src/context/location"
++import { PermissionProvider } from "../../../../src/context/permission"
++import { ProjectProvider } from "../../../../src/context/project"
++import { PromptRefProvider } from "../../../../src/context/prompt"
++import { RouteProvider } from "../../../../src/context/route"
++import { SDKProvider } from "../../../../src/context/sdk"
++import { SyncProvider, useSync } from "../../../../src/context/sync"
++import { ThemeProvider } from "../../../../src/context/theme"
++import { TuiConfigProvider } from "../../../../src/config"
++import { OpencodeKeymapProvider, registerOpencodeKeymap, useOpencodeKeymap } from "../../../../src/keymap"
++import { createPluginRuntime, PluginRuntimeProvider } from "../../../../src/plugin/runtime"
++import { DialogProvider } from "../../../../src/ui/dialog"
++import { ToastProvider } from "../../../../src/ui/toast"
++import { FrecencyProvider } from "../../../../src/component/prompt/frecency"
++import { PromptHistoryProvider } from "../../../../src/component/prompt/history"
++import { PromptStashProvider } from "../../../../src/component/prompt/stash"
++import { tmpdir } from "../../../fixture/fixture"
++import { TestTuiContexts } from "../../../fixture/tui-environment"
++import { createTuiResolvedConfig } from "../../../fixture/tui-runtime"
++import { createEventSource, createFetch, directory, json, worktree } from "./sync-fixture"
 +
-+// 0624「渲染资源窗口」在目标无 withRenderedSession 全帧 Session harness（源仓
-+// session-message-render.test 的 RQ-02 视口观察用例依赖该 harness 的真实 renderer
-+// 几何采样）。按 #506 subagent-footer-flow 与 #520 R1 B-01 先例，以源码模板合同锁定
-+// 驻留机制的结构契约——以下断言失败即代表容量+时间有界驻留、折叠即销毁或消费所有权
-+// 任一主路径被回归。
-+const source = readFileSync(path.join(import.meta.dir, "../../../src/routes/session/index.tsx"), "utf8")
++const sid = "ses_residency"
++const model = { id: "model", providerID: "provider", api: { id: "model", url: "", npm: "" }, name: "Test Model",
++  capabilities: { temperature: true, reasoning: false, attachment: true, toolcall: true,
++    input: { text: true, audio: false, image: false, video: false, pdf: false },
++    output: { text: true, audio: false, image: false, video: false, pdf: false }, interleaved: false },
++  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } }, limit: { context: 100_000, output: 4_000 },
++  status: "active", options: {}, headers: {}, release_date: "2024-01-01" } satisfies Model
++const provider = { id: "provider", name: "Provider", source: "custom", env: [], options: {}, models: { model } } satisfies Provider
++const agent = { name: "general", mode: "primary", permission: [], options: {} } satisfies Agent
++const user = (id: string, created: number): UserMessage => ({ id, sessionID: sid, role: "user", time: { created }, agent: "general", model: { providerID: provider.id, modelID: model.id } })
++const assistant = (id: string, created: number, parentID = "msg_user"): AssistantMessage => ({
++  id, sessionID: sid, parentID, role: "assistant", agent: "general", mode: "general", modelID: model.id, providerID: provider.id,
++  path: { cwd: directory, root: worktree }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  time: { created, completed: created + 1 }, finish: "stop",
++})
++const textPart = (id: string, messageID: string, text: string): Part => ({ id, sessionID: sid, messageID, type: "text", text })
++const toolPart = (id: string, messageID: string, output: string, contextOutput = output): Part => ({ id, sessionID: sid, messageID, type: "tool", callID: id, tool: "bash",
++  state: { status: "completed", input: { command: "fixture" }, output: contextOutput, title: "fixture", metadata: { output }, time: { start: 1, end: 2 } },
++})
++type App = Awaited<ReturnType<typeof testRender>>
++type Context = { sync: ReturnType<typeof useSync>; local: ReturnType<typeof useLocal>; keymap: ReturnType<typeof useOpencodeKeymap> }
 +
-+describe("session render residency template contracts", () => {
-+  test("capacity+time bounded residency constants and eviction pass exist", () => {
-+    // 预算常数是驻留参数而不是功能开关；移除即退化回全量常驻或固定窗口（R1 已证伪）。
-+    expect(source).toContain("const RESIDENCY_MAX_AGE_MS = 30_000")
-+    expect(source).toContain("const RESIDENCY_MAX_BYTES = 64 * 1024 * 1024")
-+    // LRU 驱逐按渲染 recency 排序；测量阶段关闭 viewport culling 保证重测可靠提交。
-+    expect(source).toContain("remeasuring() ? false : shouldCullSessionViewport")
-+    expect(source).toContain("lastRenderedAt.get(a.id) ?? 0) - (lastRenderedAt.get(b.id) ?? 0)")
-+    // renderAfter 入口把驻留 pass 与贴底判定放在同一帧驱动。
-+    expect(source).toContain("syncSessionViewportStuckToBottom")
-+    expect(source).toMatch(/function syncSessionViewportStuckToBottom[\s\S]{0,400}syncMessageResidency\(\)/)
++async function withRenderedSession(messages: Array<UserMessage | AssistantMessage>, parts: Record<string, Part[]>,
++  run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 }) {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, JSON.stringify({ thinking_mode: "show" }))
++  const events = createEventSource()
++  const info = { id: sid, directory, projectID: "proj_test", slug: sid, version: "1", title: sid, time: { created: 1, updated: 1 } }
++  const calls = createFetch((url) => {
++    if (url.pathname === "/session") return json([info])
++    if (url.pathname === `/session/${sid}`) return json(info)
++    if (url.pathname === `/session/${sid}/message`) return json(messages.map((message) => ({ info: message, parts: parts[message.id] ?? [] })))
++    if (url.pathname.endsWith("/todo") || url.pathname.endsWith("/diff")) return json([])
++    if (url.pathname.endsWith("/goal")) return json({})
++    if (url.pathname === "/session/status") return json({ [sid]: { type: "idle" } })
++    if (url.pathname === "/agent") return json([agent])
++    if (url.pathname === "/config/providers") return json({ providers: [provider], default: { [provider.id]: model.id } })
++    if (url.pathname === "/provider") return json({ all: [provider], default: { [provider.id]: model.id }, connected: [] })
++    return undefined
 +  })
++  let ctx: Context | undefined
++  function Probe() {
++    const value = { sync: useSync(), local: useLocal(), keymap: useOpencodeKeymap() }
++    onMount(() => { ctx = value })
++    return <Session />
++  }
++  function Harness() {
++    const renderer = useRenderer()
++    const config = createTuiResolvedConfig()
++    const keymap = createDefaultOpenTuiKeymap(renderer)
++    const runtime = createPluginRuntime()
++    onCleanup(registerOpencodeKeymap(keymap, renderer, config))
++    onCleanup(() => runtime.clear())
++    // 挂真实Session，不启动app或插件host；驻留、跟随与重测仍由生产renderAfter驱动。
++    return <TestTuiContexts paths={{ state: tmp.path }}><ClipboardProvider value={{ write: async () => {} }}>
++      <OpencodeKeymapProvider keymap={keymap}><ArgsProvider><ExitProvider exit={() => {}}><KVProvider><ToastProvider>
++      <RouteProvider initialRoute={{ type: "session", sessionID: sid }}><TuiConfigProvider config={config}>
++      <PluginRuntimeProvider value={runtime}><SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
++      <ProjectProvider><PermissionProvider><LocationProvider><DataProvider><SyncProvider>
++      <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}><LocalProvider><PromptStashProvider><DialogProvider>
++      <FrecencyProvider><PromptHistoryProvider><PromptRefProvider><EditorContextProvider><Probe />
++      </EditorContextProvider></PromptRefProvider></PromptHistoryProvider></FrecencyProvider></DialogProvider></PromptStashProvider></LocalProvider></ThemeProvider>
++      </SyncProvider></DataProvider></LocationProvider></PermissionProvider></ProjectProvider></SDKProvider></PluginRuntimeProvider>
++      </TuiConfigProvider></RouteProvider></ToastProvider></KVProvider></ExitProvider></ArgsProvider></OpencodeKeymapProvider>
++      </ClipboardProvider></TestTuiContexts>
++  }
++  registerOpencodeSpinner()
++  const app = await testRender(() => <Harness />, { ...size, footerHeight: 0, useThread: false })
++  try {
++    await waitForFrame(app, () => Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready && ctx.sync.data.message[sid]?.length))
++    if (!ctx) throw new Error("Session harness did not mount")
++    await run(app, events.emit, ctx)
++  } finally {
++    events.dispose()
++    app.renderer.destroy()
++    engine.detach()
++  }
++}
 +
-+  test("message roots keep id and frozen height while content owner is releasable", () => {
-+    // Message 根保留 id/实测高度；正文 owner 按 mounted 门控销毁与重建。
-+    expect(source).toMatch(/function UserMessage[\s\S]{0,2000}const mounted = createMemo\(\(\) => \(view\(\)\?\.mounted \?\? true\) \|\| ctx\.pinnedMessages\(\)\.has\(props\.message\.id\)\)/)
-+    expect(source).toMatch(/function AssistantMessage[\s\S]{0,3000}const mounted = createMemo\(\(\) => \(view\(\)\?\.mounted \?\? true\) \|\| ctx\.pinnedMessages\(\)\.has\(props\.message\.id\)\)/)
-+    expect(source).toContain('height={fixedHeight()}')
-+    // 已释放后 durable 更新标脏单条重测，其余根的冻结几何不动。
-+    expect(source).toContain("ctx.markMessageDirty(props.message.id)")
-+    // context 暴露只读视图与回写入口。
-+    expect(source).toContain("messageView: (id: string) => messageView[id]")
-+    expect(source).toContain("interaction: interactionState")
++async function pumpFrames(app: App, rounds: number) {
++  for (let i = 0; i < rounds; i++) {
++    await app.renderOnce()
++    await Promise.resolve()
++    await new Promise((resolve) => process.nextTick(resolve))
++    await Bun.sleep(0)
++  }
++}
++async function waitForFrame(app: App, predicate: (frame: string) => boolean) {
++  // 单调时钟保证受控推进Date.now时也有真实超时，不把等待变成无界循环。
++  const start = performance.now()
++  while (performance.now() - start < 5_000) {
++    await pumpFrames(app, 1)
++    const frame = app.captureCharFrame()
++    if (predicate(frame)) return frame
++  }
++  throw new Error(`frame did not settle:\n${app.captureCharFrame()}`)
++}
++function messageRoot(app: App, id: string) {
++  const root = app.renderer.root.findDescendantById(id)
++  if (!root) throw new Error(`missing message root ${id}`)
++  return root
++}
++function sessionScrollBox(app: App, id: string) {
++  let node: Renderable | null = messageRoot(app, id).parent
++  while (node && !(node instanceof ScrollBoxRenderable)) node = node.parent
++  if (!node) throw new Error("missing Session scrollbox")
++  return node
++}
++function contentNode(app: App, id: string) {
++  const root = messageRoot(app, id)
++  const stack = [root]
++  while (stack.length) {
++    const node = stack.pop()
++    if (!node) break
++    if (node !== root && "textBuffer" in node) return node
++    stack.push(...node.getChildren())
++  }
++}
++const released = (app: App, id: string) => contentNode(app, id) === undefined
++async function stableHeight(app: App, scroll: ScrollBoxRenderable) {
++  let last = -1
++  let stable = 0
++  await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 })
++  return last
++}
++async function click(app: App, text: string) {
++  const frame = await waitForFrame(app, (value) => value.includes(text))
++  const row = frame.split("\n").findIndex((line) => line.includes(text))
++  await app.mockMouse.click(5, row)
++  // 普通按钮点击不是拖选测试；退休空选区，避免native mouse模拟把已展开卡片意外pin住。
++  app.renderer.clearSelection()
++}
++function windowFixture(marker: string) {
++  const messages: Array<UserMessage | AssistantMessage> = []
++  const parts: Record<string, Part[]> = {}
++  for (let index = 0; index < 24; index++) {
++    const tag = String(index).padStart(2, "0")
++    const first = user(`msg_window_user_${tag}`, index * 2 + 1)
++    const second = assistant(`msg_window_assistant_${tag}`, index * 2 + 2, first.id)
++    messages.push(first, second)
++    parts[first.id] = [textPart(`part_window_user_${tag}`, first.id, `${marker} user ${tag}`)]
++    parts[second.id] = [textPart(`part_window_assistant_${tag}`, second.id, `${marker} assistant ${tag} ${"wrap content ".repeat(18)}`)]
++  }
++  return { messages, parts }
++}
++async function withFakeNow(run: (advance: (milliseconds: number) => void) => Promise<void>) {
++  const original = Date.now
++  let now = original()
++  Date.now = () => now
++  try { await run((milliseconds) => { now += milliseconds }) } finally { Date.now = original }
++}
++const AGE = 31_000
++
++test("tool card collapse and expand 100 times keeps identical frames and releases the body owner", async () => {
++  const info = assistant("msg_hundred_toggle", 1)
++  const output = Array.from({ length: 30 }, (_, index) => `hundred toggle line ${index}`).join("\n")
++  await withRenderedSession([info], { [info.id]: [toolPart("part_hundred_toggle", info.id, output)] }, async (app) => {
++    await click(app, "Click to expand")
++    await waitForFrame(app, (frame) => frame.includes("Click to collapse"))
++    await click(app, "Click to collapse")
++    const baseline = await waitForFrame(app, (frame) => frame.includes("Click to expand"))
++    const registry = (Renderable as { renderablesByNumber: Map<number, Renderable> }).renderablesByNumber
++    const size = registry.size
++    // 先预热再比较100轮稳态帧和真实renderable数，不能把visible隐藏误当资源销毁。
++    for (let round = 0; round < 100; round++) {
++      await click(app, "Click to expand")
++      await waitForFrame(app, (frame) => frame.includes("hundred toggle line 15") && frame.includes("Click to collapse"))
++      await click(app, "Click to collapse")
++      expect(await waitForFrame(app, (frame) => frame.includes("Click to expand"))).toBe(baseline)
++      expect(registry.size).toBe(size)
++    }
++  }, { width: 80, height: 40 })
++})
++
++test("offscreen messages release content after aging while roots geometry and expanded state stay exact", async () => {
++  const fixture = windowFixture("window")
++  fixture.parts[fixture.messages[1].id] = [toolPart("part_window_tool_00", fixture.messages[1].id, Array.from({ length: 30 }, (_, index) => `window expanded line ${index}`).join("\n"))]
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
++    await waitForFrame(app, (frame) => frame.includes("window assistant 23"))
++    const scroll = sessionScrollBox(app, fixture.messages[47].id)
++    ctx.keymap.dispatchCommand("session.first")
++    await click(app, "Click to expand")
++    const card = fixture.messages[1].id
++    scroll.scrollBy(messageRoot(app, card).y - scroll.y - 1)
++    await waitForFrame(app, (frame) => frame.includes("window expanded line 15"))
++    const heights = fixture.messages.map((item) => [item.id, messageRoot(app, item.id).height])
++    const fullHeight = await stableHeight(app, scroll)
++    ctx.keymap.dispatchCommand("session.last")
++    await waitForFrame(app, (frame) => frame.includes("window assistant 23") && frame.includes("window user 23"))
++    await withFakeNow(async (advance) => {
++      await pumpFrames(app, 3)
++      expect(released(app, fixture.messages[0].id)).toBe(false)
++      expect(released(app, card)).toBe(false)
++      advance(AGE)
++      const before = app.captureCharFrame()
++      await pumpFrames(app, 8)
++      // 根/逐根高度/滚动全长/可见帧同时不变，才能证明释放的是正文而非布局。
++      expect({ user: released(app, fixture.messages[0].id), card: released(app, card) }).toEqual({ user: true, card: true })
++      expect(await stableHeight(app, scroll)).toBe(fullHeight)
++      expect(fixture.messages.map((item) => [item.id, messageRoot(app, item.id).height])).toEqual(heights)
++      expect(app.captureCharFrame()).toBe(before)
++    })
++    ctx.keymap.dispatchCommand("session.first")
++    scroll.scrollBy(messageRoot(app, card).y - scroll.y - 1)
++    await waitForFrame(app, (frame) => frame.includes("window expanded line 15"))
++    expect(released(app, card)).toBe(false)
++    expect(await stableHeight(app, scroll)).toBe(fullHeight)
 +  })
++})
 +
-+  test("BlockTool collapses by unmounting body with session-scoped expand state", () => {
-+    // 折叠即卸载：无 preview 常驻 bodyMounted/visible 隐藏路径（native 资源随 owner 销毁）。
-+    expect(source).toContain('<Show when={!hasPreview() || !collapsed()}>')
-+    expect(source).not.toContain("bodyMounted")
-+    // 展开状态在 Session 级 interaction store；同 Part 多卡片必须带区分 stateKey。
-+    expect(source).toContain('props.stateKey ?? (props.part ? `expanded:${props.part.id}` : undefined)')
-+    expect(source).toContain('stateKey={`${props.part.id}:${file.filePath}`}')
-+    // notebook/generic body 必须经工厂重建全新内容树。
-+    expect(source).toContain("view().body()")
++test("durable update remeasures only the offscreen frozen message exactly", async () => {
++  const fixture = windowFixture("stream")
++  const target = "msg_window_user_04"
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, emit) => {
++    await waitForFrame(app, (frame) => frame.includes("stream assistant 23"))
++    const scroll = sessionScrollBox(app, fixture.messages[47].id)
++    await withFakeNow(async (advance) => { advance(AGE); await pumpFrames(app, 8); expect(released(app, target)).toBe(true) })
++    const fullHeight = await stableHeight(app, scroll)
++    const height = messageRoot(app, target).height
++    emit({ directory, project: "proj_test", payload: { id: "evt_stream_offscreen", type: "message.part.updated", properties: {
++      sessionID: sid, part: textPart("part_window_user_04", target, "stream user 04\nsecond added line\nthird added line\nfourth added line"), time: Date.now(),
++    } } } satisfies GlobalEvent)
++    // 一行换四行，根高与scrollbar都恰好+3；不以全量重挂掩盖单条失效。
++    await waitForFrame(app, () => scroll.scrollHeight === fullHeight + 3)
++    expect(messageRoot(app, target).height).toBe(height + 3)
++    scroll.scrollBy(messageRoot(app, target).y - scroll.y)
++    await waitForFrame(app, (frame) => frame.includes("fourth added line"))
 +  })
++})
 +
-+  test("Task cards hold child session bodies via acquireParts with cleanup pair", () => {
-+    // 可见 Task 卡片持有子会话正文使用权；卡片销毁即释放，不再以 message[].length 判定。
-+    expect(source).toMatch(/onMount\(\(\) => \{\s*\n\s*const child = stringValue\(props\.metadata\.sessionId\)[\s\S]{0,600}sync\.session\.acquireParts\(child\)[\s\S]{0,400}onCleanup\(\(\) => \{\s*\n\s*released = true\s*\n\s*release\?\.\(\)/)
++test("selection dragged across screens keeps the traversed range alive for copy", async () => {
++  const fixture = windowFixture("drag")
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
++    await waitForFrame(app, (frame) => frame.includes("drag assistant 23"))
++    ctx.keymap.dispatchCommand("session.first")
++    const initial = await waitForFrame(app, (frame) => frame.includes("drag user 00"))
++    const scroll = sessionScrollBox(app, fixture.messages[0].id)
++    const lines = initial.split("\n")
++    const y0 = lines.findIndex((line) => line.includes("drag user 00"))
++    const x0 = lines[y0].indexOf("drag user 00")
++    const edge = scroll.viewport.screenY + scroll.viewport.height - 2
++    await app.mockMouse.pressDown(x0, y0)
++    let rows: string[] = []
++    let y1 = -1
++    for (let attempt = 0; attempt < 30 && y1 < 0; attempt++) {
++      await app.mockMouse.moveTo(x0, edge)
++      await pumpFrames(app, 1)
++      rows = app.captureCharFrame().split("\n")
++      y1 = rows.findIndex((line) => line.includes("drag user 06"))
++      if (y1 < 0) ctx.keymap.dispatchCommand("session.message.next")
++      await app.renderOnce()
++    }
++    expect(y1).toBeGreaterThanOrEqual(0)
++    const x1 = rows[y1].indexOf("drag user 06") + 13
++    await app.mockMouse.moveTo(x1, y1)
++    await app.mockMouse.release(x1, y1)
++    await pumpFrames(app, 1)
++    expect(app.renderer.getSelection()?.getSelectedText()).toContain("drag user 00")
++    expect(app.renderer.getSelection()?.getSelectedText()).toContain("drag user 06")
++    await withFakeNow(async (advance) => {
++      advance(AGE)
++      ctx.keymap.dispatchCommand("session.last")
++      await pumpFrames(app, 6)
++      expect(app.captureCharFrame()).toContain("drag assistant 23")
++      expect(released(app, "msg_window_user_00")).toBe(false)
++      expect(released(app, "msg_window_user_06")).toBe(false)
++      expect(app.renderer.getSelection()?.getSelectedText()).toContain("drag user 00")
++      expect(app.renderer.getSelection()?.getSelectedText()).toContain("drag user 06")
++      // 松开鼠标不等于清除选区；清除后重新计龄才能退休整段正文。
++      app.renderer.clearSelection()
++      advance(AGE)
++      await pumpFrames(app, 8)
++      expect(released(app, "msg_window_user_00")).toBe(true)
++      expect(released(app, "msg_window_user_06")).toBe(true)
++    })
 +  })
++})
 +
-+  test("interaction state survives content owner rebuild for shell and reasoning", () => {
-+    expect(source).toContain('ctx.interaction.get(`context:${props.part.id}`)')
-+    expect(source).toContain('ctx.interaction.get(`reasoning:${props.message.id}:${props.part.id}`)')
++test("resize naturally reflows mounted content and remeasures shelled roots in batches", async () => {
++  const fixture = windowFixture("resize")
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
++    await waitForFrame(app, (frame) => frame.includes("resize assistant 23"))
++    const scroll = sessionScrollBox(app, fixture.messages[47].id)
++    const before = await stableHeight(app, scroll)
++    // 目标spacing owner按角色归一化间距，记录真实基线各相邻边；不恢复source统一+1的旧布局。
++    const baseline = fixture.messages.map((item) => messageRoot(app, item.id))
++    const gaps = baseline.slice(1).map((root, index) => root.y - baseline[index].y - baseline[index].height)
++    const exact = () => {
++      const roots = fixture.messages.map((item) => messageRoot(app, item.id))
++      for (const [index, root] of roots.entries()) {
++        expect(root.height).toBeGreaterThan(0)
++        if (index > 0) expect(root.y).toBe(roots[index - 1].y + roots[index - 1].height + gaps[index - 1])
++      }
++      const children = scroll.getChildren()
++      const last = children[children.length - 1]
++      expect(scroll.scrollHeight).toBe(last.y + last.height - children[0].y)
++    }
++    app.resize(48, 24)
++    await stableHeight(app, scroll)
++    exact()
++    expect(scroll.scrollHeight).toBeGreaterThan(before)
++    expect(released(app, fixture.messages[0].id)).toBe(false)
++    await withFakeNow(async (advance) => { advance(AGE); await pumpFrames(app, 8); expect(released(app, fixture.messages[0].id)).toBe(true) })
++    const anchor = messageRoot(app, "msg_window_user_20")
++    scroll.scrollBy(anchor.y - scroll.y)
++    await waitForFrame(app, () => anchor.y - scroll.y === 0)
++    app.resize(80, 24)
++    let last = -1
++    let stable = 0
++    await waitForFrame(app, () => { const current = scroll.scrollHeight; stable = current === last ? stable + 1 : 0; last = current; return stable >= 2 && anchor.y - scroll.y === 0 })
++    expect(anchor.y - scroll.y).toBe(0)
++    exact()
++    expect(released(app, fixture.messages[0].id)).toBe(true)
++    ctx.keymap.dispatchCommand("session.last")
++    await waitForFrame(app, (frame) => frame.includes("resize assistant 23"))
++  })
++})
++
++test("scrolling within the residency budget performs zero content remounts", async () => {
++  const fixture = windowFixture("parity")
++  await withRenderedSession(fixture.messages, fixture.parts, async (app, _emit, ctx) => {
++    await waitForFrame(app, (frame) => frame.includes("parity assistant 23"))
++    ctx.keymap.dispatchCommand("session.first")
++    await waitForFrame(app, (frame) => frame.includes("parity user 00"))
++    const first = contentNode(app, "msg_window_user_00")
++    const second = contentNode(app, "msg_window_assistant_01")
++    expect(first).toBeDefined()
++    expect(second).toBeDefined()
++    for (let round = 0; round < 2; round++) {
++      ctx.keymap.dispatchCommand("session.last")
++      await waitForFrame(app, (frame) => frame.includes("parity assistant 23"))
++      ctx.keymap.dispatchCommand("session.first")
++      await waitForFrame(app, (frame) => frame.includes("parity user 00"))
++    }
++    expect(contentNode(app, "msg_window_user_00")).toBe(first)
++    expect(contentNode(app, "msg_window_assistant_01")).toBe(second)
++  })
++})
++
++test("content beyond the byte budget is evicted least-recently-rendered first", async () => {
++  const fixture = windowFixture("budget")
++  // 真实64MiB门槛不变；大模型输出参与记账，屏幕只展示短metadata.output。
++  fixture.parts[fixture.messages[1].id] = [toolPart("part_budget_huge", fixture.messages[1].id, "small visible output", "x".repeat(64 * 1024 * 1024 + 1))]
++  await withRenderedSession(fixture.messages, fixture.parts, async (app) => {
++    await waitForFrame(app, (frame) => frame.includes("budget assistant 23"))
++    await pumpFrames(app, 3)
++    await waitForFrame(app, () => released(app, "msg_window_user_00"))
++    expect(released(app, "msg_window_user_00")).toBe(true)
++    expect(released(app, "msg_window_assistant_23")).toBe(false)
 +  })
 +})
 
@@ -973,23 +1617,20 @@ diff --git a/packages/opencode/test/server/app-layer-sharing.test.ts b/packages/
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/server/app-layer-sharing.test.ts
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,37 @@
 +import { expect, test } from "bun:test"
 +import { ConfigProvider, Layer } from "effect"
 +import { HttpRouter } from "effect/unstable/http"
 +import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
 +
-+// [0624] 源仓 app-layer-sharing 的共享实例断言（sharedLayer 两 scope 同实例）随 F11/F12
-+// 裁记不迁移：目标 server.ts 的 listener 设计刻意安装 per-listener ConfigProvider
-+// （server.ts:108 注释——Effect 默认 ConfigProvider 会快照 process.env，共享图会把
-+// 首个 listener 的环境烤进全部 listener），与全局共享 app 图冲突；上游以新鲜度优先。
-+// 本文件保留 INV-08 的另一半合同：两个 listener（不同密码）各自鉴权隔离。
++// 共用目标应用图，但认证配置与关闭资源仍由每个listener独立拥有。
 +test(
 +  "two listeners keep their own auth while serving the same route tree",
 +  async () => {
++    const shared = HttpApiApp.createSharedServices()
 +    const make = (password: string) =>
 +      HttpRouter.toWebHandler(
-+        HttpApiApp.createRoutes().pipe(
++        HttpApiApp.createRoutes(undefined, undefined, shared).pipe(
 +          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_SERVER_PASSWORD: password }))),
 +        ),
 +        { memoMap: Layer.makeMemoMapUnsafe(), disableLogger: true },
@@ -1005,6 +1646,8 @@ new file mode 100644
 +      expect((await second.handler(request("second-secret"), HttpApiApp.context)).status).toBe(200)
 +      // 交叉密码必须 401：listener 本地鉴权不因路由树复用而串号。
 +      expect((await second.handler(request("first-secret"), HttpApiApp.context)).status).toBe(401)
++      await first.dispose()
++      expect((await second.handler(request("second-secret"), HttpApiApp.context)).status).toBe(200)
 +    } finally {
 +      await first.dispose()
 +      await second.dispose()
@@ -1013,6 +1656,33 @@ new file mode 100644
 +  60000,
 +)
 
+diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
+--- a/packages/opencode/test/server/httpapi-session.test.ts
++++ b/packages/opencode/test/server/httpapi-session.test.ts
+@@ -32,2 +32,7 @@
+ import { AppLayer } from "../../src/effect/app-runtime"
++import { SessionPrompt } from "../../src/session/prompt"
++import { SessionStatus } from "../../src/session/status"
++import { Provider } from "../../src/provider/provider"
++import { SessionV2 } from "@opencode-ai/core/session"
++import { EventV2Bridge } from "../../src/event-v2-bridge"
+ import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
+@@ -265,2 +270,8 @@
+         expect(Context.get(second, Database.Service)).toBe(Context.get(first, Database.Service))
++        // 复用目标共享层，覆盖source要求的实际应用服务身份，不建立第二个共享helper。
++        expect(Context.get(second, SessionStatus.Service)).toBe(Context.get(first, SessionStatus.Service))
++        expect(Context.get(second, SessionPrompt.Service)).toBe(Context.get(first, SessionPrompt.Service))
++        expect(Context.get(second, Provider.Service)).toBe(Context.get(first, Provider.Service))
++        expect(Context.get(second, SessionV2.Service)).toBe(Context.get(first, SessionV2.Service))
++        expect(Context.get(second, EventV2Bridge.Service)).toBe(Context.get(first, EventV2Bridge.Service))
+         expect(Context.get(runtime, SessionRunState.Service)).toBe(firstRunState)
+@@ -317,3 +328,6 @@
+         expect(exit).toEqual(Exit.succeed(interrupted))
++        yield* Scope.close(firstScope, Exit.succeed(undefined))
++        // 第一scope退出不关闭第二scope仍持有的应用服务。
++        expect((yield* Context.get(second, Session.Service).get(session.id).pipe(Effect.provide(second))).id).toBe(session.id)
+       }),
+   )
 diff --git a/packages/opencode/specs/tui-plugins.md b/packages/opencode/specs/tui-plugins.md
 --- a/packages/opencode/specs/tui-plugins.md
 +++ b/packages/opencode/specs/tui-plugins.md
@@ -1113,61 +1783,53 @@ diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -11,12 +11,40 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
- import { RootHttpApi } from "../api"
- import { PassThrough, Readable } from "node:stream"
- import { GlobalUpgradeInput } from "../groups/global"
+@@ -10 +10 @@
+-import { HttpServerResponse } from "effect/unstable/http"
++import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+@@ -15,2 +15,4 @@
+ import { EventClients } from "@opencode-ai/server/event-clients"
 +import { PartView } from "@opencode-ai/core/session/part-view"
 +import type { MessageV2 } from "@/session/message-v2"
-+
-+// 与 session handler 的本地副本保持一致；字面量由双端行为测试锁定，不为四个常量跨 handler 建共享模块。
-+const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
-+const TUI_VIEWER = "viewer"
  
- function eventData(data: unknown) {
-   // SSE 帧格式：data: 前缀 + 空行结尾，替代 v3 时代的 Sse.encode 通道
-   return `data: ${JSON.stringify(data)}\n\n`
- }
- 
-+// TUI viewer 的 SSE 在序列化前剪掉同 Part 逐字重复的大字段；只操作该连接的副本，
-+// 不改变事件 ID/次数/顺序，也不碰其他 listener 共享的原始事件对象。
+@@ -26 +28,28 @@
+-function eventResponse(clients: EventClients.Interface) {
++// 只投影当前viewer连接的副本，ID/顺序/次数与其他listener的完整事件保持不变。
 +function projectViewerEvent(event: GlobalBusEvent): GlobalBusEvent {
 +  const payload = event.payload
 +  if (payload.type === "message.part.updated" || payload.type === "message.part.progress") {
 +    const part = (payload.properties as { part?: MessageV2.Part }).part
 +    if (!part) return event
 +    const next = PartView.project(part)
-+    if (next === part) return event
-+    return { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
++    return next === part ? event : { ...event, payload: { ...payload, properties: { ...payload.properties, part: next } } }
 +  }
-+  if (payload.type === "sync") {
-+    const syncEvent = (payload as { syncEvent?: { data?: { part?: MessageV2.Part } } }).syncEvent
-+    const part = syncEvent?.data?.part
++  if (payload.type === "session.next.tool.success") {
++    const structured = PartView.projectFields(payload.properties.structured)
++    return { ...event, payload: { ...payload, properties: { ...payload.properties, structured } } }
++  }
++  if (payload.type === "sync" && payload.syncEvent?.data) {
++    const syncEvent = payload.syncEvent
++    const data = syncEvent.data
++    if (syncEvent.type === EventV2.versionedType("session.next.tool.success", 1)) {
++      return { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, structured: PartView.projectFields(data.structured) } } } }
++    }
++    const part = (data as { part?: MessageV2.Part }).part
 +    if (!part) return event
 +    const next = PartView.project(part)
-+    if (next === part) return event
-+    return { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...syncEvent.data, part: next } } } }
++    return next === part ? event : { ...event, payload: { ...payload, syncEvent: { ...syncEvent, data: { ...data, part: next } } } }
 +  }
 +  return event
 +}
 +
- // 跟踪活跃 SSE 客户端数量，供守护进程实现空闲超时退出
- let sseClientCount = 0
- let onSseCountChange: ((n: number) => void) | undefined
-@@ -56,11 +84,12 @@ function eventResponse(request: HttpServerRequest.HttpServerRequest) {
-   // #235：计数进日志——daemon 空闲退出调试需要连接数上下文
-   // #235：eventResponse 为同步函数——日志经 runSync 即时落盘，不改变 SSE 返回形态
-   Effect.logInfo("global event connected", { sseClientCount }).pipe(Effect.runSync)
-+  const viewer = request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER
-   const stream = new PassThrough()
-   const write = (event: GlobalBusEvent) => {
-     // abort 竞态下 close 可能已跑但 GlobalBus 仍派发，此时静默丢弃写入
-     if (stream.destroyed) return
--    stream.write(eventData(event))
-+    stream.write(eventData(viewer ? projectViewerEvent(event) : event))
-   }
-   const handler = (event: GlobalBusEvent) => write(event)
-   const heartbeat = setInterval(
++function eventResponse(clients: EventClients.Interface, viewer: boolean) {
+@@ -45 +74 @@
+-        Stream.map(eventData),
++        Stream.map((event) => eventData(viewer ? projectViewerEvent(event) : event)),
+@@ -74,3 +103,3 @@
+-    const event = Effect.fn("GlobalHttpApi.event")(function* () {
+-      return yield* eventResponse(clients)
++    const event = Effect.fn("GlobalHttpApi.event")(function* (ctx: { request: HttpServerRequest.HttpServerRequest }) {
++      return yield* eventResponse(clients, ctx.request.headers["x-opencode-tui-message-projection"] === "viewer")
+     })
 
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
@@ -1180,16 +1842,26 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
  import { Option } from "effect"
  import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
  import { ProviderError } from "@/provider/error"
-@@ -404,12 +405,18 @@ function hydrate(
-       // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
-       // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
-       // #553：visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
--      const restoredParts = ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden))
-+      // [0624] viewer 用 inspect 恢复内存投影而不持久 thaw：查看不应把冷数据反向预热进热表；
-+      // inspect 与 thaw 共用同一 corruption/refcount 完整性门，不降级校验。
-+      const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
-+      const restoredParts =
-+        messageProjection === "viewer" ? ColdStorage.inspectPartRows(sync, visible) : ColdStorage.thawPartRows(sync, visible)
+@@ -389,19 +390,18 @@ function hydrate(
+-      const partRows = yield* db
+-        .select()
+-        .from(PartTable)
+-        .where(inArray(PartTable.message_id, ids))
+-        .orderBy(PartTable.message_id, PartTable.id)
+-        .all()
+-        .pipe(Effect.orDie)
+-      // #0500：grouped thaw 让 shared pack 在本范围最多解压一次，同时保留原 Part 顺序。
+-      // 任一 Part payload 损坏都抛错，禁止同一 page 混入占位对象。
+-      // #553：visible read 在 thaw 前排除 tombstone，hidden cold payload 不得产生解压或持久预热副作用。
+-      const restoredParts = yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)))
++      // SELECT与冷读取在同一次连接预约和快照中完成，不能跨await携带已失效的cold locator。
++      const restoredParts = yield* Database.withSync({ db, sync }, () => sync.transaction((tx) => {
++        const partRows = tx.select().from(PartTable).where(inArray(PartTable.message_id, ids))
++          .orderBy(PartTable.message_id, PartTable.id).all()
++        const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
++        // viewer仅inspect，不持久预热；完整SDK仍走原thaw与refcount owner。
++        return messageProjection === "viewer" ? ColdStorage.inspectPartRows(tx, visible) : ColdStorage.thawPartRows(tx, visible)
++      }, { behavior: "deferred" }))
        for (const row of restoredParts) {
          const next = partFromRestored(row)
 +        // [0624] viewer 路径再过一次 TUI 专用纯投影，剪掉同 Part 内逐字重复的大字段。
@@ -1202,7 +1874,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
        }
      }
  
-@@ -1374,15 +1381,25 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
+@@ -1320,15 +1320,23 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
      // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
      messages: messageRows.map((row) => ({
        id: row.id,
@@ -1215,9 +1887,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 -        row.coldKey,
 -        parts.get(row.id) ?? [],
 -      ]),
-+      // [0624] proof key 会长期驻留在有效 warm cache 中；raw tuple 直接 JSON 会随正文重复占内存。
-+      // zstd(level 1) 输出按 latin1 转字符串，保持 string/=== 相等语义且逐字可恢复，
-+      // 不引入 hash 碰撞；临时 raw 字符串在返回后不再被缓存引用。
++      // zstd(level 1)转latin1无损保存完整tuple，保留exact相等且不让warm槽重复常驻原文。
 +      key: Buffer.from(
 +        Bun.zstdCompressSync(
 +          Buffer.from(
@@ -1241,7 +1911,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts b/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts
 --- a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts
 +++ b/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts
-@@ -59,6 +59,53 @@ test("runs onDispose callbacks with aborted signal and is idempotent", async ()
+@@ -59,6 +59,54 @@ test("runs onDispose callbacks with aborted signal and is idempotent", async ()
    }
  })
  
@@ -1280,6 +1950,7 @@ diff --git a/packages/opencode/test/cli/tui/plugin-lifecycle.test.ts b/packages/
 +  const { config, restore } = mockTuiRuntime(tmp.path, [[tmp.extra.spec, { onSettled: () => (settled = true) }]])
 +  try {
 +    await TuiPluginRuntime.init({ api, config })
++    await waitForTuiPlugins()
 +    // acquire 已在途；此时卸载必须在 resolve 后释放句柄。
 +    await TuiPluginRuntime.dispose()
 +    gate.resolve()
@@ -1320,16 +1991,6 @@ diff --git a/packages/opencode/test/fixture/tui-plugin.ts b/packages/opencode/te
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -57,7 +57,8 @@ const lifecycleIt = testEffect(lifecycleLayer)
- const fakeConfig = { lsp: { fake: { command: [process.execPath, fakeServerPath], extensions: [".repro"] } } }
- // #499：不覆盖 typescript 条目——config 覆盖会替换 spawn 闭包使 spyOn 失效；
- // builtin Typescript 的 spawn 由测试直接拦截并返回受控 fake 进程。
--const typescriptOnly = {}
-+// [0624] 默认 gate 回滚后（omitted 关闭）本组用例属“启用后功能”测试，需显式 lsp: true。
-+const typescriptOnly = { lsp: true as const }
- const touchAs = (lsp: LSP.Interface, sessionID: SessionID, file: string) =>
-   Effect.gen(function* () {
-     yield* lsp.init()
 @@ -320,7 +321,7 @@ describe("lsp.spawn", () => {
    )
  
@@ -1375,18 +2036,26 @@ diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/te
 diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/opencode/test/server/httpapi-event.test.ts
 --- a/packages/opencode/test/server/httpapi-event.test.ts
 +++ b/packages/opencode/test/server/httpapi-event.test.ts
-@@ -5,6 +5,7 @@ import { resetDatabase } from "../fixture/db"
- import { disposeAllInstances, TestInstance } from "../fixture/fixture"
- import { testEffect } from "../lib/effect"
+@@ -2 +2 @@
+-import { Effect, Layer, Queue, Schema, Stream } from "effect"
++import { DateTime, Effect, Layer, Queue, Schema, Stream } from "effect"
+@@ -15,2 +15,3 @@
  import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
 +import { GlobalBus } from "../../src/bus/global"
+ import { SessionProcessor } from "../../src/session/processor"
+@@ -18,2 +19,7 @@
+ import { SessionProjector } from "@opencode-ai/core/session/projector"
++import { EventV2 } from "@opencode-ai/core/event"
++import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionEvent } from "@opencode-ai/core/session/event"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { OpenCodeEvent } from "@opencode-ai/protocol/groups/event"
  
- const EventData = Schema.Struct({
-   id: Schema.optional(Schema.String),
-@@ -91,4 +92,87 @@ describe("event HttpApi", () => {
-       }),
-     { git: true, config: { formatter: false, lsp: false } },
-   )
+@@ -169,5 +175,196 @@ describe("event HttpApi", () => {
+     expect(settled.request?.inputEstimate).toEqual({ ...inputEstimate, confirmed: true })
+     expect(settled.request?.model?.contextLimit).toBe(8000)
+     expect(settled.request).toMatchObject({ input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 })
+   }), { git: true, config: { formatter: false, lsp: false } })
 +
 +  it.instance(
 +    "viewer event stream projects duplicate part fields; default stream stays complete",
@@ -1412,19 +2081,26 @@ diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/open
 +        }
 +        // [0624] /global/event 是 GlobalBus 包装流（帧为 {directory, payload}），与 /event 的
 +        // payload-直接流不同；TUI SDK 的 sdk.global.event 连接的就是这一端点。
++        const Frame = Schema.Struct({ payload: Schema.Struct({
++          type: Schema.String,
++          properties: Schema.optionalKey(Schema.Struct({ part: Schema.optionalKey(SessionV1.Part) })),
++        }) })
 +        const openGlobalStream = (viewer: boolean) =>
 +          Effect.gen(function* () {
 +            const headers = new Headers({ "x-opencode-directory": directory })
 +            if (viewer) headers.set("x-opencode-tui-message-projection", "viewer")
 +            const response = yield* requestInDirectory("/global/event", directory, { headers })
-+            const reader = yield* Queue.unbounded<Uint8Array>()
++            const reader = yield* Queue.unbounded<typeof Frame.Type["payload"]>()
 +            yield* response.stream.pipe(
-+              Stream.runForEach((value) => Queue.offer(reader, value)),
++              // 网络chunk可拆分/合并SSE帧，复用正式decoder后再读取完整事件。
++              Stream.decodeText(),
++              Stream.pipeThroughChannel(Sse.decodeDataSchema(Frame)),
++              Stream.runForEach((event) => Queue.offer(reader, event.data.payload)),
 +              Effect.forkScoped,
 +            )
 +            return { reader }
 +          })
-+        const readPayload = (reader: Queue.Dequeue<Uint8Array>) =>
++        const readPayload = (reader: Queue.Dequeue<typeof Frame.Type["payload"]>) =>
 +          Effect.gen(function* () {
 +            const value = yield* Queue.take(reader).pipe(
 +              Effect.timeoutOrElse({
@@ -1432,12 +2108,9 @@ diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/open
 +                orElse: () => Effect.fail(new Error("timed out waiting for global event")),
 +              }),
 +            )
-+            const frame = JSON.parse(new TextDecoder().decode(value).replace(/^data: /, "")) as {
-+              payload?: { type?: string; properties?: { part?: typeof part } }
-+            }
-+            return frame.payload
++            return value
 +          })
-+        const readPartEvent = (reader: Queue.Dequeue<Uint8Array>) =>
++        const readPartEvent = (reader: Queue.Dequeue<typeof Frame.Type["payload"]>) =>
 +          Effect.gen(function* () {
 +            for (;;) {
 +              const event = yield* readPayload(reader)
@@ -1460,9 +2133,10 @@ diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/open
 +          const completeEvent = yield* readPartEvent(complete.reader)
 +          const viewerPart = viewerEvent?.properties?.part
 +          const completePart = completeEvent?.properties?.part
-+          expect(viewerPart?.state.metadata.diff).toBe(patch)
-+          expect(viewerPart?.state.metadata.filediff as unknown).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
-+          expect((completePart?.state.metadata.filediff as { patch?: unknown }).patch).toBe(patch)
++          expect(viewerPart).toMatchObject({ type: "tool", state: { status: "completed", metadata: { diff: patch } } })
++          expect(viewerPart?.type === "tool" && viewerPart.state.status === "completed" ? viewerPart.state.metadata.filediff : undefined)
++            .toEqual({ file: "a.ts", additions: 64, deletions: 0 })
++          expect(completePart).toMatchObject({ type: "tool", state: { metadata: { filediff: { patch } } } })
 +        } finally {
 +          yield* Queue.shutdown(viewer.reader)
 +          yield* Queue.shutdown(complete.reader)
@@ -1470,12 +2144,128 @@ diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/open
 +      }),
 +    { git: true, config: { formatter: false, lsp: false } },
 +  )
++
++  it.instance("native viewer HTTP and both SSE transports preserve identity order and complete data", () => Effect.gen(function* () {
++    const instance = yield* TestInstance
++    const response = yield* requestInDirectory("/session", instance.directory, { method: "POST" })
++    const info = Schema.decodeUnknownSync(SessionV1.SessionInfo)(yield* response.json)
++    const events = yield* EventV2Bridge.Service
++    const sessionID = SessionV2.ID.make(info.id)
++    const assistantMessageID = SessionMessage.ID.create()
++    const timestamp = DateTime.makeUnsafe(1)
++    yield* events.publish(SessionEvent.Step.Started, { sessionID, assistantMessageID, timestamp, agent: "build", model: { id: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test") } })
++    for (const callID of ["call-a", "call-b"]) {
++      yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID, timestamp, callID, name: "edit" })
++      yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID, timestamp, callID, tool: "edit", input: { filePath: "a.ts" }, provider: { executed: false } })
++    }
++    // 流使用正式SSE分帧；四条连接都先ready，避免把订阅竞态误认为投影丢事件。
++    const open = (url: string, viewer: boolean) => Effect.gen(function* () {
++      const response = yield* requestInDirectory(url, instance.directory, { headers: viewer ? { "x-opencode-tui-message-projection": "viewer" } : {} })
++      const reader = yield* Queue.unbounded<unknown>()
++      yield* response.stream.pipe(Stream.decodeText(), Stream.pipeThroughChannel(Sse.decodeDataSchema(Schema.Unknown)), Stream.runForEach((event) => Queue.offer(reader, event.data)), Effect.forkScoped)
++      return reader
++    })
++    const take = (reader: Queue.Dequeue<unknown>) => Queue.take(reader).pipe(Effect.timeout("5 seconds"))
++    const nativeViewer = yield* open("/api/event", true)
++    const nativeComplete = yield* open("/api/event", false)
++    const globalViewer = yield* open("/global/event", true)
++    const globalComplete = yield* open("/global/event", false)
++    const GlobalFrame = Schema.Struct({ payload: Schema.Struct({ id: Schema.String, type: Schema.String, properties: Schema.optionalKey(Schema.Unknown), syncEvent: Schema.optionalKey(Schema.Unknown) }) })
++    for (const reader of [nativeViewer, nativeComplete]) expect(Schema.decodeUnknownSync(OpenCodeEvent)(yield* take(reader)).type).toBe("server.connected")
++    for (const reader of [globalViewer, globalComplete]) expect(Schema.decodeUnknownSync(GlobalFrame)(yield* take(reader)).payload.type).toBe("server.connected")
++    const patch = "+duplicate\n".repeat(64)
++    const structured = Object.freeze({ diff: patch, filediff: Object.freeze({ file: "a.ts", patch, additions: 64, deletions: 0 }), diagnostics: {} })
++    const published = []
++    for (const callID of ["call-a", "call-b"]) published.push(yield* events.publish(SessionEvent.Tool.Success, {
++      sessionID, assistantMessageID, callID, timestamp: DateTime.makeUnsafe(2), structured,
++      content: [{ type: "text", text: "done" }], result: { kept: true }, outputPaths: ["a.ts"], provider: { executed: false },
++    }))
++    const marker = yield* events.publish(SessionEvent.ContextUpdated, { sessionID, messageID: SessionMessage.ID.create(), text: "marker", timestamp: DateTime.makeUnsafe(0) })
++    published.push(marker)
++    const wanted = new Set(published.map((event) => event.id))
++    const collectNative = (reader: Queue.Dequeue<unknown>) => Effect.gen(function* () {
++      const result = []
++      for (;;) {
++        const event = Schema.decodeUnknownSync(OpenCodeEvent)(yield* take(reader))
++        if (!wanted.has(event.id)) continue
++        result.push(event)
++        if (event.id === marker.id) return result
++      }
++    })
++    const Sync = Schema.Struct({ id: Schema.String, type: Schema.String, seq: Schema.Number, aggregateID: Schema.String, data: Schema.Unknown })
++    const collectGlobal = (reader: Queue.Dequeue<unknown>) => Effect.gen(function* () {
++      const result = []
++      const syncs = []
++      for (;;) {
++        const payload = Schema.decodeUnknownSync(GlobalFrame)(yield* take(reader)).payload
++        if (payload.type === "sync") {
++          const event = Schema.decodeUnknownSync(Sync)(payload.syncEvent)
++          if (wanted.has(EventV2.ID.make(event.id))) syncs.push(event)
++        } else if (wanted.has(EventV2.ID.make(payload.id))) result.push({ id: payload.id, type: payload.type, data: payload.properties })
++        if (result.some((event) => event.id === marker.id) && syncs.some((event) => event.id === marker.id)) return { result, syncs }
++      }
++    })
++    const [nv, nc, gv, gc] = yield* Effect.all([collectNative(nativeViewer), collectNative(nativeComplete), collectGlobal(globalViewer), collectGlobal(globalComplete)])
++    const identities = published.map((event) => ({ id: event.id, type: event.type }))
++    for (const list of [nv, nc, gv.result, gc.result]) expect(list.map((event) => ({ id: event.id, type: event.type }))).toEqual(identities)
++    const durable = published.map((event) => {
++      if (!event.durable) throw new Error("native fixture event did not commit")
++      return { id: event.id, type: EventV2.versionedType(event.type, event.durable.version), seq: event.durable.seq, aggregateID: event.durable.aggregateID }
++    })
++    for (const list of [gv.syncs, gc.syncs]) expect(list.map(({ id, type, seq, aggregateID }) => ({ id, type, seq, aggregateID }))).toEqual(durable)
++    const Fields = Schema.Struct({ structured: Schema.Struct({ diff: Schema.String, filediff: Schema.Record(Schema.String, Schema.Unknown) }) })
++    // viewer仅删重复patch，完整连接、冻结输入与提交结果都保持完整；marker逐字不变。
++    for (const list of [nv, gv.result, gv.syncs]) for (const event of list.slice(0, 2)) {
++      expect(Schema.decodeUnknownSync(Fields)(event.data).structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
++      expect(event.data).toMatchObject({ structured: { diff: patch, diagnostics: {} }, content: [{ type: "text", text: "done" }], result: { kept: true }, outputPaths: ["a.ts"] })
++    }
++    for (const list of [nc, gc.result, gc.syncs]) for (const event of list.slice(0, 2)) expect(event.data).toMatchObject({ structured: { filediff: { patch } } })
++    expect(structured.filediff.patch).toBe(patch)
++    expect(published[0].data).toMatchObject({ structured: { filediff: { patch } } })
++    const Page = Schema.Struct({ data: Schema.Array(SessionMessage.Message), cursor: Schema.Struct({ previous: Schema.optionalKey(Schema.String), next: Schema.optionalKey(Schema.String) }) })
++    const page = (viewer: boolean, cursor?: string) => Effect.gen(function* () {
++      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "?limit=1&order=asc"
++      const response = yield* requestInDirectory(`/api/session/${sessionID}/message${query}`, instance.directory, { headers: viewer ? { "x-opencode-tui-message-projection": "viewer" } : {} })
++      expect(response.status).toBe(200)
++      return Schema.decodeUnknownSync(Page)(yield* response.json)
++    })
++    const firstViewer = yield* page(true)
++    const firstComplete = yield* page(false)
++    expect(firstViewer.data.map((message) => message.id)).toEqual([assistantMessageID])
++    expect(firstViewer.cursor).toEqual(firstComplete.cursor)
++    for (const [view, full] of firstViewer.data.map((message, index) => [message, firstComplete.data[index]] as const)) {
++      if (view.type !== "assistant" || full.type !== "assistant") throw new Error("native assistant page is missing")
++      expect(view.content.map((part) => part.type === "tool" ? part.id : part.type)).toEqual(full.content.map((part) => part.type === "tool" ? part.id : part.type))
++      for (const part of view.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toEqual({ file: "a.ts", additions: 64, deletions: 0 })
++      for (const part of full.content) if (part.type === "tool" && part.state.status === "completed") expect(part.state.structured.filediff).toMatchObject({ patch })
++    }
++    if (!firstViewer.cursor.next || !firstComplete.cursor.next) throw new Error("native next cursor is missing")
++    const nextViewer = yield* page(true, firstViewer.cursor.next)
++    const nextComplete = yield* page(false, firstComplete.cursor.next)
++    expect(nextViewer).toEqual(nextComplete)
++    expect(nextViewer.data.map((message) => message.id)).toEqual([marker.data.messageID])
++    // 最后再读完整页，确认viewer从未改写持久消息。
++    expect(yield* page(false)).toEqual(firstComplete)
++  }), { git: true, config: { formatter: false, lsp: false } })
  })
 
 diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/opencode/test/server/session-messages.test.ts
 --- a/packages/opencode/test/server/session-messages.test.ts
 +++ b/packages/opencode/test/server/session-messages.test.ts
-@@ -299,4 +299,67 @@ describe("session messages endpoint", () => {
+@@ -160,3 +160,10 @@
+         const session = yield* sessionScoped
+-        // 保留520条真实Message和limit=510断言，避免无关Part写入耗尽CI原有30秒预算。
+-        yield* fill(session.id, 520, undefined, false)
++        const database = yield* Database.Service
++        const created = Date.now()
++        // 本例只测分页边界：一次预约建立520条真实投影行，不让逐条事件写入耗尽原30秒预算。
++        yield* Database.withSync(database, (sync) => sync.insert(MessageTable).values(
++          Array.from({ length: 520 }, (_, index) => ({
++            id: MessageID.ascending(), session_id: session.id, time_created: created + index, time_updated: created + index,
++            data: { role: "user" as const, time: { created: created + index }, agent: "test", model, tools: {} },
++          })),
++        ).run())
+@@ -299,4 +306,67 @@ describe("session messages endpoint", () => {
      ),
      { git: true },
    )
@@ -1547,50 +2337,56 @@ diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/o
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -6399,3 +6399,43 @@ for (const lifecycle of ["delete", "dispose"] as const) {
-   )
- }
- 
-+// [0624] proof key 无损压缩：raw tuple 直接 JSON 会让有效缓存在正文之外再常驻一份同量内容；
-+// 目标的 promptWindowProof 是 Effect，经 Effect.map 侧道捕获解析后的 proof 对象。
-+it.instance(
-+  "prompt window proof keys do not retain a second copy of large raw content",
-+  () =>
-+    Effect.gen(function* () {
-+      const { llm } = yield* useServerConfig(providerCfg)
-+      const prompt = yield* SessionPrompt.Service
-+      const sessions = yield* Session.Service
-+      const chat = yield* sessions.create({ title: "Proof key size" })
-+      yield* user(chat.id, "x".repeat(4 * 1024 * 1024))
-+      const original = MessageV2.promptWindowProof
-+      let captured: MessageV2.PromptWindowProof | undefined
-+      const observer = spyOn(MessageV2, "promptWindowProof").mockImplementation((id) =>
-+        original(id).pipe(
-+          Effect.map((proof) => {
-+            if (id === chat.id) captured = proof
-+            return proof
-+          }),
-+        ),
-+      )
-+      try {
-+        yield* llm.text("reply")
-+        yield* prompt.loop({ sessionID: chat.id })
-+      } finally {
-+        observer.mockClear()
-+        observer.mockRestore()
-+      }
-+      expect(captured).toBeDefined()
-+      const bytes = captured!.messages.reduce(
-+        (sum, message) => sum + Buffer.byteLength(message.key, "latin1"),
-+        0,
-+      )
-+      // key 必须是无损压缩表示；阈值取压缩后上限（重复文本压缩到百字节级），
-+      // 远低于 4MiB raw，失败即证明退化回 raw。
-+      expect(bytes).toBeLessThan(64 * 1024)
-+    }),
-+  { git: true },
-+)
+@@ -6901,3 +6901,49 @@
++cacheLifetime.instance("prompt window proof keys do not retain a second copy of large raw content", () => Effect.gen(function* () {
++  const sessions = yield* Session.Service
++  const prompt = yield* SessionPrompt.Service
++  const session = yield* sessions.create({ title: "Proof key size" })
++  const message = yield* sessions.updateMessage({
++    id: MessageID.ascending(), sessionID: session.id, role: "user", agent: "build",
++    model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") }, time: { created: 1 },
++  })
++  const text = "x".repeat(4 * 1024 * 1024)
++  const part = yield* sessions.updatePart({ id: PartID.ascending(), messageID: message.id, sessionID: session.id, type: "text", text })
++  // 已完成assistant使真实loop发布warm槽后退出，不把4MiB正文交给Provider或工具外部进程。
++  yield* sessions.updateMessage({
++    id: MessageID.ascending(), sessionID: session.id, role: "assistant", parentID: message.id,
++    agent: "build", mode: "build", modelID: ModelV2.ID.make("test-model"), providerID: ProviderV2.ID.make("test"),
++    path: { cwd: "unused", root: "unused" }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    time: { created: 2, completed: 3 }, finish: "stop",
++  })
++  const original = PromptWindowCache.publish
++  let captured: MessageV2.PromptWindowProof | undefined
++  const observer = spyOn(PromptWindowCache, "publish").mockImplementation((slot, generation, entry) => {
++    if (entry.sessionID === session.id) captured = entry.proof
++    return original(slot, generation, entry)
++  })
++  try {
++    yield* prompt.loop({ sessionID: session.id })
++  } finally {
++    observer.mockClear()
++    observer.mockRestore()
++  }
++  expect(captured).toBeDefined()
++  if (!captured) throw new Error("warm proof was not published")
++  expect(captured.messages.reduce((sum, item) => sum + Buffer.byteLength(item.key, "latin1"), 0)).toBeLessThan(64 * 1024)
++  const key = captured.messages.find((item) => item.id === message.id)?.key
++  if (key === undefined) throw new Error("user proof is missing")
++  // 观察真实发布表示，再逐字解压核对内容；相同窗口相等，原位更新必须失配。
++  const raw = Buffer.from(Bun.zstdDecompressSync(Buffer.from(key, "latin1"))).toString("utf8")
++  expect(raw).toContain(text)
++  expect((JSON.parse(raw) as unknown[])[0]).toBe(message.id)
++  const unchanged = yield* MessageV2.promptWindowProof(session.id)
++  expect(unchanged.messages.find((item) => item.id === message.id)?.key).toBe(key)
++  yield* sessions.updatePart({ ...part, text: `${text}!` })
++  const changed = yield* MessageV2.promptWindowProof(session.id)
++  expect(changed.messages.find((item) => item.id === message.id)?.key).not.toBe(key)
++}), { config: { plugin: [], lsp: false, formatter: false, goal_max_turns: 0 } })
 +
+ test("prompt window cache drops in-flight publication after invalidation", () => {
+   const sessionID = SessionID.make("ses_lease_race")
+   const slot = PromptWindowCache.acquire()
 
 diff --git a/packages/plugin/src/tui.ts b/packages/plugin/src/tui.ts
 --- a/packages/plugin/src/tui.ts
@@ -1645,16 +2441,16 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      // #132：区分首次 connected 与重连
      let connectedOnce = false
      // #192：重连后 permission/question 快照版本
-@@ -300,6 +307,8 @@ export const {
-     // ID-only 事件（message.removed）走既有 findIndex——不引入第三套定位路径。
-     function releaseMessage(sessionID: string, messageID: string, info?: Message) {
+@@ -311,6 +318,8 @@ export const {
+     function releaseMessage(sessionID: string, messageID: string) {
+       touchMessage(sessionID, messageID)
        dropBufferedDeltas((event) => event.properties.sessionID === sessionID && event.properties.messageID === messageID)
 +      // [0624] Message 删除边界忘掉其 Part 的终态 ID 事实，重建后能正常准入。
 +      for (const part of store.part[messageID] ?? []) releasedTerminalParts.delete(part.id)
        const messages = store.message[sessionID]
        batch(() => {
          if (messages) {
-@@ -326,13 +335,96 @@ export const {
+@@ -334,13 +343,98 @@ export const {
        })
      }
  
@@ -1731,6 +2527,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +      partConsumers.delete(sessionID)
 +      // [0624] 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
 +      syncTokens.delete(sessionID)
++      syncingSessions.delete(sessionID)
++      hydratingSessions.delete(sessionID)
 +      releaseSessionParts(sessionID)
 +    }
 +
@@ -1751,9 +2549,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
        batch(() => {
          setStore(
            produce((draft) => {
-@@ -888,6 +980,14 @@ export const {
-           // 迟到的非隐藏 update（undo 后重建）：失效集合是持久事实，除非 daemon 重新
-           // 创建同 ID（ID 单调递增下不会发生），否则不允许经 update 复活。
+@@ -984,5 +1078,13 @@ export const {
+           if (removedMessageIDs.has(info.id)) break
            touchMessage(event.properties.info.sessionID, event.properties.info.id)
 +          // [0624] Message 内容持久的到达边界：user 写完即持久，assistant 以 time.completed 为准。
 +          // 覆盖 part-first 乱序（Part 先于父 Message 到达时已按未知状态准入）。
@@ -1766,7 +2563,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            const messages = store.message[event.properties.info.sessionID]
            if (!messages) {
              setStore("message", event.properties.info.sessionID, [event.properties.info])
-@@ -910,6 +1010,8 @@ export const {
+@@ -1005,6 +1099,8 @@ export const {
            // #290：本地缓存窗口从 200 提升至 300，降低长会话过早截断风险
            if (updated.length > 300) {
              const oldest = updated[0]
@@ -1775,18 +2572,19 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              batch(() => {
                setStore(
                  "message",
-@@ -939,7 +1041,9 @@ export const {
+@@ -1034,8 +1130,10 @@ export const {
          // 排序在 mergeLivePart 内统一裁决，避免双通道各写各的。
          case "message.part.progress": {
-           // #98：隐藏 part 从 TUI store 删除
+           // #98：隐藏部件先记入 hydration，再从 store 移除。
 -          const part = event.properties.part
 +          // [0624] 幂等 TUI 投影：剪掉同 Part 逐字重复的大字段；生产 SSE 已在 daemon 侧投影，
 +          // 这里覆盖测试 transport 与直接 SDK 注入，重复应用无害。
 +          const part = PartView.project(event.properties.part)
            if ((part as Record<string, unknown>).hidden) {
+             touchPart(part.sessionID, part.id)
              removedPartIDs.add(part.id)
              dropBufferedDeltas((event) => event.properties.partID === part.id)
-@@ -961,6 +1065,18 @@ export const {
+@@ -1057,6 +1155,18 @@ export const {
            // 只登 part 会让请求期间新 Message 的整体被 HTTP 页覆盖。
            touchMessage(event.properties.part.sessionID, event.properties.part.messageID)
            touchPart(event.properties.part.sessionID, event.properties.part.id)
@@ -1805,7 +2603,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            const parts = store.part[event.properties.part.messageID]
            if (!parts) {
              setStore("part", event.properties.part.messageID, [event.properties.part])
-@@ -989,7 +1105,8 @@ export const {
+@@ -1085,7 +1195,8 @@ export const {
          case "message.part.delta": {
            // #186：进入队列合并，applyPartDelta 内仍走 #157 raw 路径
            // #186：此处禁止直接 setStore，否则绕过 coalesce 失去批处理收益
@@ -1815,7 +2613,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            break
          }
  
-@@ -1039,6 +1156,8 @@ export const {
+@@ -1136,6 +1247,8 @@ export const {
        removedMessageIDs.clear()
        removedPartIDs.clear()
        syncTokens.clear()
@@ -1824,8 +2622,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      })
  
      const args = useArgs()
-@@ -1218,6 +1337,17 @@ export const {
- 
+@@ -1310,5 +1423,16 @@ export const {
+     // route 与 Session 快照都参与依赖追踪，bootstrap 列表到达后自动补拉正确作用域。
      createEffect(() => void refreshLsp())
  
 +    // [0624] 当前 route 持有其 Session 的正文使用权；离开即释放，后台完成事件不再把正文补进 store。
@@ -1839,16 +2637,16 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +      if (next !== undefined) acquireParts(next)
 +    })
 +
- 
      onMount(() => {
        void bootstrap()
-@@ -1345,11 +1475,14 @@ export const {
+@@ -1436,12 +1570,15 @@ export const {
                      continue
                    }
                    const currentParts = draft.part[message.info.id] ?? []
 +                  // [0624] HTTP 页的 Part 在合并前过同一幂等 TUI 投影：viewer wire 已在 daemon 侧剪重复字段，
 +                  // 这里覆盖测试 transport 与未来 caller，保证 store 中不存在两份相同 patch。
                    const parts = message.parts.flatMap((part) => {
+                     if (partGone(part.sessionID, part.messageID, part.id)) return []
 -                    const current = currentParts.find((item) => item.id === part.id)
 -                    if (tracker.parts.has(part.id)) return current ? [current] : []
 +                    const projected = PartView.project(part)
@@ -1860,7 +2658,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
                    })
                    parts.push(
                      ...currentParts.filter(
-@@ -1423,6 +1556,24 @@ export const {
+@@ -1516,6 +1650,24 @@ export const {
            syncingSessions.set(sessionID, task)
            return task
          },
@@ -1932,7 +2730,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  }>()
  
  function use() {
-@@ -238,6 +245,13 @@ function use() {
+@@ -238,6 +245,22 @@ function use() {
    return ctx
  }
  
@@ -1943,31 +2741,48 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +const RESIDENCY_MAX_AGE_MS = 30_000
 +const RESIDENCY_MAX_BYTES = 64 * 1024 * 1024
 +
++// 展开选择留在Session，正文owner可销毁；key由实际工具/推理run提供，不把折叠职责搬回BlockTool。
++function useInteraction(key: () => string) {
++  const ctx = use()
++  const get = () => ctx.interaction.get(key())
++  const set = (next: boolean | ((previous: boolean) => boolean)) =>
++    ctx.interaction.set(key(), typeof next === "function" ? next(get()) : next)
++  return [get, set] as const
++}
++
  export function Session() {
    const setEpilogue = useEpilogue()
    const clipboard = useClipboard()
-@@ -274,9 +288,12 @@ export function Session() {
+@@ -269,9 +283,12 @@ export function Session() {
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-   // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
+   // 保留粘底信号供既有跟随逻辑使用，离底浏览不再关闭视口裁剪。
    const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
 +  // [0624] 测量阶段必须关闭 viewport culling：Diff/Markdown 的宽度相关更新在渲染裁剪下
 +  // 不会可靠提交（混合 fixture 实测滚动高度失真）；正常浏览恢复现有恒定裁剪。
 +  const [remeasuring, setRemeasuring] = createSignal(false)
-   // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
+   // 恒定裁剪限制屏外遍历；用户滚动和显式导航仍由 scrollbox 处理。
    const viewportCulling = createMemo(() =>
 -    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
 +    remeasuring() ? false : shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
    )
-   // R19 惰性退出快照：不建 sessionUsage 急 memo——每个 part delta 重算 tokenAccounting
-   // （300 消息时 ~15ms/delta）会饿死 process.nextTick，reconciler 的 deferred-destroy
-@@ -551,11 +568,377 @@ export function Session() {
-   // #458：渲染后读取 scroll 位置同步粘底信号；queueMicrotask 避免在渲染帧内写信号。
+   // 退出快照只注册producer，不再随part delta全量重算而饿死deferred-destroy。
+   // 路由卸载不清空最后会话摘要；输出合并reasoning、排除cache的口径保持不变。
+@@ -526,19 +552,385 @@ export function Session() {
+   // #212：布局后读取滚动范围，避免文本更新早于原生尺寸刷新。
    function syncSessionViewportStuckToBottom() {
      if (!scroll || scroll.isDestroyed) return
 +    // [0624] renderAfter 的唯一入口：驻留窗口只把 store 写入推迟到 microtask，
 +    // 先调度它不会改变本函数的贴底判定；顺序无关紧要，关键是同一帧驱动两者。
 +    syncMessageResidency()
-     const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
+     // #212：scrollTop 是滚动偏移；y 是屏幕位置，不能用于贴底判断。
+     const wasStuckToBottom = scroll.scrollTop >= lastMaxScrollTop - 1
+     const maxScrollTopIncreased = maxScrollTop > lastMaxScrollTop
+     lastMaxScrollTop = maxScrollTop
+     // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
+     if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
+     // 在既有跟随完成后读取真实粘底状态，延后写信号避免改变当前布局帧。
+     const stuckToBottom = scroll.scrollTop >= maxScrollTop - 1
      if (stuckToBottom === untrack(viewportStuckToBottom)) return
      queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
    }
@@ -2505,7 +3320,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
                    <text fg={theme.textMuted}>
                      <span style={{ fg: theme.textMuted }}>
                        {Locale.todayTimeOrDateTime(props.message.time.created)}
-@@ -1930,26 +2366,68 @@ const footerVisible = createMemo(() => {
+@@ -1935,8 +2355,49 @@
    const childShortcut = useCommandShortcut("session.child.first")
    const backgroundShortcut = useCommandShortcut("session.background")
  
@@ -2549,43 +3364,17 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +    ),
 +  )
 +
+   // 消息导航只匹配滚动容器直接子节点的 ID；整条助手消息共用锚点，保留内部各分块的间距。
    return (
-     // #551：恢复 assistant 消息的滚动锚点 id（old tree 的 wrapper 在 OpenTUI Dynamic 重构中丢失）——
-     // reviewID 深链的 getChildren().find 依赖该 id 定位 reviewer 返回区；列方向 box 与 fragment 布局等价。
--    <box flexDirection="column" id={props.message.id}>
--      <For each={props.parts}>
--        {(part, index) => {
--          const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
--          return (
--            <Show when={component()}>
--              <Dynamic
--                last={index() === props.parts.length - 1}
--                component={component()}
--                part={part as any}
--                message={props.message}
--              />
--            </Show>
--          )
--        }}
--      </For>
--      <Show when={props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
-+    <box flexDirection="column" id={props.message.id} height={fixedHeight()}>
+-    <box id={props.message.id} flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
++    <box id={props.message.id} flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)} height={fixedHeight()}>
 +      <Show when={mounted()}>
-+        <For each={props.parts}>
-+          {(part, index) => {
-+            const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
-+            return (
-+              <Show when={component()}>
-+                <Dynamic
-+                  last={index() === props.parts.length - 1}
-+                  component={component()}
-+                  part={part as any}
-+                  message={props.message}
-+                />
-+              </Show>
-+            )
-+          }}
-+        </For>
+       <For each={renderItemKeys()}>
+         {(key, index) => {
+@@ -1959,6 +2420,7 @@
+         }}
+       </For>
+-      <Show when={props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
 +      </Show>
 +      <Show when={mounted() && props.parts.some((x) => x.type === "tool" && x.tool === "task")}>
          <box paddingTop={1} paddingLeft={3}>
@@ -2609,22 +3398,21 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
            <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
              <text marginTop={1}>
                <span
-@@ -2041,7 +2519,11 @@ export function ReasoningPartView(props: { last: boolean; part: ReasoningPart; m
-   // （expanded/overflow）是本 run 局部状态，visibility 切换不重置它。
-   // Collapsed by default in hide mode: a single line throughout, so the
-   // layout never shifts. Click to open the full markdown block, click to close.
+@@ -2068,3 +2530,3 @@
+-  // 局部选择留在稳定run root内，隐藏视觉树不重置已展开状态。
 -  const [expanded, setExpanded] = createSignal(false)
-+  // [0624] disclosure 跨内容 owner 重建保持：状态存在 Session 级 interaction store，
-+  // 屏外销毁重建后仍保持用户展开选择；键含 messageID 与 Part ID，天然唯一。
-+  const expanded = () => ctx.interaction.get(`reasoning:${props.message.id}:${props.part.id}`)
-+  const setExpanded = (update: (previous: boolean) => boolean) =>
-+    ctx.interaction.set(`reasoning:${props.message.id}:${props.part.id}`, update(expanded()))
-   // post-conceal 渲染文本缓存：Code 的 onChunks 在高亮渲染期上报实际可见文本，
-   // conceal 变更使缓存失效（下方 effect 重置）。
-   const [rendered, setRendered] = createSignal<string[] | undefined>(undefined)
-@@ -2444,7 +2926,8 @@ function GenericTool(props: ToolProps) {
-             totalLines={view().totalLines}
-             preview={view().preview}
++  // 连续推理沿用首Part的稳定身份；壳化重建保持选择，普通delta不重挂run。
++  const [expanded, setExpanded] = useInteraction(() => `reasoning:${props.parts[0]?.messageID}:${props.parts[0]?.id}`)
+   const [rendered, setRendered] = createSignal<Record<string, string | undefined>>({})
+@@ -2330,4 +2792,4 @@
+   const ctx = use()
+   const output = createMemo(() => props.output?.trim() ?? "")
+-  const [expanded, setExpanded] = createSignal(false)
++  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
+   // 20 行判断是否折叠，预览保留 10 行；字符预算继续随终端宽度变化。
+@@ -2385,7 +2847,8 @@ function GenericTool(props: ToolProps) {
+             onClick={notebookOverflow() ? () => setExpanded((prev) => !prev) : undefined}
+             preview={notebookOverflow() && !expanded() ? view().preview : undefined}
            >
 -            {view().body}
 +            {/* [0624] view().body 是工厂：BlockTool 每次展开重新调用，得到全新内容树 */}
@@ -2632,98 +3420,41 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
            </BlockTool>
          )}
        </Match>
-@@ -3002,11 +3485,14 @@ export function BlockTool(props: {
-   preview?: JSX.Element
-   // #214：autoReview=false 时跳过共享审查状态行——apply_patch 内部 BlockTool 由外部统一渲染
-   autoReview?: false
-+  // [0624] 同一 Part 渲染多张卡片（如 apply_patch 逐文件）时由调用方提供区分键。
-+  stateKey?: string
- }) {
-   const { theme } = useTheme()
-   const renderer = useRenderer()
-   // #292：navigate/review 供 openAutoReviewFromToolChrome 兜底处理冒泡到 BlockTool 的 review 行点击
-   const { navigate } = useRoute()
-+  const ctx = use()
-   const review = useContext(ToolAutoReview)
-   const [hover, setHover] = createSignal(false)
-   const error = createMemo(() => (props.part?.state.status === "error" ? props.part.state.error : undefined))
-@@ -3028,7 +3514,22 @@ export function BlockTool(props: {
-     if (previewLines() <= 0) return false
-     return (props.totalLines ?? 0) > threshold() || (props.totalChars ?? 0) > charThreshold()
-   })
--  const [expanded, setExpanded] = createSignal(false)
-+  // [0624] 展开状态保存在 Session 级 interaction store：BlockTool 随屏外内容 owner 销毁重建，
-+  // 状态决定重建后的实测高度，不能随本地 signal 重置回折叠；无 part 的调用点退回本地状态。
-+  const stateKey = createMemo(() => props.stateKey ?? (props.part ? `expanded:${props.part.id}` : undefined))
-+  const [localExpanded, setLocalExpanded] = createSignal(false)
-+  const expanded = () => {
-+    const key = stateKey()
-+    return key ? ctx.interaction.get(key) : localExpanded()
-+  }
-+  const setExpanded = (update: (previous: boolean) => boolean) => {
-+    const key = stateKey()
-+    if (!key) {
-+      setLocalExpanded(update(localExpanded()))
-+      return
-+    }
-+    ctx.interaction.set(key, update(ctx.interaction.get(key)))
-+  }
-   // #459：collapsed 直接消费 collapsible——与上游同构，无需 canCollapse 信号中转。
-   const collapsed = createMemo(() => collapsible() && !expanded())
-   // [local-smark] R2 冻结根因：preview 必须经 memo 构建恰好一次。直接对
-@@ -3038,17 +3539,10 @@ export function BlockTool(props: {
-   // TextBuffer）。存在性检查改为消费已 memo 的同一棵树。
+@@ -2919,9 +3382,5 @@ export function BlockTool(props: {
    const previewTree = createMemo(() => props.preview)
-   const hasPreview = createMemo(() => previewTree() !== undefined)
--  // OpenTUI 的 renderable 在被 <Show> 销毁后无法可靠重新挂载同一个 JSX 对象，
--  // 会导致折叠→展开→再折叠后内容区变为空白。因此 preview 和 body 一旦挂载就
--  // 常驻，通过 visible 切换显示（display:none/flex），而非卸载 DOM 节点。
--  // 不使用 maxHeight=0 + overflow=hidden：OpenTUI updateFromLayout 中
--  // Math.max(layout.height, 1) 会将高度 0 强制为 1 行，导致隐藏区域泄漏首行。
--  const [bodyMounted, setBodyMounted] = createSignal(!hasPreview() || !collapsed())
--  // body 延迟到首次展开时才挂载，避免在首屏就付出 diff/tree-sitter 渲染开销；
--  // 一旦挂载就不再卸载，后续折叠仅靠 visible=false 隐藏。
+   const collapsed = createMemo(() => previewTree() !== undefined)
+   const preview = createMemo<JSX.Element>((previous) => previewTree() ?? previous)
+-  const [bodyMounted, setBodyMounted] = createSignal(!collapsed())
+-  // 正文首次展开才挂载，此后仅隐藏，保留diff等renderable的内部状态。
 -  createEffect(() => {
--    if (!hasPreview() || !collapsed()) setBodyMounted(true)
+-    if (!collapsed()) setBodyMounted(true)
 -  })
-+  // [0624] body 折叠时彻底卸载而不是常驻后 visible 隐藏：Diff/Markdown 的 native 资源随 Solid owner
-+  // 一起销毁。Show 的 children getter 在每次挂载时重新求值，得到全新 JSX 树，因此不存在
-+  // “重新挂载已销毁对象导致空白”的问题；展开的点击/复制行为由重建后的新树承担。
-+  // preview 是折叠态可见的轻量内容，不跟随 body 释放。
++  // 展开仍归调用方；折叠销毁正文owner，重开通过children getter创建新树，不重挂已销毁对象。
    return (
-     <box
-       ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-@@ -3107,12 +3601,10 @@ export function BlockTool(props: {
-           {previewTree()}
-         </box>
-       </Show>
--      {/* body 区：有 preview 时延迟挂载；折叠态若有 preview 则 visible=false 隐藏，
--          无 preview 时退回 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块） */}
+@@ -2978,3 +3437,3 @@
 -      <Show when={bodyMounted()}>
-+      {/* [0624] body 区：有 preview 时折叠即卸载，展开时全新挂载；无 preview 时保持 previewLines 裁剪（兼容 TodoWrite 等无 preview 的块）。body 可见时 marginTop 恒为 1。 */}
-+      <Show when={!hasPreview() || !collapsed()}>
-         <box
--          marginTop={hasPreview() && collapsed() ? 0 : 1}
--          visible={!collapsed() || !hasPreview()}
-+          marginTop={1}
-           maxHeight={!hasPreview() && collapsed() ? previewLines() : undefined}
-           overflow={!hasPreview() && collapsed() ? "hidden" : undefined}
-         >
-@@ -3138,8 +3630,11 @@ function Shell(props: ToolProps) {
-   const pathFormatter = usePathFormatter()
+-        <box marginTop={collapsed() ? 0 : 1} visible={!collapsed()}>
++      <Show when={!collapsed()}>
++        <box marginTop={1}>
+           {props.children}
+@@ -2998,7 +3457,8 @@ function Shell(props: ToolProps) {
    const ctx = use()
    const isRunning = createMemo(() => props.part.state.status === "running")
--  // 上下文输出信号：右键切换显示返回给模型的内容
 -  const [showContextOutput, setShowContextOutput] = createSignal(false)
-+  // [0624] returned-to-model 开关与展开状态同属轻量交互状态：跨内容 owner 重建保持，
-+  // 否则屏外重建会把“查看上下文输出”重置且改变重建后的实测高度。
-+  const showContextOutput = () => ctx.interaction.get(`context:${props.part.id}`)
-+  const setShowContextOutput = (update: (previous: boolean) => boolean) =>
-+    ctx.interaction.set(`context:${props.part.id}`, update(showContextOutput()))
++  // 模型输出视图和展开选择跨正文重建保留，折叠/右键仍由Shell唯一owner处理。
++  const [showContextOutput, setShowContextOutput] = useInteraction(() => `context:${props.part.id}`)
+   // 只有 completed 的 props.output 才是已返回模型的内容，不能显示运行中的半成品。
    const contextOutputAvailable = createMemo(() => props.output !== undefined && props.part.state.status === "completed")
    const output = createMemo(() => {
      const text = showContextOutput() && contextOutputAvailable() ? props.output : stringValue(props.metadata.output)
-@@ -3546,8 +4041,24 @@ function Task(props: ToolProps) {
+@@ -3007 +3467 @@
+-  const [expanded, setExpanded] = createSignal(false)
++  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
+@@ -3151,2 +3611,2 @@
+   // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
+-  const [expanded, setExpanded] = createSignal(false)
++  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
+@@ -3373,8 +3833,24 @@ function Task(props: ToolProps) {
    const dialog = useDialog()
  
    onMount(() => {
@@ -2750,16 +3481,16 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    })
  
    const sessionID = createMemo(() => stringValue(props.metadata.sessionId))
-@@ -3902,6 +4413,9 @@ function ApplyPatch(props: ToolProps) {
-           }
-               title={title(file)}
-               part={props.part}
-+              // [0624] 逐文件卡片共享同一 Part：展开状态键必须含文件路径，否则一张卡片的
-+              // 展开会串到同 Patch 的其他文件卡片。
-+              stateKey={`${props.part.id}:${file.filePath}`}
-               onClick={patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 patch
-             >
-               <Show
+@@ -3567,2 +4043,2 @@
+   // diff 内容展开/收缩：超过 20 行时默认收缩，避免长 diff 占满终端
+-  const [expanded, setExpanded] = createSignal(false)
++  const [expanded, setExpanded] = useInteraction(() => `expanded:${props.part.id}`)
+@@ -3696,3 +4172,4 @@
+             // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
+-            const [patchExpanded, setPatchExpanded] = createSignal(false)
++            // 同Part的各文件使用独立key，原文件级展开owner及删除diff展示保持不变。
++            const [patchExpanded, setPatchExpanded] = useInteraction(() => `expanded:${props.part.id}:${file.filePath}`)
+             const patchLines = createMemo(() => (file.patch || "").split("\n"))
 
 diff --git a/packages/tui/src/routes/session/notebook-tool.tsx b/packages/tui/src/routes/session/notebook-tool.tsx
 --- a/packages/tui/src/routes/session/notebook-tool.tsx
@@ -2951,250 +3682,58 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli
 diff --git a/packages/tui/test/routes/session/block-tool-collapse.test.tsx b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
 --- a/packages/tui/test/routes/session/block-tool-collapse.test.tsx
 +++ b/packages/tui/test/routes/session/block-tool-collapse.test.tsx
-@@ -9,12 +9,39 @@ import { KVProvider } from "../../../src/context/kv"
- import { TuiConfigProvider } from "../../../src/config"
- import { ThemeProvider } from "../../../src/context/theme"
- import { RouteProvider } from "../../../src/context/route"
--import { BlockTool } from "../../../src/routes/session"
-+import { BlockTool, context as SessionContext } from "../../../src/routes/session"
-+
-+// [0624] BlockTool 依赖 Session 级 interaction store（展开状态跨内容 owner 重建保持）；
-+// 单组件 harness 提供最小 context：默认全部挂载、无 pin、标脏 noop、内存 interaction。
-+const sessionCtx = {
-+  width: 60,
-+  sessionID: "ses_blocktool",
-+  conceal: () => false,
-+  showThinking: () => true,
-+  showTimestamps: () => false,
-+  showDetails: () => true,
-+  showGenericToolOutput: () => true,
-+  diffWrapMode: () => "word" as const,
-+  providers: () => new Map(),
-+  sync: {} as never,
-+  tui: {} as never,
-+  messageView: () => undefined,
-+  pinnedMessages: () => new Set<string>(),
-+  markMessageDirty: () => {},
-+  interaction: {
-+    // 内存实现：点击展开/收起经真实 get/set 往返，断言依赖状态翻转而非恒值。
-+    get: (key: string) => sessionInteractionState[key] ?? false,
-+    set: (key: string, value: boolean) => {
-+      sessionInteractionState[key] = value
-+    },
-+  },
-+}
-+const sessionInteractionState: Record<string, boolean> = {}
- 
- // 回归测试：BlockTool 折叠→展开→再折叠→再展开后内容不能变为空白。
+@@ -18,3 +18,2 @@
 -// 该 bug 由 OpenTUI renderable 销毁后无法重新挂载同一 JSX 对象引起，
 -// 修复方式为 preview/body 常驻挂载，隐藏态由 #344 起改用 visible 属性整体
 -// 不可见（maxHeight=0 会经 Math.max(height,1) 泄漏首行），而非 <Show> 卸载。
-+// [0624] 折叠改为彻底卸载 body（native 资源随 owner 销毁），展开时 Show 的 children
-+// getter 重新求值得到全新 JSX 树；旧 bug（重挂载已销毁对象渲染空白）不再可达，
-+// 本测试继续锁定「反复折叠/展开内容不丢」的用户可观察合同。
- test("block tool keeps content after collapse and re-expand", async () => {
-   // 24 行输出超过 threshold=20，确保 BlockTool 进入可折叠状态。
-   // KV 预置空对象文件，避免 init 读缺失文件时的错误日志噪音。
-@@ -31,14 +58,16 @@ test("block tool keeps content after collapse and re-expand", async () => {
-             <TuiConfigProvider config={{ theme: undefined } as never}>
-               <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
-                 <RouteProvider>
--                  <BlockTool
--                    title="source · cell 3"
--                    totalLines={24}
--                    threshold={20}
--                    maxLines={10}
--                    preview={<text>PREVIEW-FRONT preview body PREVIEW-END</text>}>
--                    <text>{output}</text>
--                  </BlockTool>
-+                  <SessionContext.Provider value={sessionCtx as never}>
-+                    <BlockTool
-+                      title="source · cell 3"
-+                      totalLines={24}
-+                      threshold={20}
-+                      maxLines={10}
-+                      preview={<text>PREVIEW-FRONT preview body PREVIEW-END</text>}>
-+                      <text>{output}</text>
-+                    </BlockTool>
-+                  </SessionContext.Provider>
-                 </RouteProvider>
-               </ThemeProvider>
-             </TuiConfigProvider>
++// 折叠销毁正文，重开通过getter构造新树并恢复完整内容；preview仍复用，不能重复挂载已销毁对象。
++// 原preview边界、完整正文与命令不双显断言全部保留。
+@@ -98,3 +97,4 @@
+     frame = app.captureCharFrame()
+     expect(frame).toContain("source line 24")
+-    expect(bodyMounts).toBe(1)
++    // 第二次展开确实重建正文owner，而不是把隐藏误报成释放。
++    expect(bodyMounts).toBe(2)
 
 diff --git a/packages/tui/test/routes/session/block-tool-preview-once.test.tsx b/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
 --- a/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
 +++ b/packages/tui/test/routes/session/block-tool-preview-once.test.tsx
-@@ -11,7 +11,32 @@ import { KVProvider } from "../../../src/context/kv"
- import { TuiConfigProvider } from "../../../src/config"
- import { ThemeProvider } from "../../../src/context/theme"
- import { RouteProvider } from "../../../src/context/route"
--import { BlockTool } from "../../../src/routes/session"
-+import { BlockTool, context as SessionContext } from "../../../src/routes/session"
-+
-+// [0624] BlockTool 依赖 Session 级 interaction store；与 block-tool-collapse 同款最小 context。
-+const sessionInteractionState: Record<string, boolean> = {}
-+const sessionCtx = {
-+  width: 60,
-+  sessionID: "ses_blocktool_preview",
-+  conceal: () => false,
-+  showThinking: () => true,
-+  showTimestamps: () => false,
-+  showDetails: () => true,
-+  showGenericToolOutput: () => true,
-+  diffWrapMode: () => "word" as const,
-+  providers: () => new Map(),
-+  sync: {} as never,
-+  tui: {} as never,
-+  messageView: () => undefined,
-+  pinnedMessages: () => new Set<string>(),
-+  markMessageDirty: () => {},
-+  interaction: {
-+    get: (key: string) => sessionInteractionState[key] ?? false,
-+    set: (key: string, value: boolean) => {
-+      sessionInteractionState[key] = value
-+    },
-+  },
-+}
- 
- // R2 冻结回归锁：preview 必须经 memo 构建恰好一次——存在性检查不得为
- // `!== undefined` 而构造并丢弃整棵 preview 子树（每块约 18 个 native 句柄，
-@@ -33,14 +58,16 @@ function PreviewCard(props: { text: string }) {
-           <TuiConfigProvider config={{ theme: undefined } as never}>
-             <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
-               <RouteProvider>
--                <BlockTool
--                  title="bash"
--                  totalLines={24}
--                  threshold={20}
--                  maxLines={10}
--                  preview={<text>{props.text}</text>}>
--                  <text>{`${props.text}\napplied`}</text>
--                </BlockTool>
-+                <SessionContext.Provider value={sessionCtx as never}>
-+                  <BlockTool
-+                    title="bash"
-+                    totalLines={24}
-+                    threshold={20}
-+                    maxLines={10}
-+                    preview={<text>{props.text}</text>}>
-+                    <text>{`${props.text}\napplied`}</text>
-+                  </BlockTool>
-+                </SessionContext.Provider>
-               </RouteProvider>
-             </ThemeProvider>
-           </TuiConfigProvider>
+@@ -71,5 +71,7 @@
+   } finally {
+     app.renderer.destroy()
++    // 预览只有一棵树；Provider卸载后其真实native根也应退休。
++    expect(app.renderer.root.isDestroyed).toBe(true)
+     engine.detach()
+   }
+ })
 
 diff --git a/packages/tui/test/routes/session/block-tool-visible-once.test.tsx b/packages/tui/test/routes/session/block-tool-visible-once.test.tsx
 --- a/packages/tui/test/routes/session/block-tool-visible-once.test.tsx
 +++ b/packages/tui/test/routes/session/block-tool-visible-once.test.tsx
-@@ -9,7 +9,32 @@ import { KVProvider } from "../../../src/context/kv"
- import { TuiConfigProvider } from "../../../src/config"
- import { ThemeProvider } from "../../../src/context/theme"
- import { RouteProvider } from "../../../src/context/route"
--import { BlockTool } from "../../../src/routes/session"
-+import { BlockTool, context as SessionContext } from "../../../src/routes/session"
-+
-+// [0624] BlockTool 依赖 Session 级 interaction store；与 block-tool-collapse 同款最小 context。
-+const sessionInteractionState: Record<string, boolean> = {}
-+const sessionCtx = {
-+  width: 60,
-+  sessionID: "ses_blocktool_once",
-+  conceal: () => false,
-+  showThinking: () => true,
-+  showTimestamps: () => false,
-+  showDetails: () => true,
-+  showGenericToolOutput: () => true,
-+  diffWrapMode: () => "word" as const,
-+  providers: () => new Map(),
-+  sync: {} as never,
-+  tui: {} as never,
-+  messageView: () => undefined,
-+  pinnedMessages: () => new Set<string>(),
-+  markMessageDirty: () => {},
-+  interaction: {
-+    get: (key: string) => sessionInteractionState[key] ?? false,
-+    set: (key: string, value: boolean) => {
-+      sessionInteractionState[key] = value
-+    },
-+  },
-+}
- 
- // shell 卡片互斥回归：preview 与 body 都含 "$ <command>"。#344 之前 preview 用
- // maxHeight=0 隐藏，OpenTUI updateFromLayout 的 Math.max(layout.height, 1) 会泄漏
-@@ -27,14 +52,16 @@ function ShellCard(props: { command: string; output: string }) {
-           <TuiConfigProvider config={{ theme: undefined } as never}>
-             <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
-               <RouteProvider>
--                <BlockTool
--                  title="bash"
--                  totalLines={24}
--                  threshold={20}
--                  maxLines={10}
--                  preview={<text>{`$ ${props.command}`}</text>}>
--                  <text>{`$ ${props.command}\n${props.output}`}</text>
--                </BlockTool>
-+                <SessionContext.Provider value={sessionCtx as never}>
-+                  <BlockTool
-+                    title="bash"
-+                    totalLines={24}
-+                    threshold={20}
-+                    maxLines={10}
-+                    preview={<text>{`$ ${props.command}`}</text>}>
-+                    <text>{`$ ${props.command}\n${props.output}`}</text>
-+                  </BlockTool>
-+                </SessionContext.Provider>
-               </RouteProvider>
-             </ThemeProvider>
-           </TuiConfigProvider>
+@@ -76,5 +76,7 @@
+   } finally {
+     app.renderer.destroy()
++    // 命令互斥断言保留，同时确认窗口结束不会留下仍活着的native根。
++    expect(app.renderer.root.isDestroyed).toBe(true)
+     engine.detach()
+   }
+ })
 
 diff --git a/packages/tui/test/routes/session/reasoning-disclosure.test.tsx b/packages/tui/test/routes/session/reasoning-disclosure.test.tsx
 --- a/packages/tui/test/routes/session/reasoning-disclosure.test.tsx
 +++ b/packages/tui/test/routes/session/reasoning-disclosure.test.tsx
-@@ -15,19 +15,34 @@ import { RouteProvider } from "../../../src/context/route"
- // 因此本文件锁定可稳定复现的三个契约面；overflow 数值路径由生产流式链路覆盖。
- import { ReasoningPartView, context as SessionContext } from "../../../src/routes/session"
- 
--const makeCtx = (showThinking: () => boolean) => ({
--  width: 60,
--  sessionID: "ses_test",
--  conceal: () => false,
--  showThinking,
--  showTimestamps: () => false,
--  showDetails: () => true,
--  showGenericToolOutput: () => true,
--  diffWrapMode: () => "word" as const,
--  providers: () => new Map(),
--  sync: {} as never,
--  tui: {} as never,
--})
-+const makeCtx = (showThinking: () => boolean) => {
-+  // [0624] interaction 用每个 ctx 实例私有的内存 store：点击展开经真实 get/set 往返，
-+  // 跨内容 owner 重建的 disclosure 合同由此可测。
-+  const interactionState: Record<string, boolean> = {}
-+  return {
-+    width: 60,
-+    sessionID: "ses_test",
-+    conceal: () => false,
-+    showThinking,
-+    showTimestamps: () => false,
-+    showDetails: () => true,
-+    showGenericToolOutput: () => true,
-+    diffWrapMode: () => "word" as const,
-+    providers: () => new Map(),
-+    sync: {} as never,
-+    tui: {} as never,
-+    // [0624] 渲染资源窗口回写接口：单组件 harness 默认全部挂载、无 pin、标脏 noop。
+@@ -38,2 +38,4 @@
+ function Harness(props: { showThinking: () => boolean; parts: ReasoningPart[]; stateDir: string; width?: number; conceal?: () => boolean }) {
++  // 响应式交互存储才能验证真实点击，不使用不会通知渲染的普通对象。
++  const [interaction, setInteraction] = createSignal<Record<string, boolean>>({})
+   const value = {
+@@ -50,2 +52,9 @@
+     tui: {} as never,
 +    messageView: () => undefined,
 +    pinnedMessages: () => new Set<string>(),
 +    markMessageDirty: () => {},
 +    interaction: {
-+      get: (key: string) => interactionState[key] ?? false,
-+      set: (key: string, value: boolean) => {
-+        interactionState[key] = value
-+      },
++      get: (key: string) => interaction()[key] ?? false,
++      set: (key: string, value: boolean) => setInteraction((previous) => ({ ...previous, [key]: value })),
 +    },
-+  }
-+}
- 
- const makePart = (text: string) => ({
-   id: "prt_test",
+   }

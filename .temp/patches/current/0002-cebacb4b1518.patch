@@ -124,7 +124,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
        const title = path.relative(instance.worktree, filepath)
  
        const stat = yield* fs.stat(filepath).pipe(
-@@ -298,6 +407,10 @@
+@@ -298,10 +407,27 @@
        }
  
 +      // stat 跟随软链接；只准普通文件，避免设备别名绕过字符串黑名单。
@@ -135,7 +135,25 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
        const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
  
        const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
-@@ -335,6 +448,22 @@
+-      const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
++      // BMP 需具备完整文件头和 DIB 头，避免把 BM 开头的纯文本当图片。
++      const header = new DataView(sample.buffer, sample.byteOffset, sample.byteLength)
++      const isImage =
++        SUPPORTED_IMAGE_MIMES.has(mime) ||
++        (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(mime) &&
++          sniffAttachmentMime(sample, "") === mime) ||
++        (mime === "image/bmp" &&
++          sample.length >= 26 &&
++          sample[0] === 0x42 &&
++          sample[1] === 0x4d &&
++          header.getUint32(14, true) >= 12 &&
++          14 + header.getUint32(14, true) <= sample.length &&
++          header.getUint32(10, true) >= 14 + header.getUint32(14, true) &&
++          header.getUint32(10, true) < Number(stat.size))
+ 
+       if (isImage || isPdfAttachment(mime)) {
+         const bytes = yield* fs.readFile(filepath)
+@@ -335,6 +461,22 @@
          )
        }
  
@@ -158,7 +176,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
        let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
        output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
  
-@@ -356,6 +485,25 @@
+@@ -356,6 +498,25 @@
          output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
        }
  
@@ -186,10 +204,52 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
          output,
 
 
+diff --git a/packages/opencode/src/util/media.ts b/packages/opencode/src/util/media.ts
+--- a/packages/opencode/src/util/media.ts
++++ b/packages/opencode/src/util/media.ts
+@@ -15,6 +15,32 @@
+ export function sniffAttachmentMime(bytes: Uint8Array, fallback: string) {
+   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png"
+   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg"
+   if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif"
+   if (startsWith(bytes, [0x42, 0x4d])) return "image/bmp"
++  // TIFF byte order alone ("II"/"MM") is also valid plain text.
++  if (
++    (bytes.length >= 8 &&
++      (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a]))) ||
++    (bytes.length >= 16 &&
++      (startsWith(bytes, [0x49, 0x49, 0x2b, 0x00, 0x08, 0x00, 0x00, 0x00]) ||
++        startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2b, 0x00, 0x08, 0x00, 0x00])))
++  )
++    return "image/tiff"
++  // ISO BMFF: inspect major and compatible brands, never a filename extension.
++  if (bytes.length >= 16 && startsWith(bytes.subarray(4), [0x66, 0x74, 0x79, 0x70])) {
++    const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
++    const size = header.getUint32(0)
++    if (size >= 16 && size <= bytes.length && size % 4 === 0) {
++      const brands = [
++        header.getUint32(8),
++        ...Array.from({ length: (size - 16) / 4 }, (_, index) => header.getUint32(16 + index * 4)),
++      ]
++      // avif/avis take precedence over the generic HEIF container brands.
++      if (brands.some((brand) => brand === 0x61766966 || brand === 0x61766973)) return "image/avif"
++      // heic/heix/hevc/hevx encode HEVC images; mif1/msf1 denote HEIF containers.
++      if (brands.some((brand) => [0x68656963, 0x68656978, 0x68657663, 0x68657678].includes(brand)))
++        return "image/heic"
++      if (brands.some((brand) => brand === 0x6d696631 || brand === 0x6d736631)) return "image/heif"
++    }
++  }
+   if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return "application/pdf"
+
 diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
 --- a/packages/opencode/src/image/image.ts
 +++ b/packages/opencode/src/image/image.ts
-@@ -53,5 +53,6 @@
+@@ -1,3 +1,4 @@
++import { Image } from "@opencode-ai/core/image"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Config } from "@/config/config"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+@@ -53,5 +54,6 @@
  export interface Interface {
 -  readonly normalize: (input: SessionV1.FilePart) => Effect.Effect<SessionV1.FilePart, Error>
 +  // 预算由 Read 调用传入，用户上传与其他工具仍只受既有配置约束。
@@ -197,7 +257,20 @@ diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/
  }
  
  export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
-@@ -75,10 +76,11 @@
+@@ -60,6 +62,12 @@
+   Service,
+   Effect.gen(function* () {
+     const config = yield* Config.Service
++    const loadSharp = yield* Effect.cached(
++      Effect.tryPromise({
++        try: () => import("@opencode-ai/core/image/sharp"),
++        catch: () => new Image.ResizerUnavailableError(),
++      }).pipe(Effect.flatMap((adapter) => adapter.make)),
++    )
+     const loadPhoton = yield* Effect.cached(
+       Effect.sync(() => {
+         // Patched photon-node reads this during module init so Bun compiled binaries use the embedded wasm path.
+@@ -75,10 +83,11 @@
 -    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart) {
 +    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart, maxBase64Bytes = Infinity) {
        const image = (yield* config.get()).attachment?.image
@@ -211,6 +284,118 @@ diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/
        }
        if (!input.url.startsWith("data:") || !input.url.includes(";base64,"))
          return yield* new InvalidDataUrlError({ url: input.url })
+@@ -86,9 +95,42 @@
+       const base64 = input.url.slice(input.url.indexOf(";base64,") + ";base64,".length)
+       const bytes = Buffer.byteLength(base64, "utf8")
+ 
+-      const photon = yield* loadPhoton
++      const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(input.mime)
++      if (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(input.mime)) {
++        const content = yield* loadSharp.pipe(
++          Effect.flatMap((normalize) =>
++            normalize(
++              input.filename ?? input.id,
++              { uri: input.url, content: base64, encoding: "base64", mime: input.mime },
++              info,
++            ),
++          ),
++          // 保留加载、解码和尺寸三类错误，既有调用方仍决定 resizer 不可用时的回退。
++          Effect.mapError((error) =>
++            error instanceof Image.SizeError
++              ? new SizeError({
++                  bytes: error.bytes,
++                  max: error.maxBytes,
++                  width: error.width,
++                  height: error.height,
++                  max_width: error.maxWidth,
++                  max_height: error.maxHeight,
++                })
++              : error instanceof Image.ResizerUnavailableError
++                ? new ResizerUnavailableError()
++                : new DecodeError(),
++          ),
++        )
++        return {
++          ...input,
++          mime: content.mime,
++          url: `data:${content.mime};base64,${content.content}`,
++        }
++      }
++
++      const photon = yield* loadPhoton
+ 
+       const decoded = yield* Effect.try({
+         try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64")),
+         catch: () => new DecodeError(),
+       }).pipe(Effect.tapError((error) => Effect.logWarning("failed to decode image", { error })))
+@@ -96,9 +138,11 @@
+       try {
+         const originalWidth = decoded.get_width()
+         const originalHeight = decoded.get_height()
+-        if (originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes)
+-          return input
+-        if (!info.autoResize)
++        const withinLimits =
++          originalWidth <= info.maxWidth && originalHeight <= info.maxHeight && bytes <= info.maxBase64Bytes
++        // BMP 即使未超限也须转成 PNG/JPEG；禁用缩放不禁止等尺寸转码。
++        if (withinLimits && supported) return input
++        if (!info.autoResize && !withinLimits)
+           return yield* new SizeError({
+             bytes,
+             max: info.maxBase64Bytes,
+@@ -109,7 +153,7 @@
+           })
+ 
+         const scale = Math.min(1, info.maxWidth / originalWidth, info.maxHeight / originalHeight)
+-        for (const size of Array.from({ length: 32 }).reduce<Array<{ width: number; height: number }>>((acc) => {
++        for (const size of Array.from({ length: info.autoResize ? 32 : 1 }).reduce<Array<{ width: number; height: number }>>((acc) => {
+           const previous = acc.at(-1) ?? {
+             width: Math.max(1, Math.round(originalWidth * scale)),
+             height: Math.max(1, Math.round(originalHeight * scale)),
+
+diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+--- a/packages/core/src/tool/read-filesystem.ts
++++ b/packages/core/src/tool/read-filesystem.ts
+@@ -139,6 +139,39 @@
+   if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif"
+   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50]))
+     return "image/webp"
++  // BMP 需有结构化文件头，不能把以 BM 开头的纯文本当图片。
++  if (bytes.length >= 26 && startsWith(bytes, [0x42, 0x4d])) {
++    const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
++    const size = header.getUint32(14, true)
++    if (
++      [12, 16, 40, 52, 56, 64, 108, 124].includes(size) &&
++      bytes.length >= 14 + size &&
++      header.getUint32(10, true) >= 14 + size &&
++      header.getUint16(size === 12 ? 22 : 26, true) === 1
++    )
++      return "image/bmp"
++  }
++  // Require the complete TIFF signature, not just the printable byte-order marker.
++  if (
++    (bytes.length >= 8 &&
++      (startsWith(bytes, [0x49, 0x49, 0x2a, 0x00]) || startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2a]))) ||
++    (bytes.length >= 16 &&
++      (startsWith(bytes, [0x49, 0x49, 0x2b, 0x00, 0x08, 0x00, 0x00, 0x00]) ||
++        startsWith(bytes, [0x4d, 0x4d, 0x00, 0x2b, 0x00, 0x08, 0x00, 0x00])))
++  )
++    return "image/tiff"
++  if (bytes.length >= 16 && startsWith(bytes.subarray(4), [0x66, 0x74, 0x79, 0x70])) {
++    const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0)
++    if (size >= 16 && size <= bytes.length && size % 4 === 0) {
++      // Check both the major and compatible brands, excluding the minor version.
++      const brands = [8, ...Array.from({ length: (size - 16) / 4 }, (_, index) => 16 + index * 4)].map((offset) =>
++        Buffer.from(bytes.subarray(offset, offset + 4)).toString("ascii"),
++      )
++      if (brands.some((brand) => ["avif", "avis"].includes(brand))) return "image/avif"
++      if (brands.some((brand) => ["heic", "heix", "hevc", "hevx"].includes(brand))) return "image/heic"
++      if (brands.some((brand) => ["mif1", "msf1"].includes(brand))) return "image/heif"
++    }
++  }
+ }
+ const binary = (resource: string, bytes: Uint8Array) => {
+   if (extensions.has(path.extname(resource).toLowerCase())) return true
 
 diff --git a/packages/core/src/image.ts b/packages/core/src/image.ts
 --- a/packages/core/src/image.ts
@@ -223,7 +408,16 @@ diff --git a/packages/core/src/image.ts b/packages/core/src/image.ts
    ) => Effect.Effect<
      FileSystem.Content & { readonly encoding: "base64" },
      ResizerUnavailableError | DecodeError | SizeError
-@@ -57,6 +58,7 @@
+@@ -54,9 +55,16 @@
+         catch: () => new ResizerUnavailableError(),
+       }).pipe(Effect.flatMap((adapter) => adapter.make)),
+     )
++    const loadSharpAdapter = yield* Effect.cached(
++      Effect.tryPromise({
++        try: () => import("./image/sharp"),
++        catch: () => new ResizerUnavailableError(),
++      }).pipe(Effect.flatMap((adapter) => adapter.make)),
++    )
      const normalize = Effect.fn("Image.normalize")(function* (
        resource: string,
        content: FileSystem.Content & { readonly encoding: "base64" },
@@ -231,16 +425,134 @@ diff --git a/packages/core/src/image.ts b/packages/core/src/image.ts
      ) {
        const image = Object.assign(
          {},
-@@ -69,7 +71,8 @@
+@@ -67,9 +75,12 @@
+-      const normalize = yield* loadAdapter
++      const normalize = yield* (["image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime)
++        ? loadSharpAdapter
++        : loadAdapter)
+       return yield* normalize(resource, content, {
          autoResize: image.auto_resize ?? true,
          maxWidth: image.max_width ?? 2_000,
          maxHeight: image.max_height ?? 2_000,
 -        maxBase64Bytes: image.max_base64_bytes ?? 5 * 1024 * 1024,
-+        // 同一 Photon 算法处理可选 Read 预算；省略预算不限制其他附件至 1.2 MB。
++        // Read's budget intersects configuration without changing other callers' limits.
 +        maxBase64Bytes: Math.min(image.max_base64_bytes ?? 5 * 1024 * 1024, maxBase64Bytes),
        })
      })
      return Service.of({ normalize })
+
+diff --git a/packages/core/src/image/sharp.ts b/packages/core/src/image/sharp.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/image/sharp.ts
+@@ -0,0 +1,81 @@
++export * as CoreImageSharp from "./sharp"
++
++import { Effect } from "effect"
++import { FileSystem } from "../filesystem"
++import { Image } from "../image"
++
++export const make = Effect.gen(function* () {
++  const sharp = yield* Effect.tryPromise({
++    try: async () => {
++      const module = await import("sharp")
++      return module.default
++    },
++    catch: () => new Image.ResizerUnavailableError(),
++  })
++  return Effect.fn("Image.Sharp.normalize")(function* (
++    resource: string,
++    content: FileSystem.Content & { readonly encoding: "base64" },
++    limits: {
++      readonly autoResize: boolean
++      readonly maxWidth: number
++      readonly maxHeight: number
++      readonly maxBase64Bytes: number
++    },
++  ) {
++    const buffer = Buffer.from(content.content, "base64")
++    const metadata = yield* Effect.tryPromise({
++      try: () => sharp(buffer).metadata(),
++      catch: () => new Image.DecodeError({ resource }),
++    })
++    if (!metadata.width || !metadata.height) return yield* new Image.DecodeError({ resource })
++    const swapped = metadata.orientation !== undefined && metadata.orientation >= 5 && metadata.orientation <= 8
++    const width = swapped ? metadata.height : metadata.width
++    const height = swapped ? metadata.width : metadata.height
++    const bytes = Buffer.byteLength(content.content, "utf-8")
++    const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
++    if (withinLimits && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(content.mime)) return content
++    const sizeError = new Image.SizeError({
++      resource,
++      width,
++      height,
++      bytes,
++      maxWidth: limits.maxWidth,
++      maxHeight: limits.maxHeight,
++      maxBytes: limits.maxBase64Bytes,
++    })
++    if (!limits.autoResize && !withinLimits) return yield* sizeError
++    const scale = Math.min(1, limits.maxWidth / width, limits.maxHeight / height)
++    for (const step of Array.from({ length: limits.autoResize ? 32 : 1 }, (_, index) => index)) {
++      const size = {
++        width: Math.max(1, Math.floor(width * scale * 0.75 ** step)),
++        height: Math.max(1, Math.floor(height * scale * 0.75 ** step)),
++      }
++      const candidate = yield* Effect.tryPromise({
++        try: async () => {
++          const rotated = sharp(buffer).rotate()
++          const resized =
++            size.width < width || size.height < height
++              ? rotated.resize(size.width, size.height, { fit: "inside", withoutEnlargement: true })
++              : rotated
++          if (metadata.hasAlpha) {
++            const data = (await resized.clone().png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer()).toString(
++              "base64",
++            )
++            if (Buffer.byteLength(data, "utf-8") <= limits.maxBase64Bytes) return { data, mime: "image/png" }
++          }
++          for (const quality of [85, 70, 55, 40]) {
++            // 透明图转 JPEG 时沿用原始白底语义，避免透明像素变成黑色。
++            const data = (await (metadata.hasAlpha ? resized.clone().flatten({ background: "#ffffff" }) : resized.clone())
++              .jpeg({ quality })
++              .toBuffer()).toString("base64")
++            if (Buffer.byteLength(data, "utf-8") <= limits.maxBase64Bytes) return { data, mime: "image/jpeg" }
++          }
++        },
++        catch: () => new Image.DecodeError({ resource }),
++      })
++      if (candidate) return { ...content, content: candidate.data, mime: candidate.mime }
++      if (size.width === 1 && size.height === 1) break
++    }
++    return yield* sizeError
++  })
++})
+
+diff --git a/packages/core/src/image/photon.ts b/packages/core/src/image/photon.ts
+--- a/packages/core/src/image/photon.ts
++++ b/packages/core/src/image/photon.ts
+@@ -36,8 +36,10 @@
+       const width = decoded.get_width()
+       const height = decoded.get_height()
+       const bytes = Buffer.byteLength(content.content, "utf-8")
+-      if (width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes) return content
+-      if (!limits.autoResize)
++      const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
++      // BMP 即使未超限也须转码；禁用缩放时只尝试原尺寸编码。
++      if (withinLimits && content.mime !== "image/bmp") return content
++      if (!limits.autoResize && !withinLimits)
+         return yield* new SizeError({
+           resource,
+           width,
+@@ -62,7 +64,7 @@
+               }
+         return acc.some((item) => item.width === next.width && item.height === next.height) ? acc : [...acc, next]
+       }, [])
+-      for (const size of sizes) {
++      for (const size of limits.autoResize ? sizes : sizes.slice(0, 1)) {
+         const resized = photon.resize(decoded, size.width, size.height, photon.SamplingFilter.Lanczos3)
+         try {
+           const encoders: Array<readonly [mime: string, encode: () => Uint8Array]> = [
 
 diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 --- a/packages/core/src/tool/read.ts
@@ -285,13 +597,24 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
              return [
                { type: "text", text: "Image read successfully" },
                { type: "file", data: output.content, mime: output.mime, name: input.path },
-@@ -86,7 +101,8 @@
-               if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
+@@ -86,7 +101,17 @@
+-              if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
++              if (
++                "encoding" in content &&
++                content.encoding === "base64" &&
++                (SUPPORTED_IMAGE_MIMES.has(content.mime) ||
++                  ["image/bmp", "image/tiff", "image/avif", "image/heif", "image/heic"].includes(content.mime))
++              ) {
                  return yield* image
 -                  .normalize(resource, { ...content, encoding: "base64" })
 +                  // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
 +                  .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
-                   .pipe(Effect.catchTag("Image.ResizerUnavailableError", () => Effect.succeed(content)))
+-                  .pipe(Effect.catchTag("Image.ResizerUnavailableError", () => Effect.succeed(content)))
++                  .pipe(
++                    Effect.catchTag("Image.ResizerUnavailableError", (error) =>
++                      SUPPORTED_IMAGE_MIMES.has(content.mime) ? Effect.succeed(content) : Effect.fail(error),
++                    ),
++                  )
                }
                if ("encoding" in content && content.encoding === "base64")
                  return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
@@ -299,7 +622,27 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
 --- a/packages/core/test/tool-read.test.ts
 +++ b/packages/core/test/tool-read.test.ts
-@@ -199,6 +199,39 @@
+@@ -132,7 +132,7 @@
+-const readLayer = (imageLayer: Layer.Layer<Image.Service>) =>
++const readLayer = (imageLayer: Layer.Layer<Image.Service>, readerLayer: Layer.Layer<ReadToolFileSystem.Service> = reader) =>
+   AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, ReadTool.node]), [
+-    [ReadToolFileSystem.node, reader],
++    [ReadToolFileSystem.node, readerLayer],
+     [PermissionV2.node, permission],
+     [Config.node, config],
+     [Image.node, imageLayer],
+     [LocationMutation.node, mutation],
+@@ -144,6 +144,9 @@
+ const it = testEffect(readLayer(imageLayer))
+ const itWithoutResizer = testEffect(readLayer(unavailableImage))
++const itFiles = testEffect(
++  Layer.mergeAll(readLayer(imageLayer, LayerNode.compile(ReadToolFileSystem.node)), LayerNode.compile(FSUtil.node)),
++)
+ const sessionID = SessionV2.ID.make("ses_read_tool_test")
+ 
+ describe("ReadTool", () => {
+   beforeEach(() => {
+@@ -199,6 +202,39 @@
 -  it.effect("asks for external_directory approval before reading an external absolute path", () =>
 +  it.effect("projects malware reminders without changing typed text or permission ordering", () =>
      Effect.gen(function* () {
@@ -340,6 +683,154 @@ diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read
        const external = path.join(path.parse(process.cwd()).root, "external-read", "notes.txt")
  
        expect(
+@@ -223,49 +259,71 @@
+-  it.effect("returns a small PNG as native media instead of durable base64 text", () =>
++  itFiles.live("returns small PNG, BMP, TIFF and AVIF files as native model-supported media", () =>
+     Effect.gen(function* () {
+-      const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+-      readResult = {
+-        uri: "file:///pixel.png",
+-        name: "pixel.png",
+-        content: png,
+-        encoding: "base64",
+-        mime: "image/png",
+-      }
++      const bmp = Buffer.alloc(58)
++      bmp.set([0x42, 0x4d])
++      bmp.writeUInt32LE(bmp.length, 2)
++      bmp.writeUInt32LE(54, 10)
++      bmp.writeUInt32LE(40, 14)
++      bmp.writeInt32LE(1, 18)
++      bmp.writeInt32LE(1, 22)
++      bmp.writeUInt16LE(1, 26)
++      bmp.writeUInt16LE(24, 28)
++      bmp.writeUInt32LE(4, 34)
++      bmp.set([0, 0, 255, 0], 54)
++      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
++      const source = new photon.PhotonImage(new Uint8Array([255, 0, 0, 255]), 1, 1)
++      const png = Buffer.from(source.get_bytes())
++      source.free()
++      const fs = yield* FSUtil.Service
++      const directory = yield* fs.makeTempDirectoryScoped()
+       const registry = yield* ToolRegistry.Service
+-
+-      expect(
+-        yield* executeTool(registry, {
++      const { default: sharp } = yield* Effect.promise(() => import("sharp"))
++      const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
++      const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
++      for (const [name, data] of [
++        ["pixel.png", png],
++        ["pixel.bmp", bmp],
++        ["pixel.tiff", tiff],
++        ["pixel.avif", avif],
++      ] as const) {
++        const file = path.join(directory, name)
++        yield* fs.writeFile(file, data)
++        const settled = yield* settleTool(registry, {
+           sessionID,
+           ...toolIdentity,
+-          call: { type: "tool-call", id: "call-image", name: "read", input: { path: "pixel.png" } },
+-        }),
+-      ).toEqual({
+-        type: "content",
+-        value: [
+-          { type: "text", text: "Image read successfully" },
+-          { type: "file", uri: `data:image/png;base64,${png}`, mime: "image/png", name: "pixel.png" },
+-        ],
+-      })
+-      expect(readCalls).toEqual([
+-        {
+-          input: AbsolutePath.make(path.join(process.cwd(), "pixel.png")),
+-          page: { offset: undefined, limit: undefined },
+-        },
+-      ])
+-
+-      const settled = yield* settleTool(registry, {
+-        sessionID,
+-        ...toolIdentity,
+-        call: { type: "tool-call", id: "call-image-settle", name: "read", input: { path: "pixel.png" } },
+-      })
+-      expect(settled.output?.structured).toMatchObject({
+-        uri: "file:///pixel.png",
+-        name: "pixel.png",
+-        mime: "image/png",
+-        encoding: "base64",
+-      })
+-      expect(settled.output?.content).toMatchObject([
+-        { type: "text", text: "Image read successfully" },
+-        { type: "file", mime: "image/png", uri: `data:image/png;base64,${png}` },
+-      ])
++          call: { type: "tool-call", id: `call-image-${name}`, name: "read", input: { path: file } },
++        })
++        expect(settled.result.type).toBe("content")
++        if (settled.result.type !== "content") throw new Error("expected native image output")
++        expect(settled.result.value).toHaveLength(2)
++        expect(settled.result.value[0]).toEqual({ type: "text", text: "Image read successfully" })
++        const attachment = settled.result.value[1]
++        if (attachment.type !== "file" || !attachment.uri) throw new Error("expected image attachment")
++        expect(attachment.name).toBe(file)
++        expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(attachment.mime)
++        expect(attachment.mime).toBe("image/png")
++        expect(attachment.uri.startsWith(`data:${attachment.mime};base64,`)).toBe(true)
++        expect(Buffer.byteLength(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "utf-8")).toBeLessThanOrEqual(1600 * 750)
++        const bytes = Buffer.from(attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8), "base64")
++        expect(Array.from(bytes.subarray(0, 8)))
++          .toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
++        const decoded = photon.PhotonImage.new_from_byteslice(bytes)
++        expect(decoded.get_width()).toBe(1)
++        expect(decoded.get_height()).toBe(1)
++        decoded.free()
++        expect(settled.output?.structured).toMatchObject({
++          name,
++          mime: attachment.mime,
++          encoding: "base64",
++        })
++        expect(settled.output?.content).toMatchObject([
++          { type: "text", text: "Image read successfully" },
++          { type: "file", mime: attachment.mime, uri: attachment.uri },
++        ])
++        if (name === "pixel.png") {
++          expect(attachment.mime).toBe("image/png")
++          expect(attachment.uri).toBe(`data:image/png;base64,${png.toString("base64")}`)
++        }
++      }
++      expect(readCalls).toEqual([])
+     }),
+   )
+@@ -307,6 +365,32 @@
+           { type: "file", uri: `data:image/png;base64,${png}`, mime: "image/png", name: "large.png" },
+         ],
+       })
++
++      const oversized = Buffer.from(yield* Effect.promise(() =>
++        Bun.file(path.join(import.meta.dir, "../../opencode/test/image/fixtures/picture-5mb-base64.png")).arrayBuffer(),
++      )).toString("base64")
++      expect(oversized.length).toBe(5 * 1024 * 1024)
++      readResult = { ...readResult, uri: "file:///budget.png", name: "budget.png", content: oversized }
++      const bounded = yield* settleTool(registry, {
++        sessionID,
++        ...toolIdentity,
++        call: { type: "tool-call", id: "call-image-budget", name: "read", input: { path: "budget.png" } },
++      })
++      expect(bounded.outputPaths).toBeUndefined()
++      expect(bounded.result.type).toBe("content")
++      if (bounded.result.type !== "content") throw new Error("expected bounded native image output")
++      expect(bounded.result.value[0]).toEqual({ type: "text", text: "Image read successfully" })
++      const attachment = bounded.result.value[1]
++      if (attachment.type !== "file" || !attachment.uri) throw new Error("expected bounded image attachment")
++      expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(attachment.mime)
++      expect(attachment.uri.startsWith(`data:${attachment.mime};base64,`)).toBe(true)
++      const base64 = attachment.uri.slice(attachment.uri.indexOf(";base64,") + 8)
++      expect(Buffer.byteLength(base64, "utf-8")).toBeLessThanOrEqual(1600 * 750)
++      expect(base64).not.toBe(oversized)
++      const decoded = photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64"))
++      expect(decoded.get_width()).toBeLessThanOrEqual(2_000)
++      expect(decoded.get_height()).toBeLessThanOrEqual(2_000)
++      decoded.free()
+     }),
+   )
+ 
 
 diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
 --- a/packages/core/test/session-runner-message.test.ts
@@ -416,7 +907,64 @@ diff --git a/packages/opencode/test/image/image.test.ts b/packages/opencode/test
  function part(mime: string, data: string) {
    return {
      id: PartID.ascending(),
-@@ -83,13 +88,16 @@
+@@ -30,19 +35,53 @@
+-  it.effect("normalizes generated png and jpeg attachments", () =>
++  it.effect("normalizes generated PNG, JPEG, BMP, TIFF and AVIF attachments", () =>
+     Effect.gen(function* () {
+       const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+       const source = new photon.PhotonImage(
+         new Uint8Array(Array.from({ length: 64 * 64 * 4 }, (_, index) => (index % 4 === 3 ? 255 : index % 251))),
+         64,
+         64,
+       )
++      const { default: sharp } = yield* Effect.promise(() => import("sharp"))
++      const png = Buffer.from(source.get_bytes())
++      const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
++      const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
++      const bmp = Buffer.alloc(58)
++      bmp.set([0x42, 0x4d])
++      bmp.writeUInt32LE(bmp.length, 2)
++      bmp.writeUInt32LE(54, 10)
++      bmp.writeUInt32LE(40, 14)
++      bmp.writeInt32LE(1, 18)
++      bmp.writeInt32LE(1, 22)
++      bmp.writeUInt16LE(1, 26)
++      bmp.writeUInt16LE(24, 28)
++      bmp.writeUInt32LE(4, 34)
++      bmp.set([0, 0, 255, 0], 54)
+       const image = yield* Image.Service
++      // 模型不支持的格式即使未超预算，也必须先转成 PNG。
+       const results = yield* Effect.all([
+-        image.normalize(part("image/png", Buffer.from(source.get_bytes()).toString("base64"))),
++        image.normalize(part("image/png", png.toString("base64"))),
+         image.normalize(part("image/jpeg", Buffer.from(source.get_bytes_jpeg(90)).toString("base64"))),
++        image.normalize(part("image/bmp", bmp.toString("base64")), 1600 * 750),
++        image.normalize(part("image/tiff", tiff.toString("base64")), 1600 * 750),
++        image.normalize(part("image/avif", avif.toString("base64")), 1600 * 750),
+       ])
+ 
+       source.free()
+-      expect(results.map((result) => result.url.startsWith(`data:${result.mime};base64,`))).toEqual([true, true])
++      expect(results.map((result) => result.url.startsWith(`data:${result.mime};base64,`))).toEqual([true, true, true, true, true])
+       expect(results.every((result) => result.mime === "image/png" || result.mime === "image/jpeg")).toBe(true)
++      for (const [index, result] of results.entries()) {
++        const base64 = result.url.slice(result.url.indexOf(";base64,") + 8)
++        expect(Buffer.byteLength(base64, "utf-8")).toBeLessThanOrEqual(1600 * 750)
++        if (index === 1) {
++          expect(result.mime).toBe("image/jpeg")
++          continue
++        }
++        expect(result.mime).toBe("image/png")
++        const bytes = Buffer.from(base64, "base64")
++        expect(Array.from(bytes.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
++        const decoded = photon.PhotonImage.new_from_byteslice(bytes)
++        expect(decoded.get_width()).toBe(index === 2 ? 1 : 64)
++        expect(decoded.get_height()).toBe(index === 2 ? 1 : 64)
++        decoded.free()
++      }
+     }),
+   )
+@@ -83,13 +122,16 @@
        )
        const input = part("image/png", data.toString("base64"))
        const image = yield* Image.Service
@@ -434,7 +982,7 @@ diff --git a/packages/opencode/test/image/image.test.ts b/packages/opencode/test
        expect(resized.get_width()).toBeLessThanOrEqual(2_000)
        expect(resized.get_height()).toBeLessThanOrEqual(2_000)
        resized.free()
-@@ -99,6 +107,25 @@
+@@ -99,6 +141,25 @@
 +  uploads.effect("keeps upload limits while applying an explicit Read-only budget", () =>
 +    Effect.gen(function* () {
 +      const input = part("image/png", Buffer.from(yield* Effect.promise(() =>
@@ -533,15 +1081,33 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
  import path from "path"
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-@@ -15,6 +16,7 @@
- import { SessionID, MessageID } from "../../src/session/schema"
+@@ -10,14 +11,16 @@
+ import { Config } from "@/config/config"
++import { Image } from "@/image/image"
+ import { RuntimeFlags } from "@/effect/runtime-flags"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
+ import { LSP } from "@/lsp/lsp"
+ import { Permission } from "../../src/permission"
+-import { SessionID, MessageID } from "../../src/session/schema"
++import { SessionID, MessageID, PartID } from "../../src/session/schema"
  import { Instruction } from "../../src/session/instruction"
  import { ReadTool } from "../../src/tool/read"
 +import { FILE_UNCHANGED_STUB } from "../../src/tool/read"
  import { Truncate } from "@/tool/truncate"
  import { Tool } from "@/tool/tool"
  import { Filesystem } from "@/util/filesystem"
-@@ -194,8 +196,8 @@
+ import {
+   disposeAllInstances,
+   provideInstance,
+@@ -49,6 +52,7 @@
+     LayerNode.group([
+       Agent.node,
+       FSUtil.node,
+       CrossSpawnSpawner.node,
+       Instruction.node,
++      Image.node,
+       LSP.node,
+@@ -194,8 +198,8 @@
          const target = path.join(dir, "test.txt")
 +        // 保留 fixture 盘符；根相对路径归当前进程盘，跨盘临时目录不能假定同盘。
          const alt = target
@@ -551,7 +1117,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
  
          yield* exec(dir, { filePath: alt }, next)
          const read = items.find((item) => item.permission === "read")
-@@ -315,6 +317,70 @@
+@@ -315,6 +319,70 @@
  describe("tool.read truncation", () => {
 +  it.live("deduplicates only the current session's visible complete version", () =>
 +    Effect.gen(function* () {
@@ -622,3 +1188,127 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
        const test = yield* TestInstance
        const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
        const target = 60 * 1024
+@@ -485,18 +553,61 @@
+-  it.live("image files set truncated to false", () =>
++  it.live("PNG, BMP, TIFF and AVIF files attach without truncation and normalize for the processor", () =>
+     Effect.gen(function* () {
+       const dir = yield* tmpdirScoped()
++      const bmp = Buffer.alloc(58)
++      bmp.set([0x42, 0x4d])
++      bmp.writeUInt32LE(bmp.length, 2)
++      bmp.writeUInt32LE(54, 10)
++      bmp.writeUInt32LE(40, 14)
++      bmp.writeInt32LE(1, 18)
++      bmp.writeInt32LE(1, 22)
++      bmp.writeUInt16LE(1, 26)
++      bmp.writeUInt16LE(24, 28)
++      bmp.writeUInt32LE(4, 34)
++      bmp.set([0, 0, 255, 0], 54)
+-      const png = Buffer.from(
+-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+-        "base64",
+-      )
++      const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
++      const source = new photon.PhotonImage(new Uint8Array([255, 0, 0, 255]), 1, 1)
++      const png = Buffer.from(source.get_bytes())
++      source.free()
+-      yield* put(path.join(dir, "image.png"), png)
+-
+-      const result = yield* exec(dir, { filePath: path.join(dir, "image.png") })
+-      expect(result.metadata.truncated).toBe(false)
+-      expect(result.attachments).toBeDefined()
+-      expect(result.attachments?.length).toBe(1)
+-      expect(result.attachments?.[0]).not.toHaveProperty("id")
+-      expect(result.attachments?.[0]).not.toHaveProperty("sessionID")
+-      expect(result.attachments?.[0]).not.toHaveProperty("messageID")
++      const image = yield* Image.Service
++      const { default: sharp } = yield* Effect.promise(() => import("sharp"))
++      const tiff = yield* Effect.promise(() => sharp(png).tiff({ compression: "lzw" }).toBuffer())
++      const avif = yield* Effect.promise(() => sharp(png).avif({ lossless: true }).toBuffer())
++      for (const [name, mime, data] of [
++        ["image.png", "image/png", png],
++        ["image.bmp", "image/bmp", bmp],
++        ["image.tiff", "image/tiff", tiff],
++        ["image.avif", "image/avif", avif],
++      ] as const) {
++        yield* put(path.join(dir, name), data)
++
++        const result = yield* exec(dir, { filePath: path.join(dir, name) })
++        expect(result.output).toBe("Image read successfully")
++        expect(result.metadata.truncated).toBe(false)
++        expect(result.attachments).toBeDefined()
++        expect(result.attachments?.length).toBe(1)
++        const attachment = result.attachments?.[0]
++        if (!attachment) throw new Error("expected image attachment")
++        expect(attachment.mime).toBe(mime)
++        expect(attachment).not.toHaveProperty("id")
++        expect(attachment).not.toHaveProperty("sessionID")
++        expect(attachment).not.toHaveProperty("messageID")
++        const normalized = yield* provideInstance(dir)(
++          image.normalize(
++            { ...attachment, id: PartID.ascending(), sessionID: ctx.sessionID, messageID: ctx.messageID },
++            1600 * 750,
++          ),
++        )
++        expect(["image/jpeg", "image/png", "image/gif", "image/webp"]).toContain(normalized.mime)
++        expect(normalized.mime).toBe("image/png")
++        expect(normalized.url.startsWith(`data:${normalized.mime};base64,`)).toBe(true)
++        expect(Buffer.byteLength(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "utf-8")).toBeLessThanOrEqual(1600 * 750)
++        const bytes = Buffer.from(normalized.url.slice(normalized.url.indexOf(";base64,") + 8), "base64")
++        expect(Array.from(bytes.subarray(0, 8)))
++          .toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
++        const decoded = photon.PhotonImage.new_from_byteslice(bytes)
++        expect(decoded.get_width()).toBe(1)
++        expect(decoded.get_height()).toBe(1)
++        decoded.free()
++      }
+     }),
+   )
+
+diff --git a/packages/core/package.json b/packages/core/package.json
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -127,6 +127,9 @@
+     "zod": "catalog:"
+   },
++  "optionalDependencies": {
++    "sharp": "0.33.5"
++  },
+   "overrides": {
+     "drizzle-orm": "catalog:"
+   }
+ }
+
+diff --git a/packages/opencode/package.json b/packages/opencode/package.json
+--- a/packages/opencode/package.json
++++ b/packages/opencode/package.json
+@@ -47,6 +47,7 @@
+     "@typescript/native-preview": "catalog:",
+     "drizzle-orm": "catalog:",
+     "prettier": "3.6.2",
++    "sharp": "0.33.5",
+     "typescript": "catalog:",
+     "vscode-languageserver-types": "3.17.5",
+     "why-is-node-running": "3.2.2"
+
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -379,6 +379,9 @@
+         "@types/turndown": "5.0.5",
+         "@types/which": "3.0.4",
+         "drizzle-kit": "catalog:",
+       },
++      "optionalDependencies": {
++        "sharp": "0.33.5",
++      },
+     },
+     "packages/desktop": {
+@@ -685,6 +688,7 @@
+         "@typescript/native-preview": "catalog:",
+         "drizzle-orm": "catalog:",
+         "prettier": "3.6.2",
++        "sharp": "0.33.5",
+         "typescript": "catalog:",
+         "vscode-languageserver-types": "3.17.5",
+         "why-is-node-running": "3.2.2",

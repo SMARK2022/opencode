@@ -68,25 +68,22 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +    shouldCullSessionViewport(messages(), { stuckToBottom: viewportStuckToBottom() }),
 +  )
    const messagesBeforeRevert = () => {
-@@ -517,3 +549,11 @@
-   const dialog = useDialog()
-   const renderer = useRenderer()
-+
-+  // #458：渲染后读取 scroll 位置同步粘底信号；queueMicrotask 避免在渲染帧内写信号。
-+  function syncSessionViewportStuckToBottom() {
-+    if (!scroll || scroll.isDestroyed) return
-+    const stuckToBottom = scroll.scrollTop >= Math.max(0, scroll.scrollHeight - scroll.viewport.height) - 1
+@@ -509,4 +513,8 @@
+     lastMaxScrollTop = maxScrollTop
+     // #212：仅在范围增长时补齐一行容差，普通上滚帧保留用户的阅读位置。
+     if (wasStuckToBottom && maxScrollTopIncreased && scroll.scrollTop < maxScrollTop) scroll.scrollTo(maxScrollTop)
++    // 在既有跟随完成后读取真实粘底状态，延后写信号避免改变当前布局帧。
++    const stuckToBottom = scroll.scrollTop >= maxScrollTop - 1
 +    if (stuckToBottom === untrack(viewportStuckToBottom)) return
 +    queueMicrotask(() => setViewportStuckToBottom(stuckToBottom))
-+  }
- 
-@@ -1397,4 +1437,5 @@
-                 ref={(r) => (scroll = r)}
+   }
+@@ -1378,5 +1386,5 @@
+                 // #212：由原生 renderAfter 在布局后跟随增长，无需 part 长度信号。
+                 renderAfter={syncSessionViewportStuckToBottom}
 -                // #135：流式时禁用 viewportCulling，避免裁剪抖动
 -                viewportCulling={!streamingActive()}
 +                // #458：粘底流式仍裁剪；滚入历史时保留屏外块测量，renderAfter 同步粘底信号
 +                viewportCulling={viewportCulling()}
-+                renderAfter={syncSessionViewportStuckToBottom}
                  viewportOptions={{
 diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/util/session-pending.test.ts
 --- a/packages/tui/test/util/session-pending.test.ts
@@ -115,7 +112,10 @@ diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/
 diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/packages/tui/test/routes/session/shell-output-spacing.test.ts
 --- a/packages/tui/test/routes/session/shell-output-spacing.test.ts
 +++ b/packages/tui/test/routes/session/shell-output-spacing.test.ts
-@@ -26,1 +81,9 @@
+@@ -48,4 +48,12 @@
+     expect(shellSource).toContain("collapseToolOutput(shellPreviewText(), 20,")
+     expect(shellSource).toContain("previewText(shellPreviewText(), maxLines, maxChars())")
+   })
 +
 +  // #458：继承源 session-integration 断言——scrollbox 视口裁剪由 helper 与粘底信号驱动
 +  test("scrollbox uses session viewport culling helper", () => {
@@ -125,4 +125,42 @@ diff --git a/packages/tui/test/routes/session/shell-output-spacing.test.ts b/pac
 +    expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
 +  })
  })
-\ No newline at end of file
+diff --git a/packages/tui/test/routes/session/session-viewport-follow.test.ts b/packages/tui/test/routes/session/session-viewport-follow.test.ts
+--- a/packages/tui/test/routes/session/session-viewport-follow.test.ts
++++ b/packages/tui/test/routes/session/session-viewport-follow.test.ts
+@@ -1,3 +1,4 @@
+ import { describe, expect, test } from "bun:test"
++import { createSignal, untrack } from "solid-js"
+ import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
+ import { createTestRenderer } from "@opentui/core/testing"
+@@ -22,7 +23,12 @@
++  // 使用生产信号契约，回调同时验证跟随和裁剪，不在测试中重写位置算法。
++  const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+   scroll.renderAfter = new Function(
+     "scroll",
++    "untrack",
++    "viewportStuckToBottom",
++    "setViewportStuckToBottom",
+     `let lastMaxScrollTop = 0\n${callback}\nreturn syncSessionViewportStuckToBottom`,
+-  )(scroll) as () => void
++  )(scroll, untrack, viewportStuckToBottom, setViewportStuckToBottom) as () => void
+   app.renderer.root.add(scroll)
+   const message = new BoxRenderable(app.renderer, { flexShrink: 0 })
+   const text = new TextRenderable(app.renderer, {
+@@ -34,1 +40,1 @@
+-  return { app, scroll, text }
++  return { app, scroll, text, viewportStuckToBottom }
+@@ -39,1 +45,1 @@
+-    const { app, scroll, text } = await fixture()
++    const { app, scroll, text, viewportStuckToBottom } = await fixture()
+@@ -54,2 +60,3 @@
+       expect(scroll.scrollTop).toBe(previous - gap)
++      expect(viewportStuckToBottom()).toBe(gap <= 1)
+       if (gap > 0) expect(app.captureCharFrame()).not.toContain("OLD_BOTTOM")
+@@ -63,2 +70,3 @@
+       if (gap > 1) {
++        expect(viewportStuckToBottom()).toBe(false)
+         expect(scroll.scrollTop).toBe(previous - gap)
+@@ -68,1 +76,2 @@
++      expect(viewportStuckToBottom()).toBe(true)
+       expect(scroll.scrollTop).toBeGreaterThan(previous)

@@ -5,10 +5,10 @@ Subject: [PATCH] =?UTF-8?q?feat(text-decoding):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E5=AF=B9=E5=A4=9A=E7=A7=8D=E6=96=87=E6=9C=AC=E7=BC=96=E7=A0=81?=
  =?UTF-8?q?=E7=9A=84=E6=94=AF=E6=8C=81=EF=BC=8C=E5=8C=85=E6=8B=AC=E8=87=AA?=
 
-diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
+diff --git a/packages/core/src/text-decoding.ts b/packages/core/src/text-decoding.ts
 index b1e14aba7f..0461a02427 100644
---- a/packages/opencode/src/util/text-decoding.ts
-+++ b/packages/opencode/src/util/text-decoding.ts
+--- a/packages/core/src/text-decoding.ts
++++ b/packages/core/src/text-decoding.ts
 @@ -1,21 +1,23 @@
 -// #126：自动文本解码支持的编码集合
  export type TextEncoding = "utf-8" | "utf-16le" | "utf-16be" | "gb18030"
@@ -338,14 +338,17 @@ index b1e14aba7f..0461a02427 100644
 +  out.set(right, left.length)
 +  return out
 +}
+diff --git a/packages/opencode/src/util/text-decoding.ts b/packages/opencode/src/util/text-decoding.ts
+--- a/packages/opencode/src/util/text-decoding.ts
++++ b/packages/opencode/src/util/text-decoding.ts
+@@ -1,1 +1,1 @@
+-export { createAutoTextDecoder, decodeText, detectTextEncoding, type TextEncoding } from "@opencode-ai/core/text-decoding"
++export { createAutoTextDecoder, decodeText, detectTextEncoding, type TextEncoding, type TextEncodingMode } from "@opencode-ai/core/text-decoding"
 diff --git a/packages/core/src/config/tool-output.ts b/packages/core/src/config/tool-output.ts
 index f722fa301f..5058c11b2e 100644
 --- a/packages/core/src/config/tool-output.ts
 +++ b/packages/core/src/config/tool-output.ts
-@@ -7,4 +7,8 @@ export class Info extends Schema.Class<Info>("ConfigV2.ToolOutput")({
-   max_lines: PositiveInt.pipe(Schema.optional),
-   max_bytes: PositiveInt.pipe(Schema.optional),
-   bash_compression: Schema.Boolean.pipe(Schema.optional),
+@@ -19,1 +19,5 @@
 +  // #128：shell 输出文本编码（auto 探测或显式锁定）
 +  shell_encoding: Schema.Literals(["auto", "utf-8", "gb18030", "utf-16le", "utf-16be"]).pipe(Schema.optional).annotate({
 +    description: "Shell stdout/stderr text encoding. auto detects; set explicitly to lock the decoder for the whole stream.",
@@ -355,10 +358,7 @@ diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config
 index 5089d42cf2..974c6d4715 100644
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -142,6 +142,12 @@ export const Info = Schema.Struct({
-       bash_compression: Schema.optional(Schema.Boolean).annotate({
-         description: "Enable Bash output compression to reduce token usage",
-       }),
+@@ -150,3 +150,9 @@
 +      // #128：shell 输出文本编码（auto 探测或显式锁定）
 +      shell_encoding: Schema.optional(
 +        Schema.Literals(["auto", "utf-8", "gb18030", "utf-16le", "utf-16be"]),
@@ -372,34 +372,16 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index c7d1c15e4f..96775a61af 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -22,7 +22,7 @@ import { ChildProcess } from "effect/unstable/process"
- import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
- import { ShellPrompt, type Parameters } from "./shell/prompt"
- import { BashArity } from "@/permission/arity"
+@@ -25,1 +25,1 @@
 -import { createAutoTextDecoder } from "@/util/text-decoding"
 +import { createAutoTextDecoder, type TextEncodingMode } from "@/util/text-decoding"
- // #126：自动检测 UTF-8/UTF-16/GB18030 的流式解码
- 
- // Git 写操作的子命令集合：这些命令会修改仓库状态，需要用户明确授权
-@@ -359,6 +359,18 @@ function psUtf8(command: string) {
- 
- // 将命令编码为 PowerShell -EncodedCommand 格式（UTF-16LE base64）
- // PowerShell 的 -Command 参数会丢失非 ASCII 字符，-EncodedCommand 解决此问题
+@@ -382,1 +382,6 @@
 +// #128：config.tool_output.shell_encoding，默认 auto
-+function shellOutputEncoding(config?: {
-+  tool_output?: {
-+    shell_encoding?: TextEncodingMode
-+    bash_compression?: boolean
-+    max_lines?: number
-+    max_bytes?: number
-+  }
-+}): TextEncodingMode {
++function shellOutputEncoding(config?: { tool_output?: { shell_encoding?: TextEncodingMode } }): TextEncodingMode {
 +  return config?.tool_output?.shell_encoding ?? "auto"
 +}
 +
- function psEncoded(command: string) {
-   return Buffer.from(psUtf8(command), "utf16le").toString("base64")
- }
+ export const ShellTool = Tool.define(
 @@ -612,6 +624,8 @@ export const ShellTool = Tool.define(
          env: NodeJS.ProcessEnv
          timeout: number
@@ -631,3 +613,63 @@ index 53ea900e40..4a60311f27 100644
 +  }
 +})
 +
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -242,5 +242,5 @@
+               const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
+               // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
+               const diag = new BashDiagnosticCollector({ enabled })
+-              const decoder = createAutoTextDecoder()
++              const decoder = createAutoTextDecoder({ encoding: configured.shell_encoding ?? "auto" })
+-              const preview = createAutoTextDecoder()
++              const preview = createAutoTextDecoder({ encoding: configured.shell_encoding ?? "auto" })
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -17,3 +17,4 @@
+ import { BashTool } from "@opencode-ai/core/tool/bash"
++import type { TextEncodingMode } from "@opencode-ai/core/text-decoding"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+ import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
+@@ -118,3 +119,4 @@
+   compression?: boolean,
+   filesystem: Layer.Layer<FSUtil.Service> = LayerNode.compile(FSUtil.node),
++  encoding?: TextEncodingMode,
+ ) => {
+@@ -137,5 +139,7 @@
+-          [Config.node, shell === undefined && compression === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
++          [Config.node, shell === undefined && compression === undefined && encoding === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
+             entries: () => Effect.succeed([new Config.Document({ type: "document", info: new Config.Info({
+               shell,
+-              tool_output: compression === undefined ? undefined : new ConfigToolOutput.Info({ bash_compression: compression }),
++              tool_output: compression === undefined && encoding === undefined ? undefined : new ConfigToolOutput.Info({
++                bash_compression: compression, shell_encoding: encoding,
++              }),
+             }) })]),
+@@ -434,3 +438,25 @@
+               expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
+             }), LayerNode.compile(AppProcess.node), shell)
++            for (const encoding of ["auto", "gb18030", "utf-8"] as const) {
++              const raw = Buffer.concat([Buffer.from("warning: "), Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0x0a])])
++              const bytesCommand = `$bytes = [byte[]](${Array.from(raw)}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)`
++              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++                const settled = yield* settleTool(registry, call({ command: bytesCommand, compress_output: true }))
++                const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
++                expect(settled.result.type).toBe("content")
++                expect(settled.output?.structured).toMatchObject({ exit: 0, diagnosticWarningLikeLines: 1, compression: { compressed: false } })
++                if (encoding === "utf-8") {
++                  expect(text).toContain("\uFFFD")
++                  expect(text).not.toContain("中文")
++                }
++                if (encoding !== "utf-8") {
++                  expect(text).toContain("中文")
++                  expect(text).not.toContain("\uFFFD")
++                }
++                const retained = settled.outputPaths?.[0]
++                if (!retained) throw new Error("expected retained codepage output")
++                expect(yield* Effect.promise(() => fs.readFile(retained))).toEqual(raw)
++                expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [bytesCommand], save: [bytesCommand] })
++              }), LayerNode.compile(AppProcess.node), shell, false, undefined, encoding)
++            }
+           }

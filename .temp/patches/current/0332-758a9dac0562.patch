@@ -15,7 +15,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +  // 上界钳制：当可见范围已覆盖到文件末尾（visibleEnd >= total）时再给 offset 会指向
 +  // EOF 之后的空区间，误导模型发起必失败的 read。此时文案改为声明已达末尾，彻底关闭
 +  // offset 出口、仅保留 grep 兜底，消除"还能继续读"的错觉。
-+  const reachedEof = visibleEnd >= input.total
++  const reachedEof = input.totalExact && visibleEnd >= input.total
 +  // offset 出口：未到末尾时给出精确跳读指令；到末尾时退化为 grep 兜底，
 +  // 使第二行在任何分支下都提供至少一个可执行动作，不留空指令。
 +  const offsetExit = reachedEof
@@ -37,7 +37,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
      `<path>${escapeXmlText(input.path)}</path>`,
      `<type>file</type>`,
      `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-     `<range start="${input.start}" end="${input.end}" total="${input.total}" returned="0" />`,
+     `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="0" />`,
      `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${escapeXmlAttr(input.coveredBy)}"` : ""}>`,
 -    msg,
 +    message,
@@ -63,7 +63,7 @@ diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/re
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -833,6 +833,11 @@ describe("tool.read visible context stubs", () => {
+@@ -976,5 +976,10 @@ describe("tool.read visible context stubs", () => {
          },
        )
        expect(second.output).toContain('status="stub_same_range_visible"')
@@ -74,7 +74,6 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +      expect(second.output).toContain("grep to locate symbols")
        expect(second.output).not.toContain("<content>")
        expect(second.metadata.read?.stub).toBe(true)
-     }),
 @@ -873,10 +878,102 @@ describe("tool.read visible context stubs", () => {
          },
        )
@@ -103,7 +102,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +        ...ctx,
 +        messages: [
 +          {
-+            info: { role: "assistant", id: "a1" },
++            info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +            parts: [
 +              {
 +                type: "tool",
@@ -146,7 +145,7 @@ diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/t
 +        ...ctx,
 +        messages: [
 +          {
-+            info: { role: "assistant", id: "a1" },
++            info: { role: "assistant", id: "a1", sessionID: ctx.sessionID },
 +            parts: [
 +              {
 +                type: "tool",

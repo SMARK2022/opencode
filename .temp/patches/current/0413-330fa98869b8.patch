@@ -677,7 +677,7 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
    readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
 -  readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
 +  readonly glob: (input: GlobInput) => Effect.Effect<
-+    { files: readonly Entry[]; partial: boolean; timedOut?: boolean },
++    { files: readonly Entry[]; partial: boolean; truncated: boolean; timedOut?: boolean },
 +    Error
 +  >
    readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
@@ -697,7 +697,26 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
  
  const layer = Layer.effect(
    Service,
-@@ -368,9 +375,15 @@ const layer = Layer.effect(
+@@ -213,6 +220,10 @@ const layer = Layer.effect(
+           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
+             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
+           }
++          // --no-messages后的非空诊断不是可忽略的遍历拒绝，不能伪装成部分成功。
++          if (code === 2 && stderr.trim() !== "") {
++            return yield* failure(stderr.trim())
++          }
+           if (code !== 0 && code !== 1 && code !== 2) {
+             return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
+           }
+@@ -270,5 +281,7 @@
+                   "--no-config",
+                   "--files",
+                   "--hidden",
++                  // 预扫与正文搜索共用I/O诊断策略，权限拒绝不能在候选阶段升级失败。
++                  "--no-messages",
+                   ...patterns(input.include).map((item) => `--glob=${item}`),
+                   ...patterns(input.exclude).map((item) => `--glob=${item.startsWith("!") ? item : `!${item}`}`),
+@@ -368,9 +381,15 @@ const layer = Layer.effect(
            cwd: input.cwd,
            limit: input.limit,
            signal: input.signal,
@@ -713,7 +732,7 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
              ...(input.hidden ? ["--hidden"] : []),
              ...(input.follow ? ["--follow"] : []),
              `--glob=${input.pattern}`,
-@@ -385,14 +398,18 @@ const layer = Layer.effect(
+@@ -385,14 +402,19 @@ const layer = Layer.effect(
                  .replaceAll("\\", "/"),
              ),
          }).pipe(
@@ -730,6 +749,7 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
              ),
 -          ),
 +            partial: result.partial,
++            truncated: result.truncated,
 +            timedOut: result.timedOut,
 +          })),
            Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
@@ -753,17 +773,172 @@ diff --git a/packages/core/src/filesystem/search.ts b/packages/core/src/filesyst
 diff --git a/packages/core/src/tool/glob.ts b/packages/core/src/tool/glob.ts
 --- a/packages/core/src/tool/glob.ts
 +++ b/packages/core/src/tool/glob.ts
-@@ -80,8 +80,9 @@ const layer = Layer.effectDiscard(
+@@ -28,8 +28,16 @@
+-export const Output = Schema.Array(FileSystem.Entry)
++export const Output = Schema.Struct({
++  files: Schema.Array(FileSystem.Entry),
++  partial: Schema.Boolean,
++  truncated: Schema.Boolean,
++  timedOut: Schema.optional(Schema.Boolean),
++})
+ type ModelOutput = typeof Output.Encoded
+ 
+-/** Format raw search results into the concise line-oriented output models expect. */
++// 正常结果仍用原路径列表，完整性标记同时进入结构化结果和模型文本。
+ export const toModelOutput = (output: ModelOutput) => {
+-  const lines = output.length === 0 ? ["No files found"] : output.map((item) => item.path)
++  const lines = output.files.length === 0 ? ["No files found"] : output.files.map((item) => item.path)
++  if (output.truncated) lines.push("Results truncated; narrow the search path or pattern.")
++  if (output.timedOut) lines.push("Search timed out; results may be incomplete.")
++  if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
+   return lines.join("\n")
+ }
+@@ -53,6 +61,6 @@ const layer = Layer.effectDiscard(
+             {
+               type: "text",
+               text: toModelOutput(
+-                output.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })),
++                { ...output, files: output.files.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })) },
+               ),
+             },
+@@ -80,12 +88,14 @@ const layer = Layer.effectDiscard(
                    limit: input.limit ?? Number.MAX_SAFE_INTEGER,
                  })
                  .pipe(
-+                  // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
-                   Effect.map((result) =>
+-                  Effect.map((result) =>
 -                    result.map((entry) =>
-+                    result.files.map((entry) =>
++                  // 仅重映射路径，不让数组投影吞掉partial/timeout/limit状态。
++                  Effect.map((result) => ({
++                    ...result,
++                    files: result.files.map((entry) =>
                        FileSystem.Entry.make({
                          ...entry,
                          path: RelativePath.make(path.relative(location.directory, path.resolve(cwd, entry.path))),
+                       }),
+                     ),
+-                  ),
++                  })),
+                 )
+diff --git a/packages/core/src/tool/grep.ts b/packages/core/src/tool/grep.ts
+--- a/packages/core/src/tool/grep.ts
++++ b/packages/core/src/tool/grep.ts
+@@ -34,17 +34,25 @@
+-export const Output = Schema.Array(FileSystem.Match)
++export const Output = Schema.Struct({
++  items: Schema.Array(FileSystem.Match),
++  partial: Schema.Boolean,
++  truncated: Schema.Boolean,
++  timedOut: Schema.optional(Schema.Boolean),
++})
+ type ModelOutput = typeof Output.Encoded
+ 
+-/** Format raw search matches into the familiar concise model output. */
++// 保留原匹配文本；权限partial、截断与超时是独立事实，不能互相覆盖。
+ export const toModelOutput = (output: ModelOutput) => {
+-  const lines = output.length === 0 ? ["No files found"] : [`Found ${output.length} matches`]
++  const lines = output.items.length === 0 ? ["No files found"] : [`Found ${output.items.length} matches`]
+   let current = ""
+-  for (const match of output) {
++  for (const match of output.items) {
+     if (current !== match.entry.path) {
+       if (current) lines.push("")
+       current = match.entry.path
+       lines.push(`${match.entry.path}:`)
+     }
+     lines.push(`  Line ${match.line}: ${match.text}`)
+   }
++  if (output.truncated) lines.push("Results truncated; narrow the search path or pattern.")
++  if (output.timedOut) lines.push("Search timed out; results may be incomplete.")
++  if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
+   return lines.join("\n")
+ }
+@@ -71,8 +79,8 @@ const layer = Layer.effectDiscard(
+               text: toModelOutput(
+-                output.map((match) => ({
++                { ...output, items: output.items.map((match) => ({
+                   ...match,
+                   entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
+-                })),
++                })) },
+               ),
+             },
+           ],
+@@ -95,7 +103,7 @@ const layer = Layer.effectDiscard(
+               const target = path.resolve(location.directory, input.path ?? ".")
+               const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
+               return yield* ripgrep
+-                .grep({
++                .search({
+                   cwd: info?.type === "Directory" ? target : path.dirname(target),
+                   pattern: input.pattern,
+                   file: info?.type === "File" ? path.basename(target) : undefined,
+@@ -106,20 +114,22 @@ const layer = Layer.effectDiscard(
+-                  Effect.map((result) =>
+-                    result.map((match) =>
++                  // 主搜索owner已产生完整性状态，leaf只转换资源路径。
++                  Effect.map((result) => ({
++                    ...result,
++                    items: result.items.map((match) =>
+                       FileSystem.Match.make({
+                         ...match,
+                         entry: FileSystem.Entry.make({
+                           ...match.entry,
+                           path: RelativePath.make(
+                             path.relative(
+                               location.directory,
+                               path.resolve(
+                                 info?.type === "Directory" ? target : path.dirname(target),
+                                 match.entry.path,
+                               ),
+                             ),
+                           ),
+                         }),
+                       }),
+                     ),
+-                  ),
++                  })),
+                 )
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -348,9 +348,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+         if (part.type === "tool") {
+           toolNames.add(part.tool)
+           if (part.state.status === "completed") {
++            // 目标已无Search History表，剪枝回放仍须保留同一搜索的partial，不能把无正文当作完整阴性。
+             const outputText = part.state.time.compacted
+-              ? formatCompactionClearedNotice()
++              ? formatCompactionClearedNotice() + ((part.tool === "glob" || part.tool === "grep") && part.state.metadata.partial === true ? "\nSearch incomplete: some paths were inaccessible and skipped." : "")
+               : truncateToolOutput(
+                   part.state.output,
+                   options?.toolOutputTruncation?.head,
+                   options?.toolOutputTruncation?.tail,
+diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
+--- a/packages/opencode/test/session/message-v2.test.ts
++++ b/packages/opencode/test/session/message-v2.test.ts
+@@ -944,6 +944,22 @@ describe("session.message-v2.toModelMessage", () => {
+           },
+         ],
+       },
+     ])
++    // 与原完整Bash占位共用fixture，验证剪枝后的零匹配partial不丢失，且不改原始正文。
++    const part = input[1].parts[0]
++    if (part.type !== "tool" || part.state.status !== "completed") throw new Error("expected completed tool")
++    for (const tool of ["glob", "grep"]) {
++      part.tool = tool
++      part.state.metadata = { partial: true }
++      const replay = await MessageV2.toModelMessages(input, model)
++      expect(replay[2]?.content[0]).toStrictEqual({
++        type: "tool-result", toolCallId: "call-1", toolName: tool,
++        output: {
++          type: "text",
++          value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />\nSearch incomplete: some paths were inaccessible and skipped.',
++        },
++      })
++      expect(part.state.output).toBe("this should be cleared")
++    }
+   })
+ 
 diff --git a/packages/core/test/filesystem/search.test.ts b/packages/core/test/filesystem/search.test.ts
 --- a/packages/core/test/filesystem/search.test.ts
 +++ b/packages/core/test/filesystem/search.test.ts
@@ -780,6 +955,22 @@ diff --git a/packages/core/test/filesystem/search.test.ts b/packages/core/test/f
 diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
 --- a/packages/core/test/ripgrep.test.ts
 +++ b/packages/core/test/ripgrep.test.ts
+@@ -1,9 +1,14 @@
+ import { describe, expect } from "bun:test"
+ import fs from "fs/promises"
+ import path from "path"
+-import { Effect } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer, Sink, Stream } from "effect"
++import { ChildProcessSpawner } from "effect/unstable/process"
++import { AppProcess } from "@opencode-ai/core/process"
++import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
++import { GlobTool } from "@opencode-ai/core/tool/glob"
++import { GrepTool } from "@opencode-ai/core/tool/grep"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
+ import { RelativePath } from "@opencode-ai/core/schema"
+ import { tmpdir } from "./fixture/tmpdir"
+ import { testEffect } from "./lib/effect"
 @@ -125,6 +125,83 @@ describe("Ripgrep", () => {
      ),
    )
@@ -864,6 +1055,114 @@ diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.tes
    // #244：timeout 存在时，正则语法错误仍是 rg 的真实失败，
    // 不能被降级成「超时后的空部分结果」
    it.live("search timeout does not hide invalid regex errors", () =>
+@@ -167,3 +249,107 @@
+   )
+ 
+ })
++
++const scriptedCases: Array<{ name: string; code: number; stdout?: string; stderr?: string; pending?: boolean }> = [
++  { name: "partial", code: 2, stdout: "accessible.ts\n" },
++  { name: "search-partial", code: 2, stdout: JSON.stringify({ type: "match", data: { path: { text: "accessible.ts" }, lines: { text: "needle\n" }, line_number: 1, absolute_offset: 0, submatches: [{ match: { text: "needle" }, start: 0, end: 6 }] } }) + "\n" },
++  { name: "invalid", code: 2, stderr: "error parsing glob '[': unclosed character class" },
++  { name: "unknown-diagnostic", code: 2, stderr: "unknown decoder error" },
++  { name: "unknown-code", code: 3 },
++  { name: "empty", code: 1 },
++  { name: "arguments", code: 1 },
++  { name: "find-diagnostics", code: 1 },
++  { name: "bounded", code: 0, pending: true, stdout: Array.from({ length: 11 }, (_, index) => `file-${index}.ts`).join("\n") + "\n" },
++  { name: "abort", code: 0, pending: true },
++]
++for (const scenario of scriptedCases) {
++  const spawned = Deferred.makeUnsafe<void>()
++  const released = Deferred.makeUnsafe<void>()
++  const calls: string[][] = []
++  // 同时替换进程和binary发现，不下载、不委托真实spawn；参数、parser及scope仍用生产实现。
++  const scripted = testEffect(LayerNode.compile(Ripgrep.node, [
++    [AppProcess.node, Layer.mock(AppProcess.Service)({
++      spawn: (command) => Effect.acquireRelease(
++        Effect.sync(() => {
++          if (command._tag !== "StandardCommand") throw new Error("expected standard command")
++          calls.push([...command.args])
++          const prescan = scenario.name === "search-partial" && command.args.includes("--files")
++          const stdout = prescan ? "accessible.ts\n" : scenario.stdout
++          const stderr = prescan && !command.args.includes("--no-messages") ? "blocked/: Permission denied (os error 13)" : scenario.stderr
++          return ChildProcessSpawner.makeHandle({
++            pid: ChildProcessSpawner.ProcessId(0),
++            exitCode: scenario.pending ? Effect.never : Effect.succeed(ChildProcessSpawner.ExitCode(scenario.code)),
++            isRunning: Effect.succeed(scenario.pending === true), kill: () => Effect.void, stdin: Sink.drain,
++            stdout: stdout ? Stream.make(new TextEncoder().encode(stdout)) : Stream.empty,
++            stderr: stderr ? Stream.make(new TextEncoder().encode(stderr)) : Stream.empty,
++            all: Stream.empty, getInputFd: () => Sink.drain, getOutputFd: () => Stream.empty, unref: Effect.succeed(Effect.void),
++          })
++        }).pipe(Effect.tap(() => Deferred.succeed(spawned, undefined))),
++        () => Deferred.succeed(released, undefined),
++      ),
++    })],
++    [RipgrepBinary.node, Layer.succeed(RipgrepBinary.Service, RipgrepBinary.Service.of({ filepath: Effect.succeed("rg-fixture") }))],
++  ]))
++  scripted.live(`scripted ripgrep replay: ${scenario.name}`, () => Effect.gen(function* () {
++    const rg = yield* Ripgrep.Service
++    if (scenario.name === "search-partial") {
++      // 保留生产默认预扫；缺少抑制参数时替身真实返回权限诊断，不能绕过首个失败点。
++      const result = yield* rg.search({ cwd: process.cwd(), pattern: "needle", limit: 10 })
++      expect(calls).toHaveLength(2)
++      expect(calls[0]).toContain("--files")
++      expect(calls[0]).toContain("--no-messages")
++      expect(calls[1]).toContain("--json")
++      expect(result).toMatchObject({ partial: true, truncated: false })
++      expect(result.items.map((item) => item.entry.path)).toEqual([RelativePath.make("accessible.ts")])
++      expect(GrepTool.toModelOutput(result)).toContain("could not be accessed")
++      expect(GrepTool.toModelOutput(result)).toContain("needle")
++      return
++    }
++    if (scenario.name === "find-diagnostics") {
++      expect(yield* rg.find({ cwd: process.cwd(), pattern: "*", limit: 10 })).toEqual([])
++      expect(calls[0]).not.toContain("--no-messages")
++      return
++    }
++    const controller = new AbortController()
++    const input = { cwd: process.cwd(), pattern: scenario.name === "arguments" ? ".git/config" : "*.ts", limit: 10, signal: controller.signal }
++    if (scenario.name === "abort") {
++      const fiber = yield* rg.glob(input).pipe(Effect.forkScoped)
++      yield* Deferred.await(spawned).pipe(Effect.timeout("1 second"))
++      controller.abort()
++      expect(Exit.isFailure(yield* Fiber.await(fiber))).toBe(true)
++      yield* Deferred.await(released).pipe(Effect.timeout("1 second"))
++      return
++    }
++    const exit = yield* rg.glob(input).pipe(Effect.exit)
++    if (scenario.name === "invalid" || scenario.name === "unknown-diagnostic" || scenario.name === "unknown-code") {
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain(scenario.stderr ?? "code 3")
++      return
++    }
++    expect(Exit.isSuccess(exit)).toBe(true)
++    if (Exit.isFailure(exit)) return yield* exit
++    const result = exit.value
++    expect(result.partial).toBe(scenario.name === "partial")
++    expect(result.truncated).toBe(scenario.name === "bounded")
++    if (scenario.name === "partial") {
++      expect(result.files.map((item) => item.path)).toEqual([RelativePath.make("accessible.ts")])
++      expect(GlobTool.toModelOutput(result)).toContain("could not be accessed")
++    }
++    if (scenario.name === "empty") {
++      expect(result.files).toEqual([])
++      expect(GlobTool.toModelOutput(result)).toBe("No files found")
++      expect(GrepTool.toModelOutput({ items: [], partial: false, truncated: false })).toBe("No files found")
++    }
++    if (scenario.name === "bounded") {
++      expect(result.files).toHaveLength(10)
++      // exit永久pending，只有正确的bounded返回及scope释放才能到达这里。
++      yield* Deferred.await(released).pipe(Effect.timeout("1 second"))
++    }
++    if (scenario.name === "arguments") {
++      expect(calls[0]).toContain("--no-messages")
++      expect(calls[0]).not.toContain("--follow")
++      // 保留上游统一排除git metadata的更强规则，不恢复旧source的覆盖例外。
++      expect(calls[0].indexOf("--glob=.git/config")).toBeLessThan(calls[0].indexOf("--glob=!**/.git/**"))
++    }
++  }))
++}
 diff --git a/packages/opencode/src/cli/cmd/debug/ripgrep.ts b/packages/opencode/src/cli/cmd/debug/ripgrep.ts
 --- a/packages/opencode/src/cli/cmd/debug/ripgrep.ts
 +++ b/packages/opencode/src/cli/cmd/debug/ripgrep.ts
@@ -886,7 +1185,7 @@ diff --git a/packages/opencode/src/tool/glob.ts b/packages/opencode/src/tool/glo
            const limit = 100
 -          const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
 +          // [local-smark] glob 通道透出 partial：零匹配不再等同于确定性无匹配
-+        const globResult = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
++        const globResult = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit, signal: ctx.abort })
 +        const globPartial = globResult.partial
 +        const files = globResult.files
            const truncated = files.length === limit
@@ -1063,6 +1362,25 @@ diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/t
 +      expect(result.output).toContain("timed out")
 +    }),
 +  )
+diff --git a/packages/tui/src/routes/session/layout.ts b/packages/tui/src/routes/session/layout.ts
+--- a/packages/tui/src/routes/session/layout.ts
++++ b/packages/tui/src/routes/session/layout.ts
+@@ -9,2 +9,2 @@
+-// #184：tip viewport+content 各 paddingRight 1，合计 gutter 2
+-const SESSION_SCROLLBAR_GUTTER = 2
++// viewport/content各留一列，原生vertical track作为横向兄弟另占一列。
++const SESSION_SCROLLBAR_GUTTER = 3
+diff --git a/packages/tui/test/routes/session/session-layout.test.ts b/packages/tui/test/routes/session/session-layout.test.ts
+--- a/packages/tui/test/routes/session/session-layout.test.ts
++++ b/packages/tui/test/routes/session/session-layout.test.ts
+@@ -23,5 +23,5 @@
+   test("subtracts scrollbar gutter when enabled", () => {
+-    // #184：滚动条开启再扣 tip 双层 paddingRight 合计 2
++    // 双层padding之外还须计入真实track，预览预算与正文几何才能一致。
+     const w = sessionMessageContentWidth({ terminalWidth: 160, sidebarInLayout: true, scrollbarEnabled: true })
+-    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 2)
++    expect(w).toBe(160 - SESSION_SIDEBAR_WIDTH - 3 - 3 - 3)
+   })
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
@@ -1090,7 +1408,58 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
      return true
    }
    return true
-@@ -1708,7 +1714,7 @@ if (!ctx.showThinking()) return false
+@@ -1697,6 +1703,40 @@
+ }
+ 
++type MessageRenderItem =
++  | { kind: "part"; key: string; part: Part }
++  | { kind: "reasoning-run"; key: string; parts: ReasoningPart[] }
++
++function projectMessageParts(messageID: string, parts: Part[]) {
++  // 只投影本消息的原始Part引用，不改持久化身份、正文或delta路由。
++  const result: MessageRenderItem[] = []
++  let reasoning: ReasoningPart[] = []
++  let boundary: Part | undefined
++  const flush = () => {
++    if (reasoning.length === 0) return
++    // 身份锚定前置硬边界，乱序前插成员不会清掉用户的展开状态。
++    result.push({
++      kind: "reasoning-run",
++      key: boundary ? `${messageID}:reasoning:after:${boundary.id}` : `${messageID}:reasoning:start`,
++      parts: reasoning,
++    })
++    // 新数组不再修改已交给描述符的成员列表。
++    reasoning = []
++  }
++  parts.forEach((part) => {
++    if (part.type === "reasoning") {
++      reasoning.push(part)
++      return
++    }
++    // 空text和隐藏工具仍是原始边界，不能先按可见性过滤再聚合。
++    flush()
++    result.push({ kind: "part", key: `part:${part.id}`, part })
++    boundary = part
++  })
++  flush()
++  return result
++}
++
+ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
+   const ctx = use()
+   const local = useLocal()
+   const { theme } = useTheme()
+@@ -1703,6 +1743,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
+   const sync = useSync()
+   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
+   const model = createMemo(() => Model.name(ctx.providers(), props.message.providerID, props.message.modelID))
++  const renderItems = createMemo(() => projectMessageParts(props.message.id, props.parts))
++  const itemByKey = createMemo(() => new Map(renderItems().map((item) => [item.key, item])))
++  const renderItemKeys = createMemo(() => renderItems().map((item) => item.key))
+ 
+   const final = createMemo(() => {
+     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
+@@ -1708,7 +1751,7 @@ if (!ctx.showThinking()) return false
        // #185：工具是否计入 visibleParts 与 shouldHide 同口径
        if (part.type === "tool")
          return isVisibleAssistantPart(
@@ -1099,7 +1468,307 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
            { showDetails: ctx.showDetails(), showThinking: true },
          )
        return false
-@@ -2044,7 +2050,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
+@@ -1751,15 +1794,20 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
+-      <For each={props.parts}>
+-        {(part, index) => {
+-          const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
++      <For each={renderItemKeys()}>
++        {(key, index) => {
++          // For保留primitive key对应的root，普通正文delta不重挂run。
++          const item = createMemo(() => itemByKey().get(key)!)
+           return (
+-            <Show when={component()}>
+-              <Dynamic
+-                last={index() === props.parts.length - 1}
+-                component={component()}
+-                part={part as any}
+-                message={props.message}
+-              />
+-            </Show>
++            <Switch>
++              <Match when={item().kind === "reasoning-run" && item()}>
++                {(current) => <ReasoningRun parts={(current() as Extract<MessageRenderItem, { kind: "reasoning-run" }>).parts} />}
++              </Match>
++              <Match when={item().kind === "part" && item()}>
++                {(current) => {
++                  const part = () => (current() as Extract<MessageRenderItem, { kind: "part" }>).part
++                  const component = createMemo(() => PART_MAPPING[part().type as keyof typeof PART_MAPPING])
++                  return <Show when={component()}><Dynamic last={index() === renderItemKeys().length - 1} component={component()} part={part() as any} message={props.message} /></Show>
++                }}
++              </Match>
++            </Switch>
+           )
+         }}
+       </For>
+@@ -1836,9 +1884,8 @@
+ const PART_MAPPING = {
+   text: TextPart,
+   tool: ToolPart,
+-  reasoning: ReasoningPart,
+ }
+ 
+ const INLINE_TOOL_ICON_WIDTH = 2
+ 
+-function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
++const REASONING_PREVIEW_ROWS = 5
+@@ -1845,121 +1892,135 @@
+-  const { theme } = useTheme()
+-  const ctx = use()
+-  const renderer = useRenderer()
+-  // Collapsed by default in hide mode: a single line throughout, so the
+-  // layout never shifts. Click to open the full markdown block, click to close.
+-  const [expanded, setExpanded] = createSignal(false)
+-
+-  const content = createMemo(() => {
+-    // OpenRouter encrypts some reasoning blocks; drop the placeholder.
+-    return props.part.text.replace("[REDACTED]", "").trim()
+-  })
+-  const opaque = createMemo(() => !content() && Boolean(props.part.metadata))
+-  // 全文共用既有 50ms 首尾值窗口，预览与展开正文不另设刷新计时器。
+-  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
+-  createEffect(() => setDisplayContent(content()))
+-  // 首次 effect 尚未发布时沿源回退正文，已有节流值后不再逐字重排 markdown。
+-  const renderedContent = createMemo(() => displayContent() || content())
+-  // Reasoning is finalized when the server sets `time.end` (see processor.ts).
+-  // Flips independently of the parent message completing.
+-  const isDone = createMemo(() => props.part.time.end !== undefined)
+-  // #137：完成后 remount 推理块，避免高度测量粘滞
+-  const completedKey = createMemo(() => `${ctx.width}@${renderedContent()}`)
+-  const inMinimal = createMemo(() => ctx.thinkingMode() === "hide")
+-  const duration = createMemo(() => {
+-    const end = props.part.time.end
+-    return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
+-  })
+-  const summary = createMemo(() => reasoningSummary(renderedContent()))
+-  const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
+-
+-  // 选区只拦截鼠标入口；共享 toggle 保留模式与加密判断，键盘切换思考模式不应受残留选区影响。
+-  const toggle = () => {
+-    if (!inMinimal() || opaque()) return
+-    setExpanded((prev) => !prev)
+-  }
+-
+-  return (
+-    <Show when={content() || opaque()}>
+-      <box
+-        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+-        paddingLeft={3}
+-        marginTop={1}
+-        flexDirection="column"
+-        flexShrink={0}
+-        onMouseUp={() => {
+-          // 拖选推理内容时保留展开状态，让外层应用复制选区，避免重排正文打断复制。
+-          if (renderer.getSelection()?.getSelectedText()) return
+-          toggle()
+-        }}
+-      >
+-        <box>
+-          {/* 字数与正文使用同一节流快照，避免标题逐字刷新绕过 markdown 的 50ms 窗口。 */}
+-          <ReasoningHeader
+-            toggleable={inMinimal() && !opaque()}
+-            open={!inMinimal() || expanded()}
+-            done={isDone()}
+-            title={summary().title}
+-            characters={opaque() ? undefined : renderedContent().length}
+-            duration={isDone() ? Locale.duration(duration()) : undefined}
+-            encrypted={opaque()}
+-          />
+-        </box>
+-        {/* 折叠推理：保留 5 行预览，避免 hide 模式只剩标题不可窥 */}
+-        <Show when={inMinimal() && !expanded() && content()}>
+-          <box paddingLeft={2} marginTop={1}>
+-            {/* 用 content() 而非 summary().body：summary 可能只剩标题体为空 */}
+-            <code
+-              filetype="markdown"
+-              // #137：预览流式用 styled streaming
+-              drawUnstyledText={false}
+-              streaming={!isDone()}
+-              syntaxStyle={syntax()}
+-              content={renderedContent().split(String.fromCharCode(10)).slice(0, 5).join(String.fromCharCode(10))}
+-              conceal={ctx.conceal()}
+-              fg={theme.textMuted}
+-            />
+-            {/* 超出预览行时提示可展开；点击由外层推理区统一处理 */}
+-            {/* 溢出提示也按同一快照判定，正文尾值发布前不能提前改变折叠布局。 */}
+-            <Show when={renderedContent().split(String.fromCharCode(10)).length > 5}>
+-              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
+-            </Show>
+-          </box>
+-        </Show>
+-        <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
+-          <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
+-            <Switch>
+-              <Match when={!isDone()}>
+-                <code
+-                  filetype="markdown"
+-                  // #135/#137：流式推理 styled streaming，避免 unstyled 闪烁
+-                  drawUnstyledText={false}
+-                  streaming={true}
+-                  syntaxStyle={syntax()}
+-                  content={summary().body}
+-                  conceal={ctx.conceal()}
+-                  fg={theme.textMuted}
+-                />
+-              </Match>
+-              {/* #137：推理完成后 keyed remount */}
+-              <Match when={isDone()}>
+-                <Show keyed when={completedKey()}>
+-                  {(_key) => (
+-                    <code
+-                      filetype="markdown"
+-                      drawUnstyledText={false}
+-                      streaming={false}
+-                      syntaxStyle={syntax()}
+-                      content={summary().body}
+-                      conceal={ctx.conceal()}
+-                      fg={theme.textMuted}
+-                    />
+-                  )}
+-                </Show>
+-              </Match>
+-            </Switch>
+-          </box>
+-        </Show>
+-      </box>
+-    </Show>
+-  )
+-}
++function normalizeReasoning(text: string) {
++  return text.replace("[REDACTED]", "").trim()
++}
++
++function reasoningRows(text: string, width: number) {
++  const bodyWidth = Math.max(width, 1)
++  return text.split("\n").reduce((total, line) => {
++    // 与char-wrap使用相同终端cell口径；tab/control保守占一行，CJK不按字符个数算。
++    const cells = [...line].reduce((sum, char) => {
++      const code = char.codePointAt(0) ?? 0
++      return sum + (char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char))
++    }, 0)
++    return total + Math.max(1, Math.ceil(cells / bodyWidth))
++  }, 0)
++}
++
++function ReasoningRun(props: { parts: ReasoningPart[] }) {
++  const { theme } = useTheme()
++  const ctx = use()
++  const renderer = useRenderer()
++  const [override, setOverride] = createSignal<boolean>()
++  const [bodyMounted, setBodyMounted] = createSignal(false)
++  const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
++  // 加密占位仍显示上游Thought标题，不从metadata猜测正文或长度。
++  const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
++  const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
++  const [displayTexts, setDisplayTexts] = createThrottledSignal<string[]>([], 50)
++  createEffect(() => setDisplayTexts(texts()))
++  const renderedTexts = createMemo(() => displayTexts().length ? displayTexts() : texts())
++  const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
++  const previews = createMemo(() => {
++    let remaining = REASONING_PREVIEW_ROWS
++    return parts().flatMap((part, index) => {
++      // 后续成员必须同时分到marker及至少一行正文，不能留下孤立标记。
++      const markerRows = index === 0 ? 0 : 1
++      if (remaining <= markerRows) return []
++      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
++      remaining -= markerRows + bodyRows
++      return [{ part, index, bodyRows }]
++    })
++  })
++  const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
++  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
++  const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
++  const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
++  // 全局模式变化才清除局部选择；普通delta不得把已展开的run折回。
++  createEffect(on(() => ctx.thinkingMode(), () => setOverride(undefined), { defer: true }))
++  createEffect(() => { if (expanded()) setBodyMounted(true) })
++  return (
++    <Show when={ctx.showThinking() && (parts().length > 0 || opaque())}>
++      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}
++        onMouseUp={() => {
++          if (renderer.getSelection()?.getSelectedText() || opaque() || !overflow()) return
++          setOverride(!expanded())
++        }}>
++        <ReasoningHeader toggleable={overflow() && !opaque()} open={expanded()} done={done()}
++          title={[reasoningSummary(renderedTexts()[0] ?? "").title, renderedTexts().length > 1 ? `${renderedTexts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
++          characters={opaque() ? undefined : renderedTexts().reduce((total, text) => total + text.length, 0)}
++          duration={done() ? Locale.duration(duration()) : undefined} encrypted={opaque()} />
++        {/* 总预览只有五行，且与普通正文同宽，不再额外增加横向padding。 */}
++        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
++          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part}
++            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`} rows={preview.bodyRows}
++            width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />}</For>
++        </box>
++        {/* 首次展开后保留full树，仅切visible，避免复用已销毁的CodeRenderable。 */}
++        <Show when={bodyMounted()}><box visible={expanded()}>
++          <For each={parts().map((part) => part.id)}>{(id) => {
++            const part = createMemo(() => parts().find((item) => item.id === id)!)
++            const index = createMemo(() => parts().findIndex((item) => item.id === id))
++            return <ReasoningBody id={`text-${id}`} part={part()} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
++              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
++          }}</For>
++        </box></Show>
++        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${parts().length > previews().length ? ` · +${parts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
++      </box>
++    </Show>
++  )
++}
++
++function ReasoningBody(props: { id: string; part: ReasoningPart; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
++  const { theme } = useTheme()
++  const content = createMemo(() => normalizeReasoning(props.part.text))
++  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
++  createEffect(() => setDisplayContent(content()))
++  const renderedContent = createMemo(() => displayContent() || content())
++  // 保留上游per-Part完成判定，不等待父消息或其他成员结束。
++  const done = createMemo(() => props.part.time.end !== undefined)
++  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
++  const [markerReady, setMarkerReady] = createSignal(false)
++  let generation = 0
++  let active = true
++  createEffect(() => {
++    renderedContent()
++    props.conceal
++    generation++
++    setMarkerReady(false)
++  })
++  onCleanup(() => { active = false; generation++ })
++  // 每个Part独立解析Markdown；显式锁定正文宽度，避免CJK固有测量向偶数列扩张。
++  const code = () => <code id={props.id} width={props.width} filetype="markdown" drawUnstyledText={false} streaming={!done()}
++    syntaxStyle={props.syntaxStyle} content={renderedContent()} conceal={props.conceal} fg={theme.textMuted} wrapMode={props.rows ? "char" : "word"}
++    onChunks={(chunks, context) => {
++      const current = generation
++      const visible = reasoningHasVisibleGlyph(chunks.map((chunk) => chunk.text).join(""), props.width, props.rows)
++      queueMicrotask(() => {
++        // 只认可当前conceal结果，晚到的highlight不能在正文消失后复活marker。
++        if (!active || current !== generation || context.content !== renderedContent()) return
++        setMarkerReady(visible)
++      })
++      return chunks
++    }} />
++  return <>
++    <Show when={props.marker && markerReady()}><text fg={theme.textMuted} wrapMode="none">{props.marker}</text></Show>
++    <box maxHeight={props.rows} overflow={props.rows ? "hidden" : "visible"}>
++      <Show when={!done()} fallback={<Show keyed when={completedKey()}>{(_key) => code()}</Show>}>{code()}</Show>
++    </box>
++  </>
++}
++
++function reasoningHasVisibleGlyph(text: string, width: number, rows?: number) {
++  // 仅控制下级marker，不能据此隐藏正文；裁剪后的远端glyph不能替首行背书。
++  const bodyWidth = Math.max(width, 1)
++  let row = 1
++  let column = 0
++  return [...text].some((char) => {
++    if (rows && row > rows) return false
++    if (char === "\n") { row++; column = 0; return false }
++    const code = char.codePointAt(0) ?? 0
++    const cells = char === "\t" || code < 32 || (code >= 127 && code <= 159) ? bodyWidth : Bun.stringWidth(char)
++    if (column + cells > bodyWidth) { row++; column = 0 }
++    column += cells
++    return (!rows || row <= rows) && !/\s/u.test(char) && cells > 0
++  })
++}
+@@ -2044,7 +2105,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
      // #185：与 isVisibleAssistantPart 同口径（详情关+completed 隐藏）
      if (ctx.showDetails()) return false
      return !isVisibleAssistantPart(
@@ -1140,6 +1809,151 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  }
  
  function Grep(props: ToolProps) {
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -454,6 +454,129 @@
+ )
+ 
++// 复用现有真实Session和隔离SDK transport，断言字符帧与鼠标/SSE行为而非源码字符串。
++test.each(["bounded", "boundary", "conceal", "insert", "remove", "show"] as const)("reasoning run replay: %s", async (scenario) => {
++  const messageID = `msg_reasoning_${scenario}`
++  const reasoning = (id: string, text: string): Part => ({ id, sessionID, messageID, type: "reasoning", text, time: { start: 1, end: 2 } })
++  const long = Array.from({ length: 7 }, (_, index) => `middle ${index}`).join("\n")
++  const boundary: Part = { id: "part_b", sessionID, messageID, type: "text", text: "   " }
++  const parts = scenario === "bounded" || scenario === "show"
++    ? Array.from({ length: 10 }, (_, index) => reasoning(`part_${String(index).padStart(2, "0")}`, `short thought ${index + 1}`))
++    : scenario === "boundary" ? [reasoning("part_a", "left source"), boundary, reasoning("part_c", "right source")]
++    : scenario === "conceal" ? [reasoning("part_a", "visible first source"), reasoning("part_b", "![](private-url)")]
++    : scenario === "remove" ? [reasoning("part_a", long), boundary, reasoning("part_c", "right source")]
++    : [reasoning("part_b", long)]
++  const info: AssistantMessage = {
++    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
++    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  await withRenderedReview([{ info, parts }], async (app, _route, emit) => {
++    const frame = async (...texts: string[]) => {
++      await waitForReviewFrame(app, async (value) => {
++        if (texts.every((text) => value.includes(text))) return true
++        await Bun.sleep(5)
++        return false
++      }, { maxPasses: 400 })
++      // 等预布局间距落定后才使用可见文本坐标点击。
++      await app.renderOnce()
++      await app.renderOnce()
++      return app.captureCharFrame()
++    }
++    if (scenario === "boundary") {
++      const value = await frame("left source", "right source")
++      expect(value.split("\n").filter((line) => line.includes("Thought")).length).toBe(2)
++      expect(value).not.toContain("2 segments")
++      return
++    }
++    if (scenario === "conceal") {
++      await frame("visible first source")
++      for (let index = 0; index < 12; index++) {
++        await app.renderOnce()
++        expect(app.captureCharFrame()).not.toContain("[seg 2/2]")
++        await Bun.sleep(5)
++      }
++      app.mockInput.pressKey("x", { ctrl: true })
++      app.mockInput.pressKey("h")
++      await frame("[seg 2/2]", "private-url")
++      app.mockInput.pressKey("x", { ctrl: true })
++      app.mockInput.pressKey("h")
++      // 逐帧验证conceal往返，晚到highlight不能留下只有marker的帧。
++      for (let index = 0; index < 12; index++) {
++        await app.renderOnce()
++        const value = app.captureCharFrame()
++        expect(value.includes("[seg 2/2]") && !value.includes("private-url")).toBe(false)
++        await Bun.sleep(5)
++      }
++      return
++    }
++    if (scenario === "bounded" || scenario === "show") {
++      if (scenario === "show") {
++        expect(await frame("short thought 10", "▲ 收起推理")).not.toContain("▼ 展开查看完整推理")
++        await clickVisibleText(app, "▲ 收起推理")
++      }
++      const value = await frame("10 segments", "[seg 2/10]", "▼ 展开查看完整推理")
++      const lines = value.split("\n")
++      expect(lines.filter((line) => line.includes("Thought")).length).toBe(1)
++      const header = lines.findIndex((line) => line.includes("10 segments"))
++      const footer = lines.findIndex((line) => line.includes("▼ 展开查看完整推理"))
++      expect(footer - header + 1).toBeLessThanOrEqual(7)
++      expect(value).not.toContain("short thought 10")
++      await clickVisibleText(app, "▼ 展开查看完整推理")
++      expect(await frame("short thought 10", "▲ 收起推理")).toContain("[seg 10/10]")
++      // 再折叠再展开，完整正文不能因renderable销毁而变空。
++      await clickVisibleText(app, "▲ 收起推理")
++      await frame("▼ 展开查看完整推理")
++      await clickVisibleText(app, "▼ 展开查看完整推理")
++      await frame("short thought 10", "▲ 收起推理")
++      return
++    }
++    await frame("▼ 展开查看完整推理")
++    await clickVisibleText(app, "▼ 展开查看完整推理")
++    await frame("middle 6", "▲ 收起推理")
++    if (scenario === "insert") {
++      emit({ directory, project: "proj_test", payload: { id: "evt_prepend", type: "message.part.updated", properties: { sessionID, part: reasoning("part_a", "earlier source"), time: 3 } } })
++      await frame("earlier source", "2 segments", "▲ 收起推理")
++      emit({ directory, project: "proj_test", payload: { id: "evt_append", type: "message.part.updated", properties: { sessionID, part: reasoning("part_c", "later source"), time: 4 } } })
++      const value = await frame("later source", "3 segments", "▲ 收起推理")
++      expect(value.split("\n").filter((line) => line.includes("earlier source")).length).toBe(1)
++      return
++    }
++    emit({ directory, project: "proj_test", payload: { id: "evt_boundary_remove", type: "message.part.removed", properties: { sessionID, messageID, partID: "part_b" } } })
++    const value = await frame("right source", "2 segments", "▲ 收起推理")
++    expect(value.split("\n").filter((line) => line.includes("right source")).length).toBe(1)
++    emit({ directory, project: "proj_test", payload: { id: "evt_member_remove", type: "message.part.removed", properties: { sessionID, messageID, partID: "part_c" } } })
++    await waitForReviewFrame(app, async (next) => {
++      if (!next.includes("right source") && !next.includes("2 segments") && next.includes("middle 6")) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 400 })
++  }, { width: 110, height: 48 }, {}, { thinking_mode: scenario === "show" ? "show" : "hide" })
++})
++
++test.each(["glob", "grep"] as const)("completed partial %s remains visibly incomplete with details off", async (tool) => {
++  const messageID = `msg_partial_${tool}`
++  const info: AssistantMessage = {
++    id: messageID, sessionID, role: "assistant", parentID: "msg_request", finish: "stop",
++    time: { created: 1, completed: 3 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const part: Part = { id: "part_search", sessionID, messageID, type: "tool", tool, callID: "call_search", state: {
++    status: "completed", title: "search", input: { pattern: "needle", path: directory }, output: "No files found in accessible paths.",
++    metadata: { count: 0, matches: 0, partial: true, truncated: false }, time: { start: 1, end: 2 },
++  } }
++  await withRenderedReview([{ info, parts: [part] }], async (app) => {
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("incomplete")) return true
++      await Bun.sleep(5)
++      return false
++    }, { maxPasses: 400 })
++    expect(app.captureCharFrame()).toContain("incomplete")
++  }, {}, {}, { tool_details_visibility: false })
++})
++
+ async function clickVisibleText(app: Awaited<ReturnType<typeof testRender>>, text: string) {
+   const lines = app.captureCharFrame().split("\n")
+   const y = lines.findIndex((line) => line.includes(text))
+   if (y < 0) throw new Error(`missing clickable text ${JSON.stringify(text)}:\n${lines.join("\n")}`)
+@@ -477,9 +600,10 @@ async function withRenderedReview(
+   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
+   dimensions: { width?: number; height?: number } = {},
+   children: Record<string, () => typeof messages> = {},
++  kv: Record<string, unknown> = {},
+ ) {
+   await using tmp = await tmpdir()
+-  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  await Bun.write(`${tmp.path}/kv.json`, JSON.stringify(kv))
+   const info = {
+     id: sessionID, slug: "review-render", projectID: "proj_test", directory,
+     version: "1", title: "Review render", time: { created: 1, updated: 3 },
 diff --git a/packages/tui/test/routes/session/session-message-spacing.test.ts b/packages/tui/test/routes/session/session-message-spacing.test.ts
 --- a/packages/tui/test/routes/session/session-message-spacing.test.ts
 +++ b/packages/tui/test/routes/session/session-message-spacing.test.ts
@@ -1198,7 +2012,7 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { Global } from "@opencode-ai/core/global"
  import { Truncate } from "@/tool/truncate"
-@@ -129,4 +132,138 @@ describe("tool.glob", () => {
+@@ -129,4 +132,140 @@ describe("tool.glob", () => {
        }
      }),
    )
@@ -1215,7 +2029,7 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +        Effect.provide(
 +          Layer.mock(Ripgrep.Service)({
 +            find: () => Effect.die("unused in partial test"),
-+            glob: () => Effect.succeed({ files: [], partial: true, timedOut: false }),
++            glob: () => Effect.succeed({ files: [], partial: true, truncated: false, timedOut: false }),
 +            grep: () => Effect.die("unused in partial test"),
 +            search: () => Effect.die("unused in partial test"),
 +          }),
@@ -1247,6 +2061,7 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +              Effect.succeed({
 +                files: [Entry.make({ path: RelativePath.make("keep.ts"), type: "file" })],
 +                partial: true,
++                truncated: false,
 +                timedOut: false,
 +              }),
 +            grep: () => Effect.die("unused in partial test"),
@@ -1274,7 +2089,7 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +        Effect.provide(
 +          Layer.mock(Ripgrep.Service)({
 +            find: () => Effect.die("unused in partial test"),
-+            glob: () => Effect.succeed({ files: [], partial: false, timedOut: false }),
++            glob: () => Effect.succeed({ files: [], partial: false, truncated: false, timedOut: false }),
 +            grep: () => Effect.die("unused in partial test"),
 +            search: () => Effect.die("unused in partial test"),
 +          }),
@@ -1304,6 +2119,7 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +                  Entry.make({ path: RelativePath.make(`file-${index}.ts`), type: "file" }),
 +                ),
 +                partial: false,
++                truncated: true,
 +                timedOut: false,
 +              }),
 +            grep: () => Effect.die("unused in partial test"),

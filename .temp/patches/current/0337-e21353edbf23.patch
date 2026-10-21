@@ -54,7 +54,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -3655,3 +3655,66 @@ it.instance(
+@@ -3655,3 +3655,68 @@ it.instance(
      }),
    { git: true },
  )
@@ -90,10 +90,12 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +      })
 +      // 注入 SubtaskPart 走 handleSubtask 路径
 +      yield* addSubtask(chat.id, msg.id)
-+      // 子会话只需要返回文本即可完成
++      // 子会话返回后父模型仍需消费工具结果，为两次实际调用分别提供响应。
 +      yield* llm.push(reply().text("review done").stop().item())
++      yield* llm.push(reply().text("review summarized").stop().item())
 +
 +      yield* prompt.loop({ sessionID: chat.id })
++      expect(yield* llm.hits).toHaveLength(2)
 +
 +      // 找到 task 工具 part 拿到子会话 ID
 +      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)

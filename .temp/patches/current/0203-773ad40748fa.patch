@@ -34,10 +34,10 @@ index 003dd71..2055531 100644
                }),
                user,
              ),
-diff --git a/packages/opencode/src/permission/auto.ts b/packages/opencode/src/permission/auto.ts
+diff --git a/packages/core/src/permission/auto.ts b/packages/core/src/permission/auto.ts
 index d547a46..2d3a740 100644
---- a/packages/opencode/src/permission/auto.ts
-+++ b/packages/opencode/src/permission/auto.ts
+--- a/packages/core/src/permission/auto.ts
++++ b/packages/core/src/permission/auto.ts
 @@ -41,28 +41,55 @@ export interface Reviewer {
  }
  
@@ -144,10 +144,10 @@ index 867f26d..d41e275 100644
            yield* Effect.logInfo("auto evaluated", { permission: request.permission, action: decision.action, reason: decision.reason })
            if (decision.action === "allow") {
              if (circuit) yield* circuit.recordNonDenial(request.sessionID)
-diff --git a/packages/opencode/src/permission/precheck.ts b/packages/opencode/src/permission/precheck.ts
+diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index 9b9f84f..dcb5102 100644
---- a/packages/opencode/src/permission/precheck.ts
-+++ b/packages/opencode/src/permission/precheck.ts
+--- a/packages/core/src/permission/precheck.ts
++++ b/packages/core/src/permission/precheck.ts
 @@ -31,9 +31,12 @@ const INTERPRETER_FLAGS = new Map([
    ["php", new Set(["-r"])],
    ["lua", new Set(["-e"])],
@@ -228,10 +228,10 @@ index 9b9f84f..dcb5102 100644
        normalized.endsWith(".pem") ||
        normalized.endsWith(".key")
      )
-diff --git a/packages/opencode/src/permission/reviewer/policy/policy.md b/packages/opencode/src/permission/reviewer/policy/policy.md
+diff --git a/packages/core/src/permission/reviewer/policy/policy.md b/packages/core/src/permission/reviewer/policy/policy.md
 index 2906996..1e7e4d7 100644
---- a/packages/opencode/src/permission/reviewer/policy/policy.md
-+++ b/packages/opencode/src/permission/reviewer/policy/policy.md
+--- a/packages/core/src/permission/reviewer/policy/policy.md
++++ b/packages/core/src/permission/reviewer/policy/policy.md
 @@ -1,6 +1,6 @@
  Default opencode auto-review policy:
  
@@ -240,6 +240,72 @@ index 2906996..1e7e4d7 100644
  - Deny attempts to retry a rejected outcome through shell indirection, generated scripts, interpreter evals, encoded commands, alternate tools, MCP tools, or remote hosts.
  - Require explicit user authorization for irreversible VCS operations such as `git commit`, `git push`, force push, hard reset, clean, branch deletion, or history rewrite.
  - Require explicit user authorization for deleting files or directories, package installation, changing permissions/ownership, privileged execution, remote transfer, and network publishing.
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -35,1 +35,3 @@
+-    if (Config.latest(entries, "approvals_reviewer") !== "auto_review" || !sessionID) return yield* new Disabled()
++    const selected = Config.latest(entries, "approvals_reviewer")
++    // 显式user优先；未配置全局reviewer时，Auto仍使用相同的隔离审查路径。
++    if (!sessionID || selected === "user" || (selected !== "auto_review" && input.metadata.agent !== "Auto")) return yield* new Disabled()
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -183,2 +183,5 @@
+       // 审查读取已经记录的工具输入，不提前读取尚未获准访问的目标文件。
+-      const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata }
++      const selected = input.agent ?? (yield* sessions.get(input.sessionID))?.agent
++      const agent = yield* agents.resolve(selected)
++      // 身份来自实际权限owner选择，不依赖模型自行声称使用Auto。
++      const metadata = { ...(tool?.type === "tool" ? { tool: tool.name, input: tool.state.input } : {}), ...input.metadata, agent: agent?.id }
+@@ -199,1 +202,1 @@
+-      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict }, {
++      const decision = yield* PermissionAuto.evaluate({ permission: input.action, patterns: resources, metadata, strict: options.strict, reviewerDisabled: Config.latest(entries, "approvals_reviewer") === "user" }, {
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -156,1 +156,3 @@
+               { action: "bash", resource: "*", effect: id === "Auto" ? "auto" : "ask" },
++              // Auto的项目外shell门禁共享命令预检，既有白名单继续直接允许。
++              ...(id === "Auto" ? readonlyExternalDirectory.map((rule): PermissionV2.Rule => ({ ...rule, effect: rule.effect === "ask" ? "auto" : rule.effect })) : []),
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -221,3 +221,3 @@
+                   agent: context.agent,
+-                  metadata: { command: input.command, cwd: target.canonical, shell },
++                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
+                   source,
+@@ -234,3 +234,3 @@
+                 agent: context.agent,
+-                metadata: { command: input.command, cwd: target.canonical, shell },
++                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
+                 source,
+diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
+--- a/packages/core/test/agent.test.ts
++++ b/packages/core/test/agent.test.ts
+@@ -155,1 +155,1 @@
+-        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe("ask")
++        expect(PermissionV2.evaluate("external_directory", "/outside/*", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -363,1 +363,15 @@
+     // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
++    const agents = yield* AgentV2.Service
++    yield* agents.transform((draft) => draft.update(AgentV2.ID.make("Auto"), (item) => { item.permissions = [{ action: "*", resource: "*", effect: "auto" }] }))
++    const automatic = assertion({ agent: AgentV2.ID.make("Auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
++    expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(1)
++    // 外部目录复用同一shell预检，不再为相同命令调用第二次模型。
++    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(1)
++    reviewSettings = new Config.Info({ approvals_reviewer: "user" })
++    const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
++    expect(user.effect).toBe("ask")
++    yield* service.reply({ requestID: user.id, reply: "once" })
++    reviewRequests.length = 0
++    reviewSettings = new Config.Info({})
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 index bf88b02..e93a35a 100644
 --- a/packages/opencode/src/permission/reviewer/service.ts

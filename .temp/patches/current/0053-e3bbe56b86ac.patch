@@ -1,51 +1,158 @@
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -9,7 +9,7 @@
-   type Renderable,
- } from "@opentui/core"
- import type { CommandContext } from "@opentui/keymap"
--import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
-+import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match, untrack } from "solid-js"
- import { registerOpencodeSpinner } from "../register-spinner"
- import path from "path"
- import { fileURLToPath } from "url"
-@@ -139,6 +139,8 @@
-   return `<system-reminder>${ranges.join("\n")} This may or may not be relevant to the current task.</system-reminder>\n`
- }
- 
-+// 模块级记录跨 Prompt 重挂载保留，避免再次用历史消息覆盖用户选择。
-+const initializedSessionIDs = new Set<string>()
- let stashed: { prompt: PromptInfo; cursor: number } | undefined
- 
- export function Prompt(props: PromptProps) {
-@@ -403,15 +405,13 @@
+@@ -53,4 +53,3 @@
+ import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
+-import { useArgs } from "../../context/args"
+ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
+ import { useTuiConfig } from "../../config"
+@@ -149,5 +148,4 @@
+   const leader = useLeaderActive()
+   const local = useLocal()
+-  const args = useArgs()
+   const paths = useTuiPaths()
+   const location = useLocation()
+@@ -403,26 +401,2 @@
 -  // Initialize agent/model/variant from last user message when session changes
 -  let syncedSessionID: string | undefined
-+  // 仅按会话切换初始化，不因历史消息迟到而重新写入模型选择。
-   createEffect(() => {
-     const sessionID = props.sessionID
+-  createEffect(() => {
+-    const sessionID = props.sessionID
 -    const msg = lastUserMessage()
 -
 -    if (sessionID !== syncedSessionID) {
 -      if (!sessionID || !msg) return
 -
 -      syncedSessionID = sessionID
-+    if (!sessionID || initializedSessionIDs.has(sessionID)) return
-+    const msg = untrack(lastUserMessage)
-+    if (!msg) return
-+    // 收到历史后才标记，空历史在下次重新挂载时仍可尝试初始化。
-+    initializedSessionIDs.add(sessionID)
- 
-       // Only set agent if it's a primary agent (not a subagent)
-       const isPrimaryAgent = local.agent.list().some((x) => x.name === msg.agent)
-       if (msg.agent && isPrimaryAgent) {
-         // Keep command line --agent if specified.
-@@ -424,7 +424,6 @@
-           local.model.variant.set(msg.model.variant)
-         }
-       }
+-
+-      // Only set agent if it's a primary agent (not a subagent)
+-      const isPrimaryAgent = local.agent.list().some((x) => x.name === msg.agent)
+-      if (msg.agent && isPrimaryAgent) {
+-        // Keep command line --agent if specified.
+-        if (!args.agent) local.agent.set(msg.agent)
+-        if (msg.model) {
+-          local.model.set(msg.model)
+-          local.model.variant.set(msg.model.variant)
+-        }
+-      }
 -    }
-   })
-
+-  })
+-
    const promptCommands = createMemo(() =>
+     [
+diff --git a/packages/tui/src/context/local.tsx b/packages/tui/src/context/local.tsx
+--- a/packages/tui/src/context/local.tsx
++++ b/packages/tui/src/context/local.tsx
+@@ -1,6 +1,6 @@
+ import { createStore } from "solid-js/store"
+ import { createSimpleContext } from "./helper"
+-import { batch, createEffect, createMemo } from "solid-js"
++import { batch, createEffect, createMemo, untrack } from "solid-js"
+ import { useSync } from "./sync"
+ import { useEvent } from "./event"
+ import path from "path"
+@@ -60,6 +60,18 @@
+     const args = useArgs()
+     const event = useEvent()
+     const permission = usePermission()
+ 
++    // 标记随选择 owner 保留，只覆盖当前会话访问。
++    const selection = {
++      sessionID: undefined as string | undefined,
++      initialized: false,
++    }
++
++    function selectSession() {
++      // 成功选择先认领，迟到历史不能覆盖；失败分支不认领。
++      selection.sessionID = route.data.type === "session" ? route.data.sessionID : undefined
++      selection.initialized = true
++    }
++
+     function isModelValid(model: { providerID: string; modelID: string }) {
+       const provider = sync.data.provider.find((item) => item.id === model.providerID)
+@@ -103,7 +115,8 @@
+               message: `Agent not found: ${name}`,
+               duration: 3000,
+             })
++          selectSession()
+           setAgentStore("current", name)
+         },
+         move(direction: 1 | -1) {
+           batch(() => {
+@@ -113,7 +126,8 @@
+             if (next < 0) next = agents().length - 1
+             if (next >= agents().length) next = 0
+             const value = agents()[next]
++            selectSession()
+             setAgentStore("current", value.name)
+           })
+         },
+         color(name: string) {
+@@ -285,7 +299,8 @@
+           if (!val) return
+           const a = agent.current()
+           if (!a) return
++          selectSession()
+           setModelStore("model", a.name, { ...val })
+         },
+         cycleFavorite(direction: 1 | -1) {
+           const favorites = modelStore.favorite.filter((item) => isModelValid(item))
+@@ -313,7 +328,8 @@
+           if (!next) return
+           const a = agent.current()
+           if (!a) return
++          selectSession()
+           setModelStore("model", a.name, { ...next })
+           setModelStore("recent", recentModels(next, modelStore.recent))
+           save()
+         },
+@@ -329,7 +345,8 @@
+             }
+             const a = agent.current()
+             if (!a) return
++            selectSession()
+             setModelStore("model", a.name, model)
+             if (options?.recent) {
+               setModelStore("recent", recentModels(model, modelStore.recent))
+               save()
+@@ -383,7 +400,8 @@
+           set(value: string | undefined) {
+             const m = currentModel()
+             if (!m) return
++            selectSession()
+             const key = `${m.providerID}/${m.modelID}`
+             setModelStore("variant", key, value ?? "default")
+             save()
+           },
+@@ -407,6 +425,32 @@
+     }
+ 
+     const model = createModel()
+ 
++    // 按当前访问初始化，切换会话后允许再次恢复历史。
++    createEffect(() => {
++      const sessionID = route.data.type === "session" ? route.data.sessionID : undefined
++      if (selection.sessionID !== sessionID) {
++        selection.sessionID = sessionID
++        selection.initialized = false
++      }
++      // 等待启动数据和本地 variant 读盘，避免空历史及持久化竞态。
++      if (!sessionID || selection.initialized || sync.status === "loading" || !model.ready) return
++      const msg = sync.data.message[sessionID]?.findLast((message) => message.role === "user")
++      if (!msg || msg.role !== "user") return
++
++      // 只等待首次历史；恢复写入不订阅选择，Prompt 重挂载也不再触发。
++      untrack(() => {
++        selection.initialized = true
++        const isPrimaryAgent = agent.list().some((item) => item.name === msg.agent)
++        if (!msg.agent || !isPrimaryAgent) return
++        // 保留命令行 agent 优先级及现有模型、variant setter。
++        if (!args.agent) agent.set(msg.agent)
++        if (msg.model) {
++          model.set(msg.model)
++          model.variant.set(msg.model.variant)
++        }
++      })
++    })
++
+     function createSession() {
+       const [sessionStore, setSessionStore] = createStore<{

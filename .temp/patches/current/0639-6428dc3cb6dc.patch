@@ -632,7 +632,7 @@ index a8cb066..0f378ca 100644
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
 @@ -1,5 +1,6 @@
- import * as PromptVoiceInput from "../../src/prompt-voice-input"
+ import { PromptVoiceInput } from "../../src/prompt-voice-input"
 -import { describe, expect, test } from "bun:test"
 +import { describe, expect, spyOn, test } from "bun:test"
 +import { createRequire } from "node:module"

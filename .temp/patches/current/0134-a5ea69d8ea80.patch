@@ -6,40 +6,38 @@ Subject: [PATCH] =?UTF-8?q?feat(directory-normalization):=20=E6=B7=BB?=
  =?UTF-8?q?=E8=83=BD=EF=BC=8C=E4=BC=98=E5=8C=96Windows=E8=B7=AF=E5=BE=84?=
 
 diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
-index 897435406a..3ecc3aeea3 100644
 --- a/packages/tui/src/context/event.ts
 +++ b/packages/tui/src/context/event.ts
-@@ -2,13 +2,29 @@ import type { Event } from "@opencode-ai/sdk/v2"
+@@ -2,2 +2,32 @@
  import { useSDK } from "./sdk"
- import path from "path"
- 
--// #132：事件 directory 规范化比较（Win slash/case）
++import path from "path"
++
 +const normalizedDirectory = new Map<string, string>()
 +
-+// #134：高频事件路径上缓存目录规范化，避免 realpath 阻塞渲染
++// 高频目录比较只做纯路径归一并缓存，不调用 realpath 阻塞流式渲染。
 +function normalizeDirectory(value: string) {
 +  const cached = normalizedDirectory.get(value)
 +  if (cached) return cached
 +
 +  const resolved = path.resolve(value.replaceAll("/", path.sep))
 +  const root = path.parse(resolved).root
-+  // #134：去掉多余尾部分隔，保留盘符根
++  // 保留盘符根，仅去掉普通目录多余的尾部分隔符。
 +  const trimmed = resolved.length > root.length ? resolved.replace(/[\\/]+$/, "") : resolved
-+  // #134：Windows 大小写不敏感；不调用 realpathSync
 +  const result = process.platform === "win32" ? trimmed.toLowerCase() : trimmed
 +  normalizedDirectory.set(value, result)
 +  return result
 +}
 +
-+// #132/#134：事件 directory 与 TUI instance directory 规范化比较
- export function sameDirectory(a?: string, b?: string) {
-   if (!a || !b) return false
++export function sameDirectory(a?: string, b?: string) {
++  if (!a || !b) return false
 +  if (a === b) return true
-   try {
--    const left = path.resolve(a).replaceAll("\\", "/")
--    const right = path.resolve(b).replaceAll("\\", "/")
--    return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
++  try {
++    // Windows 不区分大小写，其他平台保留原有大小写语义。
 +    return normalizeDirectory(a) === normalizeDirectory(b)
-   } catch {
-     return a === b
-   }
++  } catch {
++    return a === b
++  }
++}
++
++// 保留源目录比较入口；当前广播不增加目录过滤，作用域仍由既有消费者处理。
+ 

@@ -15,7 +15,7 @@ Content-Transfer-Encoding: 8bit
 
 验证：system、tool/goal、tool/parameters、session/goal 四个定向测试文件共 130 pass、0 fail、16 snapshots；包级 bun typecheck 与 git diff --check 通过，未运行全量测试。
 
-适配说明：Astra 独立路由与 17 项 prompt 审计修正完整承载。已满足 no-op：system.ts 的 PROMPT_ASTRA import 与 gpt-6 路由（目标已有，仅补路由优先级注释）；system.test 的 test import。重锚：gpt-astra.txt 以 fork 107 行版覆盖目标 46 行上游模板（0640 链按 107 行形态约束）；system.ts 三段静态 section（action-care/verification/context-continuity）在目标为 environment 内联字面量（:265/:268/:269）——按 hunk 9/10 语义逐句植入（A06 请求范围限定+已授权准备/A13 verbatim 授权持久+未答澄清继续/待批拒批继续、A07 先查同域命令、new-messages-as-updates 前置句）；shell.txt 四 hunk 按目标紧凑重写形合并（A13 verbatim 授权模型替换 latest-message 模型/A14 amend hooks 臂移除/A15 commit 准备探索边界/A16 PR 分支推送授权边界）；task.txt A18 子代理进度句；tool/goal.ts A17 描述改词（two consecutive eligible Goal turns→a second consecutive call，BFS 泛化措辞替代 adjacent 枚举）。测试：system.test 增 test.each 七 id 路由表（按目标 Muse 测试松转型惯用法 as Provider.Model，免 ModelID/ProviderID 导入——目标无 provider/schema.ts）；goal.test L198 adjacent 枚举断言随 A17 改词移除（BFS 意图由 viable path/keeps active 断言继续锁定）；goal.test/parameters.test 两处 two consecutive 断言同步改词。goal.ts/goal.test fuzz 落位逐行核对。
+适配说明：保留已有GPT-6优先路由，采纳107行Astra资产及七API-id用例。公共执行/授权/验证/连续性语义迁现有Core ACTION_GUIDANCE，两代复用；Git持久授权与amend条件已满足，仅在共享政策补commit准备和PR分支授权句。Goal续跑迁Core，首轮audit与后续合法turn描述同步两代工具/schema，运行时状态机不改。原创建文件、委托选择、子任务交付提示保留并补实际Core工具可见面；独立baseline/policy期望及原Goal断言随契约适配，未删除adjacent BFS断言。transcript和源验证数字为历史载荷，不冒称本轮结果。
 
 diff --git a/docs/opencode-gpt-prompt-transcript.md b/docs/opencode-gpt-prompt-transcript.md
 new file mode 100644
@@ -1349,11 +1349,11 @@ index 0000000000000000000000000000000000000000..606fe48f92a88c5b53c1eadf031f848a
 +运行时前提：提示词修改不能保证长程执行；普通 Session 的结束由 R01 的 finish/Goal 条件决定。若故障会话存在 Goal 配置，先核对 R02 路径，再评估提示词收益。
 +
 +> `<<<< END AUDIT-RUNTIME >>>>`
-diff --git a/packages/opencode/src/session/goal.ts b/packages/opencode/src/session/goal.ts
+diff --git a/packages/core/src/session/goal.ts b/packages/core/src/session/goal.ts
 index e43d82218b73761a6d115a3fcfcbad9fa05ba655..130153f9bb350d2bb8280f25cfd0fb843a449773 100644
---- a/packages/opencode/src/session/goal.ts
-+++ b/packages/opencode/src/session/goal.ts
-@@ -643,7 +643,7 @@ export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinar
+--- a/packages/core/src/session/goal.ts
++++ b/packages/core/src/session/goal.ts
+@@ -661,7 +661,7 @@ export function continuationPrompt(goal: Goal, mode: ContinuationMode = "ordinar
      '- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; call the goal tool with operate "blocked".',
      '- Never use operate "blocked" merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.',
      "",
@@ -1436,24 +1436,29 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
      if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
      if (model.api.id.includes("codex")) {
        return [PROMPT_CODEX]
-@@ -262,11 +263,14 @@ const layer = Layer.effect(
-           // 工具使用指引：根据传入的已注册工具列表生成
-           getToolUsageSection(registeredTools),
-           // 执行操作时的安全指引：提醒模型在执行破坏性操作前需要确认
--          `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions (editing files, running tests, reading code): proceed freely.\n- Actions that are hard to reverse or affect shared state: confirm with the user first.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
-+          // A06：四条新边界（请求范围限定/verbatim 授权持久/未答澄清继续/待批拒批不停摆）把“等待”从硬阻塞改为有界继续。
-+          `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions within the user's request (editing files, running tests, reading code): proceed freely. Complete already-authorized preparation before requesting approval for the dependent action.\n- Actions that are hard to reverse or affect shared state: confirm with the user first, unless a verbatim user message has already authorized this action and target.\n- If optional clarification remains unanswered, continue using the available evidence and your best judgment.\n- If required input or approval is pending or denied, continue other authorized work on the current request that does not depend on it. Do not treat silence as approval or bypass a refusal.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
-           // 输出效率指引：提醒模型保持简洁高效的输出
-         `# Shared worktree\n\nYou may be working in a dirty worktree with user or other-agent changes.\n- If unknown changes are in files you need to edit, read them first and work with the current contents.\n- If unknown changes are unrelated to your task, ignore them.\n- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.\n- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
--        `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, state that plainly and explain the blocker.`,
--        `# Context continuity\n\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
-+        // A07：无法验证不是终点——先问同域命令能否代验，仍受阻才陈述 blocker，防止过早放弃可完成的验证。
-+        `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.`,
-+        // 上下文连续性前置句：新消息是对当前任务的更新而非任务切换，只有明确要求才停换任务（防 compaction 后“幽灵任务”回湖）。
-+        `# Context continuity\n\nTreat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
-           `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
-           [
-           // 环境信息块移到末尾：避免 env 内容影响 system prompt 前缀
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -135,5 +135,7 @@
+ # Executing actions with care
+ Carefully consider the reversibility and blast radius of actions before proceeding:
+-- Local, reversible actions (editing files, running tests, reading code): proceed freely.
+-- Actions that are hard to reverse or affect shared state: confirm with the user first.
++- Local, reversible actions within the user's request (editing files, running tests, reading code): proceed freely. Complete already-authorized preparation before requesting approval for the dependent action.
++- Actions that are hard to reverse or affect shared state: confirm with the user first, unless a verbatim user message has already authorized this action and target.
++- If optional clarification remains unanswered, continue using the available evidence and your best judgment.
++- If required input or approval is pending or denied, continue other authorized work on the current request that does not depend on it. Do not treat silence as approval or bypass a refusal.
+ 
+@@ -160,7 +162,8 @@
+ Before reporting a coding task complete, verify the change when feasible.
+ Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
+-If you cannot verify, state that plainly and explain the blocker.
++If you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.
+ 
+ <!-- 压缩摘要可能陈旧，当前用户目标优先于历史任务残留。 -->
+ # Context continuity
++Treat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.
+ The conversation may be compacted or resumed from a summary when context gets long.
 
 diff --git a/packages/opencode/src/session/prompt/gpt-astra.txt b/packages/opencode/src/session/prompt/gpt-astra.txt
 --- a/packages/opencode/src/session/prompt/gpt-astra.txt
@@ -1639,44 +1644,17 @@ diff --git a/packages/opencode/src/session/prompt/gpt.txt b/packages/opencode/sr
 -For large or complex changes, lead with the solution, then explain what you did and why. For casual chat, just chat. If something couldn’t be done (tests, builds, etc.), say so. Suggest next steps only when they are natural and useful; if you list options, use numbered items.
 +For large or complex changes, lead with the solution, then explain what you did and why. For casual chat, just chat. If something couldn’t be done (tests, builds, etc.), say so. Suggest next steps only for work outside the original request; do not offer requested work as suggestions; if you list options, use numbered items.
 
-diff --git a/packages/opencode/src/tool/shell/shell.txt b/packages/opencode/src/tool/shell/shell.txt
---- a/packages/opencode/src/tool/shell/shell.txt
-+++ b/packages/opencode/src/tool/shell/shell.txt
-@@ -15,9 +15,10 @@ ${commandSection}
- # 只读检查允许列表（含 rev-parse / remote -v）
- Read-only git inspection commands are allowed when needed, such as `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `git rev-parse`, and `git remote -v`.
- 
--# 写操作必须由最新用户消息明确要求该操作类型
-+# 写操作必须由用户逐字消息授权；授权持续有效直到被撤回
- Do not run git commands that modify refs, history, the index, the working tree, stashes, or remotes
--unless the latest user message explicitly requests that exact kind of operation.
-+unless a verbatim user message has requested that kind of operation for the current task;
-+that authorization remains valid unless the last user message withdraws it.
- This includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`,
- `git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`,
- and `git stash push/pop/apply/drop/clear`.
-@@ -31,8 +32,9 @@ If such an operation seems necessary, explain why and ask first.
- - NEVER run destructive/irreversible git commands (force push, hard reset, etc) unless the user explicitly requests them
- - NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
- - NEVER run force push to main/master; warn the user if they request it
-+# A14：amend 条件不再豁免“hook 自动改动文件”形态
- - Avoid git commit --amend. ONLY use --amend when ALL conditions are met:
--  (1) User explicitly requested amend, OR the commit succeeded and pre-commit hooks auto-modified files that need including
-+  (1) User explicitly requested amend
-   (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')
-   (3) Commit has NOT been pushed to remote (verify: git status shows "Your branch is ahead")
- - CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit
-@@ -46,8 +48,12 @@ Only create commits when the latest user message explicitly asks you to create a
- - Before committing, inspect `git status`, `git diff`, and `git log --oneline -10`; stage only intended files and never commit secrets.
+diff --git a/packages/core/src/git-safety.txt b/packages/core/src/git-safety.txt
+--- a/packages/core/src/git-safety.txt
++++ b/packages/core/src/git-safety.txt
+@@ -33,3 +33,4 @@
  - Write a concise commit message that matches the repo style.
+ - Do not use interactive `-i` or create empty commits unless explicitly requested.
  - If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.
-+# A15：commit 准备期允许相关读测追踪，而非一刀切禁止探索
 +- While preparing the commit, avoid unrelated exploration; reads, tests, and tracking needed for this commit and its hook fixes are fine.
- 
- # GitHub
+@@ -39,3 +40,4 @@
  - Before creating a PR, inspect status, diff, remote tracking, recent commits, and the diff from the base branch.
  - Review all commits included in the PR, not just the latest commit.
-+# A16：PR 的分支/推送是独立授权面，未授权时专门请求而非默认先建
 +- Create the PR when instructed; if it needs a branch or push that isn't yet authorized, ask for that specifically.
  - Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.
 
@@ -1701,7 +1679,7 @@ diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goa
      description:
        // #517：blocked 首轮指引改为 BFS 复核；two-turn 阈值与 exact reason 契约不变。
 -      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
-+      // A17：two consecutive eligible Goal turns→a second consecutive call（调用即计数，非 turn 语义）；adjacent 枚举改 breadth-first 泛化。
++      // 首轮启动audit，重复确认仍须后续合法turn；这里不改变运行时状态机。
 +      "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
    }),
    reason: Schema.optional(Schema.String).annotate({
@@ -1710,11 +1688,10 @@ diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goa
 diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/test/session/system.test.ts
 --- a/packages/opencode/test/session/system.test.ts
 +++ b/packages/opencode/test/session/system.test.ts
-@@ -9,6 +9,12 @@ import type { Provider } from "../../src/provider/provider"
- import { SystemPrompt } from "../../src/session/system"
- import { MCP } from "../../src/mcp"
+@@ -12,6 +12,11 @@
+ import { RuntimeFlags } from "../../src/effect/runtime-flags"
+ import { InstanceState } from "../../src/effect/instance-state"
  import { testEffect } from "../lib/effect"
-+// Astra 路由表测试直接比对模板实例（identity）——与源仓同构，采用目标既有的松转型惯用法。
 +import PROMPT_ASTRA from "../../src/session/prompt/gpt-astra.txt"
 +import PROMPT_GPT from "../../src/session/prompt/gpt.txt"
 +import PROMPT_CODEX from "../../src/session/prompt/codex.txt"
@@ -1723,7 +1700,7 @@ diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/t
  
  const skills: Skill.Info[] = [
    {
-@@ -84,6 +90,20 @@ const it = testEffect(
+@@ -88,3 +93,17 @@ const it = testEffect(
  )
  
  describe("session.system", () => {
@@ -1737,13 +1714,10 @@ diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/t
 +    ["gpt-4.1", PROMPT_BEAST],
 +    ["claude-sonnet-4", PROMPT_ANTHROPIC],
 +  ])("selects the provider prompt for %s", (id, expected) => {
-+    // 松转型沿用目标 Muse 测试惯例：目标无 provider/schema.ts，ModelID/ProviderID 导入不可用。
-+    expect(SystemPrompt.provider({ api: { id } } as Provider.Model)).toEqual([expected])
++    // 展示别名与API id分开，模板不能误按展示名选择；fixture沿用现有Muse测试形式。
++    expect(SystemPrompt.provider({ id: "display-alias", api: { id } } as Provider.Model)).toEqual([expected])
 +  })
 +
-   test("selects the Meta prompt for Muse Spark model IDs", () => {
-     for (const id of ["meta/muse-spark-preview", "muse-spark-1.1", "muse-spark-1.2"]) {
-       const prompt = SystemPrompt.provider({ api: { id } } as Provider.Model)[0]
 
 diff --git a/packages/opencode/test/tool/goal.test.ts b/packages/opencode/test/tool/goal.test.ts
 --- a/packages/opencode/test/tool/goal.test.ts
@@ -1776,3 +1750,75 @@ diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/
        expect(operate.description).toContain("same trimmed reason")
        // #517：blocked 首轮 BFS 复核指引进入 wire description。
        expect(operate.description).toContain("re-check relevant evidence breadth-first")
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+--- a/packages/core/src/tool/goal.ts
++++ b/packages/core/src/tool/goal.ts
+@@ -16,1 +16,2 @@
+-      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
++      // 首轮必须能启动受阻审计；后续确认继续遵守真实turn与reason约束。
++      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked to start a blocker audit; a second consecutive call with the same trimmed reason in the next eligible Goal turn marks it blocked. The first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
+@@ -20,1 +21,1 @@
+-          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Blocked requires two consecutive eligible Goal turns using the same trimmed reason; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
++          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Use blocked to start a blocker audit; a second consecutive call in the next eligible Goal turn using the same trimmed reason marks it blocked; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
+diff --git a/packages/core/src/tool/question.ts b/packages/core/src/tool/question.ts
+--- a/packages/core/src/tool/question.ts
++++ b/packages/core/src/tool/question.ts
+@@ -15,5 +15,6 @@
+ 1. Gather user preferences or requirements
+ 2. Clarify ambiguous instructions
+ 3. Get decisions on implementation choices as you work
+ 4. Offer choices to the user about what direction to take.
++Do not ask about implementation choices the user has already delegated to you, unless implementation hits a major route divergence.
+ 
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -60,3 +60,4 @@
++            // 创建许可属于模型可见约束，不另增一套执行期授权owner。
+             description:
+-              "Write content to one file. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
++              "Write content to one file. Always prefer editing existing files; never create new files unless the user explicitly requires them. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
+             input: Input,
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -75,3 +75,4 @@
++            // 保留原批量与错误契约；新文件边界只补在已有description可见面。
+             description:
+-              "Apply one patch containing add, update, and delete file operations. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
++              "Apply one patch containing add, update, and delete file operations. Create a new file only when the user explicitly requires it. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
+             input: Input,
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -40,5 +40,7 @@
+ # Executing actions with care
+ Carefully consider the reversibility and blast radius of actions before proceeding:
+-- Local, reversible actions (editing files, running tests, reading code): proceed freely.
+-- Actions that are hard to reverse or affect shared state: confirm with the user first.
++- Local, reversible actions within the user's request (editing files, running tests, reading code): proceed freely. Complete already-authorized preparation before requesting approval for the dependent action.
++- Actions that are hard to reverse or affect shared state: confirm with the user first, unless a verbatim user message has already authorized this action and target.
++- If optional clarification remains unanswered, continue using the available evidence and your best judgment.
++- If required input or approval is pending or denied, continue other authorized work on the current request that does not depend on it. Do not treat silence as approval or bypass a refusal.
+ 
+@@ -65,7 +67,8 @@
+ Before reporting a coding task complete, verify the change when feasible.
+ Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
+-If you cannot verify, state that plainly and explain the blocker.
++If you cannot verify, first check whether another in-scope command can; if still blocked, state that plainly and explain the blocker.
+ 
+ <!-- 压缩摘要可能陈旧，当前用户目标优先于历史任务残留。 -->
+ # Context continuity
++Treat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.
+ The conversation may be compacted or resumed from a summary when context gets long.
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -269,1 +269,2 @@
+-              "- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.", "",
++              "- If a commit fails or hooks reject it, fix the issue and create a new commit; do not amend the failed commit.",
++              "- While preparing the commit, avoid unrelated exploration; reads, tests, and tracking needed for this commit and its hook fixes are fine.", "",
+@@ -273,2 +274,3 @@
+               "- Review all commits included in the PR, not just the latest commit.",
++              "- Create the PR when instructed; if it needs a branch or push that isn't yet authorized, ask for that specifically.",
+               "- Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.",

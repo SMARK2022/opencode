@@ -263,7 +263,11 @@ diff --git a/packages/tui/package.json b/packages/tui/package.json
 index 88486f2..7b913fc 100644
 --- a/packages/tui/package.json
 +++ b/packages/tui/package.json
-@@ -65,6 +65,9 @@
+@@ -59,2 +59,3 @@
+     "clipboardy": "4.0.0",
++    "cross-spawn": "catalog:",
+     "diff": "catalog:",
+@@ -65,6 +66,10 @@
      "strip-ansi": "7.1.2",
      "solid-js": "catalog:"
    },
@@ -273,6 +277,7 @@ index 88486f2..7b913fc 100644
    "devDependencies": {
      "@tsconfig/bun": "catalog:",
      "@types/bun": "catalog:",
++    "@types/cross-spawn": "catalog:",
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 index a280d50..ff2f5a0 100644
 --- a/packages/tui/src/component/prompt/index.tsx
@@ -488,7 +493,7 @@ index 0000000..709a0e0
 --- /dev/null
 +++ b/packages/tui/src/prompt-voice-input.ts
 @@ -0,0 +1,248 @@
-+import { spawn } from "node:child_process"
++import spawn from "cross-spawn"
 +import { which } from "@opencode-ai/core/util/which"
 +import path from "path"
 +
@@ -715,8 +720,8 @@ index 0000000..709a0e0
 +  return transcriber
 +}
 +
-+// child_process spawn 的最小封装：收集 stdout/stderr，返回退出码。与 source 的
-+// Process.run 语义对齐（nothrow + abort 信号），但 tui 包没有跨包 run 工具。
++// 沿用source进程边界的cross-spawn，让Windows脚本和原生程序共用argv转义。
++// 保留nothrow结果与取消信号，TUI无需新增通用进程服务。
 +function runProcess(
 +  commandArgs: string[],
 +  options: { abort: AbortSignal },
@@ -916,7 +921,7 @@ new file mode 100644
 index 0000000..5b86e4b
 --- /dev/null
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,438 @@
 +import { describe, expect, test } from "bun:test"
 +import path from "path"
 +import { tmpdir } from "../fixture/fixture"
@@ -934,6 +939,16 @@ index 0000000..5b86e4b
 +})
 +
 +describe("prompt voice input", () => {
++  // Windows脚本入口及带元字符的录音路径仍须保持逐项argv，不能拼接裸shell字符串。
++  test.skipIf(process.platform !== "win32")("transcriber accepts a Windows command shim", async () => {
++    await using tmp = await tmpdir()
++    const command = path.join(tmp.path, "voice transcriber.cmd")
++    const file = path.join(tmp.path, "voice & literal.wav")
++    await Bun.write(file, "RIFF....WAVE")
++    await Bun.write(command, `@echo off\r\n"${process.execPath}" -e "process.stdout.write(JSON.stringify({text:process.argv[1]}))" %*\r\n`)
++    expect(await transcribeVoiceFile({ file, transcriber: { command, args: ["{file}"] } })).toBe(file)
++  })
++
 +  // 这个用例锁定 argv 传参边界：录音文件路径只能作为一个参数进入转写器。
 +  // 路径里的空格、分号和变量字符都必须保持字面量，不能被 shell 展开。
 +  // 这里不检查实现函数名，只观察转写器实际收到的参数值，避免测试和实现耦合。
@@ -1520,7 +1535,11 @@ index 0000000..3eaa9e0
 diff --git a/bun.lock b/bun.lock
 --- a/bun.lock
 +++ b/bun.lock
-@@ -965,6 +965,9 @@
+@@ -964,2 +964,3 @@
+         "clipboardy": "4.0.0",
++        "cross-spawn": "catalog:",
+         "diff": "catalog:",
+@@ -965,6 +966,10 @@
          "solid-js": "catalog:",
          "strip-ansi": "7.1.2",
        },
@@ -1530,7 +1549,8 @@ diff --git a/bun.lock b/bun.lock
        "devDependencies": {
          "@tsconfig/bun": "catalog:",
          "@types/bun": "catalog:",
-@@ -2324,4 +2327,6 @@
++        "@types/cross-spawn": "catalog:",
+@@ -2324,4 +2329,6 @@
      "@pierre/diffs": ["@pierre/diffs@1.2.10", "", { "dependencies": { "@pierre/theme": "1.0.3", "@pierre/theming": "0.0.1", "@shikijs/transformers": "^3.0.0 || ^4.0.0", "diff": "8.0.3", "hast-util-to-html": "9.0.5", "lru_map": "0.4.1", "shiki": "^3.0.0 || ^4.0.0" }, "peerDependencies": { "react": "^18.3.1 || ^19.0.0", "react-dom": "^18.3.1 || ^19.0.0" } }, "sha512-rPeAmDWarxFVTQpaf4y6wTxjZxU44xKJKoJti2zU21P06DVd9nRHZX+xSIObLB307Qjpaesyb1x/j0z94t7vLw=="],
  
 +    "@picovoice/pvrecorder-node": ["@picovoice/pvrecorder-node@1.2.9", "", {}, "sha512-e398ue4G8YihrnnyTpnVePvOiBEM5+R4D+ChoyyeC8J8KFBMuhGrZwrdmpIPqDqCjCA+YqO2mFaicHstVhEpcg=="],

@@ -610,92 +610,74 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
  import { isOverflow } from "./overflow"
  import { PartID } from "./schema"
  import type { SessionID } from "./schema"
-@@ -38,6 +39,10 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
+@@ -38,6 +39,9 @@ const ABORTED_TOOL_SETTLE_TIMEOUT = "2 seconds"
  const DOOM_LOOP_THRESHOLD = 3
  // #216：工具中止错误文案常量——prompt.ts/tools.ts 共用同一字符串判断中止路径
  export const TOOL_ABORTED_ERROR = "Tool execution aborted"
-+// [local-smark] Assistant 正文 attempt 级累计预算：64 KiB 字符（非 token、非字节），
-+// 覆盖单次输出的全部 Text Part 合计；单 Part 天然被同一累计值约束。
-+// 字符而非字节：provider delta 的 text 本身已是 string，字符计数免 UTF-8 二次编码。
++// attempt内全部Text Part共用65,536个UTF-16 code unit预算；不是UTF-8字节或token预算。
++// 按string.length直接累计，不为每个delta编码或分配第二份正文。
 +const OUTPUT_TEXT_LIMIT = 64 * 1024
  
  /**
   * #514：工具完成时的 input 真值回写（INV-16 / write format 同构）。
-@@ -140,6 +145,8 @@ interface ProcessorContext extends Input {
+@@ -183,5 +188,7 @@ interface ProcessorContext extends Input {
    needsCompaction: boolean
    currentText: SessionV1.TextPart | undefined
    reasoningMap: Record<string, SessionV1.ReasoningPart>
 +  // 当前 attempt 内全部 Text Part 的累计正文字符数；retry 入口与 process 起点重置。
 +  attemptTextChars: number
-   // #519：只记录本次 attempt（自上次 retry 起）已落库且可撤回的非 Tool Part ID。
-   // Tool Part 不进入集合，避免把外部副作用伪装成可安全重放；step-finish part 同样保留。
+   // 本次尝试可撤回的非 Tool Part；工具副作用与已确认 step-finish 不进入集合。
    attemptPartIDs: Set<PartID>
-@@ -194,6 +201,8 @@ const layer = Layer.effect(
+@@ -230,6 +237,7 @@ const layer = Layer.effect(
          needsCompaction: false,
          currentText: undefined,
          reasoningMap: {},
-+        // 当前 attempt 内全部 Text Part 的累计正文字符数；retry 入口与 process 起点重置。
 +        attemptTextChars: 0,
          attemptPartIDs: new Set(),
-         inputChars: undefined,
-         inputBreakdown: undefined,
-@@ -202,6 +211,9 @@ const layer = Layer.effect(
+         hasText: false,
+         hasReasoning: false,
+@@ -236,6 +244,8 @@ const layer = Layer.effect(
          hasToolCall: false,
        }
        let aborted = false
-+      // [local-smark] 语义级单次重试标记：仅在本 process() 内有效，跨 retry 保留，
-+      // 新 process() 重置；不是通用 retry 计数器，不改变 SessionRetry policy。
++      // 语义重试额度跨内部attempt保留，在下一次process重置，不改通用retry policy。
 +      let outputLimitRetried = false
-       // [local-smark] Tool 终态写入许可：串行化 completeToolCall / failToolCall /
-       // cleanup 的 read-check-write，确保 ToolPart terminal state 有唯一 winner，
-       // 防止上一轮 runner 的 late 终态写入误杀 replacement loop 的新工具状态。
-@@ -569,6 +581,33 @@ const layer = Layer.effect(
-           })
-         })
- 
-+      // [local-smark] 超限统一撤回点：先移除本 attempt 已落库 Part 并清空 live 状态，
-+      // 防止 cleanup() 把已拒绝的 currentText/reasoning 重新持久化（INV-01/03）。
-+      // 目标 NamedError 非 yieldable：按 finish-other 先例以 throw 进入外层 squash 归型。
+       // 三条终态写共享许可；只串行读写，不在其中等待工具完成信号。
+       const toolPermit = Semaphore.makeUnsafe(1)
+       // 并发副作用工具共享同一基线及失败；等待者取消不能让另一工具绕过捕获。
+@@ -569,3 +579,19 @@ const layer = Layer.effect(
++      // 复用同一撤回owner，解除live引用后再失败，防止cleanup重建已拒绝正文。
 +      const breachOutputLimit = Effect.fnUntraced(function* () {
-+        // 撤回先于失败返回：失败后 cleanup 不会再看到已清空的 live 状态。
-+        yield* Effect.forEach([...ctx.attemptPartIDs], (partID) =>
-+          session.removePart({ sessionID: ctx.sessionID, messageID: ctx.assistantMessage.id, partID }),
-+        )
-+        ctx.attemptPartIDs.clear()
-+        ctx.currentText = undefined
-+        ctx.reasoningMap = {}
-+        // 清空三处 live 状态后 cleanup 不再重新持久化（它们是 cleanup 的写入源）。
-+        // Tool Part 刻意不在撤回集合内：其外部副作用不可逆，重试安全性由 terminal 分支保证。
-+        // 首次无 Tool 超限走既有 retryable 合同；重复超限或已产生 Tool 副作用的
-+        // attempt 直接终态，避免无限重试或重放真实副作用（INV-02/04/05）。
++        yield* discardIncompleteAttempt()
 +        if (!outputLimitRetried && !ctx.hasToolCall) {
 +          outputLimitRetried = true
-+          throw new SessionV1.APIError({
-+            message: "Provider output exceeded the 64 KiB text limit",
-+            isRetryable: true,
-+            metadata: { reason: "output-length" },
-+          })
++          return yield* Effect.fail(
++            new SessionV1.APIError({
++              message: "Provider output exceeded the 64 KiB text limit",
++              isRetryable: true,
++              metadata: { reason: "output-length" },
++            }),
++          )
 +        }
-+        throw new MessageError.OutputLengthError({})
-+        // 终态路径：OutputLengthError 是空 data 命名错误，MessageV2.fromError 有专 case。
++        return yield* Effect.fail(new MessageError.OutputLengthError({}))
 +      })
 +
        const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
          switch (value.type) {
            case "reasoning-start":
-@@ -862,6 +901,15 @@ const layer = Layer.effect(
+@@ -868,8 +894,15 @@ const layer = Layer.effect(
  
            case "text-delta":
              if (!ctx.currentText) return
-+            // [local-smark] 累计预算在内存追加与 live bus 发布前判定，
-+            // crossing delta 不会进入任何持久化或事件路径。
-+            // 等于预算仍允许通过，只有严格大于才视为越界（与 INV-07 边界语义一致）。
++            // 在追加正文和发布Part delta之前检查累计值，不接纳越界delta。
++            // 等于预算仍合法；原始provider事件与用量结算继续由各自owner处理。
 +            if (ctx.attemptTextChars + value.text.length > OUTPUT_TEXT_LIMIT) {
-+              // 越界时先撤回再失败，返回与 handleEvent 的 void 返回面保持兼容。
 +              yield* breachOutputLimit()
 +              return
 +            }
 +            ctx.attemptTextChars += value.text.length
+             // 只建立文本块而没有正文，不应绕过空完成检测。
+             if (value.text.length > 0) ctx.hasText = true
              ctx.currentText.text += value.text
              if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
              yield* logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
@@ -712,17 +694,14 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
              ctx.currentText.text = (yield* plugin.trigger(
                "experimental.text.complete",
                {
-@@ -887,6 +936,17 @@ const layer = Layer.effect(
+@@ -895,6 +936,14 @@ const layer = Layer.effect(
                },
                { text: ctx.currentText.text },
              )).text
-+            // [local-smark] 终值同样受累计预算约束：hook 扩张（或收缩）后的差值
-+            // 在 durable updatePart 与 Text.Ended 发布前复检；计数器同步下调，
-+            // 收缩不产生额外额度、扩张不得绕过上限。
-+            // pluginGrowth 可为负（hook 收缩正文）；同步下调避免同一文本被二次计数。
++            // hook终值在持久写入前按长度差复检；收缩也同步下调，避免重复计数。
++            // 这里只调整本attempt正文额度，不触碰Tool、已确认step用量或原始事件。
 +            const pluginGrowth = ctx.currentText.text.length - beforePluginLength
 +            if (ctx.attemptTextChars + pluginGrowth > OUTPUT_TEXT_LIMIT) {
-+              // 终值复检失败走同一撤回点；扩张后的文本不得进入 durable updatePart。
 +              yield* breachOutputLimit()
 +              return
 +            }
@@ -738,20 +717,17 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
  
            case "finish":
              return
-@@ -1042,11 +1103,14 @@ const layer = Layer.effect(
-         })
-         ctx.needsCompaction = false
+@@ -1042,2 +1083,4 @@ const layer = Layer.effect(
          ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 +        // 每个 process() 只允许一次语义重试；跨 process 的新回合重新获得额度。
 +        outputLimitRetried = false
  
-         const result = yield* Effect.gen(function* () {
-           yield* Effect.gen(function* () {
+@@ -1046,5 +1089,6 @@ const layer = Layer.effect(
              ctx.currentText = undefined
              ctx.reasoningMap = {}
 +            ctx.attemptTextChars = 0
-             // [local-smark] 重置语义输出追踪标志：retry 时上一轮的 hasText 等标志
-             // 必须清零，否则空完成检测会因残留标志而跳过。
+             ctx.attemptPartIDs.clear()
+             // 每次重试都重新判断本轮输出，不能被旧标志误放行。
              ctx.hasText = false
 
 diff --git a/packages/tui/src/util/text-budget.ts b/packages/tui/src/util/text-budget.ts
@@ -779,12 +755,11 @@ new file mode 100644
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -96,6 +96,7 @@ import type {
+@@ -95,5 +95,6 @@ import type {
  } from "@opencode-ai/sdk/v2"
  import { useLocal } from "../../context/local"
  import { Locale } from "../../util/locale"
 +import { withinMarkdownBudget } from "../../util/text-budget"
- import { createThrottledSignal } from "../../util/signal"
  import { webSearchProviderLabel } from "../../util/tool-display"
  import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 @@ -2208,19 +2209,33 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
@@ -876,13 +851,13 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
  
  const summary = Layer.succeed(
    SessionSummary.Service,
-@@ -235,6 +236,83 @@ const providerErrorLLM = Layer.succeed(
+@@ -235,6 +236,85 @@ const providerErrorLLM = Layer.succeed(
  const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
  const itProviderError = testEffect(providerErrorEnv)
  
 +// [local-smark] 脚本化 LLM：同一响应内多个独立 ID 的 text blocks 无法经 OpenAI-compatible
 +// 测试端点表达；在 LLM.Service 公开接口上重放固定事件序列，SessionProcessor.process 仍是真实被测单元。
-+const scriptedLlmRunner = <T>(events: T[]) => {
++const scriptedLlmRunner = (events: LLMEvent[]) => {
 +  let streamCalls = 0
 +  return {
 +    // calls 取差值而非绝对值：module 级 runner 会被同进程多次运行复用。
@@ -897,10 +872,10 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 +            Layer.succeed(
 +              LLM.Service,
 +              LLM.Service.of({
-+                stream: (() => {
++                stream: () => {
 +                  streamCalls++
 +                  return Stream.fromIterable(events)
-+                }) as LLM.Interface["stream"],
++                },
 +              }),
 +            ),
 +          ] as const,
@@ -921,11 +896,13 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 +  LLMEvent.textDelta({ id: "txt-cum-b", text: "b".repeat(25 * 1024 + 1) }),
 +])
 +
-+// Tool input 开始后的超限：目标 hasToolCall 在 tool-call 事件才置位（非 tool-input-start），
-+// 首次超限仍走 retryable 合同；重放同一脚本后第二次超限必须终态。
++// 真实tool-call及结算之后超限必须立即终态，不能把仅开始输入误当作已发生调用。
++// providerExecuted脚本只提供事件，不注册或执行本地bash工具。
 +const toolBearingScript = scriptedLlmRunner([
 +  LLMEvent.stepStart({ index: 0 }),
 +  LLMEvent.toolInputStart({ id: "call-tb", name: "bash" }),
++  LLMEvent.toolCall({ id: "call-tb", name: "bash", input: {}, providerExecuted: true }),
++  LLMEvent.toolResult({ id: "call-tb", name: "bash", result: { type: "error", value: "tool settled before output limit" }, providerExecuted: true }),
 +  LLMEvent.textStart({ id: "txt-tb" }),
 +  LLMEvent.textDelta({ id: "txt-tb", text: "x".repeat(65_537) }),
 +])
@@ -1137,12 +1114,12 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 +
 +        const parts = yield* MessageV2.parts(msg.id)
 +
-+        // 首次超限 retry，重放同一脚本后第二次超限终态（目标 hasToolCall 在 tool-call 才置位，
-+        // tool-input-start 不构成副作用证据）；有界重试后终态且不得留下超限正文。
++        // 一次真实调用后不再请求provider；已结算Tool保留，超限Text全部撤回。
 +        expect(value).toBe("stop")
-+        expect(toolBearingScript.calls() - callsBefore).toBe(2)
++        expect(toolBearingScript.calls() - callsBefore).toBe(1)
 +        expect(handle.message.error?.name).toBe("MessageOutputLengthError")
 +        expect(parts.some((part) => part.type === "text")).toBe(false)
++        expect(parts.some((part) => part.type === "tool" && part.state.status === "error")).toBe(true)
 +      }),
 +    { git: true, config: (url) => providerCfg(url) },
 +  ),
@@ -1200,6 +1177,42 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
  it.live("session.processor reasoning-only finish_reason=other retries and recovers", () =>
    provideTmpdirServer(
      ({ dir, llm }) =>
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -676,3 +676,32 @@
++test("assistant text applies the Markdown budget in streaming and settled frames", async () => {
++  for (const body of ["within", "characters", "lines"] as const) {
++    for (const streaming of [true, false]) {
++      const marker = `BUDGET_${body.toUpperCase()}`
++      const text = body === "within" ? `**${marker}**`
++        : body === "characters" ? `${"x".repeat(32 * 1024)}\n**${marker}**`
++        : `${"x\n".repeat(1001)}**${marker}**`
++      const info: AssistantMessage = {
++        id: "msg_budget", sessionID, role: "assistant", parentID: "msg_request", agent: "build", mode: "build",
++        time: { created: 1, ...(streaming ? {} : { completed: 2 }) }, modelID: "model", providerID: "provider",
++        path: { cwd: directory, root: directory }, cost: 0,
++        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++      }
++      const part: Part = { id: "part_budget", sessionID, messageID: info.id, type: "text", text }
++      await withRenderedReview([{ info, parts: [part] }], async (app) => {
++        // marker放在末尾，真实贴底视口才能观察超长正文，不能用函数返回值代替渲染分支。
++        await waitForReviewFrame(app, async (frame) => {
++          if (frame.includes(marker)) return true
++          await Bun.sleep(5)
++          return false
++        }, { maxPasses: 400 })
++        const frame = app.captureCharFrame()
++        // 预算内继续Markdown conceal；两种超限则保留字面星号，流式与完成态一致。
++        expect(frame.includes(`**${marker}**`)).toBe(body !== "within")
++      }, { width: 80, height: 16 })
++    }
++  }
++})
++
+ async function withRenderedReview(
+   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
+   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,
 diff --git a/packages/opencode/test/v2/session-message-updater.test.ts b/packages/opencode/test/v2/session-message-updater.test.ts
 --- a/packages/opencode/test/v2/session-message-updater.test.ts
 +++ b/packages/opencode/test/v2/session-message-updater.test.ts

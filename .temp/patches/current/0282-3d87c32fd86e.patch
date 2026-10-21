@@ -554,26 +554,24 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 index b51fe1f14..18ab8c2b2 100644
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -32,6 +32,8 @@ import { ProviderError } from "@/provider/error"
+@@ -32,6 +32,7 @@ import { ProviderError } from "@/provider/error"
  import { iife } from "@/util/iife"
  import { errorMessage } from "@/util/error"
  import { isMedia } from "@/util/media"
-+// #282：compaction 清理后改用统一 notice 信封，替代旧的硬编码英文标记
 +import { formatCompactionClearedNotice } from "@/util/output-notice"
  import type { SystemError } from "bun"
  import type { Provider } from "@/provider/provider"
  import { Effect, Schema } from "effect"
-@@ -79,7 +81,8 @@ export { isMedia }
+@@ -79,7 +80,7 @@ export { isMedia }
  function truncateToolOutput(text: string, maxChars?: number) {
    if (!maxChars || text.length <= maxChars) return text
    const omitted = text.length - maxChars
 -  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
-+  // #282：机器可解析的省略标记（[... reason stats]），不再用面向人的英文句子
 +  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
  }
  
  export const Event = {
-@@ -330,7 +333,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -334,7 +335,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
            toolNames.add(part.tool)
            if (part.state.status === "completed") {
              const outputText = part.state.time.compacted
@@ -586,16 +584,15 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index 9d9967ed6..929dcd2a8 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -61,6 +61,8 @@ import { SessionTools } from "./tools"
+@@ -59,6 +59,7 @@ import { SessionTools } from "./tools"
  import { LLMEvent } from "@opencode-ai/llm"
- // #194：改用 TokenEstimate 统一上传估算
- import { TokenEstimate } from "@/token/estimate"
-+// #282：abort 路径接入统一 execution notice
-+import { formatExecutionNotice } from "@/util/output-notice"
  // #159：decide 窗口裁剪用 usable 上限（与 overflow 同一口径）
  import { usable } from "./overflow"
+ // #194：改用 TokenEstimate 统一上传估算
+ import { TokenEstimate } from "@/token/estimate"
++import { formatExecutionNotice } from "@/util/output-notice"
  
-@@ -748,7 +750,9 @@ const layer = Layer.effect(
+@@ -705,7 +706,9 @@ const layer = Layer.effect(
            const finish = Effect.uninterruptible(
              Effect.gen(function* () {
                if (aborted) {
@@ -610,66 +607,78 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 index 4a92ac63a..19c165406 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -15,6 +15,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
+@@ -15,7 +15,9 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
  import { Shell } from "@opencode-ai/core/shell"
+ import { ShellRemote } from "@opencode-ai/core/shell-remote"
  import { ShellID } from "./shell/id"
- import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
+ import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
 +// #282：超时/中止/截断改用统一 notice 信封
 +import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
  
- import * as Truncate from "./truncate"
+-import * as Truncate from "./truncate"
++import { Truncate } from "./truncate"
  import { Plugin } from "@/plugin"
-@@ -1015,10 +1017,12 @@ export const ShellTool = Tool.define(
+@@ -499,4 +501,7 @@
+       const list: Chunk[] = []
+       let used = 0
++      // total描述恢复路径中的完整原始归档，统计不能重新载入已淘汰的输出。
++      const total = { bytes: 0, lines: 0 }
++      let trailingLine = false
+       let file = ""
+       let sink: ReturnType<typeof createWriteStream> | undefined
+@@ -559,3 +564,6 @@
+             const size = Buffer.byteLength(chunk, "utf-8")
++            total.bytes += size
++            for (const char of chunk) if (char === "\n") total.lines++
++            trailingLine = !chunk.endsWith("\n")
+             list.push({ text: chunk, size })
+             used += size
+@@ -815,10 +823,10 @@ export const ShellTool = Tool.define(
        const meta: string[] = []
        if (expired) {
          meta.push(
 -          `shell tool terminated command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.`,
-+          // #282：机器可解析 timeout notice；重试建议由调用方文档承接
 +          formatExecutionNotice({ severity: "warning", reason: "timeout", timeout_ms: input.timeout }),
          )
        }
 -      if (aborted) meta.push("User aborted the command")
-+      // #282：abort 同样走 notice，去掉旧的自然语言包装
 +      if (aborted) meta.push(formatExecutionNotice({ severity: "warning", reason: "user_abort" }))
-       // #215：模型输出由原始环形缓冲拼接，不经显示渲染，保证 result.output 忠实于子进程字节流
        const raw = list.map((item) => item.text).join("")
-       // #130：Windows PowerShell 先 normalize CLIXML 为纯文本
-@@ -1029,6 +1033,8 @@ export const ShellTool = Tool.define(
-       // #130：压缩输入为 normalize 后文本
-       const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
-       diag.end()
-+      // #282：截断前先统计 normalize 后全文，notice 的 total 必须是完整输出量
-+      const normalizedStats = outputStats(normalized)
-       const end = tail(compressed.text, limits.maxLines, limits.maxBytes)
-       if (end.cut) cut = true
-       if (!file && (end.cut || compressed.stats.applied)) {
-@@ -1040,14 +1046,24 @@ export const ShellTool = Tool.define(
+       // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
+       const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
+@@ -837,16 +845,29 @@ export const ShellTool = Tool.define(
+       let output = end.text
        if (!output) output = "(no output)"
  
-       if (cut && file) {
--        output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
-+        // #282：统一 output_truncated notice；shown 为 tail 预览的实际行字节量
++      if (cut && file) {
++        // 末尾换行不额外算一行；内存只保留计数器与原有尾部窗口。
 +        output =
 +          formatOutputTruncatedNotice({
 +            source: "shell",
-+            total: normalizedStats,
++            total: { bytes: total.bytes, lines: total.lines + Number(trailingLine) },
 +            shown: { direction: "tail", ...outputStats(output) },
 +            path: file,
 +          }) +
 +          "\n\n" +
 +          output
++      }
++
+       // 单独脱敏也广告原文路径；写盘输入仍是未改动的 raw。
+-      if (file && (cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+-        output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
++      if (file && !cut && (compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
++        output = `...output compacted or diagnostic frames sampled...\n\nFull output saved to: ${file}\n\n` + output
        }
  
-       // 诊断附录：无条件计算，追加到输出末尾（与 SMARK 源一致）
-       const appendix = renderDiagnosticAppendix(diag.snapshot(), { durationMs: Date.now() - started, exitCode: code, visibleOutput: output })
+       // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
+       const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
        if (appendix) output += "\n\n" + appendix
        if (meta.length > 0) {
 -        output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
-+        // #282：notice 本身自带结构化标记，不再加 <shell_metadata> 包装
 +        output += "\n\n" + meta.join("\n")
        }
-       // #215：完成元数据保留最终终端屏幕，output 字段仍走原始压缩/截断路径
-       const displayOutput = preview(display.value())
+       return {
+         title: input.command,
 diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool/truncate.ts
 index 2d98042bc..c00ae0e01 100644
 --- a/packages/opencode/src/tool/truncate.ts
@@ -899,10 +908,10 @@ index 8ae250e1a..71366b2b0 100644
        }),
      ),
    )
-@@ -1423,8 +1427,11 @@ describe("tool.shell truncation", () => {
-           command: fill("bytes", byteCount),
-         })
-         mustTruncate(result)
+@@ -1700,8 +1704,11 @@ describe("tool.shell truncation", () => {
+         if (typeof retained !== "string") throw new Error("expected retained raw output")
+         const fs = yield* FSUtil.Service
+         expect(yield* fs.readFileString(retained)).toBe("a".repeat(byteCount))
 -        expect(result.output).toMatch(/\.\.\.output truncated\.\.\./)
 -        expect(result.output).toMatch(/Full output saved to:\s+\S+/)
 +        // #282：单行超大输出的 total 固定为 1L——notice 行数口径与 tail 预览一致

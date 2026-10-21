@@ -460,7 +460,7 @@ new file mode 100644
 diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/session-pending.ts
 --- a/packages/tui/src/util/session-pending.ts
 +++ b/packages/tui/src/util/session-pending.ts
-@@ -19,16 +19,13 @@ type SessionViewportState = {
+@@ -19,16 +19,12 @@ type SessionViewportState = {
  }
  
  export function shouldCullSessionViewport(
@@ -476,9 +476,8 @@ diff --git a/packages/tui/src/util/session-pending.ts b/packages/tui/src/util/se
 -
 -function isStreamingViewportAssistant(message: SessionViewportMessage) {
 -  return (message.role ?? message.type) === "assistant" && !message.time.completed
-+  // 0583：OpenTUI fork 在 culling 过滤前已对全部 child 调 updateFromLayout()，
-+  // 条件分支的原始测量意图已满足，剩余作用只是解除唯一遍历上界——恒裁剪。
-+  // 签名保留（v1 caller 与测试按同合同消费），参数改名 _ 前缀标注非使用。
++  // 裁剪前刷新直接 child 的布局，可见后代再完整遍历；恒裁剪保留该遍历上界。
++  // 保留调用签名；是否跟随底部仍由既有 sticky-scroll 路径决定。
 +  return true
  }
  export function pendingAssistantIndex(messages: Message[], status: SessionStatus | undefined) {
@@ -492,7 +491,7 @@ diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/
    })
  
 -  // #458：视口裁剪三态——流式+默认粘底裁剪；流式+离底不裁；完成后恒裁
-+  // 0583：视口裁剪恒开——流式/离底/完成三态统一返回 true（fork 全量 updateFromLayout 已满足测量需求）
++  // 流式、离底及完成态都保留裁剪，不用关闭裁剪代替导航和底部跟随。
    test("keeps session viewport culling enabled while an assistant message streams", () => {
      expect(shouldCullSessionViewport([assistant("open")])).toBe(true)
    })
@@ -504,3 +503,71 @@ diff --git a/packages/tui/test/util/session-pending.test.ts b/packages/tui/test/
    })
  
    test("keeps session viewport culling enabled after the assistant message completes", () => {
+
+diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
+--- a/packages/tui/src/routes/session/index.tsx
++++ b/packages/tui/src/routes/session/index.tsx
+@@ -273,3 +273,3 @@
+-  // #458：culling 改由 stuck-to-bottom 状态驱动——粘底流式仍裁剪，滚入历史时不裁
++  // 保留粘底信号供既有跟随逻辑使用，离底浏览不再关闭视口裁剪。
+   const [viewportStuckToBottom, setViewportStuckToBottom] = createSignal(true)
+-  // 粘底时流式裁剪保持渲染热路径；离底浏览历史时暂停裁剪保留测量。
++  // 恒定裁剪限制屏外遍历；用户滚动和显式导航仍由 scrollbox 处理。
+@@ -1433,4 +1433,4 @@
+                 // #212：由原生 renderAfter 在布局后跟随增长，无需 part 长度信号。
+                 renderAfter={syncSessionViewportStuckToBottom}
+-                // #458：粘底流式仍裁剪；滚入历史时保留屏外块测量，renderAfter 同步粘底信号
++                // 裁剪与粘底跟随独立，布局后仍同步原有跟随信号。
+                 viewportCulling={viewportCulling()}
+
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -705,3 +705,47 @@
++test("session keeps latest streamed content reachable via session.last after scrolling away", async () => {
++  const message: AssistantMessage = {
++    id: "msg_cull_stream", sessionID, role: "assistant", parentID: "msg_user",
++    time: { created: 1, completed: 2 }, modelID: "model", providerID: "provider", mode: "build", agent: "build",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const part: Part = { id: "part_cull_stream", sessionID, messageID: message.id, type: "text", text: `${"wrapped content ".repeat(180)}OLD_CULL_TAIL` }
++  await withRenderedReview([{ info: message, parts: [part] }], async (app, _route, emit) => {
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("OLD_CULL_TAIL")) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    // 首帧可见不代表既有 50ms 会话打开滚动已结束；先完成导航再模拟离底。
++    await Bun.sleep(60)
++    await app.renderOnce()
++    // 越过一行粘底容差，不能把自动跟随的行为当作离底浏览。
++    for (let i = 0; i < 4; i++) app.mockInput.pressKey("y", { ctrl: true, meta: true })
++    await app.renderOnce()
++    await app.renderOnce()
++    expect(app.captureCharFrame()).not.toContain("OLD_CULL_TAIL")
++    emit({
++      directory, project: "proj_test",
++      payload: { id: "evt_cull_growth", type: "message.part.delta", properties: {
++        sessionID, messageID: message.id, partID: part.id, field: "text", delta: `${" grown tail ".repeat(40)}NEW_CULL_TAIL`,
++      } },
++    })
++    await app.renderOnce()
++    await Bun.sleep(20)
++    await app.renderOnce()
++    // 等待既有事件批次落地后，增量不能强制用户回贴底部。
++    expect(app.captureCharFrame()).not.toContain("NEW_CULL_TAIL")
++    // 公开 End 导航必须重新到达屏外增长后的正文，而非只更新路由状态。
++    app.mockInput.pressKey("END")
++    await waitForReviewFrame(app, async (frame) => {
++      if (frame.includes("NEW_CULL_TAIL")) return true
++      await Bun.sleep(10)
++      return false
++    }, { maxPasses: 300 })
++    expect(app.captureCharFrame()).toContain("NEW_CULL_TAIL")
++  }, { width: 100, height: 18 })
++})
++
+ async function withRenderedReview(
+   messages: { info: AssistantMessage | UserMessage; parts: Part[] }[],
+   run: (app: Awaited<ReturnType<typeof testRender>>, route: ReturnType<typeof useRoute>, emit: ReturnType<typeof createEventSource>["emit"]) => Promise<void>,

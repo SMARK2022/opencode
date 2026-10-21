@@ -99,17 +99,24 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
            break
          }
  
-@@ -657,7 +708,9 @@ export const {
+@@ -754,14 +805,16 @@ export const {
+             setStore(
+               "part",
+               event.properties.messageID,
                produce((draft) => {
                  draft.splice(result.index, 1)
                }),
              )
            }
-+          // 清除该 part 的缓冲 delta（part 已移除，缓冲的 bus-only delta 不再需要，防止 Map 无界驻留）
++          // part移除后不再保留待重放正文。
 +          orphanPartDeltas.delete(event.properties.partID)
            break
          }
-@@ -682,6 +735,7 @@ export const {
+ 
+         case "lsp.updated": {
+           const workspace = project.workspace.current()
+           void sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", x.data ?? []))
+@@ -782,6 +835,7 @@ export const {
        // #186：不在 cleanup 里 flush——组件已拆，UI 不再需要最后一帧
        if (pendingPartDeltaTimer) clearTimeout(pendingPartDeltaTimer)
        pendingPartDeltas = []

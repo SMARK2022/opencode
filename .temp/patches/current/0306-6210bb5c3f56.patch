@@ -8,7 +8,7 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 -    limit: search ? 30 : 100,
 +    // #306：仅搜索限制 90 天；默认浏览仍能访问更早会话，不能共享搜索的时间过滤。
 +    ...(search ? { start: Date.now() - 90 * 24 * 60 * 60 * 1000 } : {}),
-+        limit: 100,
++    limit: 100,
      ...(search ? { search } : {}),
      ...input.filter,
    }
@@ -27,22 +27,18 @@ diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/s
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -296,7 +296,7 @@ export const {
- 
-     function listSessions() {
-       return sdk.client.session
--        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
-+        .list({ start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() })
-         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
-     }
- 
+@@ -328,5 +328,5 @@
+       const tracker = new Map<string, SessionTrace>()
+       listingSessions.add(tracker)
+-      const query = { start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() }
++      const query = { start: Date.now() - 90 * 24 * 60 * 60 * 1000, limit: 1200, ...sessionListQuery() }
+       // project ID 固定到请求发起时的实例；全局事件本身不做项目筛选。
+       const projectID = project.project()
 
 diff --git a/packages/tui/test/component/dialog-session-list.test.ts b/packages/tui/test/component/dialog-session-list.test.ts
 --- a/packages/tui/test/component/dialog-session-list.test.ts
 +++ b/packages/tui/test/component/dialog-session-list.test.ts
-@@ -3,8 +3,9 @@ import { createDialogSessionListQuery, loadDialogSessionList } from "../../src/c
- 
- describe("dialog session list", () => {
+@@ -13,6 +13,7 @@
    test("requests root sessions for the default browse list", () => {
 +    // #306：精确匹配无 start 的浏览请求，防止搜索窗口泄漏到历史浏览。
      expect(createDialogSessionListQuery({ filter: { path: "packages/tui" } })).toEqual({

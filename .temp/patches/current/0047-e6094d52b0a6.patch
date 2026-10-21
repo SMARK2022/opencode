@@ -79,7 +79,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 +  sleep: (ms: number) => Promise<unknown>
 +  resolveDaemonFile: () => Promise<string>
 +  identity: typeof ServerLock.identity
-+  placement: (network?: ServerLock.ServerLock["network"]) => string | undefined
++  placement: typeof ServerLock.placement
 +  resolveNetwork: (args: Parameters<typeof resolveNetworkOptionsNoConfig>[0]) => Promise<ReturnType<typeof resolveNetworkOptionsNoConfig>>
 +  electionTimeoutMs: number
 +  electionStaleMs: number
@@ -123,8 +123,8 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 +  const network = await deps.resolveNetwork(networkArgs)
 +  const external = ["--port", "--hostname", "--mdns", "--mdns-domain", "--cors"].some(hasArg) ||
 +    network.mdns || network.port !== 0 || network.hostname !== "127.0.0.1" || network.cors.length > 0
-+  // 每次只选择一个主身份路径；显式外部请求独立放置，不探测失败后创建备用服务。
-+  const lockPath = deps.placement(external ? network : undefined)
++  // 同一 DB/channel 共用发现路径；显式网络请求只在复用检查中判断兼容性。
++  const lockPath = deps.placement()
 +  async function reuse(lock: ServerLock.ServerLock | undefined) {
 +    if (!lock || !deps.alive(lock.pid)) return null
 +    // 活进程身份不符或认证失败均保留原锁，不另建备用 daemon，也不杀其他进程。
@@ -419,10 +419,10 @@ new file mode 100644
 +  return _lockPath ?? process.env.OPENCODE_LOCK_PATH ?? path.join(Global.Path.state, "tui-server.json")
 +}
 +
-+// DB/channel/显式网络决定主发现身份；同身份仍由一个 Flock 串行选举。
-+export function placement(network?: ServerLock["network"]) {
++// DB/channel 决定主发现身份；网络参数不分裂同库 owner，显式锁路径仍优先。
++export function placement() {
 +  if (_lockPath || process.env.OPENCODE_LOCK_PATH) return getLockPath()
-+  const key = createHash("sha256").update(JSON.stringify([identity(), network])).digest("hex").slice(0, 24)
++  const key = createHash("sha256").update(JSON.stringify(identity())).digest("hex").slice(0, 24)
 +  return path.join(Global.Path.state, `tui-server-${key}.json`)
 +}
 +
@@ -516,17 +516,18 @@ new file mode 100644
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -10,7 +10,9 @@
+@@ -10,7 +10,10 @@
  import { AppRuntime } from "@/effect/app-runtime"
  import { Effect } from "effect"
  import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
  import { Database } from "@opencode-ai/core/database/database"
 +import { ServerLock } from "@/cli/tui/server-lock"
 +import { EventClients } from "@opencode-ai/server/event-clients"
++import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
  
  Heap.start()
  
-@@ -21,11 +23,18 @@
+@@ -21,11 +24,18 @@
  process.on("unhandledRejection", onUnhandledRejection)
  process.on("uncaughtException", onUncaughtException)
  
@@ -549,7 +550,7 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
  let server: Awaited<ReturnType<typeof Server.listen>> | undefined
  
  export const rpc = {
-@@ -86,3 +95,109 @@
+@@ -86,3 +96,110 @@
  }
  
 -Rpc.listen(rpc)
@@ -633,14 +634,15 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +  })
 +
 +  try {
++    const sharedServices = HttpApiApp.createSharedServices()
 +    // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
 +    // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
-+    internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients })
++    internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients, sharedServices })
 +    const network = process.env.OPENCODE_EXTERNAL_NETWORK
 +      ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
 +      : undefined
 +    if (network) {
-+      externalServer = await Server.listen({ ...network, eventClients })
++      externalServer = await Server.listen({ ...network, eventClients, sharedServices })
 +      externalUrl = externalServer.url.toString()
 +    }
 +    // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
@@ -1056,7 +1058,7 @@ new file mode 100644
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -4,9 +4,13 @@
+@@ -4,9 +4,14 @@
  import path from "path"
  import yargs from "yargs"
  import { tmpdir } from "../../fixture/fixture"
@@ -1064,6 +1066,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
 +import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
 +import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
++import { ServerLock } from "../../../src/cli/tui/server-lock"
 +import { EventClients } from "@opencode-ai/server/event-clients"
  import { cliIt } from "../../lib/cli-process"
  
@@ -1071,7 +1074,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
  describe("tui thread", () => {
    test("loads the TUI integration lazily", async () => {
      const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
-@@ -16,10 +20,17 @@
+@@ -16,10 +21,17 @@
      expect(source).not.toContain('import("./app")')
    })
  
@@ -1086,12 +1089,12 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +    expect(source).toMatch(/deps\.spawn\(|DaemonProcess\.spawn\(/)
 +    // 静态锁定内部 listener 的 exact-zero 入口，fixture 不能为此启动另一个 CLI 进程。
 +    const worker = await Bun.file(new URL("../../../src/cli/tui/worker.ts", import.meta.url)).text()
-+    expect(worker).toContain("ephemeral: true, eventClients")
-+    expect(worker).toContain("Server.listen({ ...network, eventClients })")
++    expect(worker).toContain("ephemeral: true, eventClients, sharedServices")
++    expect(worker).toContain("Server.listen({ ...network, eventClients, sharedServices })")
    })
  
    async function check(project?: string) {
-@@ -90,6 +101,195 @@
+@@ -90,6 +102,209 @@
      }),
    )
  
@@ -1118,7 +1121,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        sleep: async () => {},
 +        resolveDaemonFile: async () => "/tmp/daemon.ts",
 +        identity: () => ({ dbPath: "/tmp/test.db", channel: "local" }),
-+        placement: () => undefined,
++        placement: ServerLock.placement,
 +        resolveNetwork: async (args) => resolveNetworkOptionsNoConfig(args),
 +        electionTimeoutMs: 10_000,
 +        electionStaleMs: 5_000,
@@ -1246,22 +1249,36 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        expect(releases).toBe(1)
 +        expect(kills).toBe(["target", "spawn"].includes(stage) ? 0 : 1)
 +      }
-+      // 活的跨 DB/channel/外部监听请求明确拒绝，不能清理全局 owner。
-+      for (const mismatch of ["database", "channel", "network"]) {
-+        let spawns = 0
-+        let clears = 0
-+        await expect(discoverOrSpawnDaemon(
-+          (mismatch === "network" ? { ...localNet, port: 4321 } : localNet) as never,
-+          baseDeps({
-+            identity: () => ({ dbPath: mismatch === "database" ? "/tmp/other.db" : fakeLock.dbPath,
-+              channel: mismatch === "channel" ? "beta" : fakeLock.channel }),
-+            read: async () => fakeLock,
-+            clear: async () => { clears++ },
-+            spawn: (() => { spawns++; throw new Error("unexpected spawn") }) as DiscoverDaemonDeps["spawn"],
-+          }),
-+        )).rejects.toThrow(mismatch === "network" ? "incompatible network" : "different database or channel")
-+        expect(spawns).toBe(0)
-+        expect(clears).toBe(0)
++      // 同库默认与显式网络请求必须读同一 owner；环境覆盖在 finally 恢复。
++      const previousLockPath = process.env.OPENCODE_LOCK_PATH
++      delete process.env.OPENCODE_LOCK_PATH
++      try {
++        const ownerPath = ServerLock.placement()
++        // 活的跨 DB/channel/外部监听请求明确拒绝，不能清理全局 owner。
++        for (const mismatch of ["database", "channel", "network"]) {
++          let spawns = 0
++          let clears = 0
++          const paths: Array<string | undefined> = []
++          await expect(discoverOrSpawnDaemon(
++            (mismatch === "network" ? { ...localNet, port: 4321 } : localNet) as never,
++            baseDeps({
++              identity: () => ({ dbPath: mismatch === "database" ? "/tmp/other.db" : fakeLock.dbPath,
++                channel: mismatch === "channel" ? "beta" : fakeLock.channel }),
++              read: async (lockPath) => {
++                paths.push(lockPath)
++                return lockPath === ownerPath ? fakeLock : undefined
++              },
++              clear: async () => { clears++ },
++              spawn: (() => { spawns++; throw new Error("unexpected spawn") }) as DiscoverDaemonDeps["spawn"],
++            }),
++          )).rejects.toThrow(mismatch === "network" ? "incompatible network" : "different database or channel")
++          expect(paths).toEqual([ownerPath])
++          expect(spawns).toBe(0)
++          expect(clears).toBe(0)
++        }
++      } finally {
++        if (previousLockPath === undefined) delete process.env.OPENCODE_LOCK_PATH
++        if (previousLockPath !== undefined) process.env.OPENCODE_LOCK_PATH = previousLockPath
 +      }
 +      // 同一服务跨两个订阅 scope 计数；其中一个失败不能让另一个活跃客户端变成 idle。
 +      const counts: number[] = []
@@ -1334,7 +1351,7 @@ diff --git a/packages/opencode/src/server/server.ts b/packages/opencode/src/serv
  
  // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
  globalThis.AI_SDK_LOG_WARNINGS = false
-@@ -33,6 +34,10 @@
+@@ -33,6 +34,11 @@
    port: number
    hostname: string
    mdns?: boolean
@@ -1343,17 +1360,18 @@ diff --git a/packages/opencode/src/server/server.ts b/packages/opencode/src/serv
 +  ephemeral?: boolean
 +  // 两个 listener 共享调用方创建的服务，不依赖各自的 MemoMap 恰好相同。
 +  eventClients?: EventClients.Interface
++  sharedServices?: ReturnType<typeof HttpApiApp.createSharedServices>
  }
  type ListenerState = {
-@@ -100,6 +105,6 @@
+@@ -100,6 +106,6 @@
  function listenerLayer(opts: ListenOptions, port: number) {
 -  return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
-+  return HttpRouter.serve(HttpApiApp.createRoutes(opts, opts.eventClients), {
++  return HttpRouter.serve(HttpApiApp.createRoutes(opts, opts.eventClients, opts.sharedServices), {
      middleware: disposeMiddleware,
      disableLogger: true,
      disableListenLog: true,
    }).pipe(
-@@ -117,6 +122,7 @@
+@@ -117,6 +123,7 @@
  function startWithPortFallback(opts: ListenOptions) {
 -  if (opts.port !== 0) return startListener(opts, opts.port)
 +  // ephemeral 直接 exact-bind 到 0；失败仍失败，不先占用公开端口再回退。
@@ -1373,15 +1391,35 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/pa
  import { schemaErrorLayer } from "./middleware/schema-error"
  
  export const context = Context.makeUnsafe<unknown>(new Map())
-@@ -275,6 +276,7 @@
+@@ -272,10 +273,25 @@
+   PtyTicket.node,
+ ])
+ 
++export function createSharedServices() {
++  const locationServiceMapV2 = buildLocationServiceMap()
++  return {
++    layer: Layer.mergeAll(
++      AppNodeBuilderV1.build(app),
++      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), [
++        [LocationServiceMap.node, locationServiceMapV2],
++        [SessionExecution.node, SessionExecutionLocal.node],
++      ]),
++      AppNodeBuilderV1.build(MoveSession.node, [[LocationServiceMap.node, locationServiceMapV2]]),
++    ).pipe(Layer.provideMerge(locationServiceMapV2)),
++    memoMap,
++  }
++}
++
  export function createRoutes(
    corsOptions?: CorsOptions,
 +  eventClients?: EventClients.Interface,
++  shared?: ReturnType<typeof createSharedServices>,
  ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-   const locationServiceMapV2 = buildLocationServiceMap()
- 
+-  const locationServiceMapV2 = buildLocationServiceMap()
+-
    return Layer.mergeAll(
-@@ -287,6 +289,8 @@
+     rootApiRoutes,
+@@ -287,29 +303,26 @@
      uiRoute,
    ).pipe(
 +    // 在整个 legacy/native 合并树的装配边界提供同一服务，不在每个请求重建 Layer。
@@ -1390,6 +1428,34 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/pa
        errorLayer,
        compressionLayer,
        corsVaryFix,
+       fenceLayer,
+       cors(corsOptions),
+-      AppNodeBuilderV1.build(MoveSession.node, [[LocationServiceMap.node, locationServiceMapV2]]),
+       HttpServer.layerServices,
+     ]),
+     Layer.provide(Layer.succeed(CorsConfig)(corsOptions)),
+     Layer.provide(sessionLocationLayer),
+     Layer.provide(locationLayer),
+     Layer.provide(PtyEnvironment.layer),
+-    Layer.provide(
+-      AppNodeBuilderV1.build(SessionV2.node, [
+-        [LocationServiceMap.node, locationServiceMapV2],
+-        [SessionExecution.node, SessionExecutionLocal.node],
+-      ]),
+-    ),
+-    Layer.provide(locationServiceMapV2),
+-
+-    Layer.provide(AppNodeBuilderV1.build(app)),
++    // 只复用应用服务；路由注册、认证及 CORS 仍由各 listener 的 MemoMap 独立构建。
++    Layer.provide(shared
++      ? Layer.effectContext(Effect.flatMap(Effect.scope, (scope) =>
++          Layer.buildWithMemoMap(shared.layer, shared.memoMap, scope)))
++      : createSharedServices().layer),
+     // Must stay last: layers provided later in this pipe build beneath earlier ones,
+     // so Observability must come after every service graph. Otherwise eagerly forked
+     // fibers (e.g. the ModelsDev background refresh) capture Effect's default stdout
+     // logger and corrupt the TUI (#34730).
+     Layer.provideMerge(Observability.layer),
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
@@ -1555,3 +1621,105 @@ diff --git a/packages/opencode/test/server/httpapi-global.test.ts b/packages/ope
      Layer.provide([authorizationLayer, schemaErrorLayer]),
      // Raw HttpApi routes expose an opaque handler context at the request boundary.
      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
+--- a/packages/opencode/test/server/httpapi-session.test.ts
++++ b/packages/opencode/test/server/httpapi-session.test.ts
+@@ -4,10 +4,12 @@
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { mkdir } from "node:fs/promises"
+ import path from "node:path"
+-import { Cause, Config, Effect, Exit, Layer } from "effect"
++import { Cause, Config, Context, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
+ import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
+ import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { LocationServiceMap } from "@opencode-ai/core/location-services"
++import { SessionExecution } from "@opencode-ai/core/session/execution"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+@@ -24,6 +26,8 @@
+ import { ExperimentalPaths } from "../../src/server/routes/instance/httpapi/groups/experimental"
+ import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
+ import { Session } from "@/session/session"
++import { SessionRunState } from "../../src/session/run-state"
++import { AppLayer } from "../../src/effect/app-runtime"
+ import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
+ import { Database } from "@opencode-ai/core/database/database"
+ import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
+@@ -37,7 +41,7 @@
+ import { disposeAllInstances, provideInstanceEffect, TestInstance, tmpdirScoped } from "../fixture/fixture"
+ import { TestLLMServer } from "../lib/llm-server"
+ import { testProviderConfig } from "../lib/test-provider"
+-import { pollWithTimeout, testEffect } from "../lib/effect"
++import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
+ 
+ const originalWorkspaces = Flag.OPENCODE_EXPERIMENTAL_WORKSPACES
+ const noopBootstrapLayer = Layer.succeed(
+@@ -237,6 +241,66 @@
+ })
+ 
+ describe("session HttpApi", () => {
++  // 原 it 会启动 HTTP 路由；此用例只构建生产服务，验证跨入口取消而不监听端口。
++  testEffect(appLayer).instance(
++    "shares session ownership and cancels V1 runs across service contexts",
++    () =>
++      Effect.gen(function* () {
++        const shared = HttpApiApp.createSharedServices()
++        const scope = yield* Scope.Scope
++        const firstScope = yield* Scope.fork(scope)
++        const secondScope = yield* Scope.fork(scope)
++        const runtimeScope = yield* Scope.fork(scope)
++        const first = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, firstScope)
++        const second = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, secondScope)
++        const runtime = yield* Layer.buildWithMemoMap(AppLayer, shared.memoMap, runtimeScope)
++
++        const firstRunState = Context.get(first, SessionRunState.Service)
++        const secondRunState = Context.get(second, SessionRunState.Service)
++        expect(secondRunState).toBe(firstRunState)
++        expect(Context.get(second, SessionExecution.Service)).toBe(Context.get(first, SessionExecution.Service))
++        expect(Context.get(second, LocationServiceMap.Service)).toBe(Context.get(first, LocationServiceMap.Service))
++        expect(Context.get(second, Database.Service)).toBe(Context.get(first, Database.Service))
++        expect(Context.get(runtime, SessionRunState.Service)).toBe(firstRunState)
++        expect(Context.get(runtime, InstanceStore.Service)).toBe(Context.get(first, InstanceStore.Service))
++        const configuration = yield* Effect.promise(() => import("../../src/config/config"))
++        expect(Context.get(runtime, configuration.Config.Service)).toBe(Context.get(first, configuration.Config.Service))
++
++        // 直接调用无端口 handler，确认共享服务不会把第二棵路由或 CORS 缓存为第一棵。
++        const handlers = ["https://first.test", "https://second.test"].map(origin => ({
++          origin, web: HttpRouter.toWebHandler(HttpApiApp.createRoutes({ cors: [origin] }, undefined, shared), { disableLogger: true }),
++        }))
++        yield* Effect.addFinalizer(() => Effect.promise(() => Promise.all(handlers.map(entry => entry.web.dispose()))))
++        for (const entry of handlers) {
++          const response = yield* Effect.promise(() => entry.web.handler(new Request("http://localhost/global/health", { headers: { origin: entry.origin } }), HttpApiApp.context))
++          expect(response.status).toBe(200)
++          expect(response.headers.get("access-control-allow-origin")).toBe(entry.origin)
++        }
++        // 共享层使用独立内存库，项目也须由同一服务上下文登记后再创建会话。
++        const instance = yield* TestInstance
++        yield* Context.get(first, Project.Service).fromDirectory(instance.directory)
++        const session = yield* createSession().pipe(Effect.provide(first))
++        const message = yield* createTextMessage(session.id, "shared run").pipe(Effect.provide(first))
++        const interrupted = { info: message.info, parts: [message.part] }
++        const ready = yield* Deferred.make<void>()
++        const fiber = yield* firstRunState
++          .ensureRunning(
++            session.id,
++            Effect.succeed(interrupted),
++            Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never)),
++          )
++          .pipe(Effect.provide(first), Effect.forkScoped)
++
++        yield* awaitWithTimeout(Deferred.await(ready), "shared V1 run never became ready")
++        yield* awaitWithTimeout(
++          secondRunState.cancel(session.id).pipe(Effect.provide(second)),
++          "cross-context V1 cancellation did not finish",
++        )
++        const exit = yield* awaitWithTimeout(Fiber.await(fiber), "shared V1 run did not complete after cancellation")
++        expect(exit).toEqual(Exit.succeed(interrupted))
++      }),
++  )
++
+   it.effect("maps busy sessions to public session busy errors", () =>
+     Effect.gen(function* () {
+       const sessionID = SessionID.descending()

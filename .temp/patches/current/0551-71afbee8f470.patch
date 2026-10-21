@@ -512,7 +512,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  
    function enterChild(sessionID: string) {
      navigate({
-@@ -1382,7 +1414,8 @@ export function Session() {
+@@ -1368,7 +1400,8 @@ export function Session() {
    })
  
    // snap to bottom when session changes
@@ -520,29 +520,9 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  // #551：会话/reviewID 变化统一走 session-open 滚动——reviewID 存在时锚点优先于贴底。
 +  createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), scheduleSessionOpenScroll))
  
-   // #212：流式内容增长时，若视口原本贴底（一行容差），则跟随到新的底部
-   // #212：OpenTUI sticky scroll 仅从精确最大值跟随；一行偏差时不会自动追尾
-@@ -1879,7 +1912,9 @@ const footerVisible = createMemo(() => {
-   const backgroundShortcut = useCommandShortcut("session.background")
- 
    return (
--    <>
-+    // #551：恢复 assistant 消息的滚动锚点 id（old tree 的 wrapper 在 OpenTUI Dynamic 重构中丢失）——
-+    // reviewID 深链的 getChildren().find 依赖该 id 定位 reviewer 返回区；列方向 box 与 fragment 布局等价。
-+    <box flexDirection="column" id={props.message.id}>
-       <For each={props.parts}>
-         {(part, index) => {
-           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
-@@ -1962,7 +1997,7 @@ const footerVisible = createMemo(() => {
-           </box>
-         </Match>
-       </Switch>
--    </>
-+    </box>
-   )
- }
- 
-@@ -2552,10 +2587,56 @@ function openAutoReviewSession(
+     <LocationProvider location={location()}>
+@@ -2482,9 +2515,55 @@ function openAutoReviewSession(
    // review 行不是 transcript 正文，并且内部 text 已关闭 selection。前序 TUI
    // 测试或真实用户留下的旧 selection 不能让这次明确点击只消费事件不导航。
    renderer.clearSelection()
@@ -554,7 +534,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  
 +// #551：resolve reviewID → 锚点消息 ID（纯函数，按 autoReviewMetadata 先例导出供测试）。
 +// 主路径：request 顶层 part metadata（permissionReviewerRequest+reviewID）命中的 user 消息，
-+// 其 parentID 即 reviewer assistant 决策消息（"返回区"）；多匹配取最后（最新 request）。
++// assistant.parentID 指向该 request；优先定位返回区，多匹配取最后可见 request。
 +// 次选：tool part state.metadata.reviewID 命中的 assistant（decision 所在消息）。
 +// hidden 消息/part 已从 store 删除——"取最后可见匹配"天然成立。
 +export function resolveReviewAnchorMessageID(
@@ -597,7 +577,6 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  return decisionMessageID
 +}
 +
- // #292：openAutoReviewFromToolChrome——父工具卡兜底处理冒泡上来的 review 行 mouseup
  function openAutoReviewFromToolChrome(
    review: AutoReviewMetadata | undefined,
 
@@ -673,7 +652,7 @@ new file mode 100644
 +  })
 +})
 +
-+// #551：接线合同——目标无 withRenderedSession harness（#506/#550 先例），以源码合同断言兜底。
++// #551：纯解析与静态接线之外，真实点击/可见帧由auto-review-render的现有夹具验证。
 +describe("auto review deep link wiring contract", () => {
 +  const source = readFileSync(
 +    path.join(import.meta.dir, "..", "..", "..", "src", "routes", "session", "index.tsx"),
@@ -704,7 +683,80 @@ new file mode 100644
 +  })
 +
 +  test("assistant messages expose a scroll-child id for anchor lookup", () => {
-+    // OpenTUI Dynamic 重构丢失了 assistant wrapper id——#551 恢复它使主路径可达。
-+    expect(source).toContain('<box flexDirection="column" id={props.message.id}>')
++    // 复用前序消息布局的稳定id与layoutGroups，不额外套wrapper改变几何。
++    expect(source).toContain('<box id={props.message.id} flexShrink={0}')
 +  })
 +})
+
+diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
+--- a/packages/tui/test/routes/session/auto-review-render.test.tsx
++++ b/packages/tui/test/routes/session/auto-review-render.test.tsx
+@@ -609,1 +609,68 @@
++// 两个source场景共用现有真实Session夹具：有回答定位旧返回，无回答定位请求正文。
++test.each(["pending", "completed"] as const)("auto review deep link keeps the matching region: %s", async (scenario) => {
++  const childID = "ses_reviewer_child"
++  const reviewID = "review_old_deep"
++  const request: UserMessage = {
++    id: "msg_anchor_request", sessionID: childID, role: "user", time: { created: 10 },
++    agent: "permission-reviewer", model: { providerID: "provider", modelID: "model" },
++  }
++  const answer: AssistantMessage = {
++    id: "msg_anchor_answer", sessionID: childID, role: "assistant", parentID: request.id,
++    time: { created: 11, completed: 12 }, modelID: "model", providerID: "provider",
++    mode: "permission-reviewer", agent: "permission-reviewer", finish: "stop",
++    path: { cwd: directory, root: directory }, cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++  }
++  const text = (info: AssistantMessage | UserMessage, value: string): Extract<Part, { type: "text" }> => ({
++    id: `part_${info.id}`, sessionID: childID, messageID: info.id, type: "text", text: value,
++  })
++  const child: { info: AssistantMessage | UserMessage; parts: Part[] }[] = [
++    { info: request, parts: [{ ...text(request, "REVIEWING_REQUEST_MARKER_xyz"), metadata: { permissionReviewerRequest: true, reviewID } }] },
++    ...(scenario === "completed" ? [{ info: answer, parts: [text(answer, "OLD_REVIEW_RETURN_MARKER_xyz")] }] : []),
++  ]
++  // 每个padding回答有自己的parent，避免伪造多条同parent回答干扰真实join方向。
++  for (let index = 0; index < 18; index++) {
++    const user = { ...request, id: `msg_fill_user_${index}`, time: { created: 20 + index * 2 } }
++    const assistant = { ...answer, id: `msg_fill_answer_${index}`, parentID: user.id, time: { created: 21 + index * 2, completed: 22 + index * 2 } }
++    child.push({ info: user, parts: [text(user, "filler request")] }, { info: assistant, parts: [text(assistant, `FILLER_${index}_LONG_ENOUGH_TO_HIDE_OLD_REVIEW_WHEN_STUCK_TO_BOTTOM`)] })
++  }
++  const latestRequest = { ...request, id: "msg_latest_request", time: { created: 200 } }
++  const latestAnswer = { ...answer, id: "msg_latest_answer", parentID: latestRequest.id, time: { created: 201, completed: 202 } }
++  child.push({ info: latestRequest, parts: [text(latestRequest, "latest request")] }, { info: latestAnswer, parts: [text(latestAnswer, "LATEST_REVIEW_RETURN_MARKER_xyz")] })
++  const parent = { ...answer, id: "msg_deep_link_parent", sessionID, parentID: "msg_parent_request" }
++  const review = {
++    reviewID, sessionID: childID, status: scenario === "completed" ? "allowed" : "reviewing",
++    precheck: { level: "cautious", reason: "external file read requires reviewer approval" },
++    result: { risk_level: "high", user_authorization: "high", rationale: "requested exact file" },
++  }
++  const part: Part = {
++    id: "part_deep_link_parent", sessionID, messageID: parent.id, type: "tool", callID: "call_deep_link", tool: "read",
++    state: scenario === "completed"
++      ? { status: "completed", input: { filePath: "external folder/secret.txt" }, title: "secret.txt", output: "read", metadata: { autoReview: review }, time: { start: 1, end: 2 } }
++      : { status: "running", input: { filePath: "external folder/secret.txt" }, metadata: { autoReview: review }, time: { start: 1 } },
++  }
++  await withRenderedReview([{ info: parent, parts: [part] }], async (app, route) => {
++    const label = scenario === "completed" ? "✓ auto review · allowed · auth high" : "◌ auto review · cautious"
++    await waitForReviewFrame(app, async (value) => { if (value.includes(label)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
++    await app.renderOnce()
++    await app.renderOnce()
++    // 点击公开状态行而非直接导航；request/answer marker均为独立字面量。
++    await clickVisibleText(app, label)
++    expect(route.data).toMatchObject({ type: "session", sessionID: childID, reviewID })
++    const marker = scenario === "completed" ? "OLD_REVIEW_RETURN_MARKER_xyz" : "REVIEWING_REQUEST_MARKER_xyz"
++    await waitForReviewFrame(app, async (value) => { if (value.includes(marker)) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
++    // 两个50ms入口都完成后仍必须停在锚点，不能以瞬间出现掩盖旧贴底timer覆盖。
++    await Bun.sleep(130)
++    await app.renderOnce()
++    await app.renderOnce()
++    expect(app.captureCharFrame()).toContain(marker)
++    expect(app.captureCharFrame()).not.toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
++    // 普通导航省略reviewID后仍按既有语义贴底，并清除同Session的旧锚点。
++    route.navigate({ type: "session", sessionID: childID })
++    expect(route.data).not.toHaveProperty("reviewID")
++    await waitForReviewFrame(app, async (value) => { if (value.includes("LATEST_REVIEW_RETURN_MARKER_xyz")) return true; await Bun.sleep(5); return false }, { maxPasses: 400 })
++    expect(app.captureCharFrame()).toContain("LATEST_REVIEW_RETURN_MARKER_xyz")
++  }, { height: 14 }, { [childID]: () => child })
++})
++
+ async function withRenderedReview(

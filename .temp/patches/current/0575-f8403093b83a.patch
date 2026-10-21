@@ -13,7 +13,7 @@ Content-Transfer-Encoding: 8bit
 
 保持版本 bump commit 分界语义与各边界路径（首次发布/无 bump/无变更）行为不变；README 与 workflow 仅调整呈现层级与措辞，不改变既有细节内容。checksums job 仅新增轻量 Bun 运行时，不引入依赖安装。
 
-适配说明：目标 README.md/README.en.md 已重写为 1.18.44 口径（opencode.ai 安装命令与目录结构），源 13+14 段正文润色 hunks 的基线文本在目标不存在，按"呈现层级与语气"语义仅迁移 [!WARNING]/[!TIP] 提示求级与前置结构；workflow.md Blocker 复议段与源基线逐字一致，原样落地；yml 内联 bash 在目标含 #156/#170 增补注释，等价抽为 script/release-notes.ts 并保留其全部边界语义。
+适配说明：目标 README.md/README.en.md 已重写为1.18.44口径，保留其安装命令、结构及操作细节，将两个入口的WARNING/TIP按source前置；workflow.md复议段原样迁移。checksums按source抽取release-notes.ts，并采用source的Merge/bump过滤、首次发布过滤后50项及无变更输出；上游其他发布链保持原样。
 
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
@@ -94,7 +94,7 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 diff --git a/README.md b/README.md
 --- a/README.md
 +++ b/README.md
-@@ -39,11 +39,16 @@
+@@ -39,11 +39,13 @@
    <a href="docs/readme/README.vi.md">Tiếng Việt</a>
  </p>
  
@@ -107,21 +107,24 @@ diff --git a/README.md b/README.md
  <!-- TODO: 替换为实际的 TUI 主界面截图 -->
  [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
  
- ---
- 
+----
+-
 -> **关于本分支**：这是 OpenCode 的 `dev-smark` 增强分支（当前版本 `1.18.44-smark`），在上游 `dev` 分支基础上进行了大量功能增强和跨平台适配，涵盖 TUI 交互、会话管理、Token 统计、Windows 兼容、VSCode 集成、网络代理等多个维度。
- 
+-
  ---
 diff --git a/README.en.md b/README.en.md
 --- a/README.en.md
 +++ b/README.en.md
-@@ -38,11 +38,12 @@
+@@ -38,11 +38,15 @@
    <a href="docs/readme/README.gr.md">Ελληνικά</a> |
    <a href="docs/readme/README.vi.md">Tiếng Việt</a>
  </p>
  
 +> [!WARNING]
 +> **Back up your `opencode.db` before switching branches.** The SMARK branch carries custom database schema changes and migrations; before coming from upstream `dev`, the main branch, or another original branch, create a manual backup of your local database. After migration, the database may no longer migrate or roll back cleanly to upstream or original branches, and this project is not responsible for schema-format compatibility of your local database context data.
++
++> [!TIP]
++> This is OpenCode's `dev-smark` enhanced branch (current version `1.18.44-smark`), improving TUI interaction, session management, token visibility, Windows compatibility, VS Code integration, networking and installation on top of upstream `dev`.
 +
  [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
  
@@ -302,3 +305,27 @@ new file mode 100644
 +const body = lines.join("\n").trim() + "\n"
 +await Bun.write(values.output!, body)
 +console.log(body)
+diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test/docs/readme.test.ts
+--- a/packages/opencode/test/docs/readme.test.ts
++++ b/packages/opencode/test/docs/readme.test.ts
+@@ -52,5 +52,20 @@
+ describe("README branch onboarding", () => {
++  test("root readmes show migration and branch notices before the screenshot", async () => {
++    for (const file of ["README.md", "README.en.md"]) {
++      const content = await readReadme(file)
++      const warning = content.indexOf("> [!WARNING]")
++      const tip = content.indexOf("> [!TIP]", warning)
++      const screenshot = content.indexOf("[![OpenCode Terminal UI]")
++      // 根入口是用户首次接触迁移风险的位置，两个语种都必须在截图前依次展示风险与分支提示。
++      expect(warning).toBeGreaterThan(content.indexOf("</p>", content.indexOf('href="README.md"')))
++      expect(tip).toBeGreaterThan(warning)
++      expect(screenshot).toBeGreaterThan(tip)
++      // 分支身份仍沿用目标发布版本，不能随文案重排退回 source 的旧版本。
++      expect(content.slice(tip, screenshot)).toContain("1.18.44-smark")
++    }
++  })
++
+   for (const readme of readmes) {
+     test(`${readme.file} warns before installation about database migration risk`, async () => {
+       const content = await readReadme(readme.file)
+       const installHeading = content.indexOf(readme.installHeading)

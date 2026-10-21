@@ -13,8 +13,8 @@ lazy-runtime 探针改用子进程：Bun.plugin.clearAll() 会清掉 preload 注
 
 正文清扫从同步改为 microtask 复查计数：导航进入子会话时旧树卸载先于路由消费者注册，同步擦除会让 isServer 下一次性节流的 footer usage 永久丢真值。daemon 维护型 shutdown 同步发布 stopping 不变，拆解主体推迟一个 macrotask，修复处置变快后 controlServer.stop 抢在响应前的 ECONNRESET。
 
-适配说明：CI 后四修复完整重锚（owner 迁移 cli/cmd/tui→tui 与 cli/tui）。sync：releaseParts 正文清扫推迟 microtask 并复查计数（导航竞态）。worker（目标 packages/opencode/src/cli/tui/worker.ts）：gracefulShutdown published 参数+maintenance-idle 路径同步发布 stopping+拆解主体 macrotask 推迟（ECONNRESET 竞态）。测试：lazy-runtime 探针改子进程（Bun.plugin.clearAll 清 preload JSX 转换）；sync-parts-lifetime 两处补 microtask await。
-裁记（SUPERSEDED，随 0624 F11/F12）：app-layer-sharing 的共享图探针 idle 清理 hunk——目标的 app-layer-sharing 测试因 F11/F12 裁记不含 sharedLayer 实例探针用例（只有双 listener 鉴权隔离，无进程级探针写入），残留问题在目标结构性不存在。
+适配说明：同步退休现有请求租约与登记，仅将正文清扫推迟microtask复查计数；worker沿同一exitCode/guard/总截止闭包同步发布stopping，再让出macrotask给控制响应，不恢复旧published绕过入口。lazy探针隔离到短Bun子进程，只导入命令元数据，不启动应用或执行handler。
+测试映射：保留两处microtask等待，增加真实route消费者接力；现有createSharedServices测试不写SessionStatus探针，无需恢复旧probe才能执行其清理。source计划中的CI/daemon数字为历史载荷，本轮验证另记record。
 
 diff --git a/docs/plans/opencode-memory-residency-successor.md b/docs/plans/opencode-memory-residency-successor.md
 --- a/docs/plans/opencode-memory-residency-successor.md
@@ -41,40 +41,24 @@ diff --git a/docs/plans/opencode-memory-residency-successor.md b/docs/plans/open
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -278,8 +278,10 @@ if (isDaemon) {
-     await runMaintenance(prepared, task)
-   }
- 
--  async function gracefulShutdown(reason = "unknown") {
--    if (shutdownInProgress) return
-+  async function gracefulShutdown(reason = "unknown", published = false) {
-+    // [0626] published 表示控制面 handler 已同步置过标志（响应返回前到达的 start/resume 被拒）。
-+    // 常规入口只允许第一个调用者真正开始拆解；published 入口则必须继续执行主体。
-+    if (shutdownInProgress && !published) return
-     shutdownInProgress = true
-     // #547：residual 与 process.exit 硬截止必须同一 t0——maintenance abort 也吃墙钟，不能只从 dispose 起算。
-     const shutdownStartedAt = Date.now()
-@@ -519,8 +521,13 @@ if (isDaemon) {
-       }
-       // #259：setTimeout 避免在 fetch handler 内直接关闭——让响应先返回。
-       // #535：conditional 通过后同步发布 shutdownInProgress，响应返回前到达的 start/resume 也必须被拒绝。
--      if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(DisposedReason.DaemonStop)
--      else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
-+      // [0626] 但拆解主体必须推迟到下一个 macrotask：Bun 在同一 macrotask 内先刷出本次响应，
-+      // 若同步进入 gracefulShutdown，其 microtask 续段会先于 socket 写入跑到 controlServer.stop(true)，
-+      // 客户端读到的是 ECONNRESET 而不是 {ok:true}（处置工作越少越容易输掉这个竞态）。
-+      if (url.searchParams.get("maintenance-idle") === "1") {
-+        shutdownInProgress = true
-+        setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop, true), 0).unref?.()
-+      } else setTimeout(() => void gracefulShutdown(DisposedReason.DaemonStop), 0).unref?.()
-       return Response.json({ ok: true })
-     },
-   })
+@@ -237 +237 @@
+-  async function gracefulShutdown(exitCode = 0, reason = "unknown") {
++  async function gracefulShutdown(exitCode = 0, reason = "unknown", defer = false) {
+@@ -247 +247,3 @@
+     shutdownTimer.unref?.()
++    // 停机资格和总截止已同步发布；先让控制响应刷出，再执行同一拆解闭包。
++    if (defer) await new Promise<void>((resolve) => setTimeout(resolve, 0))
+@@ -600,3 +602,4 @@
+         // conditional通过后立即进入同一闭包置位shutdownInProgress，不能暴露接收新维护的窗口。
+-        if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(0, DisposedReason.DaemonStop)
++        // 拆解让出macrotask避免stop(true)抢先关闭本次{ok:true}响应，拒绝新维护的时机不变。
++        if (url.searchParams.get("maintenance-idle") === "1") void gracefulShutdown(0, DisposedReason.DaemonStop, true)
+         else setTimeout(() => void gracefulShutdown(0, DisposedReason.DaemonStop), 0).unref?.()
 
 diff --git a/packages/opencode/test/cli/run/lazy-runtime.test.ts b/packages/opencode/test/cli/run/lazy-runtime.test.ts
 --- a/packages/opencode/test/cli/run/lazy-runtime.test.ts
 +++ b/packages/opencode/test/cli/run/lazy-runtime.test.ts
-@@ -1,28 +1,44 @@
+@@ -1,28 +1,43 @@
  import { expect, test } from "bun:test"
 +import path from "path"
  
@@ -92,9 +76,8 @@ diff --git a/packages/opencode/test/cli/run/lazy-runtime.test.ts b/packages/open
 -        contents: 'globalThis[Symbol.for("opencode.test.run-runtime-loaded")]++; export {};',
 -        loader: "js",
 -      }))
-+  // [0626] Bun.plugin 的模块替换是进程全局的，clearAll 还会清掉 bunfig preload 注册的
-+  // Solid JSX 转换——同进程使用会污染 shard 内所有后续 tsx 文件。探针因此放在
-+  // 子进程里跑，父进程只读它的退出码与输出。
++  // clearAll会连同preload的Solid转换一起清除；仅在子进程注册探针，父进程不改插件表。
++  // 子进程只导入命令元数据，runtime被替换为计数器，绝不执行交互handler。
 +  const child = Bun.spawn(
 +    [
 +      process.execPath,
@@ -119,7 +102,7 @@ diff --git a/packages/opencode/test/cli/run/lazy-runtime.test.ts b/packages/open
 +      stdout: "pipe",
 +      stderr: "pipe",
 +      // [0626] 不继承测试进程的 worker/daemon 角色变量，子进程走真实 CLI 模块路径。
-+      env: { ...process.env, OPENCODE_WORKER: "", OPENCODE_TUI_WORKER: "" },
++      env: { ...process.env, OPENCODE_WORKER: "", OPENCODE_TUI_WORKER: "", OPENCODE_PROCESS_ROLE: "" },
      },
 -  })
 -  try {
@@ -146,14 +129,14 @@ diff --git a/packages/opencode/test/cli/run/lazy-runtime.test.ts b/packages/open
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -424,7 +424,13 @@ export const {
+@@ -422,9 +422,13 @@ export const {
        partConsumers.delete(sessionID)
        // [0624] 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
        syncTokens.delete(sessionID)
+       syncingSessions.delete(sessionID)
+       hydratingSessions.delete(sessionID)
 -      releaseSessionParts(sessionID)
-+      // [0626] 正文清扫推迟到 microtask 并复查计数：路由切换时旧树的清理（如 Task 卡片卸载）
-+      // 可能先于新路由的消费者注册运行；同步擦除会把“导航进入该 Session”刚要用的正文清掉，
-+      // 下游的一次性/节流展示（isServer 下 leadingAndTrailing 只落地首个值）再无恢复机会。
++      // 同批路由消费者可能晚于旧树清理注册；仅延迟正文清扫，旧请求资格仍立即失效。
 +      queueMicrotask(() => {
 +        if (partConsumers.has(sessionID)) return
 +        releaseSessionParts(sessionID)
@@ -174,7 +157,28 @@ diff --git a/packages/tui/test/cli/cmd/tui/sync-parts-lifetime.test.tsx b/packag
      expect(bytes(h, other)).toBe(0)
      const again = await h.sync.session.acquireParts(other)
      expect(bytes(h, other)).toBe(1024)
-@@ -267,6 +269,7 @@ test("concurrent acquisitions both resolve only after bodies are loaded", async
+@@ -114 +116,20 @@
++test("route handoff preserves acquired bodies across the release microtask", async () => {
++  const rows = [{ info: message("msg_handoff", other), parts: [tool("msg_handoff", other, "Y".repeat(1024))] }]
++  const h = await mount(transport(rows), undefined, { type: "session", sessionID: active })
++  try {
++    const handle = await h.sync.session.acquireParts(other)
++    handle.release()
++    h.route.navigate({ type: "session", sessionID: other })
++    // 同一批不await：新route必须接住原正文，而不是稍后HTTP重建掩盖同步擦除。
++    expect(bytes(h, other)).toBe(1024)
++    await Promise.resolve()
++    expect(bytes(h, other)).toBe(1024)
++    h.route.navigate({ type: "session", sessionID: active })
++    await Promise.resolve()
++    expect(bytes(h, other)).toBe(0)
++  } finally {
++    h.app.renderer.destroy()
++  }
++})
++
+ test("acquireParts rolls back the consumer count when sync rejects", async () => {
+@@ -267,6 +288,7 @@ test("concurrent acquisitions both resolve only after bodies are loaded", async
      expect(bytes(h, other)).toBe(1024)
      h1.release()
      h2.release()

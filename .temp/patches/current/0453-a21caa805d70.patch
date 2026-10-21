@@ -9,3 +9,14 @@ diff --git a/README.md b/README.en.md
 similarity index 100%
 rename from README.md
 rename to README.en.md
+diff --git a/packages/opencode/test/docs/readme.test.ts b/packages/opencode/test/docs/readme.test.ts
+--- a/packages/opencode/test/docs/readme.test.ts
++++ b/packages/opencode/test/docs/readme.test.ts
+@@ -19,5 +19,6 @@
+     },
+   },
+-  { file: "README.md",
++  // 英文文档随本次改名迁移；继续在实际英文入口验证原有承诺，不用英文规则检查中文首页。
++  { file: "README.en.md",
+     // 三语种 README 结构保持一致，所以每份文档都用本地化安装标题切分“安装前”区域。
+     installHeading: "### Installation",

@@ -9,17 +9,18 @@ diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/
 index 8530e46ee3..b8cb349e65 100644
 --- a/packages/opencode/src/agent/agent.ts
 +++ b/packages/opencode/src/agent/agent.ts
-@@ -188,6 +188,10 @@ const layer = Layer.effect(
+@@ -187,7 +187,11 @@ const layer = Layer.effect(
+                 // 保留编辑审批及原始工具规则，覆盖 V1 的文件修改入口。
                  edit: "ask",
                  write: "ask",
                  apply_patch: "ask",
-+                // #99：build 对 notebook 变更类工具默认 ask
++                // review 对笔记本变更沿用编辑审批，用户规则仍最后覆盖。
 +                vscode_notebook_run: "ask",
 +                vscode_notebook_edit: "ask",
 +                vscode_notebook_env: "ask",
                }),
+               // 同名代理的专属配置还会在注册表构建后覆盖这些规则。
                user,
-             ),
 @@ -197,7 +201,7 @@ const layer = Layer.effect(
            },
            plan: {
@@ -44,28 +45,21 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 index 6bb53c03d4..f05b1970d3 100644
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -485,7 +485,8 @@ function messageTokens(messages: WithParts[], ratio = 4) {
- }
- 
- // 汇总已确认用量：优先从 step-finish 部件提取，无确认时回退到助手消息自身的 token 字段
+@@ -507,1 +507,2 @@
 -function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"] {
 +// ratio 用于流式字符估 token（未完成 assistant 增量）
 +function usageTotals(messages: WithParts[], ratio: number): ContextUsageData["details"]["usage"] {
-   const usage: ContextUsageData["details"]["usage"] = {
-     input: 0,
-     output: 0,
-@@ -495,27 +496,21 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
-     total: 0,
-     cost: 0,
-   }
+@@ -517,30 +518,23 @@
 -  let confirmed = false
+-  // 部件与消息携带同一生产者结果，存在确认部件时不能再加一次消息用量。
 +  // 每条消息优先用 step-finish 精确账本；无则回退 assistant tokens
    for (const msg of messages) {
 -    for (const part of msg.parts) {
 -      if (part.type !== "step-finish") continue
+-      // 零 token 的 step-finish 也已确认，历史回退取决于部件存在性而非总额真值。
 -      confirmed = true
 -      usage.input += part.tokens.input
--      // output 不含 reasoning：推理 token 单独累计到 usage.reasoning 避免重复计算
+-      // getUsage 已扣除 reasoning；展示的 output 不应再次包含推理。
 -      usage.output += part.tokens.output
 -      usage.reasoning += part.tokens.reasoning
 -      usage.cacheRead += part.tokens.cache.read
@@ -74,7 +68,7 @@ index 6bb53c03d4..f05b1970d3 100644
 -    }
 -  }
 -
--  // 无 step-finish 确认时，回退到助手消息自身的 token 累计
+-  // 消息级字段仅服务没有确认部件的历史格式；这条回退不能与已有部件账本叠加。
 -  if (!confirmed) {
 -    for (const msg of messages) {
 -      if (msg.info.role !== "assistant") continue
@@ -83,6 +77,7 @@ index 6bb53c03d4..f05b1970d3 100644
 +      for (const part of msg.parts) {
 +        if (part.type !== "step-finish") continue
 +        usage.input += part.tokens.input
++        // getUsage 已扣除 reasoning，输出与推理仍分别累计。
 +        usage.output += part.tokens.output
 +        usage.reasoning += part.tokens.reasoning
 +        usage.cacheRead += part.tokens.cache.read
@@ -91,15 +86,16 @@ index 6bb53c03d4..f05b1970d3 100644
 +      }
 +    } else if (msg.info.role === "assistant") {
        usage.input += msg.info.tokens.input
--      // 同上：output 不含 reasoning
+-      // 助手消息与 step-finish 保存同一 getUsage 结果，回退也保持分栏。
        usage.output += msg.info.tokens.output
        usage.reasoning += msg.info.tokens.reasoning
        usage.cacheRead += msg.info.tokens.cache.read
-@@ -523,7 +518,28 @@ function usageTotals(messages: WithParts[]): ContextUsageData["details"]["usage"
+       usage.cacheWrite += msg.info.tokens.cache.write
        usage.cost += msg.info.cost
      }
    }
--  // total 不含 cost 但含 reasoning：reasoning 单独累计避免与 output 重复
+@@ -547,1 +541,23 @@
+-  // total 各加一次 output/reasoning；cost 是金额，不能进入 token 总额。
 +
 +  // 未完成 assistant：把 step-finish 之后的流式增量按字符估 token
 +  const lastMsg = messages.findLast((m) => m.info.role === "assistant" && !m.info.time.completed)
@@ -122,17 +118,30 @@ index 6bb53c03d4..f05b1970d3 100644
 +    usage.input += Math.round(inputChars / ratio)
 +  }
 +
-   usage.total = usage.input + usage.output + usage.reasoning + usage.cacheRead + usage.cacheWrite
-   return usage
- }
-@@ -1190,8 +1206,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-   const bd = latestBreakdown(raw)
- 
++  // total 各加一次 output/reasoning；cost 是金额，不能进入 token 总额。
+@@ -1129,4 +1145,4 @@
    const msg = messageTokens(compacted, ratio)
--    // 使用 raw 而非 compacted：统计全部消息的用量，不仅压缩后的尾部
+-  // raw 保存整场会话用量；窗口分类仍由 compacted 估算。
 -  const usage = usageTotals(raw)
 +  // #99：usage 用 raw 全量消息 + ratio 估流式增量
 +  const usage = usageTotals(raw, ratio)
    const instructions = await gatherInstructionFiles(input)
-   let instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
-   const messageText = msg.text.join("\n")
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -147,3 +147,5 @@
+               // V2 的 edit/write/apply_patch 共用 edit 动作，不能只按工具名设审批。
+               ...(id === "review" ? [{ action: "edit", resource: "*", effect: "ask" as const }] : []),
++              // 笔记本桥接使用独立动作名，沿用 review 的编辑审批，且保留后续用户覆盖。
++              ...(id === "review" ? ["vscode_notebook_run", "vscode_notebook_edit", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
+             ]),
+@@ -155,1 +157,1 @@
+-        item.description = "Plan mode. Disallows all edit tools."
++        item.description = "Plan mode. Disallows all edit tools and notebook mutations."
+@@ -162,2 +164,6 @@
+             { action: "edit", resource: "*", effect: "deny" },
++            // 与 V1 相同，plan 不能通过独立的 notebook 动作绕过编辑限制。
++            { action: "vscode_notebook_run", resource: "*", effect: "deny" },
++            { action: "vscode_notebook_edit", resource: "*", effect: "deny" },
++            { action: "vscode_notebook_env", resource: "*", effect: "deny" },
+             { action: "edit", resource: path.join(".opencode", "plans", "*.md"), effect: "allow" },

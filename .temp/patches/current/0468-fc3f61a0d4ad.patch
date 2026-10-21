@@ -11,25 +11,24 @@ install-target 纯函数与其测试原样落位（新文件无冲突）。
 diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 --- a/.github/workflows/test.yml
 +++ b/.github/workflows/test.yml
-@@ -73,5 +73,20 @@
+@@ -73,5 +73,19 @@
              os_label: Windows
              runner: windows-latest
-             command: bun run --cwd packages/http-recorder test:ci
+             command: GITHUB_ACTIONS=false bun run --cwd packages/http-recorder test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
              junit: packages/http-recorder/.artifacts/unit/junit.xml
-+          # macOS 覆盖：opencode 和 core 包的 64+ 处 process.platform 分支此前从未在 CI 上验证过。
-+          # 不添加 http-recorder-macos：该包无原生依赖也无平台特定代码，Linux+Windows 覆盖已充分。
-+          # OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER 对 macos-latest 正确求值为 'false'，无需额外配置。
++          # macOS 覆盖 opencode/core 的平台分支；http-recorder 保留既有双平台矩阵。
++          # 与现有必过项使用相同 test/JUnit 契约，filewatcher 标志仍按 runner 判断。
 +          - id: opencode-macos
 +            label: packages/opencode
 +            os_label: macOS
 +            runner: macos-latest
-+            command: bun turbo test:ci --filter=opencode --continue=dependencies-successful
++            command: GITHUB_ACTIONS=false bun turbo test --filter=opencode --continue=dependencies-successful -- --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/opencode/.artifacts/unit/junit.xml
 +          - id: core-macos
 +            label: packages/core
 +            os_label: macOS
 +            runner: macos-latest
-+            command: bun run --cwd packages/core test:ci
++            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
 +            junit: packages/core/.artifacts/unit/junit.xml
      defaults:
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
@@ -70,11 +69,9 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..7034abb6e36b8c77fda3f700394e3c95997df65a
 --- /dev/null
 +++ b/packages/opencode/script/install-target.ts
-@@ -0,0 +1,14 @@
-+// 将 build.ts 的 CLI 参数映射为 bun install 的 --os / --cpu 目标。
-+// 优先级必须与 build.ts 的 target 过滤逻辑（L158-179）一致：singleFlag > osFilter > "*"。
-+// 不一致会导致安装非目标平台的原生包（例如 --single --os=darwin 在 Linux 上安装 darwin 包），
-+// 触发 bun 的 IntegrityCheckFailed（oven-sh/bun#26879）。
+@@ -0,0 +1,12 @@
++// 安装平台必须与构建过滤一致：singleFlag > osFilter > "*"，避免下载非目标平台原生包。
++// 错配会在 macOS 安装 win32 包时触发 IntegrityCheckFailed（oven-sh/bun#26879）。
 +export function resolveInstallTarget(
 +  osFilter: string | undefined,
 +  archFilter: string | undefined,
