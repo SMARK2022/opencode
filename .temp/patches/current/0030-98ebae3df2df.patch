@@ -13,24 +13,91 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -419,8 +419,20 @@ ShellTool.shellEnv
+@@ -444,8 +444,10 @@ ShellTool.shellEnv
          { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
          { env: {} },
        )
-+
-+      // 兼容性修改：探测 Windows 平台并静默挂载 UTF-8 强控变量以解决管道读取乱码
-+      const isWin = process.platform === "win32"
-+      // 非 Windows 平台无副作用，utf8EnvOverrides 为空对象
-+      const utf8EnvOverrides = isWin ? {
-+        PYTHONIOENCODING: "utf-8",
-+        PYTHONUTF8: "1",
-+        JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
-+        RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim()
-+      } : {}
-+
        return {
          ...process.env,
-+        ...utf8EnvOverrides,
++        // 保留源顺序：宿主环境、Windows UTF-8、插件 extras；插件显式覆盖仍最后生效。
++        ...Shell.utf8Environment(),
          ...extra.env,
        }
      })
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -25,2 +25,15 @@
++// 只返回子进程覆盖项，不修改 process.env，也不改变非 Windows 环境。
++export const utf8Environment = (env: Readonly<Record<string, string | undefined>> = process.env, platform: string = process.platform) => {
++  if (platform !== "win32") return {}
++  return {
++    // Python 管道编码与 UTF-8 模式分别控制输出编码和解释器默认编码。
++    PYTHONIOENCODING: "utf-8",
++    PYTHONUTF8: "1",
++    // 追加而非替换已有 Java/Ruby 参数，保留用户的内存、代理与加载选项。
++    JAVA_TOOL_OPTIONS: `${env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
++    RUBYOPT: `${env.RUBYOPT || ""} -Eutf-8`.trim(),
++  }
++}
++
+ export type Item = {
+   path: string
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -221,2 +221,6 @@
+                 shell,
++                // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
++                extendEnv: true,
++                // V2 尚无插件 shell.env owner；这里只叠加源编码设置，不能恢复 legacy hook。
++                env: Shell.utf8Environment(),
+                 stdin: "ignore",
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -35,2 +35,4 @@
+   readonly shell?: string | boolean
++  readonly env?: ChildProcess.CommandOptions["env"]
++  readonly extendEnv?: boolean
+   readonly options?: AppProcess.RunOptions
+@@ -75,1 +77,3 @@
+-        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
++        // 在既有 process 观察边界记录真正交给 spawner 的环境，不重复执行命令。
++        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell,
++          env: command.options.env, extendEnv: command.options.extendEnv, options })
+@@ -202,2 +206,11 @@
+             expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
++            // 真实 leaf 的环境必须继承宿主，四项 Windows 覆盖与已有 options 精确对应。
++            expect(runs[0]?.extendEnv).toBe(true)
++            expect(runs[0]?.env).toEqual(process.platform === "win32" ? {
++              PYTHONIOENCODING: "utf-8",
++              PYTHONUTF8: "1",
++              JAVA_TOOL_OPTIONS: `${process.env.JAVA_TOOL_OPTIONS || ""} -Dfile.encoding=UTF-8`.trim(),
++              RUBYOPT: `${process.env.RUBYOPT || ""} -Eutf-8`.trim(),
++            } : {})
++            expect(runs).toHaveLength(1)
+             // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
+diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
+--- a/packages/core/test/shell.test.ts
++++ b/packages/core/test/shell.test.ts
+@@ -23,2 +23,19 @@
+ describe("shell", () => {
++  test("builds Windows UTF-8 overlays without mutating the inherited environment", () => {
++    const env = { PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" }
++    // 平台作为纯输入覆盖两支，不写全局环境或伪造 process.platform。
++    expect(Shell.utf8Environment(env, "linux")).toEqual({})
++    expect(Shell.utf8Environment(env, "darwin")).toEqual({})
++    expect(Shell.utf8Environment(env, "win32")).toEqual({
++      PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
++      JAVA_TOOL_OPTIONS: "-Xmx1g -Dfile.encoding=UTF-8", RUBYOPT: "-w -Eutf-8",
++    })
++    // 空值必须 trim 掉前导空格；任意非编码变量仍由 process 环境继承。
++    expect(Shell.utf8Environment({}, "win32")).toEqual({
++      PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1",
++      JAVA_TOOL_OPTIONS: "-Dfile.encoding=UTF-8", RUBYOPT: "-Eutf-8",
++    })
++    expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
++  })
++
+   test("normalizes shell names", () => {

@@ -4,81 +4,149 @@ Date: Wed, 6 May 2026 03:29:50 +0800
 Subject: [PATCH] =?UTF-8?q?feat(read):=20=E6=9B=B4=E6=96=B0=E9=BB=98?=
  =?UTF-8?q?=E8=AE=A4=E8=AF=BB=E5=8F=96=E8=A1=8C=E6=95=B0=E4=B8=BA400?=
  =?UTF-8?q?=EF=BC=8C=E8=B0=83=E6=95=B4=E8=BE=93=E5=87=BA=E5=AD=97=E8=8A=82?=
+ =?UTF-8?q?=E9=99=90=E5=88=B6=E8=87=B324KB=EF=BC=8C=E7=A7=BB=E9=99=A4?=
+ =?UTF-8?q?=E8=A1=8C=E9=95=BF=E5=BA=A6=E6=88=AA=E6=96=AD=E9=80=BB=E8=BE=91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
-index 0b9ddb3887..7b5c1f03bd 100644
 --- a/packages/core/src/tool/read-filesystem.ts
 +++ b/packages/core/src/tool/read-filesystem.ts
-@@ -13,8 +13,7 @@ export const MAX_READ_LINES = 1_000
- // V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 24KB
+@@ -15,8 +15,6 @@ export const MAX_READ_LINES = 2_000
+ // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
  export const MAX_READ_BYTES = 24 * 1024
  export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
 -const MAX_LINE_LENGTH = 2_000
 -const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
-+// #90：禁止行中 2000 字截断；仅行数+总字节预算分页
  
  export class BinaryFileError extends Schema.TaggedErrorClass<BinaryFileError>()("ReadTool.BinaryFileError", {
    resource: Schema.String,
-@@ -250,7 +249,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
+@@ -247,7 +245,6 @@ export const read = Effect.fn("ReadTool.read")(function* (
+       const lines: string[] = []
+       const decoder = new TextDecoder("utf-8", { fatal: true })
+       let pending = ""
+-      let discard = false
+       let line = 1
+       let bytes = 0
+       let next: number | undefined
+@@ -260,7 +257,7 @@ export const read = Effect.fn("ReadTool.read")(function* (
            next = line
            return false
          }
 -        const text = input.length > MAX_LINE_LENGTH ? input.slice(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : input
-+        const text = input // 完整行：不做 2000 字截断
++        const text = input
          const size = Buffer.byteLength(text, "utf-8") + (lines.length > 0 ? 1 : 0)
          if (bytes + size > MAX_READ_BYTES) {
            next = line
-@@ -267,11 +266,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
+@@ -275,20 +272,14 @@ export const read = Effect.fn("ReadTool.read")(function* (
+         let text = input
+         while (true) {
            const index = text.indexOf("\n")
            if (index === -1) {
-             if (!discard) {
-+              // 长行完整缓冲，不在行中丢弃/截断
-               pending += text
+-            if (!discard) {
+-              pending += text
 -              if (pending.length > MAX_LINE_LENGTH) {
 -                pending = pending.slice(0, MAX_LINE_LENGTH + 1)
 -                discard = true
 -              }
-             }
+-            }
++            // 跨块保留完整行，由 append 的字节预算决定整行是否进入当前页。
++            pending += text
              break
            }
+-          const current = pending + (discard ? "" : text.slice(0, index))
++          const current = pending + text.slice(0, index)
+           pending = ""
+-          discard = false
+           text = text.slice(index + 1)
+           if (!append(current.endsWith("\r") ? current.slice(0, -1) : current)) return false
+         }
+         return true
+@@ -317,8 +308,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
+       }
+       if (!done) {
+         const tail = yield* decodeUtf8(resource, decoder)
+-        if (!discard) pending += tail
++        pending += tail
+         if (pending) append(pending.endsWith("\r") ? pending.slice(0, -1) : pending)
+       }
+       if (lines.length === 0 && offset !== 1) return yield* Effect.fail(new OffsetOutOfRangeError({ offset }))
+       return new TextPage({
+diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
+--- a/packages/core/test/tool-read-filesystem.test.ts
++++ b/packages/core/test/tool-read-filesystem.test.ts
+@@ -81,6 +81,27 @@ describe("ReadToolFileSystem", () => {
+     }),
+   )
+ 
++  it.live("keeps cross-chunk long lines whole within the byte budget", () =>
++    Effect.gen(function* () {
++      const fixtureData = yield* fixture
++      const file = path.join(fixtureData.directory, "long-lines.txt")
++      const long = "\u00e9".repeat(3000)
++      // 首行跳过，第二行在 64 KiB 读取块末尾留下 2048 字符，覆盖旧 pending 截短。
++      yield* fixtureData.files.writeFileString(
++        file,
++        `${"p".repeat(64 * 1024 - 4097)}\n${Array.from({ length: 5 }, () => long).join("\n")}`,
++      )
++      const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 2 })
++      expect(first.content).toBe(Array.from({ length: 4 }, () => long).join("\n"))
++      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 6 })
++      expect(Buffer.byteLength(first.content)).toBe(24_003)
++      const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "long-lines.txt", { offset: 6 })
++      expect(last.content).toBe(long)
++      expect(last).toMatchObject({ type: "text-page", truncated: false })
++      expect("next" in last ? last.next : undefined).toBeUndefined()
++    }),
++  )
++
+   it.effect("fails with a typed filesystem error when a resolved file disappears", () =>
+     Effect.gen(function* () {
+       const { fs, directory } = yield* fixture
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 6d1ef54051..c6000c109b 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -11,12 +11,9 @@ import { Instruction } from "../session/instruction"
- import { isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
- import { SessionV1 } from "@opencode-ai/core/v1/session"
+@@ -12,10 +12,8 @@ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
  
--// 默认 read 行数 400：与 notebook source 默认 limit 对齐，压低单次工具输出
--// 默认 400 行：与 notebook source limit 对齐
--// 默认 400 行：与 notebook source limit 对齐，降低单次工具输出
-+// 默认 400 行：与 notebook source limit 对齐，压低单次工具输出
+ // 只降低缺省页大小，显式 limit 与既有安全、附件分支不随默认值收紧。
  const DEFAULT_READ_LIMIT = 400
 -const MAX_LINE_LENGTH = 2000
 -const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
-+// 不再按行截断：超长行完整保留，仅用 MAX_BYTES 控制总输出
- // 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
+ // 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
  const MAX_BYTES = 24 * 1024
  const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
-@@ -280,7 +277,7 @@ export const ReadTool = Tool.define<
+ const SAMPLE_BYTES = 4096
+ const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
+@@ -262,7 +260,7 @@ export const ReadTool = Tool.define<
                return
              }
  
 -            const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
-+            const line = text
++            const line = text // 保留完整行，由总字节预算决定当前页是否接纳。
              const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
              if (flags.bytes + size <= MAX_BYTES) {
                raw.push(line)
+@@ -495,9 +493,7 @@ export const ReadTool = Tool.define<
+       if (
+         // 当前页读取与权限检查已完成；未截掉页内正文时分页仍可去重。
+         !file.cut &&
+-        // 行内截断丢失完整内容，相同前缀不能证明文件版本一致。
+-        file.raw.every((line) => !line.endsWith(MAX_LINE_SUFFIX)) &&
+         // 每次用本会话可见历史证明范围与版本，恢复会话无需预热或借用外会话缓存。
+         findUnexpandedFileInContext(ctx, params, output)
+       ) {
+         return {
 diff --git a/packages/opencode/src/tool/read.txt b/packages/opencode/src/tool/read.txt
-index 368174cc8d..f0842253cf 100644
 --- a/packages/opencode/src/tool/read.txt
 +++ b/packages/opencode/src/tool/read.txt
-@@ -2,13 +2,12 @@ Read a file or directory from the local filesystem. If the path does not exist,
+@@ -2,13 +2,13 @@ Read a file or directory from the local filesystem. If the path does not exist,
  
  Usage:
  - The filePath parameter should be an absolute path.
 -- By default, this tool returns up to 2000 lines from the start of the file.
 +- By default, this tool returns up to 400 lines from the start of the file.
++- Text content is capped at 24 KiB per read, with no per-line character truncation.
  - The offset parameter is the line number to start from (1-indexed).
  - To read later sections, call this tool again with a larger offset.
  - Use the grep tool to find specific content in large files or files with long lines.
@@ -89,68 +157,101 @@ index 368174cc8d..f0842253cf 100644
  - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
  - This tool can read image files and PDFs and return them as file attachments.
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index 5aba7870a5..4cf1074a1d 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
-@@ -469,14 +469,18 @@ describe("tool.read truncation", () => {
+@@ -385,11 +385,17 @@ describe("tool.read truncation", () => {
+         ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
+       })
+       expect(denied.message).toBe("read denied")
+-      // 相同截断前缀不是完整版本证明，长行必须继续返回实际可见内容。
++      // 完整长行可证明同版本，2000 字符之后的变化也必须返回新正文。
+       yield* put(target, "x".repeat(3000))
++      const whole = yield* exec(dir, request)
++      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toBe(FILE_UNCHANGED_STUB)
++      yield* put(target, "x".repeat(3000) + "changed")
++      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain("changed")
++      // 字节预算省略的正文仍不构成完整版本证明。
++      yield* put(target, "x".repeat(24 * 1024 + 1))
+       const partial = yield* exec(dir, request)
+       expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
+         .not.toBe(FILE_UNCHANGED_STUB)
+     }),
+   )
+ 
+@@ -407,7 +413,7 @@ describe("tool.read truncation", () => {
+       const content = base.length >= target ? base : base.repeat(Math.ceil(target / base.length))
+       yield* put(path.join(test.directory, "large.json"), content)
+ 
+-      const result = yield* run({ filePath: path.join(test.directory, "large.json") })
++      const result = yield* run({ filePath: path.join(test.directory, "large.json"), limit: 2000 })
+       expect(result.metadata.truncated).toBe(true)
+       expect(result.output).toContain("Output capped at")
+       expect(result.output).toContain("Use offset=")
+@@ -551,15 +557,17 @@ describe("tool.read truncation", () => {
      }),
    )
  
 -  it.live("truncates long lines", () =>
-+  it.live("keeps long lines whole until byte budget", () =>
++  it.live("keeps long lines whole within the byte budget", () =>
      Effect.gen(function* () {
-+      // #90：长行完整保留；禁止出现 2000 字行中截断后缀
        const dir = yield* tmpdirScoped()
 -      yield* put(path.join(dir, "long-line.txt"), "x".repeat(3000))
 +      const long = "x".repeat(3000)
-+      yield* put(path.join(dir, "long-line.txt"), long + "\n")
++      yield* put(path.join(dir, "long-line.txt"), long)
  
        const result = yield* exec(dir, { filePath: path.join(dir, "long-line.txt") })
 -      expect(result.output).toContain("(line truncated to 2000 chars)")
 -      expect(result.output.length).toBeLessThan(3000)
-+      expect(result.output).toContain(long)
++      expect(result.output).toContain(`1: ${long}`)
 +      expect(result.output).not.toContain("line truncated to 2000")
-+      expect(result.output).not.toContain("(line truncated")
-+      expect(result.output.length).toBeGreaterThan(3000)
++      expect(result.metadata.truncated).toBe(false)
      }),
    )
  
+   it.live("image files set truncated to false", () =>
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index 2ead9b305c..e6786da5cd 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -24,7 +24,7 @@ import { resolveNotebook } from "./resolve"
- 
+@@ -13,10 +13,10 @@ import { resolveNotebook, resolveNotebookCell } from "./resolve"
  /**
-  * Bridge endpoint handler: returns notebook source code with global line numbering.
-- * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 12 KB.
-+ * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
+  * filePath 必填，主定位参数为完整规范化 cellId。
+  * offset 默认 1，所选格默认从其全局起点读取；越界时警告并重置到格起点。
+- * limit 默认 400，源码长行仍在 2000 字符处标为预览；未编号格头不占正文行预算。
+- * 12 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
+- * 返回 ran=false、实际 globalStart、returned、totalLines 与续读提示，不承诺未截短原文。
++ * limit 默认 400，源码长行完整保留；未编号格头不占正文行预算。
++ * 24 KiB UTF-8 渲染预算包含格头和行号文本，不覆盖 XML 封装与续读提示；首个正文行可超预算以保证推进。
++ * 返回 ran=false、实际 globalStart、returned、totalLines 与续读提示；分页只省略未返回的完整行。
   */
- // 获取 notebook 源码：返回所有 cell 的代码、类型和虚拟行号范围
- // 获取 notebook 源码：返回所有 cell 的代码和虚拟行号范围
-@@ -75,7 +75,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+ export async function notebookSource(input: Record<string, unknown>) {
+   // source 复用身份解析接口并独占虚拟行分页，读取源码不能调用 run 模块。
+   const filePath = stringProp(input, "filePath")
+@@ -62,7 +62,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+   // 空文档仍使用一作为起点，零总行数不能使 clamp 生成负的续读位置。
    globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
  
-   // Render cells one by one, emitting headers + in-range source lines
 -  const maxBytes = 12 * 1024
 +  const maxBytes = 24 * 1024
    let bytes = 0
    let rendered = 0
    let cut = false
-@@ -123,10 +123,8 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -106,13 +106,10 @@ export async function notebookSource(input: Record<string, unknown>) {
+         cut = true
          break
        }
+-      // 长行预览明确带截短标记，不能让调用方把 2000 字符当成完整源行。
++      // 精确编辑需要完整源行，分页仍沿既有行数与 UTF-8 字节预算。
        const sourceLine = cell.document.lineAt(i).text
 -      const src = sourceLine.length > 2000
 -        ? sourceLine.substring(0, 2000) + "... (line truncated to 2000 chars)"
 -        : sourceLine
 -      const outLine = `${globalLineNum}: ${src}`
-+      // 不再截断单行：字节预算只截断总输出
 +      const outLine = `${globalLineNum}: ${sourceLine}`
+       // UTF-8 预算包括真实行号前缀，多字节正文不能用字符数冒充输出字节。
        const outBytes = Buffer.byteLength(outLine, "utf8")
-       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
-         cut = true
-@@ -153,7 +151,7 @@ export async function notebookSource(input: Record<string, unknown>) {
+       // 首个正文行允许推进，未编号格头不能让空正文页永远重复同一 offset。
+       if (bytes + outBytes > maxBytes && rendered > 0) {
+@@ -140,7 +137,7 @@ export async function notebookSource(input: Record<string, unknown>) {
    output += outputCells.join("\n")
  
    if (cut) {

@@ -9,14 +9,14 @@ diff --git a/packages/opencode/script/version-env.ts b/packages/opencode/script/
 -if (versionArg?.startsWith("--version=")) {
 -  process.env.OPENCODE_VERSION = versionArg.replace("--version=", "")
 -}
-+// 支持两种参数形式：--version=X（等号形式，可在 argv 任意位置）和 --version X（空格分隔形式）
++// 构建选项可能先于版本参数，扫描全部 argv 才能让 --os 等选项不挤占版本位置。
 +const versionFromEquals = process.argv.find((arg) => arg.startsWith("--version="))?.replace("--version=", "")
 +if (versionFromEquals) {
 +  process.env.OPENCODE_VERSION = versionFromEquals
 +}
 +
 +const versionIndex = process.argv.findIndex((arg) => arg === "--version")
-+// versionIndex + 1 边界检查：防止 --version 为最后一个参数时读取 undefined
++// 缺少分隔值时保留已有版本；两种形式同时出现时沿源补丁由分隔形式最后赋值。
 +if (versionIndex >= 0 && process.argv[versionIndex + 1]) {
 +  process.env.OPENCODE_VERSION = process.argv[versionIndex + 1]
 +}

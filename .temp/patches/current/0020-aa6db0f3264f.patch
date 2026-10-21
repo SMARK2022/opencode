@@ -1,30 +1,18 @@
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -7,28 +7,32 @@
- // 指纹计算盐值，与 Claude Code 官方一致
- // 指纹盐值：与 Claude Code 官方二进制一致，修改会导致计费头校验失败
+@@ -7,27 +7,6 @@
+ // 指纹盐值与 Claude Code 官方二进制一致，修改会导致计费头校验失败。
  const SALT = "59cf53e54c78"
--// CLI 身份标识块，注入 system prompt 标识为 Claude Code
+-// 身份块放在主提示之前；20 会撤销该注入，不能提前删去补丁序列中的行为阶段。
 -export const CLI_IDENTITY_BLOCK = {
 -  type: "text" as const,
 -  text: "You are Claude Code, Anthropic's official CLI for Claude.",
--  // ephemeral 缓存控制：允许 API 对此块进行 prompt caching
+-  // 身份块仅使用临时缓存，不能在网关侧声明跨账号共享的持久缓存身份。
 -  cache_control: { type: "ephemeral" as const },
 -}
-+// 禁用 CLI 身份标识块：不再注入伪造的 Claude Code 身份，保留原始 system
-+// 上游 V2 不需要 CLI 身份欺骗，直接使用模型原始 system prompt
-+// 禁用 CLI 身份标识块：不再注入伪造的 Claude Code 身份，保留原始 system
-+// 上游 V2 不需要 CLI 身份欺骗，直接使用模型原始 system prompt
-+// CLI 身份标识块已禁用：不再注入伪造的 Claude Code 身份
-+// export const CLI_IDENTITY_BLOCK = {
-+//   type: "text" as const,
-+//   text: "You are Claude Code, Anthropic's official CLI for Claude.",
-+//   // ephemeral 缓存控制：允许 API 对此块进行 prompt caching
-+//   cache_control: { type: "ephemeral" as const },
-+// }
  
--// 主系统提示块，模拟 Claude Code 的系统提示词
+-// 主提示与计费身份分别建块，避免修改一段用户指令时连带改写身份声明。
 -export const MAIN_SYSTEM_BLOCK = {
 -  type: "text" as const,
 -  text: [
@@ -38,24 +26,10 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 -  ].join("\n"),
 -  cache_control: { type: "ephemeral" as const },
 -}
-+// 主系统提示块已禁用：不再注入伪造的 Claude Code 系统提示
-+// export const MAIN_SYSTEM_BLOCK = {
-+//   type: "text" as const,
-+//   text: [
-+//     "You are an interactive agent that helps users with software engineering tasks.",
-+//     "Use the instructions below and the tools available to you to assist the user.",
-+//     "",
-+//     "# System",
-+//     " - All text you output outside of tool use is displayed to the user.",
-+//     " - Tool results and user messages may include <system-reminder> tags.",
-+//     " - The conversation has unlimited context through automatic summarization.",
-+//   ].join("\n"),
-+//   cache_control: { type: "ephemeral" as const },
-+// }
  
  // --- 会话状态管理 ---
- // 单例模式管理 sessionId/deviceId/accountUuid
-@@ -76,10 +80,10 @@
+ // 随机设备与会话身份属于进程，不可按请求重建，否则同一次对话的 metadata 与 headers 会漂移。
+@@ -76,10 +56,6 @@
    }
  }
  
@@ -63,48 +37,161 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 -export function buildSystemBlocks(fp: string) {
 -  return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
 -}
-+// buildSystemBlocks 已禁用：不再注入伪造的系统块
-+// export function buildSystemBlocks(fp: string) {
-+//   return [buildBillingHeaderBlock(fp), CLI_IDENTITY_BLOCK, MAIN_SYSTEM_BLOCK]
-+// }
  
- // 构建用户元数据 JSON，包含设备 ID、账号 UUID 和会话 ID
+ // user_id 是紧凑 JSON 字符串而非对象；空 account_uuid 仍需保留以符合网关格式。
  export function buildMetadataUserId(opts: { deviceId: string; sessionId: string; accountUuid?: string }) {
-@@ -287,15 +291,15 @@
-     // 计算消息指纹，用于计费头和 CCH 签名
-     const fp = computeFingerprint(firstUserText, VERSION)
+@@ -276,34 +252,7 @@
+     const originalBody = init?.body
+       ? JSON.parse(typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body as ArrayBuffer))
+       : {}
  
--    // 2. 合并 System Blocks（将我们的 Block 插入到最前面，保留原有 system）
--    let newSystem = buildSystemBlocks(fp)
--    if (originalBody.system) {
--      if (Array.isArray(originalBody.system)) {
--        newSystem = newSystem.concat(originalBody.system)
--      } else {
--        newSystem.push({ type: "text" as const, text: originalBody.system })
+-    // 指纹只使用首个 text block；拼接附件后的文本会偏离源客户端的字符位置。
+-    const firstUserMessage = (originalBody.messages ?? []).find((m: { role: string }) => m.role === "user")
+-    const firstUserText = (() => {
+-      if (!firstUserMessage) return ""
+-      const content = firstUserMessage.content
+-      if (typeof content === "string") return content
+-      if (Array.isArray(content)) {
+-        const firstText = content.find((b: { type: string }) => b.type === "text")
+-        return firstText ? firstText.text : ""
 -      }
--    }
-+    // 2. 系统块合并已禁用：不再注入伪造的系统块，保留原始 system
-+    // let newSystem = buildSystemBlocks(fp)
-+    // if (originalBody.system) {
-+    //   if (Array.isArray(originalBody.system)) {
-+    //     newSystem = newSystem.concat(originalBody.system)
-+    //   } else {
-+    //     newSystem.push({ type: "text" as const, text: originalBody.system })
-+    //   }
-+    // }
+-      return ""
+-    })()
+-
+-    // 计算消息指纹，用于计费头和 CCH 签名
+-    const fp = computeFingerprint(firstUserText, VERSION)
+-
+-    // 接续 SDK 已 lowering 的 agent/user/project system，保留每个块的文字及协议属性。
+-    const system = Array.isArray(originalBody.system) ? originalBody.system : originalBody.system ? [{ type: "text" as const, text: originalBody.system }] : []
+-    // SDK 已共享四断点预算；原工具/system/history 标记优先，身份块只领取剩余名额。
+-    const cached = [
+-      ...(originalBody.tools ?? []),
+-      ...system,
+-      ...(originalBody.messages ?? []).flatMap((message: { content?: unknown }) => Array.isArray(message.content) ? message.content : []),
+-    ].filter((block: { cache_control?: unknown }) => block.cache_control).length
+-    // 只省略无剩余预算的自有缓存属性，不能删除上游已有 cache_control 或禁用全部缓存。
+-    const newSystem = buildSystemBlocks(fp).map((block, index) =>
+-      index > 0 && cached + index > 4 ? { type: block.type, text: block.text } : block).concat(system)
  
      // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
      const newMetadata = {
-@@ -349,7 +353,7 @@
+@@ -359,8 +309,7 @@
  
      const patchedBody = {
-       ...originalBody,
+-      // system 首字段使 billing 定位独立于 SDK 的 MCP/container 字段；其余原字段逐项保留。
 -      system: newSystem,
-+      // system: newSystem, // 已禁用：不再注入伪造系统块
+-      ...Object.fromEntries(Object.entries(originalBody).filter(([key]) => key !== "system")),
++      // 撤销适配器身份及计费注入，完整保留 Session owner 组装的原始 system。
++      ...originalBody,
        metadata: newMetadata,
        tools: patchedTools,
        ...(thinking ? { thinking } : {}),
+@@ -368,8 +316,7 @@
+     }
+ 
+-    // 在合并全部字段之后计算校验值，metadata、thinking 与工具字段都属于签名字节。
+-    const bodyWithPlaceholder = JSON.stringify(patchedBody)
+-    const finalBodyStr = patchCch(bodyWithPlaceholder)
++    // billing block 已停止注入，没有 adapter 占位符可修补；用户的同名文本必须保持原样。
++    const finalBodyStr = JSON.stringify(patchedBody)
+ 
+     // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
+     const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
 
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -1,6 +1,5 @@
+ import { Effect, Schema } from "effect"
+-import { createHash, randomUUID } from "node:crypto"
+-import { HttpTransport } from "../route/transport"
++import { randomUUID } from "node:crypto"
+ import { Route } from "../route/client"
+ import { Auth } from "../route/auth"
+ import { Endpoint } from "../route/endpoint"
+@@ -168,4 +167,3 @@
+ const AnthropicBodyFields = {
+-  // billing 固定位于首字段首块，最终字节修补无需搜索用户文字或再编码 model ID。
+-  system: optionalArray(AnthropicTextBlock),
+   model: Schema.String,
++  system: optionalArray(AnthropicTextBlock),
+@@ -586,21 +584,8 @@
+-  // 源15只取首user的首text block，附件后续文本不能移动指纹采样位置。
+-  const firstUserText = messages.find((message) => message.role === "user")?.content
+-    .find((block) => block.type === "text")?.text ?? ""
+-  const chars = [4, 7, 20].map((index) => firstUserText[index] ?? "0").join("")
+-  const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
+-  // 三位版本后缀与五位零占位是源 wire 契约；CCH 只在完整 overlay 编码后计算。
+-  const billing = `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;`
+   const outputConfig = anthropicOptions(request)?.output_config
+   return {
++    model: request.model.id,
+-    // 13 的身份注入在 20 明确撤销；保留用户的原始 system，顺序始终是身份在前。
+-    system: claudecode ? [
+-      { type: "text" as const, text: billing },
+-      // 上游 tools/system/history 已先领取预算；身份只消费剩余名额，不能挤掉有效工具标记。
+-      { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude.", cache_control: breakpoints.remaining > 0 ? cacheControl(breakpoints, { type: "ephemeral" }) : undefined },
+-      { type: "text" as const, text: "You are an interactive agent that helps users with software engineering tasks.\nUse the instructions below and the tools available to you to assist the user.\n\n# System\n - All text you output outside of tool use is displayed to the user.\n - Tool results and user messages may include <system-reminder> tags.\n - The conversation has unlimited context through automatic summarization.", cache_control: breakpoints.remaining > 0 ? cacheControl(breakpoints, { type: "ephemeral" }) : undefined },
+-      ...(system ?? []),
+-    ] : system,
+-    model: request.model.id,
++    // 与 V1 的 20 同步撤销身份注入，保留真实 typed system lowering 的所有上游能力。
++    system,
+     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
+     // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
+     ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
+@@ -913,31 +898,15 @@
+ 
+-// 复用现有 HTTP frames/executor，专用 prepare 只在唯一最终编码点修补自己的五位字段。
+-const transport = HttpTransport.httpJson<AnthropicMessagesBody, string>({ framing: Framing.sse })
+ export const route = Route.make({
+   id: ADAPTER,
+   provider: "anthropic",
+   protocol,
+   endpoint: Endpoint.path(PATH, { baseURL: DEFAULT_BASE_URL }),
+   auth: Auth.none,
+-  transport: {
+-    ...transport,
+-    prepare: (input) => Effect.gen(function* () {
+-      if (input.request.model.provider !== "claudecode")
+-        return yield* transport.prepare(input)
+-      const parts = yield* HttpTransport.jsonRequestParts(input)
+-      // Schema/return 将 system 排首；首块纯 ASCII，offset 不受 model ID 或用户 UTF-8 长度影响。
+-      const prefix = `{"system":[{"type":"text","text":"${input.body.system?.[0]?.text.slice(0, -6)}`
+-      if (!parts.bodyText.startsWith(`${prefix}00000;`))
+-        return yield* invalid("ClaudeCode billing layout changed before transport")
+-      // 包含全部工具、metadata、thinking 与允许的 HTTP overlay，只编码一次最终 JSON。
+-      const cch = (Bun.hash.xxHash64(new TextEncoder().encode(parts.bodyText)) & 0xfffffn).toString(16).padStart(5, "0")
+-      const body = parts.bodyText.slice(0, prefix.length) + cch + parts.bodyText.slice(prefix.length + 5)
+-      return { request: ProviderShared.jsonPost({ url: parts.url, body, headers: parts.headers }), framing: Framing.sse }
+-    }),
+-  },
++  // billing 阶段结束后复用标准 transport；用户的 cch 同名内容不再进入修补逻辑。
++  framing: Framing.sse,
+   // 请求头在 protocol route 的既有构造点产生，运输层仍拥有取消和 stream 生命周期。
+   headers: ({ request }) => {
+     // 使用已合并的配置/variant beta；仅在协议 owner 去重，不生成另一条 HTTP 覆盖路径。
+     const betas = anthropicOptions(request)?.betas
+     return {
+       "anthropic-version": "2023-06-01",
+
+diff --git a/packages/llm/test/provider/anthropic-messages.test.ts b/packages/llm/test/provider/anthropic-messages.test.ts
+--- a/packages/llm/test/provider/anthropic-messages.test.ts
++++ b/packages/llm/test/provider/anthropic-messages.test.ts
+@@ -901,11 +901,6 @@
+       expect(claude.body.messages.every((message) => message.content.every((block) => !("cache_control" in block) || block.cache_control === undefined))).toBe(true)
+-      // 不给身份缓存不等于撤销身份：13–19 仍须保留计费首块、两段身份和原 system。
+-      expect(claude.body.system?.map((block) => block.text)).toEqual([
+-        expect.stringMatching(/^x-anthropic-billing-header: cc_version=2\.1\.117\.[0-9a-f]{3}; cc_entrypoint=cli; cch=00000;$/),
+-        "You are Claude Code, Anthropic's official CLI for Claude.",
+-        expect.stringContaining("You are an interactive agent that helps users with software engineering tasks."),
+-        "system-tail",
+-      ])
++      // 20 撤销的只是自有身份阶段，四个工具缓存和真正 system/history 仍由上游 owner 保留。
++      expect(claude.body.system?.map((block) => block.text)).toEqual(["system-tail"])
+ 
+       // 首次接纳必须在13成立：缺省才 enabled，普通 Anthropic 不共享专用默认。
+       expect(claude.body.thinking).toEqual({ type: "enabled", budget_tokens: 4095 })
 
 diff --git a/packages/opencode/src/session/prompt/anthropic.txt b/packages/opencode/src/session/prompt/anthropic.txt
 index 21d9c0e9f2163f2c5124c8cd1754cbb7dd9d7f06..7a555b7cc65dd16913998c19e1403b04396606bd 100644
@@ -226,134 +313,573 @@ index 21d9c0e9f2163f2c5124c8cd1754cbb7dd9d7f06..7a555b7cc65dd16913998c19e1403b04
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -25,6 +25,8 @@
- import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+@@ -27,4 +27,8 @@
  import { Git } from "@/git"
  import { RuntimeFlags } from "@/effect/runtime-flags"
-+import { type as osType, release as osRelease } from "os"
-+import { ToolRegistry } from "@/tool/registry"
++import os from "node:os"
++import { Shell } from "@opencode-ai/core/shell"
++import { Config } from "@/config/config"
++import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
  
- // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
- const MAX_STATUS_CHARS = 2000
-@@ -53,6 +55,61 @@
- }
- 
- export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
-+
-+
-+// 获取环境额外信息：检测 shell 类型并生成 Windows 兼容提示
-+const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
-+  const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
-+  // 检测 shell 类型：支持 zsh/bash/fish/nu/cmd/powershell/pwsh
-+  const shellName = shell.includes("zsh") ? "zsh"
-+    : shell.includes("bash") ? "bash"
-+    : shell.includes("fish") ? "fish"
-+    : shell.includes("nu")   ? "nu"
-+    : shell.includes("cmd")  ? "cmd"
-+    : shell.includes("powershell") ? "powershell"
-+    : shell.includes("pwsh") ? "pwsh"
-+    : shell.split("/").pop() ?? shell
-+  // Windows 下提示使用 Unix shell 语法
-+  const shellLine = process.platform === "win32"
-+    ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
-+    : shellName
-+  const osVersion = `${osType()} ${osRelease()}`
-+  return { shellLine, osVersion }
-+})
-+
-+// 根据模型 API ID 估算知识截止日期（含 Claude 4 系列）
-+const getKnowledgeCutoff = (modelApiId: string): string | undefined => {
-+  if (modelApiId.includes("claude-sonnet-4-6")) return "August 2025"
-+  if (modelApiId.includes("claude-opus-4-6")) return "May 2025"
-+  if (modelApiId.includes("claude-haiku-4")) return "February 2025"
-+  if (modelApiId.includes("claude-opus-4") || modelApiId.includes("claude-sonnet-4")) return "January 2025"
-+  if (modelApiId.includes("gpt-4o")) return "October 2024"
-+  if (modelApiId.includes("gemini-2")) return "January 2025"
-+  return undefined
-+}
-+
-+// 构建工具使用指引文本：按已注册工具生成 per-tool 替代指引
-+const getToolUsageSection = (toolIds: string[]) => {
-+  if (toolIds.length === 0) return undefined
-+  const has = (name: string) => toolIds.includes(name)
-+  const items: string[] = [
-+    `Do NOT use the bash tool when a dedicated tool is available.`,
-+    `Using dedicated tools lets the user review and track your work:`,
-+  ]
-+  // 按已注册工具生成专用替代指引
-+  if (has("read"))  items.push(` - To read files use the read tool instead of cat, head, tail, or sed`)
-+  if (has("edit"))  items.push(` - To edit files use the edit tool instead of sed or awk`)
-+  if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
-+  if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
-+  if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
-+  items.push(
-+    ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-+    `You can call multiple tools in a single response. When there are no dependencies between calls,` +
-+    ` make them IN PARALLEL. Maximize parallel tool calls to increase efficiency.` +
-+    ` Only call sequentially when one result is needed to inform the next.`,
-+  )
-+  return ["# Using your tools", ...items].join("\n")
-+}
- 
- const layer = Layer.effect(
-   Service,
-@@ -62,6 +119,7 @@
+ // 只限制状态字段，保留分支和最近提交，避免大型工作树挤占模型上下文。
+@@ -76,5 +80,6 @@
      const locations = yield* LocationServiceMap.Service
      const git = yield* Git.Service
      const flags = yield* RuntimeFlags.Service
-+    const registry = yield* ToolRegistry.Service
++    const config = yield* Config.Service
  
-     // 该缓存是会话级快照，按 cwd 作为键。
-     // 为保持“快照语义”，会话内不主动失效。
-@@ -132,6 +190,14 @@
+     // 沿用源补丁的目录级缓存，工具改变工作树后仍返回首次采集的状态。
+@@ -163,6 +168,9 @@
+       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
          const ctx = yield* InstanceState.context
-         // getGitContext 是 Effect.fn，返回的是函数而非 Effect，必须调用以获取 Effect
+         // Effect.fn 返回函数，必须调用后再 yield*，不能直接执行函数值。
          const gitContext = yield* getGitContext()
-+        // 获取环境额外信息：shell 类型和 OS 版本，用于系统提示词
-+        // 获取环境额外信息：shell 和 OS 版本
-+        const { shellLine, osVersion } = yield* getEnvExtras()
-+        // 根据模型估算知识截止日期
-+        const isWorktree = ctx.worktree !== ctx.directory
-+        const cutoff = getKnowledgeCutoff(model.api.id)
-+        // 使用 layer 中捕获的 registry 获取已注册工具列表
-+        const toolIds = yield* registry.ids().pipe(Effect.orDie)
++        // 与 ShellTool 使用同一个实际选择器，Windows 的 pwsh/cmd 不能被 SHELL 猜测替代。
++        const shell = Shell.acceptable((yield* config.get()).shell)
++        const cutoff = SystemContextBuiltIns.knowledgeCutoff(model.api.id)
          const references = yield* Effect.gen(function* () {
            return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
-         }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-@@ -143,9 +209,13 @@
-             `  Working directory: ${ctx.directory}`,
-             `  Workspace root folder: ${ctx.worktree}`,
-             // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
--            ...gitContext.split("\n").map((line) => `  ${line}`),
-+            ...gitContext.split("\n").map((line: string) => `  ${line}`),
-+            `  Shell: ${shellLine}`,
-+            `  OS Version: ${osVersion}`,
-+            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
+@@ -178,8 +186,14 @@
+             // 状态和日志可能多行，统一缩进保证它们仍属于同一个环境块。
+             ...gitContext.split("\n").map((line) => `  ${line}`),
              `  Platform: ${process.platform}`,
++            // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
++            `  Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
++            `  OS Version: ${os.type()} ${os.release()}`,
++            ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
              `  Today's date: ${new Date().toDateString()}`,
-+            ...(isWorktree ? [`This is a git worktree — run ALL commands from this directory.`, `Do NOT cd to the original repository root.`] : []),
++            // 保留打开目录作为执行位置，不能因为 workspace root 不同就让模型切回原仓库。
++            ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
              `</env>`,
            ].join("\n"),
            references.length === 0
-@@ -166,6 +236,12 @@
-                   ]),
+             ? undefined
+@@ -200,6 +214,8 @@
                  "</available_references>",
                ].join("\n"),
-+          // 工具使用指引：根据已注册工具列表生成
-+          getToolUsageSection(toolIds),
-+          // 执行操作时的安全指引：提醒模型在执行破坏性操作前需要确认
-+          `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions (editing files, running tests, reading code): proceed freely.\n- Actions that are hard to reverse or affect shared state: confirm with the user first.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
-+          // 输出效率指引：提醒模型保持简洁高效的输出
-+          `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
++          SystemContextBuiltIns.ACTION_GUIDANCE,
++          SystemContextBuiltIns.OUTPUT_GUIDANCE,
          ].filter((part): part is string => part !== undefined)
        }),
  
-@@ -214,7 +290,7 @@
+       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
+@@ -247,5 +263,5 @@
    service: Service,
    layer: layer,
-   // 依赖 Git 服务采集 git 上下文，依赖 RuntimeFlags 读取 OPENCODE_DISABLE_GIT 开关
+   // Git 与开关沿用既有依赖图，不引入会话事件订阅。
 -  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node],
-+  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, ToolRegistry.node],
++  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node],
  })
+
+diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/src/session/llm/request.ts
+--- a/packages/opencode/src/session/llm/request.ts
++++ b/packages/opencode/src/session/llm/request.ts
+@@ -9,6 +9,7 @@
+ import type { Provider } from "@/provider/provider"
+ import { ProviderTransform } from "@/provider/transform"
+ import { SystemPrompt } from "../system"
++import { SystemContextBuiltIns } from "@opencode-ai/core/system-context/builtins"
+ import { InstallationVersion } from "@opencode-ai/core/installation/version"
+ import { Effect, Record } from "effect"
+ import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
+@@ -56,9 +57,14 @@
+ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: PrepareInput) {
+   const isOpenaiOauth = input.provider.id === "openai" && input.auth?.type === "oauth"
++  // 复用最终权限/user.tools 过滤；同一工具对象随后用于 SDK/native 请求，不读取 registry 全集。
++  const tools = resolveTools(input)
++  // 指引在 prompt transform 和 OAuth instructions 构造之前进入 system，避免漏掉其中一种运行时。
++  const toolGuidance = SystemContextBuiltIns.toolUsage(Object.keys(tools))
+   const system = [
+     [
+       ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+       ...input.system,
++      ...(toolGuidance ? [toolGuidance] : []),
+       ...(input.user.system ? [input.user.system] : []),
+     ]
+       .filter((x) => x)
+@@ -146,7 +152,6 @@
+   )
  
- export * as SystemPrompt from "./system"
+-  const tools = resolveTools(input)
+   // Codex parity: OpenAI Responses-family providers hardcode `strict: false`
+   // on every function tool so MCP-sourced and dynamic schemas that don't
+   // satisfy OpenAI's structured-outputs constraints still register.
+   if (
+
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -10,6 +10,80 @@
+ import { SystemContextRegistry } from "./registry"
+ import { FSUtil } from "../fs-util"
+ import { Global } from "../global"
++import os from "node:os"
++
++// 截止日期是源提示的型号映射，未知型号省略，不能用发布日期猜测训练数据截止时间。
++export const knowledgeCutoff = (id: string) => {
++  if (id.includes("claude-sonnet-4-6")) return "August 2025"
++  if (id.includes("claude-opus-4-6")) return "May 2025"
++  if (id.includes("claude-haiku-4")) return "February 2025"
++  if (id.includes("claude-opus-4") || id.includes("claude-sonnet-4")) return "January 2025"
++  if (id.includes("gpt-4o")) return "October 2024"
++  if (id.includes("gemini-2")) return "January 2025"
++}
++
++// 输入必须是当前 turn 真正广告的工具名；不能读取 registry.ids 或固定默认 agent。
++export const toolUsage = (ids: readonly string[]) => {
++  if (ids.length === 0) return undefined
++  return [
++    "# Using your tools",
++    "Do NOT use the bash tool when a dedicated tool is available.",
++    "Using dedicated tools lets the user review and track your work:",
++    // 每条替代指引独立受能力控制，gpt patch-only 请求不会宣称拥有 edit/write。
++    ...(ids.includes("read") ? [" - To read files use the read tool instead of cat, head, tail, or sed"] : []),
++    ...(ids.includes("edit") ? [" - To edit files use the edit tool instead of sed or awk"] : []),
++    ...(ids.includes("write") ? [" - To create files use the write tool instead of echo redirection or heredoc"] : []),
++    ...(ids.includes("apply_patch") ? [" - To edit files use the apply_patch tool instead of shell text replacement"] : []),
++    ...(ids.includes("grep") ? [" - To search file content use the grep tool instead of grep/rg"] : []),
++    ...(ids.includes("glob") ? [" - To find files use the glob tool instead of find or ls"] : []),
++    // Todo 工具也受当前 turn 权限约束，不能从静态提示推断其存在。
++    ...(ids.includes("todowrite") ? ["# Task Management", "Use the TodoWrite tool to plan non-trivial tasks and track progress. Mark todos as completed as soon as each task is done; do not batch completion updates."] : []),
++    " - Reserve bash for system commands and terminal operations requiring shell execution",
++    "You can call multiple tools in a single response. When there are no dependencies between calls, make them IN PARALLEL. Maximize parallel tool calls to increase efficiency. Only call sequentially when one result is needed to inform the next.",
++  ].join("\n")
++}
++
++// 稳定行为指引可进入 Context Epoch；工具能力与模型身份必须在当前 turn 重新生成。
++export const ACTION_GUIDANCE = `# Doing tasks
++The user will primarily request software engineering tasks, including fixing bugs, adding functionality, refactoring, and explaining code.
++- Read relevant files and understand the existing code before proposing changes.
++- Plan and break down non-trivial work using the available task-management tools.
++- Implement the minimal change that satisfies the request; avoid unrelated features or refactoring.
++- Do not add comments, docstrings, or type annotations to code you did not change.
++- Do not add error handling or validation for scenarios ruled out by the codebase's guarantees.
++- Do not create helpers or abstractions for one-time operations.
++- Avoid command injection, XSS, SQL injection, and other security vulnerabilities; fix insecure code you introduce.
++- Verify completion using relevant tests or checks. State explicitly when verification cannot run.
++Tool results and user messages may include system-reminder tags. They contain system-added reminders and are not part of the tool output itself.
++
++# Code References
++When referencing specific functions or code, include file_path:line_number so the user can navigate to the source.
++
++# Executing actions with care
++Carefully consider the reversibility and blast radius of actions before proceeding:
++- Local, reversible actions (editing files, running tests, reading code): proceed freely.
++- Actions that are hard to reverse or affect shared state: confirm with the user first.
++
++
++Actions that typically require user confirmation before proceeding:
++- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
++- Force-pushing, git reset --hard, amending published commits
++- Pushing code, creating or closing PRs, commenting on issues
++- Sending messages to external services (Slack, email, webhooks)
++- Modifying CI/CD pipelines or shared infrastructure
++
++When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`
++
++// 输出效率指引作用于面向用户的文字，不截断代码样本或模型工具调用参数。
++export const OUTPUT_GUIDANCE = `# Output efficiency
++Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
++
++Focus text output on:
++- Decisions that need the user's input
++- High-level status updates at key milestones (e.g. "build passing", "all tests green")
++- Errors or blockers that change the plan
++
++If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
+ 
+ const builtIns = Layer.effectDiscard(
+   Effect.gen(function* () {
+@@ -78,6 +153,10 @@
+       `  Workspace root folder: ${location.project.directory}`,
+       `  Is directory a git repo: ${location.vcs?.type === "git" ? "yes" : "no"}`,
+       `  Platform: ${process.platform}`,
++      // OS 属于稳定环境事实，Shell 由 BashTool 的独立 typed source 观察。
++      `  OS Version: ${os.type()} ${os.release()}`,
++      // 目录不同只产生位置约束，不额外探测或宣称它一定是 Git worktree。
++      ...(location.project.directory !== location.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
+       "</env>",
+     ].join("\n")
+     const context = SystemContext.combine([
+@@ -106,6 +185,16 @@
+         baseline: (date) => `Today's date: ${date}`,
+         update: (_previous, date) => `Today's date is now: ${date}`,
+       }),
++      // 独立 source 接纳稳定指引，已有 environment/Git 快照无需被整体替换或重采样。
++      SystemContext.make({
++        key: SystemContext.Key.make("core/action-guidance"),
++        // 字符串 codec 让提示版本变化可被既有 reconcile 精确比较，而非覆盖默认 agent。
++        codec: Schema.toCodecJson(Schema.String),
++        // 两个完整 literal 一起接纳；没有重复注册 environment 或重新采集 Git 的捷径。
++        load: Effect.succeed([ACTION_GUIDANCE, OUTPUT_GUIDANCE].join("\n\n")),
++        baseline: (text) => text,
++        update: (_previous, text) => text,
++      }),
+     ])
+ 
+     yield* registry.register({ key: SystemContext.Key.make("core/builtins"), load: Effect.succeed(context) })
+
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -15,5 +15,8 @@
+ import { Tool } from "./tool"
+ import { Tools } from "./tools"
++import { SystemContext } from "../system-context/index"
++import { SystemContextRegistry } from "../system-context/registry"
++import { Shell } from "../shell"
+ 
+ export const name = "bash"
+ export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
+@@ -48,5 +51,8 @@
+ 
+ const defaultShell = () => (process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh")
++// 单一选择器同时供执行和环境生产者读取，避免配置优先级或平台默认值漂移。
++const selectedShell = (entries: readonly Config.Entry[]) =>
++  Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info] : [])).shell ?? defaultShell()
+ 
+ const modelOutput = (output: Output) => {
+   const warnings = output.warnings?.length
+@@ -102,6 +108,19 @@
+     const appProcess = yield* AppProcess.Service
+     const config = yield* Config.Service
+     const permission = yield* PermissionV2.Service
++    const registry = yield* SystemContextRegistry.Service
++    // Shell source 随实际执行配置刷新；持久快照比较和更新仍由 Session Context Epoch 处理。
++    const shellContext = SystemContext.make({
++      key: SystemContext.Key.make("core/shell"),
++      codec: Schema.toCodecJson(Schema.String),
++      load: config.entries().pipe(Effect.map(selectedShell)),
++      baseline: (shell) => `Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
++      // 更新正文同样点名实际 shell，模型不能在换 shell 后继续使用旧的语法假设。
++      update: (_previous, shell) => `The execution shell is now: ${shell}`,
++    })
++    // 注册只提供上下文，不调用 tools.materialize，因此不创建另一个权限或执行 owner。
++    // 注册身份独立于 core/builtins，重建或释放工具 Location 不会创建第二个环境 owner。
++    yield* registry.register({ key: SystemContext.Key.make("core/shell"), load: Effect.succeed(shellContext) })
+ 
+     yield* tools
+       .register({
+@@ -154,7 +173,5 @@
+               const entries = yield* config.entries()
+-              const shell =
+-                Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
+-                  .shell ?? defaultShell()
++              const shell = selectedShell(entries)
+               const command = ChildProcess.make(input.command, [], {
+                 cwd: target.canonical,
+                 shell,
+@@ -203,5 +220,5 @@
+ export const node = makeLocationNode({
+   name: "tool/bash",
+   layer,
+-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node, SystemContextRegistry.node],
+ })
+
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -21,6 +21,7 @@
+ import { SystemContext } from "../../system-context/index"
+ import { SystemContextRegistry } from "../../system-context/registry"
++import { SystemContextBuiltIns } from "../../system-context/builtins"
+ import { SkillGuidance } from "../../skill/guidance"
+ import { ReferenceGuidance } from "../../reference/guidance"
+ import { ToolRegistry } from "../../tool/registry"
+ import { ToolOutputStore } from "../../tool-output-store"
+@@ -201,6 +202,10 @@
+       const context = entries.map((entry) => entry.message)
+       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
+       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
++      // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
++      const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
++      // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
++      const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
+       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
+       const request = LLM.request({
+         model,
+@@ -215,6 +220,7 @@
+-        system: [agent.info?.system, system.baseline]
++        system: [agent.info?.system, system.baseline, toolGuidance,
++          `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
+           .filter((part): part is string => part !== undefined && part.length > 0)
+           .map(SystemPart.make),
+         messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+         tools: toolMaterialization?.definitions ?? [],
+         toolChoice: isLastStep ? "none" : undefined,
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -110,6 +110,16 @@
+   provider: "fake",
+   route: OpenAIChat.route.with({ limits: { context: 20_000, output: 1_000 } }),
+ })
++// echo/defect 只产生通用指引；独立全文期望防止生产 formatter 自证或虚构专用工具能力。
++const expectedToolGuidance = `# Using your tools
++Do NOT use the bash tool when a dedicated tool is available.
++Using dedicated tools lets the user review and track your work:
++ - Reserve bash for system commands and terminal operations requiring shell execution
++You can call multiple tools in a single response. When there are no dependencies between calls, make them IN PARALLEL. Maximize parallel tool calls to increase efficiency. Only call sequentially when one result is needed to inform the next.`
++// 身份固定到 fixture 的真实 provider/id；未知型号没有 cutoff，不能从持久 baseline 或显示名拼造。
++const expectedModelIdentity = "You are powered by the model named fake-model. The exact model ID is fake/fake-model"
++const expectedReplacementIdentity = "You are powered by the model named replacement. The exact model ID is fake/replacement"
++
+ const authorizations: Tool.Context[] = []
+ const executions: string[] = []
+ const permission = Layer.succeed(
+@@ -753,9 +763,9 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context"],
+-        ["Initial context"],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+       ])
+       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
+       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
+@@ -791,7 +801,7 @@
+       response = fragmentFixture("text", "text-build", ["Done"]).completeEvents
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context"])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+     }),
+   )
+ 
+@@ -817,7 +827,7 @@
+       response = fragmentFixture("text", "text-reviewer", ["Done"]).completeEvents
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context"])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
+     }),
+   )
+@@ -846,7 +856,7 @@
+       response = fragmentFixture("text", "text-selected", ["Done"]).completeEvents
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context"])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Reviewer instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
+       expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
+     }),
+   )
+@@ -872,9 +882,9 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context\n\nBuild skills"],
+-        ["Initial context\n\nBuild skills"],
++        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+       ])
+       expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
+     }),
+@@ -906,9 +916,9 @@
+       response = []
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context\n\nBuild skills"],
++        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+       ])
+     }),
+   )
+ 
+@@ -936,7 +946,8 @@
+       response = []
+       yield* session.resume(sessionID)
+       expect(requests.map((request) => request.model)).toEqual([model])
+-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context"]])
++      // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
++      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context", expectedToolGuidance, expectedModelIdentity]])
+     }),
+   )
+ 
+@@ -984,10 +995,11 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+       yield* session.resume(sessionID)
+ 
++      // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context"],
+-        ["Initial context"],
+-        ["Initial context"],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+       ])
+       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
+       expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
+@@ -1030,10 +1042,10 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+       yield* session.resume(sessionID)
+ 
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context"],
+-        ["Initial context"],
+-        ["Initial context"],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+       ])
+     }),
+   )
+@@ -1067,9 +1079,10 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
+       yield* session.resume(sessionID)
+ 
++      // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context"],
+-        ["Replacement context"],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        ["Replacement context", expectedToolGuidance, expectedModelIdentity],
+       ])
+       yield* replaySessionProjection(sessionID)
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+@@ -1368,7 +1381,7 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context"])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context", expectedToolGuidance, expectedModelIdentity])
+       expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
+     }),
+   )
+@@ -1566,10 +1579,10 @@
+       yield* Fiber.join(run)
+ 
+       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context"],
+-        ["Initial context"],
++        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+       ])
+       expect(systemTexts(requests[1]!)).toContain("Replacement context")
+     }),
+   )
+
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -1,6 +1,7 @@
+ import { describe, expect } from "bun:test"
++import os from "node:os"
+ import { ConfigProvider, Effect, Layer, Schema } from "effect"
+ import { AppProcess } from "@opencode-ai/core/process"
+ import * as TestClock from "effect/testing/TestClock"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -19,6 +20,48 @@
+ const instructionFile = FSUtil.resolve("/repo/AGENTS.md")
+ const timestamp = Date.parse("2026-06-03T12:00:00.000Z")
+ const localDate = (time: number) => new Date(time).toDateString()
++// 独立固定期望供两个完整 baseline 复用，不能导入生产常量让提示文字回归自证正确。
++// 段内双空行及段间分隔都属于精确契约，完整比较继续检测顺序、删句和重复注入。
++const expectedGuidance = `# Doing tasks
++The user will primarily request software engineering tasks, including fixing bugs, adding functionality, refactoring, and explaining code.
++- Read relevant files and understand the existing code before proposing changes.
++- Plan and break down non-trivial work using the available task-management tools.
++- Implement the minimal change that satisfies the request; avoid unrelated features or refactoring.
++- Do not add comments, docstrings, or type annotations to code you did not change.
++- Do not add error handling or validation for scenarios ruled out by the codebase's guarantees.
++- Do not create helpers or abstractions for one-time operations.
++- Avoid command injection, XSS, SQL injection, and other security vulnerabilities; fix insecure code you introduce.
++- Verify completion using relevant tests or checks. State explicitly when verification cannot run.
++Tool results and user messages may include system-reminder tags. They contain system-added reminders and are not part of the tool output itself.
++
++# Code References
++When referencing specific functions or code, include file_path:line_number so the user can navigate to the source.
++
++# Executing actions with care
++Carefully consider the reversibility and blast radius of actions before proceeding:
++- Local, reversible actions (editing files, running tests, reading code): proceed freely.
++- Actions that are hard to reverse or affect shared state: confirm with the user first.
++
++
++Actions that typically require user confirmation before proceeding:
++- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes
++- Force-pushing, git reset --hard, amending published commits
++- Pushing code, creating or closing PRs, commenting on issues
++- Sending messages to external services (Slack, email, webhooks)
++- Modifying CI/CD pipelines or shared infrastructure
++
++When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.
++
++# Output efficiency
++Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
++
++Focus text output on:
++- Decisions that need the user's input
++- High-level status updates at key milestones (e.g. "build passing", "all tests green")
++- Errors or blockers that change the plan
++
++If you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`
++
+ const locationLayer = Layer.succeed(
+   Location.Service,
+   Location.Service.of(
+@@ -168,7 +211,11 @@
+           `  Workspace root folder: ${projectDirectory}`,
+           "  Is directory a git repo: yes",
+           `  Platform: ${process.platform}`,
++          `  OS Version: ${os.type()} ${os.release()}`,
++          "  Run ALL commands from the working directory; do NOT cd to the original repository root.",
+           "</env>",
+           "",
+           `Today's date: ${localDate(timestamp)}`,
++          "",
++          expectedGuidance,
+         ].join("\n"),
+@@ -175,6 +222,14 @@
+       )
++      // 禁用 Git 的固定 fixture 只有三个 source；不能因新增指引泄露 Git 或工具 Shell 注册。
++      expect(Object.keys(initialized.snapshot).sort()).toEqual(["core/action-guidance", "core/date", "core/environment"])
++      // 指引持久化为独立字符串 source，不能拼入 environment 或只生成未入快照的显示文字。
++      expect(initialized.snapshot["core/action-guidance"]).toEqual({ value: expectedGuidance })
++      expect(typeof initialized.snapshot["core/environment"].value).toBe("string")
++      expect(initialized.snapshot["core/date"]).toEqual({ value: localDate(timestamp) })
++      // 用真实 Snapshot schema 校验序列化边界，保留完整值而非只检查几个提示子串。
++      expect(Schema.decodeUnknownSync(SystemContext.Snapshot)(initialized.snapshot)).toEqual(initialized.snapshot)
+     }),
+   )
+ 
+   it.effect("reconciles the date without repeating unchanged environment context", () =>
+     Effect.gen(function* () {
+@@ -189,6 +244,8 @@
+         _tag: "Updated",
+         text: `Today's date is now: ${localDate(timestamp + 24 * 60 * 60 * 1000)}`,
+       })
++      // 日期变化只更新 date，稳定指引的独立 source 值保持原样，不重复进入更新正文。
++      if (refreshed._tag === "Updated") expect(refreshed.snapshot["core/action-guidance"]).toEqual({ value: expectedGuidance })
+     }),
+   )
+ 
+@@ -209,15 +266,20 @@
+       const context = yield* SystemContextRegistry.Service
+ 
++      // ambient instructions 仍须位于稳定指引之后；完整比较防止二者被重新排序或吞并。
+       expect((yield* SystemContext.initialize(yield* context.load())).baseline).toBe(
+         [
+           "Here is some useful information about the environment you are running in:",
+           "<env>",
+           `  Working directory: ${directory}`,
+           `  Workspace root folder: ${projectDirectory}`,
+           "  Is directory a git repo: yes",
+           `  Platform: ${process.platform}`,
++          `  OS Version: ${os.type()} ${os.release()}`,
++          "  Run ALL commands from the working directory; do NOT cd to the original repository root.",
+           "</env>",
+           "",
+           `Today's date: ${localDate(timestamp)}`,
++          "",
++          expectedGuidance,
+           "",
+           `Instructions from: ${instructionFile}\nBe precise.`,

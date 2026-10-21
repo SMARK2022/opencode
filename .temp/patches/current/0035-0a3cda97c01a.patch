@@ -1,18 +1,17 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -263,7 +263,9 @@
+@@ -270,7 +270,8 @@
    const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
    const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
    const [showAssistantMetadata, _setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
 -  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", false)
-+  const [showScrollbar, setShowScrollbar] = // 滚动条默认启用：改善长输出的可读性
-+        // 滚动条默认启用：改善长输出的可读性
-+        kv.signal("scrollbar_enabled", true)
++  // 使用新偏好键启用滚动条，避免旧键的默认 false 抵消本次默认值迁移。
++  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_enabled", true)
    const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
    const [_animationsEnabled, _setAnimationsEnabled] = kv.signal("animations_enabled", true)
    const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
-@@ -1171,7 +1173,7 @@
+@@ -1183,7 +1184,7 @@
          }}
        >
          <box flexDirection="row" flexGrow={1} minHeight={0}>
@@ -21,31 +20,32 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
              <Show when={session()}>
                <scrollbox
                  ref={(r) => (scroll = r)}
-@@ -1179,11 +1181,11 @@ export function Session() {
+@@ -1191,11 +1192,11 @@ export function Session() {
                    paddingRight: showScrollbar() ? 1 : 0,
                  }}
                  verticalScrollbarOptions={{
 -                  paddingLeft: 1,
-+                  paddingLeft: 0, // 滚动条紧贴右侧，消除左侧留白
++                  paddingLeft: 0, // viewport 已预留一列，轨道不再重复挤占内容宽度。
                    visible: showScrollbar(),
                    trackOptions: {
                      backgroundColor: theme.backgroundElement,
 -                    foregroundColor: theme.border,
-+                    foregroundColor: theme.textMuted, // 使用柔和文字色，降低滚动条视觉强度
++                    foregroundColor: theme.textMuted, // 跟随终端主题，避免固定颜色在深浅背景上失去对比度。
                    },
                  }}
                  stickyScroll={true}
-@@ -2144,23 +2146,40 @@
+@@ -2152,23 +2153,41 @@
  function Write(props: ToolProps) {
    const { theme, syntax } = useTheme()
    const pathFormatter = usePathFormatter()
 +  const ctx = use()
-+  // 文件内容展开/收缩：超过 10 行时默认收缩，点击展开
++  // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
 +  const [expanded, setExpanded] = createSignal(false)
    const code = createMemo(() => {
      return stringValue(props.input.content) ?? ""
    })
 +  const maxLines = 20
++  // 同时限制字符预算，单行长内容也不能挤满窄终端。
 +  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
 +  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars()))
 +  const limited = createMemo(() => {
@@ -78,7 +78,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
          </BlockTool>
        </Match>
-@@ -2435,6 +2454,8 @@
+@@ -2438,6 +2457,8 @@
    const ctx = use()
    const { theme, syntax } = useTheme()
    const pathFormatter = usePathFormatter()
@@ -87,16 +87,12 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  
    const view = createMemo(() => {
      const diffStyle = ctx.tui.diff_style
-@@ -2446,14 +2467,24 @@
+@@ -2449,14 +2470,21 @@
    const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
  
    const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
 +  const diffLines = createMemo(() => diffContent().split("\n"))
 +  const diffOverflow = createMemo(() => diffLines().length > 20)
-+  const limitedDiff = createMemo(() => {
-+    if (expanded() || !diffOverflow()) return diffContent()
-+    return [...diffLines().slice(0, 10), "…"].join("\n")
-+  })
  
    return (
      <Switch>
@@ -105,16 +101,17 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +        <BlockTool
 +          title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))}
 +          part={props.part}
-+          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
++          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
 +        >
-           <box paddingLeft={1}>
+-          <box paddingLeft={1}>
++          {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
++          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 15 : undefined}>
              <diff
--              diff={diffContent()}
-+              diff={limitedDiff()}
+               diff={diffContent()}
                view={view()}
                filetype={ft()}
                syntaxStyle={syntax()}
-@@ -2472,6 +2503,9 @@
+@@ -2474,6 +2502,9 @@
                removedLineNumberBg={theme.diffRemovedLineNumberBg}
              />
            </box>
@@ -124,7 +121,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
            <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
          </BlockTool>
        </Match>
-@@ -2534,8 +2568,22 @@
+@@ -2536,8 +2567,18 @@
      <Switch>
        <Match when={files().length > 0}>
          <For each={files()}>
@@ -135,31 +132,31 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +            const [patchExpanded, setPatchExpanded] = createSignal(false)
 +            const patchLines = createMemo(() => (file.patch || "").split("\n"))
 +            const patchOverflow = createMemo(() => patchLines().length > 20)
-+            const limitedPatch = createMemo(() => {
-+              if (patchExpanded() || !patchOverflow()) return file.patch
-+              return [...patchLines().slice(0, 10), "…"].join("\n")
-+            })
 +
 +            return (
 +            <BlockTool
 +              title={title(file)}
 +              part={props.part}
-+              onClick={patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 patch
++              onClick={file.type !== "delete" && patchOverflow() ? () => setPatchExpanded((prev) => !prev) : undefined}  // 删除文件没有 diff 预览，不提供无效展开操作。
 +            >
                <Show
                  when={file.type !== "delete"}
                  fallback={
-@@ -2544,11 +2592,15 @@
+@@ -2546,11 +2587,18 @@
                    </text>
                  }
                >
 -                <Diff diff={file.patch} filePath={file.filePath} />
-+                <Diff diff={limitedPatch()} filePath={file.filePath} />
++                {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
++                <box maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
++                  <Diff diff={file.patch} filePath={file.filePath} />
++                </box>
 +                <Show when={patchOverflow()}>
 +                  <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
 +                </Show>
-                 <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
+-                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
                </Show>
++              <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
              </BlockTool>
 -          )}
 +            )
@@ -180,53 +177,9 @@ diff --git a/packages/session-ui/src/components/part-default-open.ts b/packages/
      if (!edit) return false
      return !deletionOnly(part)
    }
-+  // 非工具消息与未列出的工具不默认展开
++  // 未列出的工具不强制默认值，交由 renderer 的既有策略决定。
 +  return undefined
  }
-
-diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
---- a/packages/session-ui/src/components/message-part.tsx
-+++ b/packages/session-ui/src/components/message-part.tsx
-@@ -2184,9 +2186,11 @@ ToolRegistry.register({
-     return (
-       <div data-component="edit-tool">
-         <BasicTool
--          {...props}
-           icon="code-lines"
-           defer={props.deferContent !== false}
-+          status={props.status}
-+          hideDetails={props.hideDetails}
-+          defaultOpen={props.defaultOpen}
-           trigger={
-             <div data-component="edit-trigger">
-               <div data-slot="message-part-title-area">
-@@ -2251,9 +2255,11 @@ ToolRegistry.register({
-     return (
-       <div data-component="write-tool">
-         <BasicTool
--          {...props}
-           icon="code-lines"
-           defer={props.deferContent !== false}
-+          status={props.status}
-+          hideDetails={props.hideDetails}
-+          defaultOpen={props.defaultOpen}
-           trigger={
-             <div data-component="write-trigger">
-               <div data-slot="message-part-title-area">
-@@ -2334,9 +2340,11 @@ ToolRegistry.register({
-         fallback={
-           <div data-component="apply-patch-tool">
-             <BasicTool
--              {...props}
-               icon="code-lines"
-               defer={props.deferContent !== false}
-+              status={props.status}
-+              hideDetails={props.hideDetails}
-+              defaultOpen={props.defaultOpen}
-               trigger={{
-                 title: i18n.t("ui.tool.patch"),
-                 subtitle: subtitle(),
-
 
 diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/components/scroll-view.css
 --- a/packages/ui/src/components/scroll-view.css
@@ -235,12 +188,12 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
    flex-direction: column;
    min-height: 0;
    overflow: hidden;
-+  height: 100%; /* 滚动视图填满父容器高度 */
-+  width: 100%; /* 滚动视图填满父容器宽度 */
++  height: 100%;
++  width: 100%;
  }
  
  .scroll-view__viewport {
-@@ -21,14 +23,19 @@
+@@ -21,14 +23,18 @@
  
  .scroll-view__thumb {
    position: absolute;
@@ -251,7 +204,6 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
    width: 12px;
    transition: opacity 200ms ease;
 -  cursor: default;
-+  /* 指针变为手型，提示可拖拽 */
 +  cursor: pointer;
    user-select: none;
 +  /* 确保滚动条显示在内容之上，包括 sticky header */
@@ -263,37 +215,41 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
  }
  
  .scroll-view__thumb::after {
-@@ -37,30 +44,33 @@
+@@ -38,30 +44,31 @@
    transform: translateX(-50%);
    top: 0;
    bottom: 0;
 -  width: 4px;
-+  width: 6px;  /* 加宽滚动条，改善可点击区域 */
++  width: 6px;
    border-radius: 9999px;
 -  background-color: var(--border-weak-base);
-+  background-color: rgba(0, 0, 0, 0.3); /* 浅色模式下半透明黑色滚动条 */
++  background-color: rgba(0, 0, 0, 0.3);
    backdrop-filter: blur(4px);
 -  transition: background-color 150ms ease;
-+  transition: all 150ms ease; /* 宽度与颜色统一过渡，悬停时更顺滑 */
++  transition: all 150ms ease;
  }
  
  .scroll-view__thumb:hover::after,
  .scroll-view__thumb[data-dragging="true"]::after {
 -  background-color: var(--border-strong-base);
-+  width: 8px; /* 悬停/拖拽时加宽，增强可点击区域 */
++  width: 8px;
 +  background-color: rgba(0, 0, 0, 0.5);
  }
  
- .dark .scroll-view__thumb::after,
- [data-theme="dark"] .scroll-view__thumb::after {
+-.dark .scroll-view__thumb::after,
+-[data-theme="dark"] .scroll-view__thumb::after {
++/* theme 存放主题 ID，深浅模式由 color-scheme 属性提供；Portal 也继承根属性。 */
++[data-color-scheme="dark"] .scroll-view__thumb::after {
 -  background-color: var(--border-weak-base);
-+  background-color: rgba(255, 255, 255, 0.3); /* 深色模式下半透明白色滚动条 */
++  background-color: rgba(255, 255, 255, 0.3);
  }
  
- .dark .scroll-view__thumb:hover::after,
- [data-theme="dark"] .scroll-view__thumb:hover::after,
- .dark .scroll-view__thumb[data-dragging="true"]::after,
- [data-theme="dark"] .scroll-view__thumb[data-dragging="true"]::after {
+-.dark .scroll-view__thumb:hover::after,
+-[data-theme="dark"] .scroll-view__thumb:hover::after,
+-.dark .scroll-view__thumb[data-dragging="true"]::after,
+-[data-theme="dark"] .scroll-view__thumb[data-dragging="true"]::after {
++[data-color-scheme="dark"] .scroll-view__thumb:hover::after,
++[data-color-scheme="dark"] .scroll-view__thumb[data-dragging="true"]::after {
 -  background-color: var(--border-strong-base);
 +  width: 8px;
 +  background-color: rgba(255, 255, 255, 0.5);
@@ -301,29 +257,29 @@ diff --git a/packages/ui/src/components/scroll-view.css b/packages/ui/src/compon
  
  .scroll-view__thumb[data-visible="true"] {
    opacity: 1;
-+  pointer-events: auto; /* 可见时启用指针事件，允许拖拽滚动条 */
++  pointer-events: auto;
  }
 
 
 diff --git a/packages/ui/src/components/scroll-view.tsx b/packages/ui/src/components/scroll-view.tsx
 --- a/packages/ui/src/components/scroll-view.tsx
 +++ b/packages/ui/src/components/scroll-view.tsx
-@@ -277,9 +277,11 @@
-      onPointerDown={onThumbPointerDown}
-      class="scroll-view__thumb"
+@@ -277,11 +277,12 @@
+       onPointerDown={onThumbPointerDown}
+       class="scroll-view__thumb"
 -      data-visible={thumbVisible()}
-+      // data-visible 用字符串 "true" 而非布尔值，匹配 CSS [data-visible="true"] 选择器
++      // 显式字符串匹配 CSS，可见态同时决定拖拽命中范围。
 +      data-visible={thumbVisible() ? "true" : undefined}
-      data-dragging={isDragging()}
-      style={{
-        height: `${thumbHeight()}px`,
-        transform: `translateY(${thumbTop()}px)`,
+-      data-dragging={isDragging()}
++      data-dragging={isDragging() ? "true" : undefined}
+       style={{
+         height: `${thumbHeight()}px`,
+         transform: `translateY(${thumbTop()}px)`,
 -        "z-index": 100, // ensure it displays over content
-+        // 滚动条可交互：启用指针事件以便拖拽；z-index 已移至 scroll-view.css
-+        "pointer-events": "auto",
-      }}
-         />
-       </Show>
++        // 层级和可见态交互由 CSS 管理，隐藏 thumb 不得用内联 auto 覆盖它。
+       }}
+     />
+   )
 
 
 diff --git a/packages/session-ui/src/components/session-turn.css b/packages/session-ui/src/components/session-turn.css
@@ -333,16 +289,15 @@ diff --git a/packages/session-ui/src/components/session-turn.css b/packages/sess
    align-items: flex-start;
    justify-content: flex-start;
  
--  [data-slot="session-turn-content"] {
-+  /* ScrollView 容器样式：仅设置尺寸，滚动交由 ScrollView 自身处理 */
-+  .scroll-view[data-slot="session-turn-content"] {
++  /* 两种容器共用尺寸；ScrollView 的滚动所有权留在内部 viewport。 */
+   [data-slot="session-turn-content"] {
      flex-grow: 1;
      width: 100%;
      height: 100%;
      min-width: 0;
 +  }
 +
-+  /* 保留原有的滚动条隐藏样式（用于非 ScrollView 的情况） */
++  /* 普通 div 仍需原生滚动，不能继承 ScrollView 根容器的 overflow: hidden。 */
 +  [data-slot="session-turn-content"]:not(.scroll-view) {
      overflow-y: auto;
      scrollbar-width: none;
@@ -353,26 +308,12 @@ diff --git a/packages/session-ui/src/components/session-turn.css b/packages/sess
      display: none;
    }
  
-@@ -239,3 +239,13 @@
- [data-slot="session-turn-list"] {
-   gap: 24px;
- }
-+
-+/* ScrollView 容器使用自身滚动条，非 ScrollView 的 div 保留原生 overflow-y 滚动 */
-+.scroll-view[data-slot="session-turn-content"] {
-+  overflow: auto;
-+}
-+
-+:not(.scroll-view)[data-slot="session-turn-content"] {
-+  overflow-y: auto;
-+  scrollbar-width: none;
-+}
 
 
 diff --git a/packages/session-ui/src/components/session-turn.tsx b/packages/session-ui/src/components/session-turn.tsx
 --- a/packages/session-ui/src/components/session-turn.tsx
 +++ b/packages/session-ui/src/components/session-turn.tsx
-@@ -25,6 +25,7 @@
+@@ -26,6 +26,7 @@
  import { createAutoScroll } from "@opencode-ai/ui/hooks"
  import { useI18n } from "@opencode-ai/ui/context/i18n"
  import { normalize } from "./session-diff"
@@ -380,18 +321,19 @@ diff --git a/packages/session-ui/src/components/session-turn.tsx b/packages/sess
  
  function record(value: unknown): value is Record<string, unknown> {
    return !!value && typeof value === "object" && !Array.isArray(value)
-@@ -383,8 +384,8 @@
+@@ -384,8 +385,9 @@
  
    return (
      <div data-component="session-turn" class={props.classes?.root}>
 -      <div
 -        ref={autoScroll.scrollRef}
 +      <ScrollView
++        // 自动跟随和用户滚动检测必须绑定实际 viewport，不能绑定外层布局容器。
 +        viewportRef={autoScroll.scrollRef}
          onScroll={autoScroll.handleScroll}
          data-slot="session-turn-content"
          class={props.classes?.content}
-@@ -536,7 +537,7 @@
+@@ -534,7 +536,7 @@
            </Show>
            {props.children}
          </div>
@@ -400,4 +342,24 @@ diff --git a/packages/session-ui/src/components/session-turn.tsx b/packages/sess
      </div>
    )
  }
+
+diff --git a/packages/session-ui/src/components/part-default-open.test.ts b/packages/session-ui/src/components/part-default-open.test.ts
+--- a/packages/session-ui/src/components/part-default-open.test.ts
++++ b/packages/session-ui/src/components/part-default-open.test.ts
+@@ -42,6 +42,15 @@
+   })
+ 
+   test("preserves shell defaults", () => {
+     expect(partDefaultOpen(tool("shell", {}), true, false)).toBe(true)
+   })
++
++  test("collapses file tools by default without overriding unrelated tools", () => {
++    // 默认策略不能强制无关工具关闭；受控展开仍由上层 props 承载。
++    for (const name of ["edit", "write", "patch", "apply_patch"]) {
++      expect(partDefaultOpen(tool(name, {}))).toBe(false)
++    }
++    expect(partDefaultOpen(tool("bash", {}))).toBe(false)
++    expect(partDefaultOpen(tool("read", {}))).toBeUndefined()
++  })
+ })
 

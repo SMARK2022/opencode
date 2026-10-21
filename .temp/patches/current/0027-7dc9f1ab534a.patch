@@ -1,8 +1,9 @@
 diff --git a/packages/opencode/src/session/prompt/codex.txt b/packages/opencode/src/session/prompt/codex.txt
 --- a/packages/opencode/src/session/prompt/codex.txt
 +++ b/packages/opencode/src/session/prompt/codex.txt
-@@ -1,11 +1,11 @@
+@@ -1,11 +1,12 @@
 -You are OpenCode, the best coding agent on the planet.
++<!-- 编辑工具按实际可用定义选择；自动生成文件继续交给原生成流程。 -->
 +You are OpenCode, a coding agent for software engineering tasks.
  
  You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
@@ -20,16 +21,17 @@ diff --git a/packages/opencode/src/session/prompt/codex.txt b/packages/opencode/
 diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencode/src/session/prompt/default.txt
 --- a/packages/opencode/src/session/prompt/default.txt
 +++ b/packages/opencode/src/session/prompt/default.txt
-@@ -29,7 +29,7 @@
+@@ -30,7 +30,8 @@
  
  <example>
  user: what command should I run to list files in the current directory?
 -assistant: ls
++<!-- 目录读取与模式检索是不同需求，不借终端命令替代专用工具。 -->
 +assistant: [use the read tool on the directory, or the glob tool when you need a pattern]
  </example>
  
  <example>
-@@ -40,7 +40,7 @@
+@@ -41,7 +42,7 @@
  
  <example>
  user: what files are in the directory src/?
@@ -43,16 +45,16 @@ diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencod
 diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode/src/session/prompt/gemini.txt
 --- a/packages/opencode/src/session/prompt/gemini.txt
 +++ b/packages/opencode/src/session/prompt/gemini.txt
-@@ -53,7 +53,7 @@
- - **File Paths:** Always use absolute paths when referring to files with tools like 'read' or 'write'. Relative paths are not supported. You must provide an absolute path.
+@@ -55,6 +55,7 @@
  - **Parallelism:** Execute multiple independent tool calls in parallel when feasible, especially reads, searches, and status checks. Parallel writes are only appropriate when target files or edit ranges cannot conflict.
  - **Command Execution:** Use the 'bash' tool for running shell commands, remembering the safety rule to explain modifying commands first.
 -- **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
++<!-- 后台语法随执行 shell 改变，不能默认把 POSIX 的 & 搬到 PowerShell。 -->
 +- **Long-Running Processes:** For commands that are unlikely to stop on their own, use the shell-native approach for the current environment and set an appropriate timeout. If unsure, ask the user.
  - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
  - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
  
-@@ -74,12 +74,12 @@
+@@ -75,12 +76,12 @@
  
  <example>
  user: list files here.
@@ -72,16 +74,17 @@ diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode
 diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencode/src/session/prompt/trinity.txt
 --- a/packages/opencode/src/session/prompt/trinity.txt
 +++ b/packages/opencode/src/session/prompt/trinity.txt
-@@ -26,7 +26,7 @@
+@@ -26,7 +26,8 @@
  
  <example>
  user: what command should I run to list files in the current directory?
 -assistant: ls
++<!-- 已知目录直接读取；需要文件模式时才使用 glob。 -->
 +assistant: [use the read tool on the directory, or the glob tool when you need a pattern]
  </example>
  
  <example>
-@@ -42,7 +42,7 @@
+@@ -43,7 +44,7 @@
  
  <example>
  user: what files are in the directory src/?
@@ -95,218 +98,39 @@ diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencod
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -27,6 +27,7 @@
- import { RuntimeFlags } from "@/effect/runtime-flags"
- import { type as osType, release as osRelease } from "os"
- import { ToolRegistry } from "@/tool/registry"
-+import { Shell } from "@opencode-ai/core/shell"
- 
- // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
- const MAX_STATUS_CHARS = 2000
-@@ -59,22 +60,20 @@
- 
- // 获取环境额外信息：检测 shell 类型并生成 Windows 兼容提示
- const getEnvExtras = Effect.fn("SystemPrompt.envExtras")(function* () {
--  const shell = process.env.SHELL ?? process.env.COMSPEC ?? "unknown"
--  // 检测 shell 类型：支持 zsh/bash/fish/nu/cmd/powershell/pwsh
--  const shellName = shell.includes("zsh") ? "zsh"
--    : shell.includes("bash") ? "bash"
--    : shell.includes("fish") ? "fish"
--    : shell.includes("nu")   ? "nu"
--    : shell.includes("cmd")  ? "cmd"
--    : shell.includes("powershell") ? "powershell"
--    : shell.includes("pwsh") ? "pwsh"
--    : shell.split("/").pop() ?? shell
--  // Windows 下提示使用 Unix shell 语法
--  const shellLine = process.platform === "win32"
--    ? `${shellName} (use Unix shell syntax — /dev/null not NUL, forward slashes)`
--    : shellName
-+  const actualShell = Shell.acceptable()
-+  const shellName = Shell.name(actualShell)
-+  const shellNotes =
-+    process.platform !== "win32"
-+      ? [`Shell: ${shellName}`]
-+      : shellName === "powershell"
-+        ? [`Shell: powershell (Windows PowerShell 5.1)`, `Shell syntax: use PowerShell syntax, not Unix shell syntax.`, `Do NOT use Unix-only commands such as tail, head, sed, awk, or grep in shell commands.`, `Do NOT use /dev/null. Use $null or dedicated tools instead.`, `Do NOT use && or || in Windows PowerShell 5.1. Use A; if ($?) { B } for conditional chaining.`]
-+        : shellName === "pwsh"
-+          ? [`Shell: pwsh (PowerShell 7+)`, `Shell syntax: use PowerShell syntax. Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may not exist.`, `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`]
-+          : shellName === "cmd"
-+            ? [`Shell: cmd.exe`, `Shell syntax: use Windows cmd syntax, not Bash or PowerShell syntax.`, `Use dir instead of ls, type instead of cat, and do not use tail/head/sed/awk/grep.`, `For file reads/searches/listing, use dedicated OpenCode tools instead of shell commands.`]
-+            : [`Shell: ${shellName}`, `Shell syntax: this Windows shell may not support Unix commands. Prefer dedicated OpenCode tools for file operations.`]
-   const osVersion = `${osType()} ${osRelease()}`
--  return { shellLine, osVersion }
-+  return { shellNotes, osVersion }
- })
- 
- // 根据模型 API ID 估算知识截止日期（含 Claude 4 系列）
-@@ -102,6 +101,9 @@
-   if (has("write")) items.push(` - To create files use the write tool instead of echo redirection or heredoc`)
-   if (has("grep"))  items.push(` - To search file content use the grep tool instead of grep/rg`)
-   if (has("glob"))  items.push(` - To find files use the glob tool instead of find or ls`)
-+  if (has("todowrite")) items.push(` - For non-trivial multi-step work, use the todowrite tool to track progress`)
-+  if (process.platform === "win32") items.push(` - On Windows, do not use Unix text utilities such as tail/head/sed/awk/grep for file operations. Use read/grep/glob, or shell-native commands only when a terminal operation truly requires shell execution.`)
-+  if (has("todo")) items.push(``, `Keep todo state current while working: only one item should be in_progress at a time.`, `Move an item to in_progress before completing it; do not jump directly from pending to completed.`, `If your understanding changes, update the todo list before continuing implementation.`)
-   items.push(
-     ` - Reserve bash for system commands and terminal operations requiring shell execution`,
-     // 并行调用指引：独立读取和搜索应并行执行，避免 echo 拼接
-@@ -198,7 +200,7 @@
-         const gitContext = yield* getGitContext()
-         // 获取环境额外信息：shell 类型和 OS 版本，用于系统提示词
-         // 获取环境额外信息：shell 和 OS 版本
--        const { shellLine, osVersion } = yield* getEnvExtras()
-+        const { shellNotes, osVersion } = yield* getEnvExtras()
-         // 根据模型估算知识截止日期
-         const isWorktree = ctx.worktree !== ctx.directory
-         const cutoff = getKnowledgeCutoff(model.api.id)
-@@ -216,7 +218,7 @@
-             `  Workspace root folder: ${ctx.worktree}`,
-             // 将 git 多行内容逐行缩进，保持在 <env> 块内格式一致
-             ...gitContext.split("\n").map((line: string) => `  ${line}`),
--            `  Shell: ${shellLine}`,
-+            ...shellNotes.map((line) => `  ${line}`),
-             `  OS Version: ${osVersion}`,
-             ...(cutoff ? [`  Knowledge cutoff: ${cutoff}`] : []),
-             `  Platform: ${process.platform}`,
-@@ -247,6 +249,9 @@
-           // 执行操作时的安全指引：提醒模型在执行破坏性操作前需要确认
-           `# Executing actions with care\nCarefully consider the reversibility and blast radius of actions before proceeding:\n- Local, reversible actions (editing files, running tests, reading code): proceed freely.\n- Actions that are hard to reverse or affect shared state: confirm with the user first.\n\n\nActions that typically require user confirmation before proceeding:\n- Deleting files, branches, or directories; rm -rf; overwriting uncommitted changes\n- Force-pushing, git reset --hard, amending published commits\n- Pushing code, creating or closing PRs, commenting on issues\n- Sending messages to external services (Slack, email, webhooks)\n- Modifying CI/CD pipelines or shared infrastructure\n\nWhen you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user\x27s in-progress work.`,
-           // 输出效率指引：提醒模型保持简洁高效的输出
-+        `# Shared worktree\n\nYou may be working in a dirty worktree with user or other-agent changes.\n- If unknown changes are in files you need to edit, read them first and work with the current contents.\n- If unknown changes are unrelated to your task, ignore them.\n- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.\n- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.`,
-+        `# Verification\n\nBefore reporting a coding task complete, verify the change when feasible.\nStart with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.\nIf you cannot verify, state that plainly and explain the blocker.`,
-+        `# Context continuity\n\nThe conversation may be compacted or resumed from a summary when context gets long.\nAfter compaction, resume from the summary and current messages rather than restarting from scratch.\nCompaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.\nBefore your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`,
-           `# Output efficiency\nGo straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.\n\nFocus text output on:\n- Decisions that need the user\x27s input\n- High-level status updates at key milestones (e.g. "build passing", "all tests green")\n- Errors or blockers that change the plan\n\nIf you can say it in one sentence, do not use three. Do not narrate each step or list every file you read. This does not apply to code or tool calls.`,
-         ].filter((part): part is string => part !== undefined)
-       }),
+@@ -190,3 +190,4 @@
+             // 语法信息来自执行 shell；完整 PS/cmd 安全和 quoting 指引仍归工具 description。
+-            `  Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
++            // 沿用上方 cfg.shell 的真实选择，共用说明不能重新猜测环境变量。
++            ...Shell.guidance(shell, process.platform).split("\n").map((line) => `  ${line}`),
+             `  OS Version: ${os.type()} ${os.release()}`,
 
 
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -334,7 +334,99 @@
+@@ -334,7 +334,13 @@
    ps.setLanguage(psLanguage)
    return { bash, ps }
  })
-+
-+// Windows 下禁止使用的 Unix 文本工具集合
-+const UNIX_TEXT_COMMANDS = new Set(["tail", "head", "sed", "awk", "grep"])
  
-+// 检测 Windows shell 下是否误用 Unix 工具，返回错误消息阻止执行
-+function shellCompatibilityError(root: Node, shellName: string): string | undefined {
-+  if (process.platform !== "win32") return
-+  if (shellName !== "powershell" && shellName !== "pwsh" && shellName !== "cmd") return
-+  for (const node of commands(root)) {
-+    const command = parts(node)
-+    const raw = command[0]?.text
-+    if (!raw) continue
-+    const name = raw.toLowerCase().replace(/\.exe$/, "")
-+    if (UNIX_TEXT_COMMANDS.has(name)) {
-+      // Unix 文本工具在 Windows shell 中不存在，返回错误阻止执行
-+      return [
-+        `The current shell is ${shellName}, but the command uses Unix utility \`${raw}\`.`,
-+        `Use OpenCode's dedicated tools instead: read for files, grep for content search, glob for file search.`,
-+        shellName === "powershell" || shellName === "pwsh"
-+          ? `If a shell command is truly required, use PowerShell equivalents such as Get-Content -Tail or Select-String.`
-+          : `If a shell command is truly required in cmd.exe, use cmd-native commands such as dir/type/findstr.`,
-+      ].join(" ")
-+    }
-+    if (shellName === "cmd" && name === "ls") {
-+      // cmd.exe 中 ls 不是原生命令，引导使用 read/glob
-+      return `The current shell is cmd.exe, where \`ls\` is not native. Use read/glob for file listing, or \`dir\` only when a shell command is required.`
-+    }
-+    // PowerShell 中 find 语义不同，引导使用 glob/grep
-+    if ((shellName === "powershell" || shellName === "pwsh") && name === "find") {
-+      return `The current shell is ${shellName}; \`find\` is ambiguous on Windows. Use glob for file search or grep for content search.`
-+    }
-+  }
-+}
-+
-+
-+// 生成 per-shell 指引文本：Windows 下按 shell 类型提供 Unix 工具禁用和替代方案
-+// powershell 5.1 不支持 && ||，需要用 A; if ($?) { B } 条件链
-+function shellGuidance(name: string) {
-+  if (process.platform !== "win32") return ""
-+
-+  // Windows PowerShell 5.1：禁止 Unix 工具，提供 PowerShell 等价命令
-+  if (name === "powershell") {
-+    return [
-+      "PowerShell notes:",
-+      "- This shell is Windows PowerShell 5.1 unless configured otherwise.",
-+      "- Do NOT use Unix utilities such as tail, head, sed, awk, or grep. They are not PowerShell built-ins.",
-+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
-+      "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
-+      "- Do NOT use /dev/null. Use $null.",
-+      "- Do NOT use && or ||. Use `A; if ($?) { B }` when B depends on A succeeding.",
-+      "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
-+    ].join("\n")
-+  }
-+
-+  // PowerShell 7+：支持 && || 但 Unix 工具可能不存在
-+  if (name === "pwsh") {
-+    return [
-+      "PowerShell notes:",
-+      "- This shell is PowerShell 7+.",
-+      "- Bash-like && and || are supported, but Unix utilities such as tail/head/sed/awk/grep may still be unavailable.",
-+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
-+      "- If shell text processing is truly required, use Get-Content -Tail, Select-String, Get-ChildItem, Test-Path, and $null.",
-+      "- Read environment variables with `$env:NAME`, not `export NAME=...`.",
-+    ].join("\n")
-+  }
-+
-+  // cmd.exe：使用 Windows cmd 语法，禁止 Unix 工具
-+  if (name === "cmd") {
-+    return [
-+      "Windows cmd notes:",
-+      "- Use cmd.exe syntax, not Bash or PowerShell syntax.",
-+      "- Use `dir` for directory listing and `type` for simple file output.",
-+      "- Do NOT use Unix utilities such as ls, tail, head, sed, awk, or grep.",
-+      "- Use dedicated tools for file operations: read, grep, glob, edit, write.",
-+      "- Use `NUL` for the null device, not `/dev/null`.",
-+    ].join("\n")
-+  }
-+
-+  // 未知 Windows shell：提供通用建议
-+  return [
-+    "- This shell may not support Unix utilities. Prefer dedicated OpenCode tools for file operations.",
-+  ].join("\n")
-+}
-+
-+// 返回当前 shell 的目录列表命令，用于提示词中的目录验证指引
-+// 非 Windows 返回 ls，PowerShell 返回 Get-ChildItem，cmd 返回 dir
-+function listCommand(name: string) {
-+  if (process.platform !== "win32") return "`ls`"
-+  if (name === "powershell" || name === "pwsh") return "`Get-ChildItem`"
-+  if (name === "cmd") return "`dir`"
-+  return "the shell-native directory listing command"
++// 只检查解析出的命令头，不能把 echo 参数或路径里的 grep 当成执行工具。
++function shellCompatibilityError(root: Node, shellName: string) {
++  // V1 保留完整 AST 提取；分类与错误文字复用 Core 的同一 guard。
++  return Shell.compatibilityError(commands(root).flatMap((node) => parts(node)[0]?.text ?? []), shellName)
 +}
 +
  export const ShellTool = Tool.define(
    ShellID.ToolID,
    Effect.gen(function* () {
-@@ -601,10 +693,14 @@
-         const name = Shell.name(shell)
-         const limits = yield* trunc.limits()
-         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
-+        // 追加 per-shell 指引、目录列表命令和专用工具列表到提示词描述
-+        const shellGuidanceText = shellGuidance(name)
-+        const listCmd = listCommand(name)
-+        const enhancedDescription = prompt.description + (shellGuidanceText ? "\n\n" + shellGuidanceText : "") + "\nDirectory listing command: " + listCmd + "\nDedicated tools (prefer over shell):\n- File listing/search: Use Glob or Read directory output (NOT ls/find/dir/Get-ChildItem -Recurse)\n- Content search: Use Grep (NOT grep/rg/findstr/Select-String)\n- Read files: Use Read (NOT cat/head/tail/type/Get-Content)\n- Edit files: Use Edit (NOT sed/awk/PowerShell text replacement)\n- Write files: Use Write (NOT echo redirection/heredoc/Out-File/Set-Content)\n- Communication: Output text directly (NOT echo/printf)"
-         yield* Effect.logInfo("shell tool using shell", { shell })
- 
-         return {
--          description: prompt.description,
-+          description: enhancedDescription,
-           parameters: prompt.parameters,
-           execute: (params: Parameters, ctx: Tool.Context) =>
-             Effect.gen(function* () {
-@@ -622,7 +718,10 @@
+@@ -622,7 +628,10 @@
                    const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
                      Effect.sync(() => tree.delete()),
                    )
--                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
-+                                // parse 后检测 Unix 工具误用，不兼容时抛出错误阻止执行
-+              const compatibility = shellCompatibilityError(tree.rootNode, name)
-+              if (compatibility) throw new Error(compatibility)
-+              const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
++                  // 检查发生在权限与执行之前，tree 的 acquireRelease 仍负责失败释放。
++                  const compatibility = shellCompatibilityError(tree.rootNode, name)
++                  if (compatibility) throw new Error(compatibility)
+                   const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
                    if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
                    yield* ask(ctx, scan, params)
                  }),
@@ -315,21 +139,72 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
 --- a/packages/opencode/src/tool/shell/prompt.ts
 +++ b/packages/opencode/src/tool/shell/prompt.ts
-@@ -64,7 +64,7 @@
+@@ -3,6 +3,7 @@
+ import { PositiveInt } from "@opencode-ai/core/schema"
+ import { Global } from "@opencode-ai/core/global"
+ import { ShellID } from "./id"
++import { Shell } from "@opencode-ai/core/shell"
+ 
+ const PS = new Set(["powershell", "pwsh"])
+ const CMD = new Set(["cmd"])
+@@ -15,7 +16,11 @@
+ export function parameterSchema() {
+   return Schema.Struct({
+     command: Schema.String.annotate({ description: "The command to execute" }),
++    // 调用说明是可选元数据，不能拼入实际 command 或改变权限匹配。
++    description: Schema.optional(Schema.String).annotate({
++      description: "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
++    }),
+     timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
+     workdir: Schema.optional(Schema.String).annotate({
+       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
+     }),
+@@ -64,7 +69,8 @@
  
  function chainGuidance(name: string) {
    if (name === "powershell") {
 -    return "If the commands depend on each other and must run sequentially, avoid '&&' in this shell because Windows PowerShell (5.1) does not support it. Use PowerShell conditionals such as `cmd1; if ($?) { cmd2 }` when later commands must depend on earlier success."
++    // 5.1 两种链式运算符都不可用，不能只提醒避免 &&。
 +    return "If the commands depend on each other and must run sequentially, do NOT use '&&' or '||'. Use `cmd1; if ($?) { cmd2 }`."
    }
    if (PS.has(name)) {
      return "If the commands depend on each other and must run sequentially, use a single bash tool call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like New-Item before Copy-Item, Write before bash for git operations, or git add before git commit), run these operations sequentially instead."
+@@ -79,8 +85,9 @@
+   return `Before executing the command, please follow these steps:
+ 
+ 1. Directory Verification:
+-   - If the command will create new directories or files, first use \`ls\` to verify the parent directory exists and is the correct location
+-   - For example, before running "mkdir foo/bar", first use \`ls foo\` to check that "foo" exists and is the intended parent directory
++   <!-- 目录确认不要求运行 ls；专用工具能保留可审查的读取结果。 -->
++   - If the command will create new directories or files, first verify the parent directory exists and is correct using available read/glob tools.
++   - If terminal verification is necessary, use this shell's native directory listing command.
+ 
+ 2. Command Execution:
+    - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
+@@ -258,5 +265,5 @@
+-    intro:
+-      "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.",
++    // 每次命令独立执行，不能向模型承诺跨调用的持久 shell 状态。
++    intro: "Executes a shell command in the current workspace with optional timeout.",
+     workdirSection:
+       "All commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.",
+     commandSection: bashCommandSection(chain, limits, defaultTimeoutMs),
+@@ -273,7 +280,8 @@
+ export function render(name: string, platform: NodeJS.Platform, limits: Limits, defaultTimeoutMs: number) {
+   const selected = profile(name, platform, limits, defaultTimeoutMs)
+   return {
+-    description: renderPrompt(DESCRIPTION, {
++    // 完整工具说明复用既有 profile，平台编码与环境变量约束由 Core Shell 提供，避免追加第二份工具列表或复制 V1 模板。
++    description: Shell.guidance(name, platform) + "\n\n" + renderPrompt(DESCRIPTION, {
+       intro: selected.intro,
+       os: platform,
+       shell: name,
 
 
 diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
 --- a/packages/opencode/src/tool/task.txt
 +++ b/packages/opencode/src/tool/task.txt
-@@ -2,18 +2,30 @@
+@@ -2,18 +2,33 @@
  
  When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
  
@@ -338,6 +213,7 @@ diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/ta
 -- If you are searching for a specific class definition like "class Foo", use the Grep tool instead, to find the match more quickly
 -- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
 -- If no available agent is a good fit for the task, use other tools directly
++<!-- 委派前先判断收益；已知路径的读取不应绕到另一个 agent。 -->
 +Use task when:
 +- The user invokes a custom slash command; pass the slash command invocation as the full prompt.
 +- A broad codebase question requires multiple rounds of search/read synthesis.
@@ -351,6 +227,7 @@ diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/ta
 +- The next local step is blocked on the result and you can answer it faster yourself.
 +- The task is trivial or would duplicate work you are already doing.
  
++<!-- 新 agent 没有当前上下文，明确所有权与验证要求才能避免重叠修改。 -->
 +Prompting rules:
 +- Make the prompt self-contained unless resuming with task_id.
 +- State whether the agent should research only or edit files.
@@ -368,6 +245,7 @@ diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/ta
 -5. The agent's outputs should generally be trusted
 -6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
 -7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
++<!-- 回传结果供主 agent 整合；成功结论仍需查看实际修改与验证证据。 -->
 +- Launch independent agents in parallel in one response when their scopes do not overlap.
 +- Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
 +- Reuse task_id only when continuing the same subagent context is useful.
@@ -377,7 +255,7 @@ diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/ta
 diff --git a/packages/opencode/src/tool/todowrite.txt b/packages/opencode/src/tool/todowrite.txt
 --- a/packages/opencode/src/tool/todowrite.txt
 +++ b/packages/opencode/src/tool/todowrite.txt
-@@ -1,19 +1,16 @@
+@@ -1,19 +1,17 @@
  Create and maintain a structured task list for the current coding session. Tracks progress, organizes multi-step work, and surfaces status to the user.
  
 -## When to use
@@ -388,6 +266,7 @@ diff --git a/packages/opencode/src/tool/todowrite.txt b/packages/opencode/src/to
 -- New instructions arrive - capture them as todos
 -- You start a task - mark it `in_progress` (only one at a time) before working
 -- You finish a task - mark it `completed` and add any follow-ups discovered during the work
++<!-- 追踪围绕有意义的任务步骤，不按调用次数制造额外任务。 -->
 +Use todowrite when:
 +- The task has 3 or more meaningful steps.
 +- The user explicitly asks for a todo list or progress tracking.
@@ -407,4 +286,469 @@ diff --git a/packages/opencode/src/tool/todowrite.txt b/packages/opencode/src/to
  
  ## States
  - `pending` - not started
+@@ -24,7 +22,10 @@
+ ## Rules
+ - Update status in real time; don't batch completions
+ - Mark `completed` only after the required work is actually done, including any required verification. Never based on intent.
++<!-- 完成状态代表已执行且验证的结果，不能从计划直接跳为完成。 -->
++- Move an item to `in_progress` before working on it; do not jump from pending directly to completed.
+ - Keep exactly one `in_progress` while work remains
+ - If blocked or partial, keep it `in_progress` and add a follow-up todo describing the blocker
+ - Preserve user-provided commands verbatim (flags, args, order)
++- Update the list when your understanding changes before continuing implementation.
+ - Items should be specific and actionable; break large work into smaller steps
+
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -223,4 +223,103 @@
+ export async function list(): Promise<Item[]> {
+   const shells = process.platform === "win32" ? win() : await unix()
+   return shells.filter((s) => resolve(s)).map(info)
+ }
++
++// 只渲染已选择的 shell，调用方继续拥有各自的配置优先级与 fallback。
++export function guidance(file: string, platform: NodeJS.Platform) {
++  const shell = name(file)
++  return [
++    `Shell: ${file}`,
++    // PowerShell 跨平台仍使用自身语法，不能根据 OS 把它误判为 Bash。
++    ...(ps(file) ? [
++      "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
++      // 5.1 与 7+ 链式能力不同，分号始终是无条件顺序执行。
++      shell === "powershell" ? "Windows PowerShell 5.1: do NOT use && or ||. Use A; if ($?) { B } for success-dependent commands." : "PowerShell 7+: && and || are supported; use ; only for unconditional sequencing.",
++    ] : shell === "cmd" ? [
++      // cmd 的变量与空设备均不同于 PowerShell 和 POSIX。
++      "Use cmd.exe syntax, %NAME% for environment variables, NUL instead of /dev/null, and && for success-dependent commands.",
++    ] : ["Use this shell's native syntax."]),
++    // Git Bash 保留 Unix 工具；严格禁用仅面向 Windows 原生 shell。
++    ...(platform === "win32" && ["powershell", "pwsh", "cmd"].includes(shell) ? [
++      "Do NOT use Unix text utilities tail/head/sed/awk/grep for file operations. Prefer available dedicated tools.",
++      // 仅必要的终端处理给出等价命令，不宣称当前请求拥有未注册工具。
++      shell === "cmd" ? "For necessary terminal checks use dir/type/findstr." : "For necessary terminal checks use Test-Path, Get-Content -Tail or Select-String.",
++    ] : []),
++    // 两条执行路径都按 UTF-8 解码，非 ASCII 程序输出必须使用相同编码。
++    "For non-ASCII output, configure the shell/native program to emit UTF-8; captured output is decoded as UTF-8.",
++  ].join("\n")
++}
++
++// 只识别直接调用和顶层命令链；复杂脚本保留 Core 原有权限路径，不在这里补写 shell 解释器。
++export function* commandHeads(command: string, shellName: string) {
++  if (!["powershell", "pwsh", "cmd"].includes(shellName)) return
++  const powershell = shellName !== "cmd"
++  const separators = powershell ? ";|&\r\n" : "|&\r\n"
++  const escapes: Record<string, string> = { "0": "\0", a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", ...(shellName === "pwsh" ? { e: "\x1b" } : {}) }
++  let head = true
++  let invoked = false
++  let depth = 0
++  for (let index = 0; index < command.length;) {
++    const character = command[index]
++    if (powershell && character === "#") {
++      while (index < command.length && command[index] !== "\n") index++
++      continue
++    }
++    // 嵌套表达式和脚本块不属于此浅层检查，避免把标签、数组值或哈希键当命令。
++    if ("({".includes(character)) { depth++; head = false; index++; continue }
++    if (")}".includes(character)) { depth = Math.max(0, depth - 1); index++; continue }
++    if (separators.includes(character)) {
++      if (!depth) { invoked = powershell && character === "&" && head; head = true }
++      index++
++      continue
++    }
++    if (/\s/.test(character)) { index++; continue }
++    const quoted = character === '"' || (powershell && character === "'")
++    let quote = ""
++    let text = ""
++    while (index < command.length) {
++      const current = command[index]
++      // 引号与转义只用于划分参数，参数中的分隔符不能制造新命令。
++      if (current === (powershell ? "`" : "^") && (powershell ? quote !== "'" : !quote)) {
++        index++
++        text += (powershell ? escapes[command[index] ?? ""] : undefined) ?? command[index] ?? ""
++        index++
++        continue
++      }
++      if (quote) {
++        if (current === quote) {
++          if (powershell && command[index + 1] === quote) { text += current; index += 2; continue }
++          quote = ""
++        } else text += current
++        index++
++        continue
++      }
++      if (current === '"' || (powershell && current === "'")) { quote = current; index++; continue }
++      if (/\s/.test(current) || separators.includes(current) || "(){}".includes(current)) break
++      text += current
++      index++
++    }
++    if (!head || depth) continue
++    // 保留常见显式调用形式，不把 PowerShell 裸字符串当成可执行文件。
++    if ((powershell && text === ".") || (!powershell && text.toLowerCase() === "call")) { invoked = true; continue }
++    if (text && (!powershell || !quoted || invoked)) yield text
++    head = false
++    invoked = false
++  }
++}
++
++// 两条执行路径共用分类；调用方传 AST 或词法命令头，不传任意参数文字。
++export function compatibilityError(heads: Iterable<string>, shellName: string) {
++  if (process.platform !== "win32" || !["powershell", "pwsh", "cmd"].includes(shellName)) return
++  for (const raw of heads) {
++    // 源guard仅匹配裸命令名，显式路径交给原权限/advisory，不用basename扩大范围。
++    const file = raw.replace(/^[&.]\s+/, "").replace(/^(['"])(.*)\1$/, "$2")
++    const command = (shellName === "cmd" ? file.replace(/^@/, "") : file).toLowerCase().replace(/\.exe$/, "")
++    if (["tail", "head", "sed", "awk", "grep"].includes(command)) {
++      return `The current shell is ${shellName}, but the command uses Unix utility ${raw}. Prefer available dedicated file tools; if terminal processing is required, use ${shellName === "cmd" ? "dir/type/findstr" : "Get-Content -Tail or Select-String"}.`
++    }
++    // ls 是 PS 的目录别名，只有 cmd 需要拦截；find 在 PS 语义含糊。
++    if (shellName === "cmd" && command === "ls") return "The current shell is cmd.exe; use available directory tools or dir instead of ls."
++    if (shellName !== "cmd" && command === "find") return `The current shell is ${shellName}; find is ambiguous on Windows. Prefer available dedicated search tools.`
++  }
++}
+
+diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
+--- a/packages/core/src/system-context/builtins.ts
++++ b/packages/core/src/system-context/builtins.ts
+@@ -39,4 +39,7 @@
+     // Todo 工具也受当前 turn 权限约束，不能从静态提示推断其存在。
+-    ...(ids.includes("todowrite") ? ["# Task Management", "Use the todowrite tool to plan non-trivial tasks and track progress. Mark todos as completed as soon as each task is done; do not batch completion updates."] : []),
++    // 状态规则归真实 todowrite 能力，不用不存在的 todo 别名触发。
++    ...(ids.includes("todowrite") ? ["# Task Management", "Use the todowrite tool for non-trivial multi-step work, explicit progress tracking, multiple requirements, and changed plans. Skip trivial or informational tasks. Keep items concrete and verifiable. Include required verification. Keep only one item in_progress; move it to in_progress before working, do not jump from pending to completed. Mark completed as soon as work and required verification finish; do not batch updates. Cancel irrelevant items and update the list when understanding changes before continuing implementation."] : []),
++    // 通用 Windows 文件操作约束不猜测 shell，也不点名未广告的工具。
++    ...(process.platform === "win32" && ids.includes("bash") ? [" - On Windows, prefer available dedicated tools for file operations; use shell-native commands only when terminal execution is truly required."] : []),
+     " - Reserve bash for system commands and terminal operations requiring shell execution",
+     // 分段分隔是格式契约，避免指引紧贴前面的能力列表。
+@@ -80,5 +83,26 @@
+ - Modifying CI/CD pipelines or shared infrastructure
+ 
+-When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.`
++When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.
++
++<!-- 未知工作树修改需要按关联性处理，不能把其他人的工作当作清理对象。 -->
++# Shared worktree
++You may be working in a dirty worktree with user or other-agent changes.
++- If unknown changes are in files you need to edit, read them first and work with the current contents.
++- If unknown changes are unrelated to your task, ignore them.
++- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
++- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.
++
++<!-- 从最小相关检查逐步扩大验证，未运行的检查必须留下明确阻塞信息。 -->
++# Verification
++Before reporting a coding task complete, verify the change when feasible.
++Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
++If you cannot verify, state that plainly and explain the blocker.
++
++<!-- 压缩摘要可能陈旧，当前用户目标优先于历史任务残留。 -->
++# Context continuity
++The conversation may be compacted or resumed from a summary when context gets long.
++After compaction, resume from the summary and current messages rather than restarting from scratch.
++Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
++Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.`
+ 
+ // 输出效率指引作用于面向用户的文字，不截断代码样本或模型工具调用参数。
+
+diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
+--- a/packages/core/test/system-context/builtins.test.ts
++++ b/packages/core/test/system-context/builtins.test.ts
+@@ -50,8 +50,29 @@
+ - Sending messages to external services (Slack, email, webhooks)
+ - Modifying CI/CD pipelines or shared infrastructure
+ 
+ When you encounter an obstacle, do not use destructive actions as a shortcut. Identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state such as unfamiliar files, branches, or configuration, investigate before deleting or overwriting — it may represent the user's in-progress work.
+ 
++<!-- 未知工作树修改需要按关联性处理，不能把其他人的工作当作清理对象。 -->
++# Shared worktree
++You may be working in a dirty worktree with user or other-agent changes.
++- If unknown changes are in files you need to edit, read them first and work with the current contents.
++- If unknown changes are unrelated to your task, ignore them.
++- If unknown changes directly block your task or make the correct edit ambiguous, ask the user one concise question.
++- Never revert, overwrite, or clean up changes you did not make unless explicitly asked.
++
++<!-- 从最小相关检查逐步扩大验证，未运行的检查必须留下明确阻塞信息。 -->
++# Verification
++Before reporting a coding task complete, verify the change when feasible.
++Start with the narrowest relevant check for the code you changed, then broaden to related tests, typecheck, lint, or build as confidence grows.
++If you cannot verify, state that plainly and explain the blocker.
++
++<!-- 压缩摘要可能陈旧，当前用户目标优先于历史任务残留。 -->
++# Context continuity
++The conversation may be compacted or resumed from a summary when context gets long.
++After compaction, resume from the summary and current messages rather than restarting from scratch.
++Compaction summaries can include stale or unrelated context; do not treat old tasks from the summary as current work unless the latest user message asks for them.
++Before your final response after a resume, interruption, or context transition, sanity-check that your answer and tool actions address the newest user request, not an older ghost still lingering in the thread.
++
+ # Output efficiency
+ Go straight to the point. Lead with the answer or action, not the reasoning. Skip filler words, preamble, and unnecessary transitions. Do not restate what the user said — just do it. When explaining, include only what is necessary for the user to understand.
+ 
+
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -26,5 +26,9 @@
+ export const Input = Schema.Struct({
+   command: Schema.String.annotate({ description: "Shell command string to execute" }),
++  // description 是调用意图，不参与命令拼接，也不替代原始命令授权资源。
++  description: Schema.String.pipe(Schema.optional).annotate({
++    description: "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
++  }),
+   workdir: Schema.String.pipe(Schema.optional).annotate({
+     description: "Working directory. Defaults to the active Location; relative paths resolve from that Location.",
+   }),
+@@ -114,10 +118,12 @@
+       key: SystemContext.Key.make("core/shell"),
+       codec: Schema.toCodecJson(Schema.String),
+       load: config.entries().pipe(Effect.map(selectedShell)),
+-      baseline: (shell) => `Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
++      // cfg.shell 与默认值仍由 selectedShell 决定，不套用 legacy acceptable fallback。
++      baseline: (shell) => Shell.guidance(shell, process.platform),
+       // 更新正文同样点名实际 shell，模型不能在换 shell 后继续使用旧的语法假设。
+-      update: (_previous, shell) => `The execution shell is now: ${shell}`,
++      // 换 shell 后同时更新链式/变量/编码语义，不能只替换显示名。
++      update: (_previous, shell) => `The execution shell is now:\n${Shell.guidance(shell, process.platform)}`,
+     })
+     // 注册只提供上下文，不调用 tools.materialize，因此不创建另一个权限或执行 owner。
+     // 注册身份独立于 core/builtins，重建或释放工具 Location 不会创建第二个环境 owner。
+     yield* registry.register({ key: SystemContext.Key.make("core/shell"), load: Effect.succeed(shellContext) })
+@@ -125,8 +131,9 @@
+     yield* tools
+       .register({
+         [name]: Tool.make({
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
++          // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
+           input: Input,
+           output: Output,
+           structured: StructuredOutput,
+           toStructuredOutput: ({ output }) => ({
+@@ -141,6 +148,12 @@
+           execute: (input, context) =>
+             Effect.gen(function* () {
++              // 配置只采样一次，兼容检查和最终 spawn 必须使用同一个实际 shell。
++              const entries = yield* config.entries()
++              const shell = selectedShell(entries)
++              const compatibility = Shell.compatibilityError(Shell.commandHeads(input.command, Shell.name(shell)), Shell.name(shell))
++              // 在目录授权和命令授权之前返回已有 ToolFailure，不执行任何进程。
++              if (compatibility) return yield* new ToolFailure({ message: compatibility })
+               const source = {
+                 type: "tool" as const,
+                 messageID: context.assistantMessageID,
+                 callID: context.toolCallID,
+@@ -170,9 +183,8 @@
+               if ((yield* fs.stat(target.canonical)).type !== "Directory")
+                 return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
+ 
+-              const entries = yield* config.entries()
+-              const shell = selectedShell(entries)
++              // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
+               const command = ChildProcess.make(input.command, [], {
+                 cwd: target.canonical,
+                 shell,
+                 stdin: "ignore",
+@@ -210,7 +222,9 @@
++                  // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
+                 truncated: result.outputTruncated === true,
+                 ...(warnings.length ? { warnings } : {}),
+               }
+-            }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
++              // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
++            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
+         }),
+       })
+       .pipe(Effect.orDie)
+
+diff --git a/packages/core/src/tool/todowrite.ts b/packages/core/src/tool/todowrite.ts
+--- a/packages/core/src/tool/todowrite.ts
++++ b/packages/core/src/tool/todowrite.ts
+@@ -32,6 +32,8 @@
+       .register({
+         [name]: Tool.make({
+           description:
+-            "Create and maintain a structured task list for the current coding session. Use it to track progress during multi-step work and keep todo statuses current.",
++            // 真实注册工具保留源27的使用边界，不向 Core 增加不存在的 task/plan。
++            // 验证与状态变化属于任务追踪，不改变 SessionTodo 的持久化或权限 owner。
++            "Create and maintain a structured task list for the current coding session. Use todowrite for 3 or more meaningful steps, explicit progress tracking, multiple requirements, planning/implementation/verification, or changed instructions. Skip single straightforward, trivial or informational requests. Keep items short, concrete and verifiable; include required verification. Keep exactly one in_progress while work remains, mark it before working, mark completed only after required work and verification, cancel irrelevant items, and update the list when understanding changes. Do not batch completion updates.",
+           input: Input,
+           output: Output,
+
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -17,6 +17,8 @@
+ import { BashTool } from "@opencode-ai/core/tool/bash"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+ import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
++import { SystemContext } from "@opencode-ai/core/system-context"
++import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
+ import { location } from "./fixture/location"
+ import { tmpdir } from "./fixture/tmpdir"
+ import { testEffect } from "./lib/effect"
+@@ -100,6 +102,7 @@
+ const withTool = <A, E, R>(
+   directory: string,
+   body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>,
+   processLayer: Layer.Layer<AppProcess.Service> = appProcess,
++  shell?: string,
+ ) => {
+   const activeLocation = Layer.succeed(
+@@ -111,10 +114,14 @@
+   }).pipe(
+     Effect.provide(
+       AppNodeBuilder.build(
+-        LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, LocationMutation.node, BashTool.node]),
++        // 显式导出 Bash 依赖的同一 registry，测试 body 不能读取另建实例。
++        LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, LocationMutation.node, BashTool.node, SystemContextRegistry.node]),
+         [
+           [Location.node, activeLocation],
+           [PermissionV2.node, permission],
+           [AppProcess.node, processLayer],
+-          [Config.node, config],
++          // 显式 Config 文档驱动真实 selectedShell，不改测试进程的 SHELL 或 platform。
++          [Config.node, shell === undefined ? config : Layer.succeed(Config.Service, Config.Service.of({
++            entries: () => Effect.succeed([new Config.Document({ type: "document", info: new Config.Info({ shell }) })]),
++          }))],
+           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+@@ -143,9 +150,12 @@
+             const definitions = yield* toolDefinitions(registry)
+             expect(definitions.map((tool) => tool.name)).toEqual(["bash"])
+             expect(definitions[0]?.inputSchema).not.toHaveProperty("properties.background")
+-            expect(definitions[0]?.inputSchema).not.toHaveProperty("properties.description")
++            // 描述字段只记录调用意图，旧调用不提供它仍然合法。
++            expect(definitions[0]?.inputSchema).toHaveProperty("properties.description")
++            expect(definitions[0]?.inputSchema).toHaveProperty("required", ["command"])
+             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.output")
+             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.command")
+             expect(definitions[0]?.outputSchema).not.toHaveProperty("properties.cwd")
+             expect(yield* toolDefinitions(registry, [{ action: "bash", resource: "*", effect: "deny" }])).toEqual([])
+-            expect(yield* settleTool(registry, call({ command: "pwd" }))).toEqual({
++            // 真实 settlement 接纳说明字段，但授权与进程仍只收到原始 pwd 命令。
++            expect(yield* settleTool(registry, call({ command: "pwd", description: "Shows the current working directory" }))).toEqual({
+@@ -173,9 +183,72 @@
+               maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
+             })
+             expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
++            // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
++            const contexts = yield* SystemContextRegistry.Service
++            const initialized = yield* SystemContext.initialize(yield* contexts.load())
++            expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
++            expect(initialized.baseline).toContain("captured output is decoded as UTF-8")
++            // 同一配置 refresh 不重复注入，保留既有 Context Epoch 的比较边界。
++            expect(yield* SystemContext.reconcile(yield* contexts.load(), initialized.snapshot)).toEqual({ _tag: "Unchanged" })
++            expect(definitions[0]?.description).toContain("Use workdir instead of changing directories")
+           }),
+         )
++          .pipe(Effect.andThen(() => Effect.gen(function* () {
++            if (process.platform !== "win32") return
++            for (const shell of ["pwsh.exe", "powershell.exe", "cmd.exe"]) {
++              const cmd = shell === "cmd.exe"
++              // 全部源分支走实际 registry settlement；路径参数故意在工作目录之外。
++              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++                const blocked = [
++                  ...["tail", "head", "sed", "awk", "grep.exe"].map((name) => `${name} missing`),
++                  cmd ? "ls" : "find .",
++                  cmd ? '"HEAD.EXE" missing' : '& "HEAD.EXE" missing',
++                  cmd ? 'call "grep.exe" missing' : ". 'grep.exe' missing",
++                  cmd ? "@g^rep.exe missing" : "gre`p.exe missing",
++                  cmd ? "echo ok&head missing" : "Write-Output ok;head missing",
++                  "echo ok&&grep.exe missing",
++                  "echo ok|awk missing",
++                  "echo ok||sed missing",
++                  "echo ok\ntail missing",
++                ]
++                for (const command of blocked) {
++                  reset()
++                  const settled = yield* settleTool(registry, call({ command, workdir: path.dirname(tmp.path) }))
++                  expect(settled.result).toMatchObject({ type: "error", value: expect.stringMatching(/Unix utility|instead of ls|ambiguous/) })
++                  // 同时证明 external_directory 与 bash 权限均未请求，进程边界也未调用。
++                  expect(assertions).toEqual([])
++                  expect(runs).toEqual([])
++                }
++                // 与源守卫一样区分程序与参数；复杂脚本不承诺由此浅层扫描完整解释。
++                const allowed = cmd ? ["echo head grep", 'echo "head&grep.exe"', "echo head^&grep.exe", "find needle input", '" head" missing'] : [
++                  "Write-Output head grep", "Write-Output 'head;grep.exe'", 'Write-Output "head|grep.exe"',
++                  "Write-Output head`;grep.exe", "Write-Output 'it''s head; grep'", "'head'", "ls",
++                  "g`rep.exe missing",
++                  "& ' head' missing",
++                ]
++                if (cmd) allowed.push(
++                  // 显式路径即使basename是head也不属于源guard裸名范围，仍走实际授权。
++                  '"C:\\tools with spaces\\HEAD.EXE" missing', 'call "C:\\tools with spaces\\grep.exe" missing', '.\\head.exe missing',
++                )
++                if (!cmd) allowed.push('& "C:\\tools with spaces\\HEAD.EXE" missing', ". 'C:\\tools with spaces\\grep.exe' missing", '.\\head.exe missing')
++                for (const command of allowed) {
++                  reset()
++                  expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
++                  expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
++                  expect(runs).toMatchObject([{ command, shell }])
++                }
++              }), appProcess, shell)
++            }
++            // 配置 Git Bash 仍执行原 Unix 命令，不能把 Windows OS 当成 Windows shell。
++            reset()
++            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++              const command = "head input | grep needle; ls; find ."
++              expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
++              expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
++              expect(runs).toMatchObject([{ command, shell: "C:\\Program Files\\Git\\bin\\bash.exe" }])
++            }), appProcess, "C:\\Program Files\\Git\\bin\\bash.exe")
++          })))
+       },
+       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+     ),
+   )
+
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -218,3 +218,34 @@
+     }),
+   )
+ })
++
++it.live("guards Windows command heads without rejecting literal arguments", () => Effect.gen(function* () {
++  // 平台无关地验证实际共用 renderer；5.1/7+/cmd 的变量与链式规则不能混用。
++  expect(Shell.guidance("powershell", "win32")).toContain("do NOT use && or ||")
++  expect(Shell.guidance("pwsh", "win32")).toContain("PowerShell 7+: && and || are supported")
++  expect(Shell.guidance("cmd", "win32")).toContain("%NAME%")
++  expect(Shell.guidance("bash", "win32")).not.toContain("Do NOT use Unix text utilities")
++  if (process.platform !== "win32") return
++  for (const item of shells.filter((item) => PS.has(item.label) || item.label === "cmd")) {
++    // 显式配置所测 shell，环境默认值不能冒充本用例的执行配置。
++    const tmp = yield* tmpdirScoped({ config: { shell: item.shell } })
++    yield* runIn(tmp, Effect.gen(function* () {
++      const tool = yield* initShell()
++      expect(tool.description).toContain("captured output is decoded as UTF-8")
++      const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
++      for (const command of ["head -n 1 missing", "grep.exe needle missing", item.label === "cmd" ? "ls" : "find ."]) {
++        // 真正命令头在执行与权限之前被阻止，不调用外部 Unix 程序来证明失败。
++        const error = yield* fail({ command }, capture(requests))
++        expect(error.message).toMatch(/Unix utility|instead of ls|ambiguous/)
++      }
++      expect(requests).toEqual([])
++      // 同样的文字作为参数必须正常执行，阻止基于整串关键词的假 guard。
++      const result = yield* tool.execute({
++        command: item.label === "cmd" ? "echo head grep" : "Write-Output 'head grep'",
++        description: "Prints literal words without invoking utilities",
++      }, ctx)
++      expect(result.metadata.exit).toBe(0)
++      expect(result.output).toContain("head grep")
++    }))
++  }
++}))
+@@ -992,12 +1023,13 @@
+-  each("always pattern has space before wildcard to not include different commands", () =>
++  each("always pattern has space before wildcard to not include different commands", (item) =>
+     Effect.gen(function* () {
+       const tmp = yield* tmpdirScoped()
+       yield* runIn(
+         tmp,
+         Effect.gen(function* () {
+           const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+-          yield* run({ command: "ls -la" }, capture(requests))
++          // cmd 的 ls 被真实 guard 拦截；原权限 wildcard 断言继续用原生命令验证。
++          yield* run({ command: item.label === "cmd" ? "dir /a" : "ls -la" }, capture(requests))
+           const bashReq = requests.find((r) => r.permission === "bash")
+           expect(bashReq).toBeDefined()
+-          expect(bashReq!.always[0]).toBe("ls *")
++          expect(bashReq!.always[0]).toBe(item.label === "cmd" ? "dir *" : "ls *")
+         }),
 

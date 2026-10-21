@@ -1,11 +1,10 @@
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
-@@ -8,15 +8,6 @@
- // 指纹计算盐值，与 Claude Code 官方一致
- // 指纹盐值：与 Claude Code 官方二进制一致，修改会导致计费头校验失败
+@@ -8,14 +8,5 @@
+ // 指纹盐值与 Claude Code 官方二进制一致，修改会导致计费头校验失败。
  const SALT = "59cf53e54c78"
--// Anthropic API beta 特性列表
+-// 这些 beta 是 ClaudeCode 请求契约，普通 Anthropic provider 不共享这份列表。
 -const ANTHROPIC_BETAS = [
 -  "claude-code-20250219",
 -  "interleaved-thinking-2025-05-14",
@@ -14,25 +13,24 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 -  "prompt-caching-scope-2026-01-05",
 -].join(",")
 -
- // CLI 身份标识块，注入 system prompt 标识为 Claude Code
+ // 身份块放在主提示之前；20 会撤销该注入，不能提前删去补丁序列中的行为阶段。
  export const CLI_IDENTITY_BLOCK = {
    type: "text" as const,
-@@ -101,15 +92,32 @@
+@@ -100,16 +91,30 @@
  }
  
- // 构建请求头，包含 Anthropic 版本、beta 特性和 Bearer 认证
+-// 构建请求头，包含 Anthropic 版本、beta 特性和 Bearer 认证
 -export function buildRequestHeaders(opts: { token: string; sessionId: string }): Record<string, string> {
 +// 构建请求头，beta 特性按模型动态生成，鉴权由 fetch wrapper 处理
 +export function buildRequestHeaders(opts: { sessionId: string; modelId: string }): Record<string, string> {
-+  // beta 特性列表，移除 redact-thinking，按模型动态添加 context-1m
++  // 15 撤销 redact-thinking，按当前要求排除已弃用 interleaved；功能 beta 由后面的 SDK 合并保留。
 +  const betas = [
 +    "claude-code-20250219",
 +    "prompt-caching-scope-2026-01-05",
-+    "interleaved-thinking-2025-05-14",
 +    "context-management-2025-06-27"
 +  ]
 +
-+  // opus-4-7/opus-4-6/sonnet-4-6 启用 1M context window
++  // 检查服务端实际 modelId 而非配置显示名，别名不应决定可用 context beta。
 +  if (
 +    opts.modelId.includes("opus-4-7") ||
 +    opts.modelId.includes("opus-4-6") ||
@@ -49,42 +47,39 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
      "x-app": "cli",
      "user-agent": `claude-cli/${VERSION} (external, cli)`,
      "x-claude-code-session-id": opts.sessionId,
+-    // Bearer token 来自 provider 捕获的选中凭据，覆盖 SDK 同名认证头。
 -    authorization: `Bearer ${opts.token}`,
    }
  }
  
-@@ -139,16 +147,16 @@
-   return bodyStr.slice(0, idx + 4) + cch + bodyStr.slice(idx + 9)
+@@ -140,14 +147,14 @@
+   return bodyStr.slice(0, idx) + cch + bodyStr.slice(idx + 5)
  }
  
 -// --- Fetch Wrapper ---
 +// --- Fetch 拦截与重写包装器 ---
- // 创建 Claude Code 风格的 fetch 包装器
--// 拦截 /v1/messages 请求，注入 system 块、metadata、thinking 和 cch
 -export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; baseUrl: string }) {
 -  const { session, token, baseUrl } = opts
-+// 拦截 /v1/messages 请求，合并 system 块、metadata、动态 thinking 和 cch
 +export function createClaudeCodeFetch(opts: { session: CubenceSession; token: string; authMode: "bearer" | "x-api-key" }) {
 +  const { session, token, authMode } = opts
  
    return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
      const url = typeof input === "string" ? input : input.toString()
  
--    // 非 /v1/messages 请求直接透传，不注入 Claude Code 头
+-    // 透传分支保留原始 input/init，避免把健康检查的 method、body 或 signal 丢弃。
 +    // 只拦截向 /v1/messages 发送的请求
      if (!url.includes("/v1/messages")) {
        return fetch(input, init)
      }
-@@ -157,84 +165,120 @@
+@@ -158,99 +165,135 @@
        ? JSON.parse(typeof init.body === "string" ? init.body : new TextDecoder().decode(init.body as ArrayBuffer))
        : {}
  
-+    // 1. 抽取 first user text（严格只取第一个 text block，不拼接所有 text）
++    // 指纹只使用首个 text block；拼接附件后的文本会偏离源客户端的字符位置。
      const firstUserMessage = (originalBody.messages ?? []).find((m: { role: string }) => m.role === "user")
 -
--    // 提取第一条用户消息的文本内容，用于指纹计算
--const firstUserText = (() => {
-+    const firstUserText = (() => {
+-    // 跳过 assistant/tool 消息后读取首个 user，指纹不能由最近一次模型回答决定。
+     const firstUserText = (() => {
        if (!firstUserMessage) return ""
        const content = firstUserMessage.content
        if (typeof content === "string") return content
@@ -100,18 +95,19 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
      })()
  
      // 计算消息指纹，用于计费头和 CCH 签名
--const fp = computeFingerprint(firstUserText, VERSION)
-+    const fp = computeFingerprint(firstUserText, VERSION)
-+
-+    // 2. 合并 System Blocks（将我们的 Block 插入到最前面，保留原有 system）
-+    let newSystem = buildSystemBlocks(fp)
-+    if (originalBody.system) {
-+      if (Array.isArray(originalBody.system)) {
-+        newSystem = newSystem.concat(originalBody.system)
-+      } else {
-+        newSystem.push({ type: "text" as const, text: originalBody.system })
-+      }
-+    }
+     const fp = computeFingerprint(firstUserText, VERSION)
+ 
+     // 接续 SDK 已 lowering 的 agent/user/project system，保留每个块的文字及协议属性。
+     const system = Array.isArray(originalBody.system) ? originalBody.system : originalBody.system ? [{ type: "text" as const, text: originalBody.system }] : []
+     // SDK 已共享四断点预算；原工具/system/history 标记优先，身份块只领取剩余名额。
+     const cached = [
+       ...(originalBody.tools ?? []),
+       ...system,
+       ...(originalBody.messages ?? []).flatMap((message: { content?: unknown }) => Array.isArray(message.content) ? message.content : []),
+     ].filter((block: { cache_control?: unknown }) => block.cache_control).length
+     // 只省略无剩余预算的自有缓存属性，不能删除上游已有 cache_control 或禁用全部缓存。
+     const newSystem = buildSystemBlocks(fp).map((block, index) =>
+       index > 0 && cached + index > 4 ? { type: block.type, text: block.text } : block).concat(system)
 +
 +    // 3. 合并 Metadata（保留原有字段，只覆盖 user_id）
 +    const newMetadata = {
@@ -123,7 +119,7 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 +      }),
 +    }
 +
-+    // 4. 动态分发 Thinking 策略，按模型和用户配置决定
++    // disabled 先于型号默认；只有源支持的新型号改为 adaptive，其余保留显式配置。
 +    const modelId = originalBody.model || ""
 +    const maxTokens = originalBody.max_tokens || 32000
 +    const originalThinking = originalBody.thinking
@@ -131,19 +127,23 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 +    let thinking = originalThinking
 +
 +    if (originalThinking?.type === "disabled") {
++      // 显式关闭思考同样是一份有效配置，不能用 truthy 判断重新启用默认预算。
 +      thinking = originalThinking
 +    } else if (
 +      modelId.includes("opus-4-7") ||
 +      modelId.includes("opus-4-6") ||
 +      modelId.includes("sonnet-4-6")
 +    ) {
-+      thinking = { type: "adaptive" }
++      // SDK 已验证 adaptive 属性；保留 display/block_binding，避免 Opus4.7 默认为 omitted。
++      thinking = { ...(originalThinking?.type === "adaptive" ? originalThinking : {}), type: "adaptive" }
 +    } else if (modelId.includes("haiku")) {
 +      const defaultBudget = 32000
++      // Haiku 的预算必须小于 max_tokens，输出上限变化后不能继续使用固定 32000。
 +      const budgetTokens = Math.min(defaultBudget, Math.max(1, maxTokens - 1))
 +      thinking = { type: "enabled", budget_tokens: budgetTokens }
 +    } else {
 +      if (!thinking) {
++        // 旧型号只有缺少配置时补默认，已有 enabled/budget_tokens 不被无条件替换。
 +        const defaultBudget = 32000
 +        const budgetTokens = Math.min(defaultBudget, Math.max(1, maxTokens - 1))
 +        thinking = { type: "enabled", budget_tokens: budgetTokens }
@@ -152,8 +152,9 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
  
 +    // 5. 构造打补丁后的最终 Body，保留 output_config
      const patchedBody = {
-       ...originalBody,
--      system: buildSystemBlocks(fp),
+       // system 首字段使 billing 定位独立于 SDK 的 MCP/container 字段；其余原字段逐项保留。
+       system: newSystem,
+       ...Object.fromEntries(Object.entries(originalBody).filter(([key]) => key !== "system")),
 -      metadata: {
 -        user_id: buildMetadataUserId({
 -          deviceId: session.deviceId,
@@ -161,17 +162,17 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 -          accountUuid: session.accountUuid,
 -        }),
 -      },
+-      // 仅夹紧缺省预算，显式 enabled/adaptive/disabled 配置继续交给原有 SDK 语义。
 -      thinking: originalBody.thinking ?? {
 -        type: "enabled",
--        budget_tokens: 31999,
+-        budget_tokens: Math.min(31999, Math.max(1, (originalBody.max_tokens ?? 32000) - 1)),
 -      },
-+      system: newSystem,
 +      metadata: newMetadata,
 +      ...(thinking ? { thinking } : {}),
 +      ...(originalBody.output_config ? { output_config: originalBody.output_config } : {}),
      }
  
-+    // 6. 占位符替换机制
++    // 在合并全部字段之后计算校验值，metadata、thinking 与工具字段都属于签名字节。
      const bodyWithPlaceholder = JSON.stringify(patchedBody)
      const finalBodyStr = patchCch(bodyWithPlaceholder)
  
@@ -180,28 +181,27 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 -      sessionId: session.sessionId,
 -    })
 -
-+    // 7. 处理请求头与鉴权
++    // 从 init.headers 开始合并，保留调用方无关的 tracing、路由及缓存头。
 +    const customHeaders = buildRequestHeaders({ sessionId: session.sessionId, modelId })
      const requestHeaders = new Headers(init?.headers)
 -    for (const [key, value] of Object.entries(headers)) {
 +
 +    for (const [key, value] of Object.entries(customHeaders)) {
-       requestHeaders.set(key, value)
+       // SDK 的 MCP/task-budget/thinking-binding beta 与实际 body 配套，必须同源 beta 一起发送。
++      // 仅撤销源明确移除和当前弃用的 beta，其余去重保留，不能丢掉对应 body 的功能开关。
+       requestHeaders.set(key, key === "anthropic-beta"
+-        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter(Boolean))].join(",")
++        ? [...new Set([...(requestHeaders.get(key) ?? "").split(","), ...value.split(",")].map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(",")
+         : value)
      }
--    // Remove the default authorization since we manually set it, but keep others?
--    // Wait, the auth might have been set by the SDK, we just overwrite it with ours.
 -    
--    // Some endpoints may require dropping `/v1/messages` duplicate if `baseUrl` already includes it
--    // Wait, `baseUrl` in custom provider is passed to the SDK. 
--    // If the sdk is Anthropic, it appends `/v1/messages` itself!
--    // But `input` is what SDK sends. We can just use `input` instead of concatenating `baseUrl/v1/messages`.
--    // Wait! SDK sends to `baseUrl/v1/messages` automatically, so `input` is already the correct full URL.
--    // So let's just use `input`.
 -    
 -    return fetch(`${baseUrl}/v1/messages`, {
+-      // 先保留 signal/keepalive 等控制项，再由适配器覆盖 POST、headers 和已签名 body。
+-      ...init,
 -      method: "POST",
 +
-+    // 判断鉴权方式：由外层透传的 authMode 决定
++    // 两种认证头互斥；删除 SDK 遗留头，避免 Bearer 与 x-api-key 指向不同账号。
 +    if (authMode === "x-api-key") {
 +      requestHeaders.set("x-api-key", token)
 +      requestHeaders.delete("authorization")
@@ -221,21 +221,24 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
  
 -// --- Provider registration ---
 +// --- Provider 暴露点 ---
- // 创建 Claude Code 提供者配置，返回 baseURL、fetch 和 headers
+ // SDK 的 URL 构造与 fetch 的消息改写属于同一个 provider，不能把 wrapper 全局安装。
 -export function createClaudeCodeProvider(token: string, baseUrl: string) {
 +export function createClaudeCodeProvider(token: string, baseUrl: string, authMode: "bearer" | "x-api-key") {
    const session = getSession()
+   // 根地址统一去除已有 /v1；SDK 的 /v1 和 wrapper 的 /v1/messages 共享此 root，避免重复拼接完整消息路径。
+   const root = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "")
  
    return {
--    baseURL: `${baseUrl}/v1`,
-+    baseURL: baseUrl,
+     baseURL: `${root}/v1`,
+     // SDK 在进入 fetch 前校验 apiKey；必须交付同一选中凭据，不能依赖 wrapper 补认证。
+     apiKey: token,
      fetch: createClaudeCodeFetch({
        session,
        token,
--      baseUrl,
+-      baseUrl: root,
 +      authMode,
      }),
--    // headers 留空：认证头由 fetch wrapper 根据 authMode 动态设置，避免 SDK 覆盖
+-    // headers 留空：Bearer 认证在消息 wrapper 合并，避免 SDK 配置缓存另一份静态 token。
      headers: {},
    }
 -}
@@ -246,7 +249,7 @@ diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/sr
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts
-@@ -171,18 +171,22 @@
+@@ -177,18 +177,22 @@
      claudecode: Effect.fnUntraced(function* (provider: Info) {
        const auth = yield* dep.auth(provider.id)
        const env = yield* dep.env()
@@ -272,4 +275,142 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
          },
          async getModel(sdk: any, modelID: string) {
            return sdk.languageModel(modelID)
+
+diff --git a/packages/core/src/catalog.ts b/packages/core/src/catalog.ts
+--- a/packages/core/src/catalog.ts
++++ b/packages/core/src/catalog.ts
+@@ -72,5 +72,5 @@
+       if (provider.disabled) return false
+       // 环境只决定可用性，不写入配置 body；解析密钥时显式 api.settings 仍先于环境。
+-      if (provider.id === "claudecode" && process.env.CLAUDECODE_API_KEY) return true
++      if (provider.id === "claudecode" && (process.env.ANTHROPIC_AUTH_TOKEN || process.env.CLAUDECODE_API_KEY)) return true
+       if (typeof provider.request.body.apiKey === "string") return true
+       if (integration?.connections.length) return true
+
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -83,9 +83,10 @@
+ const apiKey = (model: ModelV2.Info, credential?: Credential.Value) => {
+   // ClaudeCode 的配置、环境、已保存 API key 顺序来自源 loader，不能继承通用 credential-first。
+   if (model.providerID === "claudecode" && model.api.type === "aisdk" && model.api.package === "@ai-sdk/anthropic") {
+     const configured = model.request.body.apiKey ?? model.api.settings?.apiKey
+-    const value = (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
++    // ANTHROPIC_AUTH_TOKEN 必须在模型覆盖和保存凭据之前，不能只在 Catalog 启动时投影一次。
++    const value = process.env.ANTHROPIC_AUTH_TOKEN || (typeof configured === "string" && configured) || process.env.CLAUDECODE_API_KEY ||
+       (credential?.type === "key" ? credential.key : undefined)
+     // OAuth access 不是源补丁支持的 API key，不在这里偷偷增加另一种认证来源。
+     return value ? Auth.value(value) : undefined
+   }
+@@ -177,7 +178,8 @@
+           // 源服务使用 Bearer；清除另一个认证头避免同一请求携带两份凭据。
+           auth: key === undefined ? Auth.none : claudecode ? Auth.remove("x-api-key").andThen(Auth.bearer(key)) : Auth.header("x-api-key", key),
+           // Endpoint 已拥有 /messages 路径，base URL 只补一次 /v1，不拼接完整消息地址。
+-          ...(claudecode ? { endpoint: { baseURL: `${(resolved.api.url || process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com").replace(/\/+$/, "").replace(/\/v1$/, "")}/v1` } } : {}),
++          // URL 环境覆盖与 token 环境覆盖独立；不改变 model API ID 或显式 package。
++          ...(claudecode ? { endpoint: { baseURL: `${(process.env.ANTHROPIC_BASE_URL || resolved.api.url || process.env.CLAUDECODE_BASE_URL || "https://api.cubence.com").replace(/\/+$/, "").replace(/\/v1$/, "")}/v1` } } : {}),
+         })
+         .model({ id: resolved.api.id }),
+     )
+
+diff --git a/packages/llm/src/protocols/anthropic-messages.ts b/packages/llm/src/protocols/anthropic-messages.ts
+--- a/packages/llm/src/protocols/anthropic-messages.ts
++++ b/packages/llm/src/protocols/anthropic-messages.ts
+@@ -179,7 +179,8 @@
+   top_k: Schema.optional(Schema.Number),
+   stop_sequences: optionalArray(Schema.String),
+   metadata: Schema.optional(JsonObject),
+   thinking: Schema.optional(ClaudeCodeThinking),
++  output_config: Schema.optional(JsonObject),
+ }
+ const AnthropicMessagesBody = Schema.Struct(AnthropicBodyFields)
+ export type AnthropicMessagesBody = Schema.Schema.Type<typeof AnthropicMessagesBody>
+@@ -507,17 +508,29 @@
+ const lowerThinking = Effect.fn("AnthropicMessages.lowerThinking")(function* (request: LLMRequest) {
+   const thinking = anthropicOptions(request)?.thinking
+-  // 只在 ClaudeCode 保留源13显式值，普通 Anthropic 的 enabled-only lowering 完整保持。
+-  if (request.model.provider === "claudecode" && thinking !== undefined && thinking !== null) {
+-    if (!ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
+-    if (thinking.type === "disabled") return { type: "disabled" as const }
+-    if (thinking.type === "adaptive") return {
+-      type: "adaptive" as const,
+-      // 已验证枚举值用 const 对象保留字面量，避免返回类型再次拓宽为 string。
+-      ...(thinking.display === "omitted" || thinking.display === "summarized" ? { display: thinking.display } as const : {}),
+-    }
++  // 专用策略由 provider 身份限定，普通 Anthropic 的预算验证仍沿用上游。
++  if (request.model.provider === "claudecode") {
++    if (thinking !== undefined && thinking !== null && !ProviderShared.isRecord(thinking)) return yield* invalid("ClaudeCode thinking must be an object")
++    // disabled 优先于模型默认，不能把用户关闭思考的选择改成 adaptive。
++    if (ProviderShared.isRecord(thinking) && thinking.type === "disabled") return { type: "disabled" as const }
++    const id = String(request.model.id)
++    // 只保留 SDK 支持的 display 值，typed Schema 编码时也不能再次剥离摘要选择。
++    const adaptive = { type: "adaptive" as const,
++      ...(ProviderShared.isRecord(thinking) && (thinking.display === "omitted" || thinking.display === "summarized")
++        ? { display: thinking.display } as const : {}),
++    }
++    // 只匹配源 15 明确支持的三种型号，不向新型号猜测或扩大默认策略。
++    if (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((model) => id.includes(model)))
++      return adaptive
++    // Haiku 与未指定 thinking 的旧型号使用预算；显式旧型号配置继续由原验证处理。
++    if (id.includes("haiku") || !thinking) {
++      const max = request.generation?.maxTokens ?? request.model.defaults?.limits?.output ?? request.model.route.defaults.limits?.output ?? 4096
++      return { type: "enabled" as const, budget_tokens: Math.min(32000, Math.max(1, max - 1)) }
++    }
++    // 其他旧型号保留调用方显式 adaptive，不因通用 enabled-only lowering 而静默丢弃。
++    if (ProviderShared.isRecord(thinking) && thinking.type === "adaptive") return adaptive
+     // 非 nullish 的无效配置必须走 typed 错误，不能被 fromRequest 的缺省 enabled 掩盖。
+-    if (thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
++    if (ProviderShared.isRecord(thinking) && thinking.type !== "enabled") return yield* invalid("Unsupported ClaudeCode thinking type")
+   }
+   if (!ProviderShared.isRecord(thinking) || thinking.type !== "enabled") return undefined
+   const budget =
+     typeof thinking.budgetTokens === "number"
+@@ -573,3 +586,3 @@
+-  // 使用真正 lowered 的首个 user 文本；13 拼接全部 text，15 才改成首块，不能提前改变阶段。
++  // 源15只取首user的首text block，附件后续文本不能移动指纹采样位置。
+   const firstUserText = messages.find((message) => message.role === "user")?.content
+-    .filter((block) => block.type === "text").map((block) => block.text).join("") ?? ""
++    .find((block) => block.type === "text")?.text ?? ""
+@@ -577,5 +590,6 @@
+   const fp = createHash("sha256").update(`59cf53e54c78${chars}2.1.117`, "utf8").digest("hex").slice(0, 3)
+   // 三位版本后缀与五位零占位是源 wire 契约；CCH 只在完整 overlay 编码后计算。
+   const billing = `x-anthropic-billing-header: cc_version=2.1.117.${fp}; cc_entrypoint=cli; cch=00000;`
++  const outputConfig = anthropicOptions(request)?.output_config
+   return {
+     // 13 的身份注入在 20 明确撤销；保留用户的原始 system，顺序始终是身份在前。
+@@ -588,7 +602,9 @@
+     ] : system,
+     model: request.model.id,
+     ...(claudecode ? { metadata: claudeCodeMetadata } : {}),
++    // 原有 effort 等字段作为 output_config 保留，不将模型默认策略覆盖用户输出选项。
++    ...(claudecode && ProviderShared.isRecord(outputConfig) ? { output_config: outputConfig } : {}),
+     messages,
+     tools,
+     tool_choice: toolChoice,
+     stream: true as const,
+@@ -597,8 +613,7 @@
+     top_p: generation?.topP,
+     top_k: generation?.topK,
+     stop_sequences: generation?.stop,
+-    // 默认预算严格小于当前输出上限，不能照搬源固定 31999 导致小窗口请求被拒。
+-    thinking: (yield* lowerThinking(request)) ?? (claudecode ? { type: "enabled" as const, budget_tokens: Math.min(31999, Math.max(1, (generation?.maxTokens ?? outputLimit) - 1)) } : undefined),
++    thinking: yield* lowerThinking(request),
+   }
+ })
+ 
+@@ -924,10 +939,12 @@
+       "anthropic-version": "2023-06-01",
+       ...(request.model.provider === "claudecode" ? {
+         "anthropic-beta": [...new Set([
+-          "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
++          // 1M 只随源三型号添加；配置 beta 同样排除 interleaved/redact，其余功能需求保留。
++          "claude-code-20250219,prompt-caching-scope-2026-01-05,context-management-2025-06-27" +
++            (["opus-4-7", "opus-4-6", "sonnet-4-6"].some((id) => String(request.model.id).includes(id)) ? ",context-1m-2025-08-07" : ""),
+           ...(Array.isArray(betas) ? betas.filter((beta): beta is string => typeof beta === "string") : []),
+-        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter(Boolean))].join(","),
++        ].flatMap((beta) => beta.split(",")).map((beta) => beta.trim()).filter((beta) => beta && !["interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12"].includes(beta)))].join(","),
+         "x-app": "cli",
+         "user-agent": "claude-cli/2.1.117 (external, cli)",
+         // 与 metadata 使用同一个身份，不能每个 provider turn 生成新的随机 Session。
+         "x-claude-code-session-id": claudeCodeSession.sessionId,
 

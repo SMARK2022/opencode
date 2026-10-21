@@ -5,18 +5,16 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E5=A2=9E=E5=BC=BA=E7=AC=94?=
  =?UTF-8?q?=E8=AE=B0=E6=9C=AC=E8=AF=B7=E6=B1=82=E5=A4=84=E7=90=86=EF=BC=8C?=
 
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index fb36634193..fb162b4200 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -39,6 +39,25 @@ export type BridgeInfo = { port: number; token: string }
- let server: http.Server | undefined
- let registry: RegistryHandle | undefined
+@@ -40,8 +40,24 @@ let registry: RegistryHandle | undefined
+ let lifetime: Promise<void> | undefined
+ let closing = true
+ // 屏障覆盖 import/listen 的启动期，取消意图与服务器引用都属于同一个 bridge owner。
  
-+// 每 notebook filePath 一把锁：串行化同文档并发 POST
++// 在既有 filePath 必填检查后加锁，同文档处理串行，失败也必须释放后继请求。
 +const fileLocks = new Map<string, Promise<void>>()
-+// 锁表键为 notebook filePath，跨 handler 共享
-+/** Per-filePath mutex: serializes notebook requests that target the same document. */
-+// FIFO 互斥：prev.then(fn)，finally 释放槽位
++
 +function withFileLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 +  const prev = fileLocks.get(key) ?? Promise.resolve()
 +  let release!: () => void
@@ -30,58 +28,73 @@ index fb36634193..fb162b4200 100644
 +  })
 +}
 +
-+
- // 关闭桥接服务器：停止 HTTP 服务器并清理资源
- // 先 dispose registry 再 close server，避免半开状态
  export async function closeBridge() {
-@@ -105,10 +124,14 @@ export async function startBridge(output: { appendLine(value: string): void }):
-         )
-       }
+ // bridge 模块持有唯一服务器句柄，外部只调用 closeBridge，不保存可独立关闭的副本。
+   // 重复卸载共享同一个关闭屏障，不能在第一个 close 回调前清空 owner 并重新激活。
+   if (closing) return lifetime
+@@ -206,33 +222,35 @@ async function routeRequest(
+   const filePath = stringProp(body, "filePath")
+   // 已鉴权路由共享必填路径检查，不能用类型断言把缺失路径送入新的严格接口。
+   if (!filePath) throw new Error("filePath is required")
  
--      // Route to notebook handlers
--      const result = await routeRequest(request.method ?? "", url.pathname, request, output)
--      if (result !== undefined) {
--        return writeJson(response, 200, result)
-+      // POST 读 body 后按 filePath 加锁再分发；body 只读一次
-+      // Route to notebook handlers — 同 filePath 串行化
-+      if (request.method === "POST") {
-+        const body = await readJson(request)
-+        if (!body || !isRecord(body)) throw new Error("Expected JSON object body")
-+        const filePath = stringProp(body, "filePath") ?? url.pathname
-+        const result = await withFileLock(filePath, () => routeRequest(url.pathname, body, output))
-+        if (result !== undefined) return writeJson(response, 200, result)
-       }
+-  switch (pathname) {
+-    case "/notebook/env":
+-      return await notebookEnv(filePath)
++  return await withFileLock(filePath, async () => {
++    switch (pathname) {
++      case "/notebook/env":
++        return await notebookEnv(filePath)
  
-       writeJson(response, 404, { ok: false, error: "Not found" })
-@@ -161,19 +184,11 @@ export async function startBridge(output: { appendLine(value: string): void }):
- // 路由请求：根据路径分发到对应的 notebook 处理函数
- // 请求路由：根据 URL 路径分发到 notebook 处理函数
- async function routeRequest(
--  method: string,
-   pathname: string,
--  request: http.IncomingMessage,
-+  body: Record<string, unknown>,
-   output: { appendLine(value: string): void },
- ) {
--  if (method !== "POST") return undefined
--
--// 读取 JSON 请求体：解析工具参数
--const body = await readJson(request)
--  if (!isRecord(body)) {
--    throw new Error("Expected JSON object body")
+-    case "/notebook/summary":
+-      return await notebookSummary(filePath)
++      case "/notebook/summary":
++        return await notebookSummary(filePath)
+ 
+-    case "/notebook/source":
+-      return await notebookSource(body)
++      case "/notebook/source":
++        return await notebookSource(body)
+ 
+-    case "/notebook/run":
+-      return await runNotebook(body)
++      case "/notebook/run":
++        return await runNotebook(body)
+ 
+-    case "/notebook/edit":
+-      return await editNotebook(body)
++      case "/notebook/edit":
++        return await editNotebook(body)
+ 
+-    case "/notebook/output":
+-    case "/notebook/cell-output": {
+-      // 输出别名复用前置鉴权路径，70 删除 LM 路由不改变其余 notebook 能力。
+-      const cellId = typeof body.cellId === "string" ? body.cellId : undefined
+-      // HTTP 输出契约只传 cellId；数字位置不能覆盖调用方选中的稳定格身份。
+-      output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
+-      return await readNotebookCellOutput(filePath, undefined, cellId)
+-    }
++      case "/notebook/output":
++      case "/notebook/cell-output": {
++        // 输出别名复用前置鉴权路径，70 删除 LM 路由不改变其余 notebook 能力。
++        const cellId = typeof body.cellId === "string" ? body.cellId : undefined
++        // HTTP 输出契约只传 cellId；数字位置不能覆盖调用方选中的稳定格身份。
++        output.appendLine(`[bridge] reading raw notebook output ${filePath} cellId=${cellId ?? "<auto>"}`)
++        return await readNotebookCellOutput(filePath, undefined, cellId)
++      }
+ 
 -  }
--
-+  // body 已在锁内读入：此处只做路径分发，禁止二次 readJson
-   switch (pathname) {
-     case "/notebook/summary":
-       return await notebookSummary(stringProp(body, "filePath"))
++    }
+ 
+-  return undefined
++    return undefined
++  })
+ }
 diff --git a/sdks/vscode/src/notebook/summary.ts b/sdks/vscode/src/notebook/summary.ts
-index 83e4649be5..40def0ef42 100644
 --- a/sdks/vscode/src/notebook/summary.ts
 +++ b/sdks/vscode/src/notebook/summary.ts
-@@ -58,7 +58,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
-   const status = failed.length
+@@ -43,7 +43,7 @@ function notebookSummaryText(notebook: vscode.NotebookDocument, cells: ReturnTyp
      ? `${failed.length} failed`
+     // 没有代码格时保留零比零统计，不能用空数组 every 的真值宣称全部执行成功。
      : executed.length === code.length && code.length > 0
 -      ? "All code cells have successful session execution state."
 +      ? "All code cells report successful execution state (may be from a previous session)."

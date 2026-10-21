@@ -1,17 +1,7 @@
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -8,7 +8,8 @@
- import { InstanceState } from "@/effect/instance-state"
- import { assertExternalDirectoryEffect } from "./external-directory"
- import { Instruction } from "../session/instruction"
--import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
-+import { isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
-+import { SessionV1 } from "@opencode-ai/core/v1/session"
- 
- const DEFAULT_READ_LIMIT = 2000
- const MAX_LINE_LENGTH = 2000
-@@ -17,6 +18,111 @@
+@@ -17,6 +17,107 @@
  const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
  const SAMPLE_BYTES = 4096
  const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
@@ -58,16 +48,6 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +  default: 0.25,
 +}
 +
-+// 文件去重缓存 - per-session
-+type ReadCacheEntry = {
-+  content: string
-+  timestamp: number
-+  offset: number
-+  limit: number | undefined
-+  isPartialView: boolean
-+}
-+const readFileState = new Map<string, ReadCacheEntry>()
-+
 +// Stub 文案 - 当文件未修改且上下文中已有未压缩的读取结果时返回此文案
 +export const FILE_UNCHANGED_STUB =
 +  "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading."
@@ -75,7 +55,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +// 恶意代码提醒 - 对高风险扩展名注入安全提示，防止模型改进恶意代码
 +const CYBER_REMINDER = `\n\n<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>`
 +
-+// 判断是否为设备文件路径
++// 黑名单在打开流之前检查，避免设备别名绕过普通文件的有界读取。
 +function isBlockedDevicePath(filePath: string): boolean {
 +  if (BLOCKED_DEVICE_PATHS.has(filePath)) return true
 +  // Linux /proc/self/fd/0-2 别名
@@ -87,7 +67,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +  return false
 +}
 +
-+// 判断是否应该注入恶意代码提醒
++// 只提醒源码风险，不把提醒当作 MIME 检测或可执行文件的读取授权。
 +function shouldInjectCyberReminder(ext: string): boolean {
 +  return HIGH_RISK_EXTENSIONS.has(ext)
 +}
@@ -98,23 +78,29 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +  return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
 +}
 +
-+// 检查当前上下文中是否有该文件的未被压缩的读取结果
-+// 遍历 assistant 消息的 tool parts，查找同路径且未 compacted 的 read 结果
 +function findUnexpandedFileInContext(
-+  messages: SessionV1.WithParts[],
-+  filepath: string,
++  ctx: Tool.Context,
++  params: Schema.Schema.Type<typeof Parameters>,
++  output: string,
 +): boolean {
-+  for (let i = messages.length - 1; i >= 0; i--) {
-+    const msg = messages[i]
++  // 只在本次调用收到的可见历史中查找，不重新加载已被压缩或移出上下文的历史。
++  for (let i = ctx.messages.length - 1; i >= 0; i--) {
++    const msg = ctx.messages[i]
 +    if (msg.info.role !== "assistant") continue
++    // 会话身份来自实际工具上下文，不能由共享缓存或传入路径推断。
++    if (msg.info.sessionID !== ctx.sessionID) continue
 +    for (const part of msg.parts) {
 +      if (part.type !== "tool") continue
 +      if (part.tool !== "read") continue
 +      if (part.state.status !== "completed") continue
-+      const input = part.state.input as { filePath?: string }
-+      if (input.filePath !== filepath) continue
-+      // 检查是否被压缩（compacted）
-+      if (part.state.time.compacted) continue
++      const input = part.state.input
++      // 请求范围与默认范围等价；路径和行号另由完整渲染结果的精确相等证明。
++      if ((input.offset || 1) !== (params.offset || 1)) continue
++      if ((input.limit ?? DEFAULT_READ_LIMIT) !== (params.limit ?? DEFAULT_READ_LIMIT)) continue
++      // compacted=0 也代表被压缩；stub 自身没有正文，不能延长证明的生命周期。
++      if (part.state.time.compacted !== undefined || part.state.output === FILE_UNCHANGED_STUB) continue
++      // 新读取的完整输出连同路径、EOF 行数、指令与安全提醒构成版本证明；全局 mtime 或另一会话的旧结果不能证明内容相同。
++      if (part.state.output !== output) continue
 +      return true
 +    }
 +  }
@@ -123,14 +109,12 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
  
  class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
  
-@@ -238,6 +344,16 @@
+@@ -238,6 +339,14 @@
        if (process.platform === "win32") {
          filepath = FSUtil.normalizePath(filepath)
        }
 +
-+      // 设备文件保护 - 阻止可能导致进程挂起的设备文件
-+      // /dev/zero 等设备文件会导致无限输出，/dev/tty 会阻塞等待输入
-+      // /proc/self/fd/N 是 Linux 下 stdin/stdout/stderr 的别名，同样需要阻止
++      // 拒绝无限输出或等待输入的设备路径及 /proc/self/fd/0-2 别名，避免读取挂起。
 +      if (isBlockedDevicePath(filepath)) {
 +        return yield* Effect.fail(
 +          new Error(`Cannot read '${filepath}': this device file would block or produce infinite output.`),
@@ -140,66 +124,18 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
        const title = path.relative(instance.worktree, filepath)
  
        const stat = yield* fs.stat(filepath).pipe(
-@@ -260,6 +376,26 @@
-       })
+@@ -298,6 +407,10 @@
+       }
  
-       if (!stat) return yield* miss(filepath)
++      // stat 跟随软链接；只准普通文件，避免设备别名绕过字符串黑名单。
++      // splitLines 在字节上限之前等待换行，不能靠后面的限幅阻止 /dev/zero。
++      if (stat.type !== "File") return yield* Effect.fail(new Error(`Cannot read non-regular file: ${filepath}`))
 +
-+      // 文件去重检查 - 如果文件未修改且范围相同，返回 stub
-+      const existingState = readFileState.get(filepath)
-+      if (existingState && !existingState.isPartialView) {
-+        if (existingState.offset === (params.offset ?? 1) && existingState.limit === params.limit) {
-+          // stat.mtime 在目标中是 Option<Date>，需要 unwrap 后取毫秒时间戳
-+          const mtimeMs = Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
-+          if (mtimeMs === existingState.timestamp) {
-+            // 额外检查：当前上下文中是否有该文件的未被压缩的读取结果
-+            const hasUnexpandedContent = findUnexpandedFileInContext(ctx.messages, filepath)
-+            if (hasUnexpandedContent) {
-+              return {
-+                title,
-+                output: FILE_UNCHANGED_STUB,
-+                metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
-+              }
-+            }
-+          }
-+        }
-+      }
+       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
+       const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
  
-       if (stat.type === "Directory") {
-         const items = yield* list(filepath)
-@@ -305,6 +441,31 @@
- 
-       if (isImage || isPdfAttachment(mime)) {
-         const bytes = yield* fs.readFile(filepath)
-+
-+        // 图片使用三级压缩策略
-+        // 先尝试 processImageWithTokenBudget（基于 sharp 的多级压缩），失败则回退到原始 base64
-+        if (isImage) {
-+          const processed = yield* Effect.promise(() => processImageWithTokenBudget(bytes, mime))
-+          const msg = `Image read successfully (${formatSize(processed.originalSize)} → compressed for model)`
-+          return {
-+            title,
-+            output: msg,
-+            metadata: {
-+              preview: msg,
-+              truncated: false,
-+              loaded: loaded.map((item) => item.filepath),
-+            },
-+            attachments: [
-+              {
-+                type: "file" as const,
-+                mime: processed.mime,
-+                url: `data:${processed.mime};base64,${processed.data}`,
-+              },
-+            ],
-+          }
-+        }
-+
-+        // PDF 保持原样，不进行压缩
-         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
-         return {
-           title,
-@@ -335,6 +496,32 @@
+       const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
+@@ -335,6 +448,22 @@
          )
        }
  
@@ -219,20 +155,10 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +        )
 +      }
 +
-+      // 写入去重缓存
-+      readFileState.set(filepath, {
-+        content,
-+        timestamp: Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime()),
-+        offset: params.offset ?? 1,
-+        limit: params.limit,
-+        isPartialView: file.more || file.cut,
-+      })
-+      // isPartialView 标记本次读取是否为部分视图（截断或还有更多行），部分视图不参与去重
-+
        let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>\n"].join("\n")
        output += file.raw.map((line, i) => `${i + file.offset}: ${line}`).join("\n")
  
-@@ -356,6 +543,11 @@
+@@ -356,6 +485,25 @@
          output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
        }
  
@@ -241,152 +167,458 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 +        output += CYBER_REMINDER
 +      }
 +
++      // 权限与本次有界读取均已完成；只省模型上下文，不让缓存替代内容版本证明。
++      // 行内截断同样丢失正文，不能把两个不同文件的相同截断前缀当作完整文件。
++      if (
++        !truncated &&
++        file.raw.every((line) => !line.endsWith(MAX_LINE_SUFFIX)) &&
++        findUnexpandedFileInContext(ctx, params, output)
++      ) {
++        return {
++          title,
++          output: FILE_UNCHANGED_STUB,
++          metadata: { preview: FILE_UNCHANGED_STUB, truncated: false, loaded: [] as string[] },
++        }
++      }
++
        return {
          title,
          output,
 
 
-diff --git a/packages/opencode/src/util/media.ts b/packages/opencode/src/util/media.ts
---- a/packages/opencode/src/util/media.ts
-+++ b/packages/opencode/src/util/media.ts
-@@ -24,3 +24,139 @@
- 
-   return fallback
+diff --git a/packages/opencode/src/image/image.ts b/packages/opencode/src/image/image.ts
+--- a/packages/opencode/src/image/image.ts
++++ b/packages/opencode/src/image/image.ts
+@@ -53,5 +53,6 @@
+ export interface Interface {
+-  readonly normalize: (input: SessionV1.FilePart) => Effect.Effect<SessionV1.FilePart, Error>
++  // 预算由 Read 调用传入，用户上传与其他工具仍只受既有配置约束。
++  readonly normalize: (input: SessionV1.FilePart, maxBase64Bytes?: number) => Effect.Effect<SessionV1.FilePart, Error>
  }
-+
-+// 图片 token 预算 - 约等于 1024x768 图片的 token 数，超过此值触发压缩
-+const IMAGE_TOKEN_BUDGET = 1600
-+
-+// 图片处理结果 - 包含压缩后的 base64 数据、MIME 类型和原始大小
-+export interface ProcessedImage {
-+  data: string
-+  mime: string
-+  originalSize: number
-+}
-+
-+// 动态导入 sharp（可选依赖） - 哨兵值模式避免无限重试
-+// 使用 Symbol 哨兵区分"尚未尝试"和"已确认不可用"，避免每次调用都重新 import
-+// sharp 是可选依赖：安装后启用三级压缩，未安装时回退到原始 base64
-+const SHARP_UNAVAILABLE = Symbol("SHARP_UNAVAILABLE")
-+let sharpCached: typeof import("sharp") | typeof SHARP_UNAVAILABLE | null = null
-+
-+async function getSharp(): Promise<typeof import("sharp") | null> {
-+  // 哨兵值模式：失败后标记不可用，避免每次调用都重新 import
-+  if (sharpCached === SHARP_UNAVAILABLE) return null  // 失败后不重试
-+  if (sharpCached !== null) return sharpCached as typeof import("sharp")
-+  try {
-+    const mod = await import("sharp")
-+    // 处理 ESM/CJS 互操作
-+    sharpCached = (mod as any).default ?? mod
-+    return sharpCached as typeof import("sharp")
-+  } catch {
-+    sharpCached = SHARP_UNAVAILABLE  // 标记为不可用
-+    return null
-+  }
-+}
-+
-+// 估算图片 token：base64 编码后约 4/3 倍原始字节，750 token 约等于一张图
-+function estimateImageTokens(byteLength: number): number {
-+  return Math.ceil((byteLength * 4) / 3 / 750)
-+}
-+
-+// 格式化文件大小 - 用于压缩结果展示
-+function formatSize(bytes: number): string {
-+  if (bytes < 1024) return `${bytes} B`
-+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-+}
-+
-+// 三级图片压缩策略
-+// Level 0: 无需压缩; Level 1: 尺寸缩放; Level 2: 质量递减; Level 3: 极限兜底
-+export async function processImageWithTokenBudget(
-+  bytes: Uint8Array,
-+  mime: string,
-+  maxTokens: number = IMAGE_TOKEN_BUDGET,
-+): Promise<ProcessedImage> {
-+  const originalSize = bytes.length
-+  const buffer = Buffer.from(bytes)
-+
-+  // Level 0: 估算无需压缩的情况
-+  const estimatedTokens = estimateImageTokens(buffer.length)
-+  if (estimatedTokens <= maxTokens) {
-+    return {
-+      data: buffer.toString("base64"),
-+      mime,
-+      originalSize,
-+    }
-+  }
-+
-+  // 尝试使用 sharp 进行压缩
-+  const sharp = await getSharp()
-+  if (!sharp) {
-+    // 无 sharp 时直接返回原始数据
-+    return {
-+      data: buffer.toString("base64"),
-+      mime,
-+      originalSize,
-+    }
-+  }
-+
-+  try {
-+    // 读取图片元数据，计算缩放比例
-+    const meta = await sharp(buffer).metadata()
-+    const maxDim = 1568
-+    const scale = Math.min(
-+      maxDim / (meta.width ?? maxDim),
-+      maxDim / (meta.height ?? maxDim),
-+      1,
-+    )
-+
-+    // Level 1: 标准尺寸缩放（最长边 1568px，符合 Claude vision 最优分辨率）
-+    if (scale < 1) {
-+      const resized = await sharp(buffer)
-+        .resize(Math.floor((meta.width ?? maxDim) * scale), Math.floor((meta.height ?? maxDim) * scale), {
-+          fit: "inside",
-+          withoutEnlargement: true,
-+        })
-+        .jpeg({ quality: 85 })
-+        .toBuffer()
-+
-+      const l1Tokens = estimateImageTokens(resized.length)
-+      if (l1Tokens <= maxTokens) {
-+        return { data: resized.toString("base64"), mime: "image/jpeg", originalSize }
-+      }
-+    }
-+
-+    // Level 2: 质量递减压缩（无论是否缩放过都尝试）
-+    // 逐级降低分辨率和 JPEG 质量，直到满足 token 预算
-+    for (const [width, quality] of [
-+      [800, 60],
-+      [800, 40],
-+      [600, 20],
-+    ] as [number, number][]) {
-+      const compressed = await sharp(buffer)
-+        .resize(width, width, { fit: "inside", withoutEnlargement: true })
-+        .jpeg({ quality })
-+        .toBuffer()
-+      if (estimateImageTokens(compressed.length) <= maxTokens) {
-+        return { data: compressed.toString("base64"), mime: "image/jpeg", originalSize }
-+      }
-+    }
-+
-+    // Level 3: 极限兜底压缩（只有前两级都超出预算才到这里）
-+    // 强制缩放到 400x400 以下，质量降到 20
-+    const fallback = await sharp(buffer)
-+      .resize(400, 400, { fit: "inside", withoutEnlargement: true })
-+      .jpeg({ quality: 20 })
-+      .toBuffer()
-+
-+    return { data: fallback.toString("base64"), mime: "image/jpeg", originalSize }
-+  } catch {
-+    // 压缩失败时返回原始数据，不阻断读取流程
-+    return {
-+      data: buffer.toString("base64"),
-+      mime,
-+      originalSize,
-+    }
-+  }
-+}
-+
-+export { formatSize }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
+@@ -75,10 +76,11 @@
+-    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart) {
++    const normalize = Effect.fn("Image.normalize")(function* (input: SessionV1.FilePart, maxBase64Bytes = Infinity) {
+       const image = (yield* config.get()).attachment?.image
+       const info = {
+         autoResize: image?.auto_resize ?? AUTO_RESIZE,
+         maxWidth: image?.max_width ?? MAX_WIDTH,
+         maxHeight: image?.max_height ?? MAX_HEIGHT,
+-        maxBase64Bytes: image?.max_base64_bytes ?? MAX_BASE64_BYTES,
++        // 无调用预算时保持 5 MiB/配置原义；Read 的预算与更严格配置取交集。
++        maxBase64Bytes: Math.min(image?.max_base64_bytes ?? MAX_BASE64_BYTES, maxBase64Bytes),
+       }
+       if (!input.url.startsWith("data:") || !input.url.includes(";base64,"))
+         return yield* new InvalidDataUrlError({ url: input.url })
 
+diff --git a/packages/core/src/image.ts b/packages/core/src/image.ts
+--- a/packages/core/src/image.ts
++++ b/packages/core/src/image.ts
+@@ -36,6 +36,7 @@
+   readonly normalize: (
+     resource: string,
+     content: FileSystem.Content & { readonly encoding: "base64" },
++    maxBase64Bytes?: number,
+   ) => Effect.Effect<
+     FileSystem.Content & { readonly encoding: "base64" },
+     ResizerUnavailableError | DecodeError | SizeError
+@@ -57,6 +58,7 @@
+     const normalize = Effect.fn("Image.normalize")(function* (
+       resource: string,
+       content: FileSystem.Content & { readonly encoding: "base64" },
++      maxBase64Bytes = Infinity,
+     ) {
+       const image = Object.assign(
+         {},
+@@ -69,7 +71,8 @@
+         autoResize: image.auto_resize ?? true,
+         maxWidth: image.max_width ?? 2_000,
+         maxHeight: image.max_height ?? 2_000,
+-        maxBase64Bytes: image.max_base64_bytes ?? 5 * 1024 * 1024,
++        // 同一 Photon 算法处理可选 Read 预算；省略预算不限制其他附件至 1.2 MB。
++        maxBase64Bytes: Math.min(image.max_base64_bytes ?? 5 * 1024 * 1024, maxBase64Bytes),
+       })
+     })
+     return Service.of({ normalize })
+
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -1,6 +1,7 @@
+ export * as ReadTool from "./read"
+ 
+ import { ToolFailure } from "@opencode-ai/llm"
++import path from "path"
+ import { Effect, Layer, Schema } from "effect"
+ import { makeLocationNode } from "../effect/app-node"
+ import { FileSystem } from "../filesystem"
+@@ -15,6 +16,10 @@
+ 
+ export const name = "read"
+ const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
++// 提醒属于模型投影，不污染文件正文、分页结构或原生媒体的类型化输出。
++const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
++// 分析恶意代码仍被允许，安全边界是禁止改进其恶意能力。
++const CYBER_REMINDER = "<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>"
+ const LocationInput = Schema.Struct({
+   path: Schema.String,
+   offset: ReadToolFileSystem.PageInput.fields.offset.annotate({
+@@ -43,8 +48,18 @@
+           input: Input,
+           output: Output,
+           toModelOutput: ({ input, output }) => {
+-            if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime))
+-              return []
++            // 仅成功的源码文本触发提醒；目录与原生图片沿用既有投影。
++            if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
++              if (!("content" in output) || !HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1)))
++                return []
++              // 保留完整结构化结果的模型表示，不能只返回提醒而隐藏正文与 next。
++              // Schema 已完成编码，此处不增加解析器或改变 utf8/TextPage 的输出契约。
++              return [
++                { type: "text", text: CYBER_REMINDER },
++                { type: "text", text: JSON.stringify(output) },
++              ]
++            }
++            // 原生媒体继续绕过文本化 base64；所有文本仍由 registry 统一限幅。
+             return [
+               { type: "text", text: "Image read successfully" },
+               { type: "file", data: output.content, mime: output.mime, name: input.path },
+@@ -86,7 +101,8 @@
+               if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
+                 return yield* image
+-                  .normalize(resource, { ...content, encoding: "base64" })
++                  // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
++                  .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
+                   .pipe(Effect.catchTag("Image.ResizerUnavailableError", () => Effect.succeed(content)))
+               }
+               if ("encoding" in content && content.encoding === "base64")
+                 return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
+
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -199,6 +199,39 @@
+-  it.effect("asks for external_directory approval before reading an external absolute path", () =>
++  it.effect("projects malware reminders without changing typed text or permission ordering", () =>
+     Effect.gen(function* () {
+       const registry = yield* ToolRegistry.Service
++      // 完整文件与分页都须保留结构化正文，提醒不能取代真实读取结果。
++      for (const output of [readResult, new ReadToolFileSystem.TextPage({
++        type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
++      })]) {
++        readResult = output
++        const settled = yield* settleTool(registry, {
++          sessionID,
++          ...toolIdentity,
++          call: { type: "tool-call", id: "call-cyber", name: "read", input: { path: "sample.TS" } },
++        })
++        expect(settled.output?.structured).toEqual(output)
++        // 提醒先于正文，普通泛型限幅不能因正文过长先丢掉安全语义。
++        expect(settled.output?.content[0]).toMatchObject({ type: "text" })
++        const reminder = settled.output?.content[0]
++        if (reminder?.type === "text") expect(reminder.text).toContain("MUST refuse to improve")
++        // 通过真实 registry 观察模型投影，同时验证 next 与 offset 没有消失。
++        expect(settled.output?.content[1]).toEqual({ type: "text", text: JSON.stringify(output) })
++      }
++      // 权限拒绝时不执行读取，也不生成成功结果的安全提醒。
++      allow = false
++      readCalls.length = 0
++      expect(yield* executeTool(registry, {
++        sessionID,
++        ...toolIdentity,
++        call: { type: "tool-call", id: "call-cyber-denied", name: "read", input: { path: "sample.ts" } },
++      })).toEqual({ type: "error", value: "Unable to read sample.ts" })
++      expect(readCalls).toEqual([])
++    }),
++  )
++
++  it.effect("asks for external_directory approval before reading an external absolute path", () =>
++    Effect.gen(function* () {
++      const registry = yield* ToolRegistry.Service
+       const external = path.join(path.parse(process.cwd()).root, "external-read", "notes.txt")
+ 
+       expect(
+
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -16,6 +16,55 @@
+ describe("toLLMMessages", () => {
++  test("deduplicates complete Read versions only within the supplied visible history", () => {
++    const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1" }
++    const read = (value: string, structured: Record<string, unknown> = output,
++      input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
++      content: SessionMessage.ToolStateCompleted["content"] = []) => SessionMessage.Assistant.make({
++      id: id(value), type: "assistant", agent: "build",
++      model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
++      content: [SessionMessage.AssistantTool.make({
++        type: "tool", id: value, name: "read", time: { created, completed: created },
++        state: SessionMessage.ToolStateCompleted.make({ status: "completed", input, structured, content }),
++      })],
++      time: { created, completed: created },
++    })
++    const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
++      .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
++    const first = read("first")
++    const second = read("second", output, { path: "note.txt", offset: 1, limit: 2000 })
++    // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
++    expect(results(first, second)[0]).toEqual({ type: "json", value: output })
++    expect(results(first, second)[1]).toMatchObject({ type: "text" })
++    expect(JSON.stringify(results(first, second)[1])).toContain("File unchanged since last read")
++    expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
++    // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
++    expect(results(first, read("v2", { ...output, content: "v2" }))[1]).toMatchObject({ type: "json" })
++    expect(results(first, read("range", output, { path: "note.txt", limit: 1 }))[1]).toMatchObject({ type: "json" })
++    expect(results(first, read("path", output, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
++    // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
++    expect(results(second)).toEqual([{ type: "json", value: output }])
++    const checkpoint = SessionMessage.Compaction.make({
++      id: id("checkpoint"), type: "compaction", reason: "auto", summary: "summary", recent: "recent", time: { created },
++    })
++    expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
++    // 部分页、行内截断与媒体即使两个结果完全一样，也不能用纯文本 stub 取代。
++    for (const partial of [
++      { type: "text-page", content: "prefix", offset: 1, truncated: true, next: 2 },
++      { type: "text-page", content: "prefix... (line truncated to 2000 chars)", offset: 1, truncated: false },
++      { ...output, encoding: "base64", mime: "image/png" },
++    ]) expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
++    // structured 仍完整不代表模型看到了全文：generic 限幅后的 content 不能预热去重。
++    const bounded = [{ type: "text" as const, text: "... output truncated ..." }]
++    expect(results(read("b1", output, undefined, bounded), read("b2", output, undefined, bounded))[1])
++      .toEqual({ type: "text", value: bounded[0].text })
++    // 完整安全提醒投影可以去重；提醒变化本身也会改变相等性证明。
++    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: JSON.stringify(output) }]
++    expect(JSON.stringify(results(read("r1", output, undefined, visible), read("r2", output, undefined, visible))[1]))
++      .toContain("File unchanged since last read")
++    expect(results(read("r3", output, undefined, visible), read("r4", output))[1]).toMatchObject({ type: "json" })
++  })
++
+   test("omits empty assistant turns", () => {
+     const assistant = (value: string, content: SessionMessage.Assistant["content"]) =>
+       SessionMessage.Assistant.make({
+         id: id(value),
+         type: "assistant",
+
+diff --git a/packages/opencode/test/image/image.test.ts b/packages/opencode/test/image/image.test.ts
+--- a/packages/opencode/test/image/image.test.ts
++++ b/packages/opencode/test/image/image.test.ts
+@@ -15,6 +15,11 @@
+   ]),
+ )
+ 
++// 禁用缩放使错误的全局预算直接暴露，上传仍按原尺寸配置和默认 5 MiB 接收。
++const uploads = testEffect(LayerNode.compile(Image.node, [[Config.node, TestConfig.layer({
++  get: () => Effect.succeed({ attachment: { image: { auto_resize: false, max_width: 10000, max_height: 10000 } } }),
++})]]))
++
+ function part(mime: string, data: string) {
+   return {
+     id: PartID.ascending(),
+@@ -83,13 +88,16 @@
+       )
+       const input = part("image/png", data.toString("base64"))
+       const image = yield* Image.Service
+-      const result = yield* image.normalize(input)
++      // 此预算仅模拟 Read 调用；默认 normalize 仍保持上传附件的配置语义。
++      const result = yield* image.normalize(input, 1600 * 750)
+       const base64 = result.url.slice(result.url.indexOf(";base64,") + ";base64,".length)
+       const resized = photon.PhotonImage.new_from_byteslice(Buffer.from(base64, "base64"))
+ 
+       expect(input.url.slice(input.url.indexOf(";base64,") + ";base64,".length).length).toBe(5 * 1024 * 1024)
+       expect(result.url).not.toBe(input.url)
+       expect(base64.length).toBeLessThan(5 * 1024 * 1024)
++      // 使用真实大图验证编码预算，不能仅验证旧的 5 MiB 上限。
++      expect(base64.length).toBeLessThanOrEqual(1600 * 750)
+       expect(resized.get_width()).toBeLessThanOrEqual(2_000)
+       expect(resized.get_height()).toBeLessThanOrEqual(2_000)
+       resized.free()
+@@ -99,6 +107,25 @@
++  uploads.effect("keeps upload limits while applying an explicit Read-only budget", () =>
++    Effect.gen(function* () {
++      const input = part("image/png", Buffer.from(yield* Effect.promise(() =>
++        Bun.file(path.join(import.meta.dir, "fixtures", "picture-5mb-base64.png")).arrayBuffer(),
++      )).toString("base64"))
++      const image = yield* Image.Service
++      // 同一真实图片在上传调用中必须保持原样，不能悄悄继承 Read 的 1.2 MB。
++      expect(yield* image.normalize(input)).toEqual(input)
++      const exit = yield* image.normalize(input, 1600 * 750).pipe(Effect.exit)
++      // Read 禁用缩放时仍由同一个 typed SizeError 报告预算，不返回伪装压缩的原图。
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) {
++        const error = Cause.squash(exit.cause)
++        expect(error).toBeInstanceOf(Image.SizeError)
++        if (error instanceof Image.SizeError) expect(error.max).toBe(1600 * 750)
++      }
++    }),
++  )
++
+   tiny.effect("fails with a typed size error when no resized candidate fits", () =>
+     Effect.gen(function* () {
+       const photon = yield* Effect.promise(() => import("@silvia-odwyer/photon-node"))
+       const source = new photon.PhotonImage(new Uint8Array(Array.from({ length: 4 }, () => 255)), 1, 1)
+       const image = yield* Image.Service
+       const exit = yield* image
+
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -402,7 +402,8 @@
+             const rawOutput = toolResultOutput(value)
+             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
+               attachment.mime.startsWith("image/")
+-                ? image.normalize(attachment).pipe(
++                // 沿用唯一附件归一化分支，只有实际 Read 调用携带源预算。
++                ? image.normalize(attachment, toolCall?.part.tool === "read" ? 1600 * 750 : undefined).pipe(
+                     Effect.catchIf(
+                       (error) => error instanceof Image.ResizerUnavailableError,
+                       () => Effect.succeed(attachment),
+
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -169,3 +169,38 @@
+ /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
+-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
+-  messages.flatMap((message) => toLLMMessage(message, model))
++export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
++  // 证明仅存在于本次选出的历史；下一 Session/compaction 投影重新开始，不持久缓存。
++  const reads = new Set<string>()
++  return messages.flatMap((message) => {
++    if (message.type === "compaction") reads.clear()
++    if (message.type !== "assistant") return toLLMMessage(message, model)
++    const content = message.content.map((item): SessionMessage.AssistantContent => {
++      // provider 托管、被裁剪或带媒体的结果不具备本地完整文本 Read 的证明。
++      if (item.type !== "tool" || item.name !== "read" || item.provider?.executed === true ||
++          item.state.status !== "completed" || item.time.pruned !== undefined) return item
++      const output = item.state.structured
++      if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
++          (output.encoding !== "utf8" && output.type !== "text-page")) return item
++      // 分页截断与行内截断都丢失正文，两个相同前缀不能证明完整版本。
++      if (output.type === "text-page" && (output.truncated !== false || output.next !== undefined ||
++          output.content.includes("... (line truncated to 2000 chars)"))) return item
++      if (item.state.outputPaths?.length || item.state.attachments?.length ||
++          item.state.content.some((part) => part.type !== "text")) return item
++      // generic 限幅后的模型正文可能少于 structured；只接受实际可见的完整编码结果。
++      if (item.state.content.length > 0 && !item.state.content.some((part) =>
++          part.type === "text" && part.text === JSON.stringify(output))) return item
++      // 默认化同一路径/范围，并比较新鲜 durable 结果及提醒；call ID 不代表版本。
++      const key = JSON.stringify([item.state.input.path, item.state.input.offset ?? 1,
++        item.state.input.limit ?? 2000, output, item.state.content])
++      if (!reads.has(key)) {
++        reads.add(key)
++        return item
++      }
++      // 只复制模型投影，保留首个完整结果与所有原始持久化内容、工具调用和权限事实。
++      return { ...item, state: { ...item.state, content: [{
++        type: "text",
++        text: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.",
++      }] } }
++    })
++    return toLLMMessage({ ...message, content }, model)
++  })
++}
+
+diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
+--- a/packages/opencode/test/tool/read.test.ts
++++ b/packages/opencode/test/tool/read.test.ts
+@@ -1,7 +1,8 @@
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { afterEach, describe, expect } from "bun:test"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+-import { Cause, Effect, Exit, Layer, Stream } from "effect"
++import { Cause, Effect, Exit, Layer, Schema, Stream } from "effect"
+ import path from "path"
+ import { Agent } from "../../src/agent/agent"
+ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+@@ -15,6 +16,7 @@
+ import { SessionID, MessageID } from "../../src/session/schema"
+ import { Instruction } from "../../src/session/instruction"
+ import { ReadTool } from "../../src/tool/read"
++import { FILE_UNCHANGED_STUB } from "../../src/tool/read"
+ import { Truncate } from "@/tool/truncate"
+ import { Tool } from "@/tool/tool"
+ import { Filesystem } from "@/util/filesystem"
+@@ -194,8 +196,8 @@
+         const target = path.join(dir, "test.txt")
++        // 保留 fixture 盘符；根相对路径归当前进程盘，跨盘临时目录不能假定同盘。
+         const alt = target
+-          .replace(/^[A-Za-z]:/, "")
+           .replaceAll("\\", "/")
+           .toLowerCase()
+ 
+         yield* exec(dir, { filePath: alt }, next)
+         const read = items.find((item) => item.permission === "read")
+@@ -315,6 +317,70 @@
+ describe("tool.read truncation", () => {
++  it.live("deduplicates only the current session's visible complete version", () =>
++    Effect.gen(function* () {
++      const dir = yield* tmpdirScoped()
++      const target = path.join(dir, "version.txt")
++      if (process.platform === "linux") {
++        const fs = yield* FSUtil.Service
++        const device = path.join(dir, "device")
++        // 使用真实设备软链接证明实际 stat guard，不能只测试 /dev/zero 的字面黑名单。
++        yield* fs.symlink("/dev/zero", device)
++        const denied = yield* fail(dir, { filePath: device }).pipe(Effect.timeout("1 second"))
++        expect(denied.message).toContain("Cannot read non-regular file")
++      }
++      const history = (result: Tool.ExecuteResult, sessionID = ctx.sessionID): Tool.Context["messages"] => {
++        // 使用真实持久化 Schema 构造历史，不以 any 伪造工具结果的身份字段。
++        const decoded = Schema.decodeUnknownSync(SessionV1.WithParts)({
++          info: {
++            id: "msg_prior", sessionID, role: "assistant", parentID: "msg_parent",
++            time: { created: 1 }, modelID: "test", providerID: "test", mode: "build", agent: "build",
++            path: { cwd: dir, root: dir }, cost: 0,
++            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          },
++          parts: [{
++            id: "prt_prior", sessionID, messageID: "msg_prior", type: "tool", tool: "read", callID: "prior",
++            state: { status: "completed", input: { filePath: target }, ...result, time: { start: 1, end: 2 } },
++          }],
++        })
++        return [decoded as SessionV1.WithParts]
++      }
++      yield* put(target, "v1")
++      const first = yield* exec(dir, { filePath: target })
++      const visible = history(first)
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toBe(FILE_UNCHANGED_STUB)
++      // B 读 v2 后，A 的 v1 历史仍不能证明 v2；此序列捕获原全局缓存缺陷。
++      yield* put(target, "v2")
++      const second = yield* exec(dir, { filePath: target }, { ...ctx, sessionID: SessionID.make("ses_b") })
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: visible })).output).toContain("v2")
++      // 外会话即使包含当前版本，也不构成本会话的可见证明。
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(second, SessionID.make("ses_b")) })).output).toContain("v2")
++      const current = history(second)
++      const part = current[0].parts[0]
++      if (part.type !== "tool" || part.state.status !== "completed") throw new Error("invalid fixture")
++      // 压缩时间为零仍是压缩；stub 不能作为新的正文证明。
++      part.state.time.compacted = 0
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
++      delete part.state.time.compacted
++      part.state.output = FILE_UNCHANGED_STUB
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
++      part.state.output = second.output
++      // 范围变化必须返回正文；权限也必须先于成功的 stub 判定执行。
++      part.state.input.limit = 1
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: current })).output).toContain("v2")
++      delete part.state.input.limit
++      const denied = yield* fail(dir, { filePath: target }, {
++        ...ctx, messages: current, ask: () => Effect.die(new Error("read denied")),
++      })
++      expect(denied.message).toBe("read denied")
++      // 相同截断前缀不是完整版本证明，长行必须继续返回实际可见内容。
++      yield* put(target, "x".repeat(3000))
++      const partial = yield* exec(dir, { filePath: target })
++      expect((yield* exec(dir, { filePath: target }, { ...ctx, messages: history(partial) })).output)
++        .not.toBe(FILE_UNCHANGED_STUB)
++    }),
++  )
++
+   it.instance("truncates large file by bytes and sets truncated metadata", () =>
+     Effect.gen(function* () {
+       const test = yield* TestInstance
+       const base = yield* load(path.join(FIXTURES_DIR, "models-api.json"))
+       const target = 60 * 1024

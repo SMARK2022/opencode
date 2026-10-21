@@ -1,7 +1,7 @@
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -605,11 +605,10 @@
+@@ -665,11 +665,10 @@
          }
          ctx.reasoningMap = {}
  
@@ -10,11 +10,113 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 -          (call) => Deferred.await(call.done).pipe(Effect.timeout("250 millis"), Effect.ignore),
 -          { concurrency: "unbounded" },
 -        )
-+        // 使用 Deferred.succeed 快速完成未完成的工具调用，避免等待超时
++        // cleanup 直接唤醒协调信号，移除有界等待；这不表示工具执行已完成。
 +        for (const call of Object.values(ctx.toolcalls)) {
 +          yield* Deferred.succeed(call.done, undefined).pipe(Effect.ignore)
 +        }
  
          for (const toolCallID of Object.keys(ctx.toolcalls)) {
            const match = yield* readToolCall(toolCallID)
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -1,6 +1,7 @@
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { Database } from "@opencode-ai/core/database/database"
++import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { expect } from "bun:test"
+ import { tool } from "ai"
+@@ -881,7 +882,13 @@
+ 
+         const chat = yield* session.create({})
+         const parent = yield* user(chat.id, "tool abort")
++        // 使用真实数据库账本与已持久化用户身份，不复制结算逻辑或猜测最新请求。
++        const usage = SessionRequestUsage.make(database.db)
++        yield* usage.begin({
++          sessionID: chat.id, requestID: parent.id, source: "prompt", agent: "build",
++          providerID: ref.providerID, modelID: ref.modelID,
++        })
+         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+         const handle = yield* processors.create({
+           assistantMessage: msg,
+@@ -920,7 +927,8 @@
+             messages: [{ role: "user", content: "tool abort" }],
+             tools: {},
+           })
+-          .pipe(Effect.forkChild)
++          // 显式提供可选账本服务，使 cleanup 的生产者实际执行持久化结算。
++          .pipe(Effect.provideService(SessionRequestUsage.Service, usage), Effect.forkChild)
+ 
+         yield* llm.wait(1)
+         yield* waitFor(
+@@ -954,7 +962,22 @@
+           expect(call.state.metadata?.raw).toBe('{"cmd"')
+           expect(call.state.time.end).toBeDefined()
+         }
++        // Fiber 退出后读取编码后的助手终态，协调信号完成不能代替消息落盘。
++        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
++        expect(stored.info).toMatchObject({
++          id: msg.id, parentID: parent.id, role: "assistant",
++          error: { name: "MessageAbortedError" }, time: { completed: expect.any(Number) },
++        })
++        // 没有 step-finish 的取消仍须闭合请求；未解析工具输入不能被当作 provider 用量。
++        expect(yield* usage.get({ sessionID: chat.id, requestID: parent.id })).toMatchObject({
++          rootRequestID: parent.id, status: "aborted", assistantCount: 1, stepCount: 0,
++          cost: 0, tokens: { total: 0 }, time: { completed: expect.any(Number) },
++        })
++        // 明细身份固定为本次助手与调用者请求，拒绝错属或只修改内存的假结算。
++        expect(yield* usage.assistants({ sessionID: chat.id, requestID: parent.id })).toMatchObject([
++          { assistantMessageID: msg.id, rootRequestID: parent.id, status: "aborted", stepCount: 0, cost: 0 },
++        ])
+       }),
+     { config: (url) => providerCfg(url) },
+   ),
+ )
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
+@@ -450,7 +450,7 @@
+         HttpApiEndpoint.get("requestUsageList", "/session/:sessionID/request_usage", {
+           params: { sessionID: SessionID },
+-          // URL 文本转换后拒绝 NaN/Infinity；零仍有效，不额外限制整数、正值或范围。
+-          query: { ...WorkspaceRoutingQueryFields, limit: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), rootRequestID: Schema.optional(MessageID), source: Schema.optional(SessionRequestUsage.SourceSchema) },
++          // limit 使用安全整数绑定 SQLite，保留零及负数不限量；before 仍允许有限小数时间游标。
++          query: { ...WorkspaceRoutingQueryFields, limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt())), before: Schema.optional(Schema.NumberFromString.check(Schema.isFinite())), rootRequestID: Schema.optional(MessageID), source: Schema.optional(SessionRequestUsage.SourceSchema) },
+           success: Schema.Array(SessionRequestUsage.RequestUsageSchema),
+           error: [HttpApiError.BadRequest, ApiNotFoundError],
+         }).annotateMerge(OpenApi.annotations({ identifier: "session.request_usage.list", summary: "List request usage" })),
+diff --git a/packages/opencode/test/server/httpapi-session.test.ts b/packages/opencode/test/server/httpapi-session.test.ts
+--- a/packages/opencode/test/server/httpapi-session.test.ts
++++ b/packages/opencode/test/server/httpapi-session.test.ts
+@@ -336,12 +336,27 @@
+         // URL 的数字文本必须被解码；before=0 严格排除创建时间恰为零的已有行。
+         expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=0`, { headers })).toEqual([])
+         // limit=0 也属于显式输入，不能退回默认一百条。
+         expect(yield* requestJson<unknown[]>(`${url}?limit=0`, { headers })).toEqual([])
++        // 负整数保留不限量语义：同根两条都应返回，不能钳制为一条或拒绝为负数。
++        expect(
++          (yield* requestJson<Array<{ requestID: string }>>(`${url}?limit=-1&source=prompt&rootRequestID=${root.info.id}`, { headers })).map((row) => row.requestID),
++        ).toEqual([newer.info.id, root.info.id])
+         // 每个排除行只违反一个条件，不能靠单一 source/root/before 条件碰巧通过。
+         expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
++        // 整数限制仅属于 limit；before 的小数边界与安全整数上界仍须正常查询。
++        expect(yield* requestJson<unknown[]>(`${url}?limit=2&before=1.5&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
++        expect(yield* requestJson<unknown[]>(`${url}?limit=${Number.MAX_SAFE_INTEGER}&before=1.5&source=prompt&rootRequestID=${root.info.id}`, { headers })).toEqual([expected])
+ 
+         // 数字 codec 拒绝不可转换文本，避免只测试服务方法而遗漏 HttpApi query 解码。
+         expect((yield* request(`${url}?limit=bad`, { headers })).status).toBe(400)
++        // 小数及正负安全整数溢出必须在 Query codec 拒绝，不能触发 SQLite defect 或静默取整。
++        for (const limit of [1.5, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1]) {
++          const invalid = yield* request(`${url}?limit=${limit}`, { headers })
++          expect(invalid.status).toBe(400)
++          expect(yield* responseJson(invalid)).toMatchObject({
++            name: "BadRequest", data: { kind: "Query", message: expect.stringContaining("limit") },
++          })
++        }
+         // Session 已存在且 message ID 合法，404 必须来自缺失账本资源而非路由或 ID 校验。
+         const missingID = MessageID.ascending()
+         const missing = yield* request(`${url}/${missingID}`, { headers })
 

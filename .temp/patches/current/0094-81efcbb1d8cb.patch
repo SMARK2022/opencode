@@ -4,212 +4,129 @@ Date: Thu, 7 May 2026 01:09:51 +0800
 Subject: [PATCH] =?UTF-8?q?feat(notebook):=20=E4=BC=98=E5=8C=96=E5=8D=95?=
  =?UTF-8?q?=E5=85=83=E6=BA=90=E4=BB=A3=E7=A0=81=E6=B8=B2=E6=9F=93=E9=80=BB?=
  =?UTF-8?q?=E8=BE=91=EF=BC=8C=E8=B0=83=E6=95=B4=E5=AD=97=E8=8A=82=E9=99=90?=
+ =?UTF-8?q?=E5=88=B6=E5=92=8C=E8=A1=8C=E6=95=B0=E9=99=90=E5=88=B6=E5=A4=84?=
+ =?UTF-8?q?=E7=90=86?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
-index 82a1c4bc83..f6cb6dda02 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1893,9 +1893,11 @@ function GenericTool(props: ToolProps) {
+@@ -1913,12 +1913,13 @@ function GenericTool(props: ToolProps) {
    const ctx = use()
    const output = createMemo(() => props.output?.trim() ?? "")
    const [expanded, setExpanded] = createSignal(false)
 -  const maxLines = 3
--  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
--  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars()))
-+  // SMARK #94：预览 10 行；仅当总行数 >20 才折叠
++  // 20 行判断是否折叠，预览保留 10 行；字符预算继续随终端宽度变化。
 +  const maxLines = 10
-+  const threshold = 20
-+  const maxChars = createMemo(() => threshold * Math.max(20, ctx.width - 6))
-+  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars(), threshold))
+   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+-  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars()))
++  const collapsed = createMemo(() => collapseToolOutput(output(), 20, maxChars() * 2))
    const limited = createMemo(() => {
      if (expanded() || !collapsed().overflow) return output()
-     return collapsed().output
-@@ -2168,9 +2170,17 @@ function Shell(props: ToolProps) {
-     return stripAnsi(text?.trim() ?? "")
+-    return collapsed().output
++    return collapseToolOutput(output(), maxLines, maxChars()).output
    })
+ 
+   return (
+@@ -2190,8 +2191,12 @@ function Shell(props: ToolProps) {
    const [expanded, setExpanded] = createSignal(false)
-+  // SMARK #94：运行中或上下文输出禁用折叠；空闲时 preview 10 / threshold 20
++  // 命令占一行，空闲预览按总行数 10/20 与字符预算判断；运行及模型上下文视图保持完整。
    const maxLines = 10
--  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
 -  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars()))
-+  const threshold = 20
-+  const maxChars = createMemo(() => threshold * Math.max(20, ctx.width - 6))
 +  const collapsed = createMemo(() => {
-+    if (isRunning() || showContextOutput()) {
-+      // 与 SMARK maxLines=0 等价：不折叠，全量展示流式/上下文输出
-+      return { output: output(), overflow: false }
-+    }
-+    return collapseToolOutput(output(), maxLines, maxChars(), threshold)
++    if (isRunning() || showContextOutput()) return { output: output(), overflow: false }
++    return collapseToolOutput(output(), 19, maxChars() * 2)
 +  })
    const limited = createMemo(() => {
      if (expanded() || !collapsed().overflow) return output()
-     return collapsed().output
-@@ -2242,9 +2252,11 @@ function Write(props: ToolProps) {
-   const code = createMemo(() => {
-     return stringValue(props.input.content) ?? ""
+-    return collapsed().output
++    return collapseToolOutput(output(), maxLines - 1, (maxLines - 1) * Math.max(20, ctx.width - 6)).output
    })
+@@ -2213,6 +2218,5 @@ function Shell(props: ToolProps) {
+-  // 切换时展开完整窗口，避免压缩前后行数变化被旧的折叠状态隐藏。
++  // 上下文视图完整展示，右键切换不改变普通输出的展开状态。
+   const toggleContextOutput = () => {
+     if (!contextOutputAvailable()) return
+-    setExpanded(true)
+     setShowContextOutput((prev) => !prev)
+   }
+@@ -2266,8 +2270,8 @@ function Write(props: ToolProps) {
 -  const maxLines = 20
--  const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
--  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars()))
-+  // SMARK #94 Write：预览 10，阈值 20（对齐 BlockTool 契约）
 +  const maxLines = 10
-+  const threshold = 20
-+  const maxChars = createMemo(() => threshold * Math.max(20, ctx.width - 6))
-+  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars(), threshold))
+-  // 同时限制字符预算，单行长内容也不能挤满窄终端。
++  // 完整展示阈值为 20 行，折叠预览为 10 行；两者都保留字符预算。
+   const maxChars = createMemo(() => maxLines * Math.max(20, ctx.width - 6))
+-  const collapsed = createMemo(() => collapseToolOutput(code(), maxLines, maxChars()))
++  const collapsed = createMemo(() => collapseToolOutput(code(), 20, maxChars() * 2))
    const limited = createMemo(() => {
      if (expanded() || !collapsed().overflow) return code()
-     return collapsed().output
-@@ -2279,7 +2291,8 @@ function Write(props: ToolProps) {
+-    return collapsed().output
++    return collapseToolOutput(code(), maxLines, maxChars()).output
+   })
+@@ -2304,7 +2308,7 @@ function Write(props: ToolProps) {
            onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
          >
-           {/* diff 高度限制：折叠时最多显示 15 行，展开时显示全部 */}
+-          {/* diff 高度限制：折叠时最多显示 15 行，展开时显示全部 */}
++          {/* 超过 20 行才限高为 10 行，短 diff 与展开态保留完整内容。 */}
 -          <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
-+          <box paddingLeft={1} // SMARK #94：Edit 折叠预览 10 行；overflow 仍用 total>20
-+          maxHeight={expanded() ? undefined : 10}>
++          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 10 : undefined}>
              <diff
                diff={diff()!}
                syncScroll={true}
-@@ -2624,6 +2637,7 @@ function Edit(props: ToolProps) {
-     return { added, removed, total: lines.length }
+@@ -2642,7 +2646,7 @@ function Edit(props: ToolProps) {
+     // 收缩阈值仍按完整展示行数判断，不能用变更行数忽略上下文和文件头。
+     return { ...changes, total: diffContent().split("\n").length }
    })
-   // 超过 20 行时启用展开/收缩，避免长 diff 占用过多屏幕
-+  // SMARK #94 threshold=20：仅当 diff 总行数>20 才折叠
+-  // 20 行是展开阈值，15 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
++  // 20 行是展开阈值，10 行仅是长 diff 的预览高度；短 diff 不应被裁掉。
    const overflow = createMemo(() => stats().total > 20)
  
    return (
-@@ -2635,7 +2649,8 @@ function Edit(props: ToolProps) {
-           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 点击展开/收缩 diff
+@@ -2655,7 +2659,7 @@ function Edit(props: ToolProps) {
+           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}  // 展开只改变本地预览状态，不重新执行编辑工具。
          >
-           {/* 使用 maxHeight 限制初始显示高度，展开时移除限制 */}
--          <box paddingLeft={1} maxHeight={expanded() ? undefined : 15}>
-+          <box paddingLeft={1} // SMARK #94：Edit 折叠预览 10 行；overflow 仍用 total>20
-+          maxHeight={expanded() ? undefined : 10}>
+           {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
+-          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
++          <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 10 : undefined}>
              <diff
                // 同步滚动：diff 视图与代码视图同步滚动，提升编辑体验
                syncScroll={true}
-@@ -2718,6 +2733,7 @@ function ApplyPatch(props: ToolProps) {
-             // patch 内容展开/收缩：多文件 patch 超过 20 行时收缩，避免长 patch 占满终端
-             const [patchExpanded, setPatchExpanded] = createSignal(false)
-             const patchLines = createMemo(() => (file.patch || "").split("\n"))
-+            // SMARK #94 threshold=20：patch 行数>20 才折叠
-             const patchOverflow = createMemo(() => patchLines().length > 20)
-             return (
-             <BlockTool
-@@ -2734,7 +2750,8 @@ function ApplyPatch(props: ToolProps) {
+@@ -2755,7 +2759,7 @@ function ApplyPatch(props: ToolProps) {
                  }
                >
-                 {/* 内联 diff 组件：移除独立 Diff 函数，直接使用 maxHeight 控制折叠 */}
--                    <box paddingLeft={1} maxHeight={patchExpanded() ? undefined : 15}>
-+                    <box paddingLeft={1} // SMARK #94：ApplyPatch 折叠预览 10 行；overflow 仍用 lines>20
-+                    maxHeight={patchExpanded() ? undefined : 10}>
-                       <diff
-                         syncScroll={true}
-                         diff={file.patch || ""}
-diff --git a/packages/tui/src/util/collapse-tool-output.ts b/packages/tui/src/util/collapse-tool-output.ts
-index 4b4c8d87b9..18e78a33ff 100644
---- a/packages/tui/src/util/collapse-tool-output.ts
-+++ b/packages/tui/src/util/collapse-tool-output.ts
-@@ -1,10 +1,18 @@
--export function collapseToolOutput(output: string, maxLines: number, maxChars: number) {
-+// threshold：仅当总行数超过阈值才折叠；maxLines 为折叠后预览行数
-+export function collapseToolOutput(
-+  output: string,
-+  maxLines: number,
-+  maxChars: number,
-+  threshold: number = maxLines,
-+) {
-   const lines = output.split("\n")
--  if (lines.length <= maxLines && Array.from(output).length <= maxChars) {
-+  // 未超 threshold 行且未超字符预算：全量展示（SMARK 10/20 契约）
-+  if (lines.length <= threshold && Array.from(output).length <= maxChars) {
-     return { output, overflow: false }
-   }
- 
--  const preview = lines.slice(0, maxLines).join("\n")
-+  // 折叠预览用 maxLines 行；字符预算仍保护窄终端
-+  const preview = lines.slice(0, Math.max(0, maxLines)).join("\n")
-   if (Array.from(preview).length > maxChars) {
-     return {
-       output:
-@@ -15,5 +23,9 @@ export function collapseToolOutput(output: string, maxLines: number, maxChars: n
-     }
-   }
- 
--  return { output: [...lines.slice(0, maxLines), "…"].join("\n"), overflow: true }
-+  return {
-+    output: preview + (lines.length > maxLines ? "\n…" : ""),
-+    overflow: true,
-+  }
- }
-+
+-                {/* 完整 patch 保留 hunk/行号；高度裁剪不能替代 diff 解析输入。 */}
++                {/* 完整 patch 仍供解析，仅超过 20 行的未展开预览限高为 10 行。 */}
+-                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 15 : undefined}>
++                <box paddingLeft={1} maxHeight={!patchExpanded() && patchOverflow() ? 10 : undefined}>
+                   <diff
+                     syncScroll={true}
+                     diff={file.patch || ""}
 diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/source.ts
-index e6786da5cd..3995caad51 100644
 --- a/sdks/vscode/src/notebook/source.ts
 +++ b/sdks/vscode/src/notebook/source.ts
-@@ -9,7 +9,6 @@
-  *   B: <source line last>
-  *
-  * Cell headers do NOT consume line numbers. Line ranges in headers are
-- // 无 cellId 时返回全本；有 cellId 时只导出目标 cell 虚拟切片
-  * 1-based inclusive. Target a cell with `cellId` (Copilot-style #VSC-xxxxxxxx).
-  */
- import * as vscode from "vscode"
-@@ -26,10 +25,7 @@ import { resolveNotebook } from "./resolve"
-  * Bridge endpoint handler: returns notebook source code with global line numbering.
-  * Primary input: `cellId` (#VSC-xxxxxxxx). Output capped at 24 KB.
-  */
--// 获取 notebook 源码：返回所有 cell 的代码、类型和虚拟行号范围
--// 获取 notebook 源码：返回所有 cell 的代码和虚拟行号范围
--// 虚拟源码视图：按 computeVirtualRanges 输出带 range 的 header
--// 虚拟源码视图：header 带 range，正文行号与 computeVirtualRanges 对齐
-+// #94：renderedLines 与 bytesCut 分离；header 不占行预算
- export async function notebookSource(input: Record<string, unknown>) {
-   const filePath = stringProp(input, "filePath")
-   if (!filePath) throw new Error("filePath is required")
-@@ -37,7 +33,6 @@ export async function notebookSource(input: Record<string, unknown>) {
-   // filePath 必填：禁止 active-notebook 静默回退
-   const notebook = await resolveNotebook(filePath)
-   // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐，压低上下文
--  // 默认 limit 400：与 read 工具 DEFAULT_READ_LIMIT 对齐压低上下文
-   const limit = Math.max(1, numberProp(input, "limit") ?? 400)
-   const offset = Math.max(1, numberProp(input, "offset") ?? 1)
- 
-@@ -75,14 +70,18 @@ export async function notebookSource(input: Record<string, unknown>) {
-   globalStart = Math.max(1, Math.min(globalStart, totalLines > 0 ? totalLines : 1))
- 
-   // Render cells one by one, emitting headers + in-range source lines
-+  // 24KB 字节预算；满额后设 bytesCut 并 break 外层
+@@ -65,7 +65,8 @@ export async function notebookSource(input: Record<string, unknown>) {
    const maxBytes = 24 * 1024
    let bytes = 0
 -  let rendered = 0
 -  let cut = false
-+  // renderedLines：仅计数带全局行号的源码行，header 不计
++  // 正文行数与字节截断分开记录，格头只计入字节预算。
 +  let renderedLines = 0
-+  // bytesCut：仅字节预算截断时为 true，与行限分离
 +  let bytesCut = false
-+  let lineLimited = false
    let lastRenderedLine = 0
    const outputCells: string[] = []
  
--  for (const cell of notebook.getCells()) {
-+  outer: for (const cell of notebook.getCells()) {
-     const cellRange = ranges.get(cell.index)
-     if (!cellRange) continue
- 
-@@ -94,20 +93,21 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -81,15 +82,12 @@ export async function notebookSource(input: Record<string, unknown>) {
        continue
      }
  
--    // Render header
 -    if (rendered >= limit) {
 -      cut = true
-+    // 行预算已满：禁止再发 header，避免无编号源码的悬空 header
-+    if (renderedLines >= limit) {
-+      lineLimited = true
-       break
-     }
-+
-+    // header 不消耗 renderedLines 行预算，但仍计入字节预算
+-      break
+-    }
++    if (renderedLines >= limit) break
      const headerLine = buildHeader(cell, cellRange)
      const hdrBytes = Buffer.byteLength(headerLine, "utf8") + 4 // "--: "
      if (bytes + hdrBytes > maxBytes && outputCells.length > 0) {
@@ -219,32 +136,26 @@ index e6786da5cd..3995caad51 100644
      }
      outputCells.push(headerLine)
      bytes += hdrBytes
--    rendered++
- 
-     // Render source lines
-     // lineAt：避免整 cell getText+split 的内存与 EOL 误差
-@@ -118,30 +118,36 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -102,24 +100,21 @@ export async function notebookSource(input: Record<string, unknown>) {
        if (globalLineNum > globalEnd) {
          break
        }
 -      if (rendered >= limit) {
 -        cut = true
 -        break
-+      // 行数达限只停止追加；bytesCut 仅由字节预算触发
-+      if (renderedLines >= limit) {
-+        lineLimited = true
-+        break outer
-       }
+-      }
++      if (renderedLines >= limit) break
+       // 精确编辑需要完整源行，分页仍沿既有行数与 UTF-8 字节预算。
        const sourceLine = cell.document.lineAt(i).text
-       // 不再截断单行：字节预算只截断总输出
        const outLine = `${globalLineNum}: ${sourceLine}`
+       // UTF-8 预算包括真实行号前缀，多字节正文不能用字符数冒充输出字节。
        const outBytes = Buffer.byteLength(outLine, "utf8")
-       if (bytes + outBytes > maxBytes && outputCells.length > 0) {
+       // 首个正文行允许推进，未编号格头不能让空正文页永远重复同一 offset。
+-      if (bytes + outBytes > maxBytes && rendered > 0) {
 -        cut = true
--        break
-+        // 仅字节预算设 bytesCut
++      if (bytes + outBytes > maxBytes && renderedLines > 0) {
 +        bytesCut = true
-+        break outer
+         break
        }
        outputCells.push(outLine)
        bytes += outBytes
@@ -254,47 +165,119 @@ index e6786da5cd..3995caad51 100644
      }
  
 -    if (cut) break
--
-+    // cell 结束后：行/字节任一截断则退出外层，避免下一 cell 再开 header
-+    if (bytesCut || lineLimited || renderedLines >= limit) {
-+      if (renderedLines >= limit) lineLimited = true
-+      break
-+    }
-   }
++    if (bytesCut || renderedLines >= limit) break
+@@ -127,7 +122,7 @@ export async function notebookSource(input: Record<string, unknown>) {
  
+-  // 字节或行数截断时只从最后实际输出的正文编号续读，不能跳过尚未返回的源码。
 -  if (!cut) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
--  const more = lastRenderedLine < globalEnd
-+  if (!bytesCut && !lineLimited) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
-+  // more：窗口内仍有未返回行，且不是因为 24KB 截断
-+  const more = !bytesCut && lastRenderedLine < globalEnd
++  // 仅有剩余正文容量时补齐窗口终点，满额页按实际返回编号判断是否仍需续读。
++  if (!bytesCut && renderedLines < limit) lastRenderedLine = Math.max(lastRenderedLine, Math.min(globalEnd, totalLines))
+   const more = lastRenderedLine < globalEnd
  
    let output = warning ? `${warning}\n\n` : ""
    output +=
-@@ -150,9 +156,10 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -136,9 +131,9 @@ export async function notebookSource(input: Record<string, unknown>) {
      ) + "\n"
    output += outputCells.join("\n")
  
 -  if (cut) {
-+  // 页脚仅在 bytesCut 时提示 24KB；行限走 more 分页文案
 +  if (bytesCut) {
      output += `\n\n(Output capped at 24 KB. Showing lines ${globalStart}-${lastRenderedLine}. Use offset=${lastRenderedLine + 1} to continue.)`
--  } else if (more) {
-+  } else if (more || lineLimited) {
+   } else if (more) {
      output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
    }
    output += "\n</content>"
-@@ -166,9 +173,12 @@ export async function notebookSource(input: Record<string, unknown>) {
+@@ -152,8 +147,8 @@ export async function notebookSource(input: Record<string, unknown>) {
        cellId: cellId ?? (targetCellIndex !== undefined ? copilotLikeCellId(notebook.cellAt(targetCellIndex)) : undefined),
        globalStart,
        limit,
 -      returned: outputCells.length,
-+      // returned 使用源码行计数，不含 header
 +      returned: renderedLines,
        totalLines,
 -      truncated: cut || more,
-+      truncated: bytesCut || more || lineLimited,
-+      bytesCut,
-+      lineLimited,
++      truncated: bytesCut || more,
      },
    }
- }
+diff --git a/sdks/vscode/src/test/notebook-source.test.ts b/sdks/vscode/src/test/notebook-source.test.ts
+new file mode 100644
+--- /dev/null
++++ b/sdks/vscode/src/test/notebook-source.test.ts
+@@ -0,0 +1,78 @@
++import { doesNotMatch, equal, match } from "node:assert/strict"
++import { test } from "mocha"
++import vscode from "vscode"
++import { copilotLikeCellId } from "../notebook/format"
++import { notebookSource } from "../notebook/source"
++
++test("distinguishes source-line pages from UTF-8 byte truncation", async () => {
++  const serializer = vscode.workspace.registerNotebookSerializer("opencode-source-test", {
++    deserializeNotebook() {
++      return new vscode.NotebookData([])
++    },
++    serializeNotebook() {
++      return new Uint8Array()
++    },
++  })
++  try {
++    const notebook = await vscode.workspace.openNotebookDocument(
++      "opencode-source-test",
++      new vscode.NotebookData([
++        new vscode.NotebookCellData(vscode.NotebookCellKind.Code, "alpha\nbeta", "python"),
++        new vscode.NotebookCellData(vscode.NotebookCellKind.Markup, "gamma\ndelta", "markdown"),
++        new vscode.NotebookCellData(vscode.NotebookCellKind.Code, "\u754c".repeat(9 * 1024) + "\ntail", "python"),
++      ]),
++    )
++    const filePath = notebook.uri.toString()
++    const version = notebook.version
++    const first = await notebookSource({ filePath, limit: 1 })
++    equal(first.data.returned, 1)
++    equal(first.data.truncated, true)
++    match(first.summary, /^1: alpha$/m)
++    match(first.summary, /Use offset=2/)
++    doesNotMatch(first.summary, /Output capped|--: --- c2/)
++
++    const across = await notebookSource({ filePath, offset: 2, limit: 3 })
++    equal(across.data.returned, 3)
++    equal(across.data.truncated, true)
++    match(across.summary, /^2: beta$/m)
++    match(across.summary, /^3: gamma$/m)
++    match(across.summary, /^4: delta$/m)
++    match(across.summary, /Use offset=5/)
++    doesNotMatch(across.summary, /Output capped|--: --- c3/)
++
++    const target = await notebookSource({
++      filePath,
++      cellId: copilotLikeCellId(notebook.cellAt(1)),
++      limit: 2,
++    })
++    equal(target.data.returned, 2)
++    equal(target.data.truncated, false)
++    match(target.summary, /^3: gamma$/m)
++    match(target.summary, /^4: delta$/m)
++    doesNotMatch(target.summary, /Output capped|Use offset=/)
++
++    // UTF-8 超预算只省略整行，首条超长正文仍必须返回以推进 offset。
++    const bytes = await notebookSource({ filePath, limit: 400 })
++    equal(bytes.data.returned, 4)
++    equal(bytes.data.truncated, true)
++    match(bytes.summary, /Output capped at 24 KB/)
++    match(bytes.summary, /Use offset=5/)
++    doesNotMatch(bytes.summary, /^5:/m)
++
++    const long = await notebookSource({ filePath, offset: 5, limit: 400 })
++    equal(long.data.returned, 1)
++    equal(long.data.truncated, true)
++    match(long.summary, /^5: \u754c+$/m)
++    match(long.summary, /Output capped at 24 KB/)
++    match(long.summary, /Use offset=6/)
++
++    const end = await notebookSource({ filePath, offset: 6, limit: 1 })
++    equal(end.data.returned, 1)
++    equal(end.data.truncated, false)
++    match(end.summary, /^6: tail$/m)
++    doesNotMatch(end.summary, /Output capped|Use offset=/)
++    equal(notebook.version, version)
++  } finally {
++    serializer.dispose()
++  }
++})

@@ -1,391 +1,614 @@
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -8,1 +8,1 @@
+-import { DateTimeUtcFromMillis, RelativePath, statics } from "./schema"
++import { DateTimeUtcFromMillis, NonNegativeInt, RelativePath, statics } from "./schema"
+@@ -164,3 +164,22 @@
++// 五类共享同一份 prepared JSON 字符基数；消息子项不包含已归系统的 system/developer 消息。
++export interface InputBreakdown extends Schema.Schema.Type<typeof InputBreakdown> {}
++export const InputBreakdown = Schema.Struct({
++  system: NonNegativeInt,
++  instructions: NonNegativeInt,
++  skills: NonNegativeInt,
++  tools: NonNegativeInt,
++  messages: Schema.Struct({
++    userText: NonNegativeInt,
++    assistantText: NonNegativeInt,
++    reasoning: NonNegativeInt,
++    toolInput: NonNegativeInt,
++    toolOutput: NonNegativeInt,
++    attachments: NonNegativeInt,
++    // 包含归属消息的 JSON 结构开销，六个子项之和就是 total。
++    total: NonNegativeInt,
++  }),
++}).annotate({ identifier: "Session.Message.InputBreakdown" })
++
+ // 请求体估算与 provider tokens 分离；confirmed 只说明校准样本已经结算。
+ // bodyChars 保留实际请求体的字符基数，不能拿输出正文校准输入用量。
+ export interface InputEstimate extends Schema.Schema.Type<typeof InputEstimate> {}
+@@ -170,3 +189,6 @@
+   confirmed: Schema.Boolean,
++  // 比率冻结在服务端准备时；客户端不再用被分页截断的历史重新校准。
++  charsPerToken: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
++  inputBreakdown: InputBreakdown.pipe(optional),
+   afterPartID: Schema.String.pipe(optional),
+   // 同轮解析出的显示预算独立于 token 校准样本，后续模型选择不能改写它。
+diff --git a/packages/schema/src/session.ts b/packages/schema/src/session.ts
+--- a/packages/schema/src/session.ts
++++ b/packages/schema/src/session.ts
+@@ -10,3 +10,4 @@
+ import { SessionID } from "./session-id"
+ import { Revert } from "./revert"
++import { SessionMessage } from "./session-message"
+ 
+@@ -35,3 +36,5 @@
+   estimatedInput: Schema.Finite.pipe(optional),
++  // 同一请求的 prepared 元数据在确认后仍可读，绝不参与确认 input/output/cost 累加。
++  inputEstimate: SessionMessage.InputEstimate.pipe(optional),
+   model: Schema.Struct({
+     providerID: Schema.String,
+diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
+--- a/packages/core/src/util/token.ts
++++ b/packages/core/src/util/token.ts
+@@ -1,3 +1,13 @@
+ export * as Token from "./token"
+ 
++import type { SessionMessage } from "@opencode-ai/schema/session-message"
++
++export type SystemSection = { readonly kind: "instructions" | "skills"; readonly text: string }
++type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
++type Node = {
++  bucket: Bucket
++  section: "body" | "system" | "messages" | "tools" | "options"
++  role?: string
++  entries: number
++}
+ const CHARS_PER_TOKEN = 4
+@@ -7,12 +17,108 @@
+-export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number }>) {
++export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number }>) {
+   const sample = history.reduce((sum, item) => {
+-    // 调用方已筛选同模型确认样本，最近累计达到 16000 字符后不再接纳旧样本。
+-    if (sum.bodyChars >= 16000 || item.input <= 0 || item.bodyChars <= 0) return sum
++    // 调用方筛选同 API 的确认样本；分子分母同时截止，零确认和不足100字符的样本不校准。
++    if (sum.bodyChars >= 100_000 || !Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return sum
+     return { bodyChars: sum.bodyChars + item.bodyChars, input: sum.input + item.input }
+   }, { bodyChars: 0, input: 0 })
+   // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
+-  const ratio = sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
+-  // 两个请求 owner 共用 canonical JSON 字符口径，不另行解析 schema 或附件。
+-  const bodyChars = JSON.stringify(body).length
+-  return { input: Math.max(0, Math.round(bodyChars / ratio)), bodyChars, confirmed: false }
++  return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
++}
++
++export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number }>, sections?: ReadonlyArray<SystemSection>) {
++  const ratio = charsPerTokenFromHistory(history)
++  const counts = {
++    system: 0, instructions: 0, skills: 0, tools: 0,
++    messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: 0 },
++  } satisfies SessionMessage.InputBreakdown
++  const nodes = new WeakMap<object, Node>()
++  // 唯一 stringify 的 visitor 同时计数，既不重跑 Schema parser，也不按子树再次序列化。
++  const bodyChars = JSON.stringify(body, function(this: object, key: string, value: unknown) {
++    const parent = nodes.get(this)
++    // 对象的 undefined/function/symbol 不上 wire；数组同值是 null，必须沿 JSON 的两种规则计数。
++    const absent = value === undefined || typeof value === "function" || typeof value === "symbol"
++    if (absent && !Array.isArray(this)) return value
++    let bucket = parent?.bucket ?? "system"
++    let section = parent?.section ?? "body"
++    // 子片段继承父载荷，工具结果里的附件还能细分，不能把包装字段重归用户正文。
++    let role = parent?.role
++    if (parent?.section === "body") {
++      // 只在请求根识别广告与历史，工具参数里同名 messages/tools 字段不能跨桶。
++      if (key === "tools") { section = "tools"; bucket = "tools" }
++      if (key === "messages" || key === "input" || key === "contents") { section = "messages"; bucket = "userText" }
++      if (key === "system" || key === "instructions" || key === "systemInstruction") section = "system"
++      if (key === "providerOptions") section = "options"
++      if (section === "body") section = "options"
++    }
++    // SDK 的 OAuth instructions 与 native 的 system 都来自已经准备完成的正文。
++    if (section === "options" && (key === "instructions" || key === "system")) section = "system"
++    if (section === "messages") {
++      // Anthropic 的工具结果包在 user 消息中，角色只决定默认桶，片段身份随后覆盖它。
++      if (value !== null && typeof value === "object" && "role" in value && typeof value.role === "string") {
++        role = value.role
++        bucket = role === "assistant" || role === "model" ? "assistantText" : role === "tool" ? "toolOutput" : "userText"
++      }
++      // Chat 的 system/developer 消息不再重复进入 messages.total。
++      if (role === "system" || role === "developer") { section = "system"; bucket = "system" }
++      if (section === "messages") {
++        const type = value !== null && typeof value === "object" && "type" in value ? value.type : undefined
++        // Responses 的独立 function_call 与 Chat.tool_calls 都是历史调用，不属于工具定义广告。
++        if (["tool-call", "tool_use", "function_call"].includes(typeof type === "string" ? type : "") || key === "tool_calls" || key === "function_call") bucket = "toolInput"
++        // 返回片段按自己的身份归下一轮输入，即使外层协议角色不是 tool。
++        if (["tool-result", "tool_result", "function_call_output"].includes(typeof type === "string" ? type : "")) bucket = "toolOutput"
++        // 签名或加密的 reasoning 结构也属于实际载荷，不能只计可见思考正文。
++        if (["reasoning", "thinking", "redacted_thinking", "reasoning_text"].includes(typeof type === "string" ? type : "") || key === "reasoning_content") bucket = "reasoning"
++        // 附件只记录实际 JSON 字符，不再次解码 base64 或套用客户端视觉 token 启发式。
++        if (["image", "image_url", "input_image", "input_file", "file", "document", "media", "audio", "input_audio", "video"].includes(typeof type === "string" ? type : "") || key === "inlineData" || key === "fileData") bucket = "attachments"
++        // Gemini 的调用/结果使用不同字段判别，不能因缺少共享 type 就退回正文桶。
++        if (key === "functionCall") bucket = "toolInput"
++        if (key === "functionResponse") bucket = "toolOutput"
++      }
++    }
++    // 属性名、冒号和逗号归同一载荷；遗漏这些结构会让 JSON-heavy 输入的分类总和偏小。
++    const prefix = parent ? (parent.entries++ > 0 ? 1 : 0) + (Array.isArray(this) ? 0 : stringChars(key) + 1) : 0
++    // JSON 原生会拆箱 Number/String/Boolean，不能把它们误计成空对象的两个字符。
++    const scalar = value instanceof String || value instanceof Number || value instanceof Boolean ? value.valueOf() : value
++    const chars = absent || scalar === null ? 4 : typeof scalar === "string" ? stringChars(scalar)
++      : typeof scalar === "number" ? Number.isFinite(scalar) ? String(scalar).length : 4
++      : typeof scalar === "boolean" ? scalar ? 4 : 5 : 2
++    if (section === "system" && typeof scalar === "string" && sections) {
++      // 仅匹配服务端 source 真正渲染的片段；插件删除或改写的文本不会凭本地文件重新补回。
++      const spans = sections.flatMap((item) => {
++        const found: Array<{ start: number; end: number; kind: SystemSection["kind"]; text: string }> = []
++        if (!item.text) return found
++        for (let start = scalar.indexOf(item.text); start >= 0; start = scalar.indexOf(item.text, start + item.text.length))
++          found.push({ start, end: start + item.text.length, kind: item.kind, text: item.text })
++        return found
++      }).toSorted((a, b) => a.start - b.start || b.end - a.end)
++      let end = 0
++      let attributed = 0
++      for (const span of spans) {
++        // 同一 source 的重叠/重复来源只能消费一遍，system 保留分隔符与未归属默认正文。
++        if (span.start < end) continue
++        const size = stringChars(span.text) - 2
++        counts[span.kind] += size
++        attributed += size
++        end = span.end
++      }
++      counts.system += prefix + chars - attributed
++    } else if (bucket === "system" || bucket === "instructions" || bucket === "skills" || bucket === "tools") {
++      counts[bucket] += prefix + chars
++    } else {
++      counts.messages[bucket] += prefix + chars
++    }
++    // 同一对象在请求内重复引用时每次重新开始计数，WeakMap 不能成为省略第二次载荷的缓存。
++    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0 })
++    return value
++  }).length
++  // total 只求和六个消息桶，不能用 bodyChars 补残差来掩盖 system 或转义计数的遗漏。
++  counts.messages.total = counts.messages.userText + counts.messages.assistantText + counts.messages.reasoning + counts.messages.toolInput + counts.messages.toolOutput + counts.messages.attachments
++  // 不请求细分的既有纯估算调用保留返回契约；两个运行时 owner 均显式请求该元数据。
++  return { input: Math.max(0, Math.round(bodyChars / ratio)), bodyChars, confirmed: false,
++    ...(sections === undefined ? {} : { charsPerToken: ratio, inputBreakdown: counts }) }
++}
++
++function stringChars(value: string) {
++  // JSON 的控制字符与孤立 surrogate 会转义；有效 Unicode pair 仍按原有 UTF-16 字符口径计数。
++  return value.length + 2 + Array.from(value.matchAll(/["\\\u0000-\u001f]|[\ud800-\udfff]/gu)).reduce((sum, match) =>
++    sum + (/["\\\b\f\n\r\t]/u.test(match[0]) ? 1 : 5), 0)
+ }
+diff --git a/packages/core/src/system-context/index.ts b/packages/core/src/system-context/index.ts
+--- a/packages/core/src/system-context/index.ts
++++ b/packages/core/src/system-context/index.ts
+@@ -207,1 +207,1 @@
+-export function initialize(value: SystemContext): Effect.Effect<Generation, InitializationBlocked> {
++export function initialize(value: SystemContext, rendered?: (key: Key, text: string) => void): Effect.Effect<Generation, InitializationBlocked> {
+@@ -212,1 +212,1 @@
+-      return Effect.succeed(initializeObservation(entries))
++      return Effect.succeed(initializeObservation(entries, rendered))
+@@ -217,3 +217,5 @@
+-function initializeObservation(entries: ReadonlyArray<Entry>): Generation {
++function initializeObservation(entries: ReadonlyArray<Entry>, emitted?: (key: Key, text: string) => void): Generation {
+   const available = entries.filter((entry): entry is AvailableEntry => entry._tag === "Available")
+   const rendered = available.map((entry) => [entry.key, entry.baseline()] as const)
++  // 已完成的 source 渲染顺带交付归属，不能为估算第二次 load 或生成另一份 baseline。
++  rendered.forEach(([key, result]) => emitted?.(key, result.text))
+@@ -227,1 +229,1 @@
+-export function reconcile(value: SystemContext, previous: Snapshot): Effect.Effect<ReconcileResult> {
++export function reconcile(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReconcileResult> {
+@@ -231,3 +233,3 @@
+-      const result = reconcileObservation(entries, previous)
++      const result = reconcileObservation(entries, previous, rendered)
+       if (result._tag === "Unchanged" || result._tag === "Updated") return result
+-      return replaceObservation(entries, previous)
++      return replaceObservation(entries, previous, rendered)
+@@ -240,2 +242,3 @@
+   previous: Snapshot,
++  emitted?: (key: Key, text: string) => void,
+ ): { readonly _tag: "Unchanged" } | Updated | { readonly _tag: "Replace" } {
+@@ -266,3 +269,4 @@
+       const rendered = entry.baseline()
++      emitted?.(entry.key, rendered.text)
+       updates.push(rendered.text)
+       snapshot[entry.key] = rendered.snapshot
+@@ -278,3 +282,4 @@
+     const rendered = compared.render()
++    emitted?.(entry.key, rendered.text)
+     updates.push(rendered.text)
+     snapshot[entry.key] = rendered.snapshot
+@@ -285,2 +290,3 @@
+     if (removed === undefined) throw new Error(`Missing removal rendering for system context source ${key}`)
++    emitted?.(Key.make(key), removed)
+     updates.push(removed)
+@@ -282,8 +288,8 @@
+-export function replace(value: SystemContext, previous: Snapshot): Effect.Effect<ReplacementResult> {
++export function replace(value: SystemContext, previous: Snapshot, rendered?: (key: Key, text: string) => void): Effect.Effect<ReplacementResult> {
+-  return observe(value).pipe(Effect.map((entries) => replaceObservation(entries, previous)))
++  return observe(value).pipe(Effect.map((entries) => replaceObservation(entries, previous, rendered)))
+ }
+ 
+-function replaceObservation(entries: ReadonlyArray<Entry>, previous: Snapshot): ReplacementResult {
++function replaceObservation(entries: ReadonlyArray<Entry>, previous: Snapshot, rendered?: (key: Key, text: string) => void): ReplacementResult {
+   if (entries.some((entry) => entry._tag === "Unavailable" && getSnapshot(previous, entry.key) !== undefined))
+     return { _tag: "ReplacementBlocked" }
+-  return { _tag: "ReplacementReady", generation: initializeObservation(entries) }
++  return { _tag: "ReplacementReady", generation: initializeObservation(entries, rendered) }
+diff --git a/packages/core/src/session/context-epoch.ts b/packages/core/src/session/context-epoch.ts
+--- a/packages/core/src/session/context-epoch.ts
++++ b/packages/core/src/session/context-epoch.ts
+@@ -4,1 +4,1 @@
+-import { DateTime, Effect, Schema } from "effect"
++import { DateTime, Effect, Option, Schema } from "effect"
+@@ -18,4 +18,20 @@
++// 同一 JSON 列保存 baseline/历史渲染归属，source comparison 快照与模型正文仍由原 owner 管理。
++const State = Schema.Struct({
++  sources: SystemContext.Snapshot,
++  sections: Schema.Array(Schema.Struct({ kind: Schema.Literals(["instructions", "skills"]), text: Schema.String })),
++})
++export type State = typeof State.Type
++
+ interface Prepared {
+   readonly baseline: string
+   readonly baselineSeq: number
++  readonly sections: State["sections"]
+ }
++
++function capture(sections: Array<State["sections"][number]>) {
++  return (key: SystemContext.Key, text: string) => {
++    // 只认实际领域 producer 的 key；文件正文里的同名标题不创造新的分类来源。
++    if (key === "core/instructions") sections.push({ kind: "instructions", text })
++    if (key === "core/skill-guidance") sections.push({ kind: "skills", text })
++  }
++}
+@@ -50,28 +66,38 @@
++  const sections: Array<State["sections"][number]> = []
+   if (!stored) {
+-    const generation = yield* SystemContext.initialize(value)
+-    const baselineSeq = yield* insert(db, sessionID, generation)
+-    return { baseline: generation.baseline, baselineSeq }
++    const generation = yield* SystemContext.initialize(value, capture(sections))
++    const baselineSeq = yield* insert(db, sessionID, generation, sections)
++    return { baseline: generation.baseline, baselineSeq, sections }
+   }
+ 
+-  const snapshot = yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
+-    Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
+-  )
++  // 已持久化的旧裸 Snapshot 没有片段归属，仍解码原契约；缺少证明的文本保守留在 system。
++  // 私有 wrapper 不改变 baseline_seq 或 source 的等价比较，现有 ContextEpoch admission 仍是唯一 owner。
++  const decoded = Schema.decodeUnknownOption(State)(stored.snapshot)
++  const snapshot = Option.isSome(decoded) ? decoded.value : {
++    sources: yield* Schema.decodeUnknownEffect(SystemContext.Snapshot)(stored.snapshot).pipe(
++      Effect.mapError((error) => new ContextSnapshotDecodeError({ sessionID, details: String(error) })),
++    ), sections: [],
++  }
+   const replacementSeq = compaction !== undefined && compaction.seq > stored.baseline_seq ? compaction.seq : undefined
+   const result = replacementSeq
+-    ? yield* SystemContext.replace(value, snapshot)
+-    : yield* SystemContext.reconcile(value, snapshot)
++    ? yield* SystemContext.replace(value, snapshot.sources, capture(sections))
++    : yield* SystemContext.reconcile(value, snapshot.sources, capture(sections))
++  // 不可用来源继续保守复用原 baseline/证明，估算不能偷读当前文件生成替代正文。
+   if (result._tag === "Unchanged" || result._tag === "ReplacementBlocked") {
+-    return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
++    return { baseline: stored.baseline, baselineSeq: stored.baseline_seq, sections: snapshot.sections }
+   }
++  // 压缩或不兼容 replacement 重新冻结本代片段，旧 epoch 历史不进入新一代分类。
+   if (result._tag === "ReplacementReady") {
+     const baselineSeq = replacementSeq ?? (yield* EventV2.latestSequence(db, sessionID))
+-    yield* replace(db, sessionID, baselineSeq, result.generation)
+-    return { baseline: result.generation.baseline, baselineSeq }
++    yield* replace(db, sessionID, baselineSeq, result.generation, sections)
++    return { baseline: result.generation.baseline, baselineSeq, sections }
+   }
+ 
++  // 旧 baseline 与此前更新仍会发送；source 变更/删除不抹掉它们已经渲染的字符归属。
++  const state = { sources: result.snapshot, sections: [...snapshot.sections, ...sections] }
+   yield* events.publish(
+     SessionEvent.ContextUpdated,
+     { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: result.text },
+-    { commit: () => advance(db, sessionID, result.snapshot).pipe(Effect.orDie) },
++    { commit: () => advance(db, sessionID, state).pipe(Effect.orDie) },
+   )
+-  return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
++  return { baseline: stored.baseline, baselineSeq: stored.baseline_seq, sections: state.sections }
+@@ -86,3 +112,4 @@
+-  const generation = yield* context.pipe(Effect.flatMap(SystemContext.initialize))
+-  const baselineSeq = yield* insert(db, sessionID, generation)
+-  return { baseline: generation.baseline, baselineSeq }
++  const sections: Array<State["sections"][number]> = []
++  const generation = yield* context.pipe(Effect.flatMap(value => SystemContext.initialize(value, capture(sections))))
++  const baselineSeq = yield* insert(db, sessionID, generation, sections)
++  return { baseline: generation.baseline, baselineSeq, sections }
+@@ -125,2 +152,3 @@
+   generation: SystemContext.Generation,
++  sections: State["sections"],
+ ) {
+@@ -133,1 +161,2 @@
+-      snapshot: generation.snapshot,
++      // 片段与 baseline/source 快照同一次写入保存，后续 turn 不依赖尚未提交的内存来源。
++      snapshot: { sources: generation.snapshot, sections },
+@@ -145,1 +174,2 @@
+   generation: SystemContext.Generation,
++  sections: State["sections"],
+@@ -151,1 +181,1 @@
+-      snapshot: generation.snapshot,
++      snapshot: { sources: generation.snapshot, sections },
+@@ -164,1 +194,1 @@
+-  snapshot: SystemContext.Snapshot,
++  snapshot: State,
+diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
+--- a/packages/core/src/session/sql.ts
++++ b/packages/core/src/session/sql.ts
+@@ -14,2 +14,3 @@
+ import type { SystemContext } from "../system-context/index"
++import type { SessionContextEpoch } from "./context-epoch"
+ import { AgentV2 } from "../agent"
+@@ -174,1 +175,1 @@
+-  snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
++  snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot | SessionContextEpoch.State>(),
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -316,4 +316,4 @@
+         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
+         inputEstimate = {
+-          ...Token.estimateRequest(body, samples),
++          ...Token.estimateRequest(body, samples, system.sections),
+           contextLimit: model.defaults?.limits?.context ?? model.route.defaults.limits?.context ?? 0,
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -137,3 +137,7 @@
+             AND p.id > coalesce(json_extract(a.data, '$.inputEstimate.afterPartID'), '')))),
++      -- 准备元数据跟随相同请求/助手边界；确认后保留细分，不能借用更旧请求的历史样本。
++      'inputEstimate', json(coalesce((SELECT json_extract(e.data, '$.inputEstimate') FROM native_estimate e
++        WHERE e.seq > coalesce((SELECT position FROM last_assistant), -1)),
++        (SELECT json_extract(data, '$.inputEstimate') FROM last_assistant))),
+       -- 没有助手时两项为零且 assistantID 缺省，与已有未结算助手区分。
+       'model', json(coalesce((SELECT json_object(
+@@ -159,3 +163,4 @@
+       estimatedInput: Schema.NullOr(Schema.Finite),
++      inputEstimate: Schema.NullOr(SessionMessage.InputEstimate),
+       model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String, contextLimit: Schema.NullOr(Schema.Finite) })),
+     }))(parsed)
+@@ -166,3 +171,4 @@
+       estimatedInput: fields.estimatedInput ?? undefined,
++      inputEstimate: fields.inputEstimate ?? undefined,
+       model: fields.model ? { ...fields.model, contextLimit: fields.model.contextLimit ?? undefined } : undefined,
+     })
+diff --git a/packages/core/src/v1/session.ts b/packages/core/src/v1/session.ts
+--- a/packages/core/src/v1/session.ts
++++ b/packages/core/src/v1/session.ts
+@@ -101,1 +101,11 @@
+-    request: row.request ? { ...row.request, model: row.request.model ? { ...row.request.model } : undefined } : undefined,
++    request: row.request ? {
++      ...row.request, model: row.request.model ? { ...row.request.model } : undefined,
++      // 兼容调用方可变；复制新细分对象，避免修改返回值时污染同一查询快照。
++      inputEstimate: row.request.inputEstimate ? {
++        ...row.request.inputEstimate,
++        inputBreakdown: row.request.inputEstimate.inputBreakdown ? {
++          ...row.request.inputEstimate.inputBreakdown,
++          messages: { ...row.request.inputEstimate.inputBreakdown.messages },
++        } : undefined,
++      } : undefined,
++    } : undefined,
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -45,6 +45,9 @@
-       attachments?: SessionV1.FilePart[]
-     },
-   ) => Effect.Effect<void>
-+  // 输入字符数和细分：由 prompt.ts 计算，在 step-finish 中持久化
-+  inputChars: number | undefined
-+  inputBreakdown: SessionV1.StepFinishPart["inputBreakdown"] | undefined
-   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
- }
- 
-@@ -75,6 +78,9 @@
-   needsCompaction: boolean
-   currentText: SessionV1.TextPart | undefined
-   reasoningMap: Record<string, SessionV1.ReasoningPart>
-+  // 输入字符数和细分：由 prompt.ts 计算，在 step-finish 中持久化
-+  inputChars: number | undefined
-+  inputBreakdown: SessionV1.StepFinishPart["inputBreakdown"] | undefined
- }
- 
- type StreamEvent = LLMEvent
-@@ -115,6 +121,8 @@
-         needsCompaction: false,
-         currentText: undefined,
-         reasoningMap: {},
-+        inputChars: undefined,
-+        inputBreakdown: undefined,
-       }
-       let aborted = false
- 
-@@ -481,7 +489,10 @@
-               sessionID: ctx.assistantMessage.sessionID,
+@@ -551,3 +551,6 @@
                type: "step-finish",
                tokens: usage.tokens,
--              cost: usage.cost,
-+              // 传递输入字符数和细分到 step-finish 部件，供 TUI 校准 token 估算
-+      inputChars: ctx.inputChars,
-+      inputBreakdown: ctx.inputBreakdown,
-+      cost: usage.cost,
-             })
-             yield* session.updateMessage(ctx.assistantMessage)
-             const reqUsage1 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-@@ -733,7 +744,11 @@
-       })
- 
-       return {
--        get message() {
-+        get inputChars() { return ctx.inputChars },
-+    set inputChars(v: number | undefined) { ctx.inputChars = v },
-+    get inputBreakdown() { return ctx.inputBreakdown },
-+    set inputBreakdown(v: SessionV1.StepFinishPart["inputBreakdown"] | undefined) { ctx.inputBreakdown = v },
-+    get message() {
-           return ctx.assistantMessage
-         },
-         updateToolCall,
++              // 同一次准备的字符证明附在确认点；确认 tokens 与原子 publishAssistant owner 保持原值。
++              inputChars: ctx.assistantMessage.inputEstimate?.bodyChars,
++              inputBreakdown: ctx.assistantMessage.inputEstimate?.inputBreakdown,
+               cost: usage.cost,
+@@ -755,4 +758,8 @@
+-                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id
+-                  || !info.inputEstimate?.confirmed) return []
++                if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id) return []
++                // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
++                const steps = message.parts.flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
++                  ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
++                if (steps.length > 0) return steps.toReversed()
++                if (!info.inputEstimate?.confirmed) return []
+                 return [{ bodyChars: info.inputEstimate.bodyChars,
+                   input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
+@@ -762,2 +769,2 @@
+-                ...Token.estimateRequest(body, samples),
++                ...Token.estimateRequest(body, samples, streamInput.inputSections ?? []),
+                 contextLimit: ctx.model.limit.context,
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -1359,29 +1359,64 @@
-               .join("\n")
-             // 三段字符总量近似请求体，除以 chars-per-token 得 token 估算
-             const inputChars = [systemText, messagesText, toolsText].join("\n").length
--            let historyOutputTokens = 0
--            let historyOutputChars = 0
--            // 逆序遍历至累积 16000 字符即停，近期输出更具代表性
--            for (let i = msgs.length - 1; i >= 0 && historyOutputChars < 16000; i--) {
-+            // 输入字符细分：遍历消息部件计算每类字符数，供 TUI 精确分类显示
-+            let msgUserChars = 0, msgAssistantChars = 0, msgReasoningChars = 0
-+            let msgToolInputChars = 0, msgToolOutputChars = 0, msgAttachmentChars = 0
-+            for (const m of msgs) {
-+              for (const p of m.parts as any[]) {
-+                if (p.type === "text" && m.info.role === "user") msgUserChars += p.text?.length ?? 0
-+                else if (p.type === "text" && m.info.role === "assistant") msgAssistantChars += p.text?.length ?? 0
-+                else if (p.type === "reasoning") msgReasoningChars += p.text?.length ?? 0
-+                else if (p.type === "tool") {
-+                  msgToolInputChars += JSON.stringify(p.state?.input ?? {}).length
-+                  msgToolOutputChars += JSON.stringify(p.state?.output ?? {}).length
-+                } else if (p.type === "file") msgAttachmentChars += JSON.stringify(p).length
-+              }
-+            }
-+            // system 仅 agent/provider+env+mcp，与 instructions/skills 互斥，避免 used 双计
-+            // 分区字符与 TUI 分类一一对应，禁止 systemText 全量塞进 system 字段
-+            const nl = String.fromCharCode(10)
-+            const baseSystemText = [...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model))].join(nl)
-+            const envText = (Array.isArray(env) ? env : []).join(nl)
-+            const mcpText = typeof mcpInstructions === "string" ? mcpInstructions : ""
-+            const instructionsText = Array.isArray(instructions) ? instructions.join(nl) : String(instructions ?? "")
-+            const skillsText = Array.isArray(skills) ? skills.join(nl) : String(skills ?? "")
-+            const inputBreakdown = {
-+              system: baseSystemText.length + envText.length + mcpText.length,
-+              instructions: instructionsText.length,
-+              skills: skillsText.length,
-+              tools: toolsText.length,
-+              messages: { userText: msgUserChars, assistantText: msgAssistantChars, reasoning: msgReasoningChars, toolInput: msgToolInputChars, toolOutput: msgToolOutputChars, attachments: msgAttachmentChars, total: msgUserChars + msgAssistantChars + msgReasoningChars + msgToolInputChars + msgToolOutputChars + msgAttachmentChars },
-+            } as SessionV1.StepFinishPart["inputBreakdown"]
-+            // 输入侧比率校准：从历史 step-finish 的 inputChars / inputTokens 推算
-+            // 100k 字符上限避免长会话过度影响比率
-+            let historyInputChars = 0
-+            let historyInputTokens = 0
-+            for (let i = msgs.length - 1; i >= 0 && historyInputChars < 100_000; i--) {
-               const m = msgs[i]
-               if (m.info.role !== "assistant") continue
-               const sf = m.parts.findLast((p) => p.type === "step-finish")
-               if (!sf) continue
--              const chars = m.parts
--                .filter((p) => p.type === "text" || p.type === "reasoning")
--                .reduce((sum, p) => sum + ((p as any).text?.length ?? 0), 0)
--              const tokens = (sf.tokens.output ?? 0) + (sf.tokens.reasoning ?? 0)
--              historyOutputTokens += tokens
--              historyOutputChars += chars
-+              const chars = (sf as any).inputChars
-+              // 样本不足 100 字符跳过，与 TUI charsPerTokenFromHistory 对齐
-+              if (!chars || chars < 100) continue
-+              const tokens = (sf.tokens.input ?? 0) + (sf.tokens.cache?.read ?? 0) + (sf.tokens.cache?.write ?? 0)
-+              if (typeof chars === "number" && chars > 0 && tokens > 0) {
-+                historyInputChars += chars
-+                historyInputTokens += tokens
-+              }
-             }
-             // 样本不足（<500 字符）时回退 /4，避免少量数据导致比值失真
--            const charsPerToken = historyOutputTokens > 0 && historyOutputChars > 500
--              ? historyOutputChars / historyOutputTokens
-+            const charsPerToken = historyInputTokens > 0 && historyInputChars > 500
-+              ? historyInputChars / historyInputTokens
-               : 4
-             const estimatedInput = Math.round(inputChars / charsPerToken)
-             // 将估算值写入 assistant message 供 TUI 流式显示，step-finish 到达后被真实值覆盖
-             handle.message.tokens.input = estimatedInput
-             yield* sessions.updateMessage(handle.message)
-+            // 将输入字符数和细分存储到 handle，processor 在 step-finish 中持久化
-+            handle.inputChars = inputChars
-+            handle.inputBreakdown = inputBreakdown
-             const result = yield* handle.process({
-               user: lastUser,
-               agent,
-diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
---- a/packages/opencode/test/session/compaction.test.ts
-+++ b/packages/opencode/test/session/compaction.test.ts
-@@ -205,6 +205,8 @@
-     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
-     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
-     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
-+    inputChars: undefined,
-+    inputBreakdown: undefined,
-   } satisfies SessionProcessorModule.SessionProcessor.Handle
- }
+@@ -1358,3 +1358,9 @@
+               sessionID,
+               parentSessionID: session.parentID,
++              // 只交付已有 source 的原文归属；字符与 token 仍在唯一 prepared 回调计算。
++              inputSections: [
++                ...instructions.map(text => ({ kind: "instructions" as const, text })),
++                ...(lastUser.system ? [{ kind: "instructions" as const, text: lastUser.system }] : []),
++                ...(skills ? [{ kind: "skills" as const, text: skills }] : []),
++              ],
+               system,
+diff --git a/packages/opencode/src/session/llm.ts b/packages/opencode/src/session/llm.ts
+--- a/packages/opencode/src/session/llm.ts
++++ b/packages/opencode/src/session/llm.ts
+@@ -31,2 +31,3 @@
+ import { LLMRequestPrep } from "./llm/request"
++import type { Token } from "@opencode-ai/core/util/token"
  
+@@ -49,2 +50,3 @@
+   onRequestPrepared?: (body: unknown) => Effect.Effect<void>
++  inputSections?: ReadonlyArray<Token.SystemSection>
+ }
+@@ -243,9 +245,8 @@
+           abort: input.abort,
++          onRequestPrepared: input.onRequestPrepared,
+         })
+         if (native.type === "supported") {
+-          // native adapter 已完成消息 lowering 和实际工具广告，运输尚未开始。
+-          if (input.onRequestPrepared) yield* input.onRequestPrepared(native.body)
+           yield* Effect.logInfo("llm runtime selected", {
+             "llm.runtime": "native",
+             "llm.provider": input.model.providerID,
+             "llm.model": input.model.id,
+diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
+--- a/packages/opencode/src/session/llm/native-runtime.ts
++++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -27,1 +27,1 @@
+-  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown>; readonly body: unknown }
++  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown> }
+@@ -44,2 +44,3 @@
+   readonly abort: AbortSignal
++  readonly onRequestPrepared?: (body: unknown) => Effect.Effect<void>
+ }
+@@ -111,3 +112,4 @@
+         const provider = input.llmClient
+-          .stream(advertised)
++          // native 与 V2 使用同一 compile 回调，模型默认 system 不得在提前估算时漏掉。
++          .stream(advertised, input.onRequestPrepared)
+           .pipe(
+@@ -141,12 +143,11 @@
+   return {
+     ...current,
+-    body: { system: advertised.system, messages: advertised.messages, tools: advertised.tools, providerOptions: advertised.providerOptions },
+     stream: fetch ? stream.pipe(Stream.provideService(
+       FetchHttpClient.Fetch,
+       Object.assign(
+         (value: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => NetworkProxy.fetchWithRoute(fetch, value, { ...init, purpose: "provider" }),
+         // OAuth fetch 仍负责鉴权；局部 reference 取代默认 transport，不能再绕过代理或改写信号。
+         { preconnect: fetch.preconnect },
+       ),
+     )) : stream,
+   }
 diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
 --- a/packages/schema/src/v1/session.ts
 +++ b/packages/schema/src/v1/session.ts
-@@ -253,6 +253,26 @@
+@@ -255,6 +255,9 @@
        write: Schema.Finite,
      }),
    }),
-+  // 请求体字符数：用于校准 chars-per-token 比率，提高 token 估算精度
-+  inputChars: Schema.optional(NonNegativeInt),
-+  // 请求体细分：按组件记录字符数，供 TUI 精确分类显示
-+  inputBreakdown: Schema.optional(
-+    Schema.Struct({
-+      system: NonNegativeInt,
-+      instructions: NonNegativeInt,
-+      skills: NonNegativeInt,
-+      tools: NonNegativeInt,
-+      messages: Schema.Struct({
-+        userText: NonNegativeInt,
-+        assistantText: NonNegativeInt,
-+        reasoning: NonNegativeInt,
-+        toolInput: NonNegativeInt,
-+        toolOutput: NonNegativeInt,
-+        attachments: NonNegativeInt,
-+        total: NonNegativeInt,
-+      }),
-+    }),
-+  ),
++  // V1 历史的确认点引用同一个当前 Schema，禁止维护第二份细分定义。
++  inputChars: optional(NonNegativeInt),
++  inputBreakdown: optional(SessionMessage.InputBreakdown),
  }).annotate({ identifier: "StepFinishPart" })
  export type StepFinishPart = Types.DeepMutable<Schema.Schema.Type<typeof StepFinishPart>>
  
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -41,7 +41,7 @@
- import { Locale } from "../../util/locale"
- import { errorMessage } from "../../util/error"
- import { formatDuration, formatDurationCompact } from "../../util/format"
--import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
-+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
- import { createColors, createFrames } from "../../ui/spinner"
- import { useDialog } from "../../ui/dialog"
- import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
-@@ -299,6 +299,8 @@
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-     const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
-+    // 从历史 step-finish 记录中校准 chars-per-token 比率，提高 JSON 密集内容的估算精度
-+    const ratio = charsPerTokenFromHistory(msg, getParts)
- 
-     // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-     const last = requestAssistants.at(-1)!
-@@ -308,7 +310,7 @@
-       output: currentOutput,
-       totalInput,
-       totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed)
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
-     // 移除 bootstrapInputTokens 参数，改由服务端 prompt.ts 写入真实估算到 assistant.tokens.input
-     // requestTokens 用于 context 百分比和显示
+@@ -302,3 +302,4 @@
+     // 同一共享 owner 给出 step 与 request 两种范围，各保留一次未确认尾部。
++    // 密度随完整 request.inputEstimate 投影到达，100条窗口不再重新校准或累加确认点。
+     const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
      const requestTokens = currentInput + currentOutput
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -3,7 +3,7 @@
- import type { BuiltinTuiPlugin } from "../builtins"
- import { createEffect, createMemo, createSignal } from "solid-js"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
--import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
-+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
- 
- const id = "internal:sidebar-context"
- 
-@@ -51,6 +51,8 @@
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-     const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
-+    // 从历史 step-finish 记录中校准 chars-per-token 比率，提高 JSON 密集内容的估算精度
-+    const ratio = charsPerTokenFromHistory(messages, getParts)
- 
-     // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-     const last = requestAssistants.at(-1)!
-@@ -60,7 +62,7 @@
-       output,
-       totalInput,
-       totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed)
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
-     // 侧边栏移除 bootstrap 参数，依赖服务端写入的 assistant.tokens.input
+@@ -50,3 +50,4 @@
+     // 确认值低于估算时仍取真实 step，百分比和其他视图保持同一口径。
++    // 插件读取同一冻结密度，不能另扫 sidebar 的消息窗口建立第二份历史估算。
+     const { input, output, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
      const tokens = input + output
-     const totalTokens = totalInput + totalOutput
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -5,7 +5,7 @@
- import { SplitBorder } from "../../ui/border"
- import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { Locale } from "../../util/locale"
--import { sumConfirmed as sharedSumConfirmed, computeFinalTokens } from "../../util/token-estimate"
-+import { sumConfirmed as sharedSumConfirmed, computeFinalTokens, charsPerTokenFromHistory } from "../../util/token-estimate"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { useTerminalDimensions } from "@opentui/solid"
- import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
-@@ -72,6 +72,8 @@
- 
-     // 显示规则：外面是当前 step 的估算 token；括号里是当前请求的累计 token
-     const requestConfirmed = sharedSumConfirmed(requestAssistants, getParts)
-+    // 从历史 step-finish 记录中校准 chars-per-token 比率，提高 JSON 密集内容的估算精度
-+    const ratio = charsPerTokenFromHistory(msg, getParts)
- 
-     // 从最后一条消息添加流式估算，统一委托给 computeFinalTokens
-     const last = requestAssistants.at(-1)!
-@@ -81,7 +83,7 @@
-       output: currentOutput,
-       totalInput,
-       totalOutput,
--    } = computeFinalTokens(last, lastParts, requestConfirmed)
-+    } = computeFinalTokens(last, lastParts, requestConfirmed, ratio)
-     // 子代理页脚复用 computeFinalTokens，参数与主提示栏保持一致
+@@ -75,3 +75,4 @@
+     // 保留 #14 的 step/request 区别；共享估算不会把全局 tokens 填入括号。
++    // 子会话的 prepared 密度只随它自己的请求读取，父会话与旧模型确认样本不参与。
+     const { input: currentInput, output: currentOutput, totalInput, totalOutput } = computeFinalTokens(last, lastParts, request)
      const requestTokens = currentInput + currentOutput
-     const totalTokens = totalInput + totalOutput
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -9,8 +9,7 @@
- import matter from "gray-matter"
- import type { Agent, Config, Message, Part, Provider, VcsInfo } from "@opencode-ai/sdk/v2"
- import { Flag } from "@opencode-ai/core/flag/flag"
--import { estimate as estimateTokens } from "@opencode-ai/core/util/token"
--import { estimateDataUrlInputTokens } from "./token-estimate"
-+import { estimateDataUrlInputTokens, charsPerTokenFromHistory } from "./token-estimate"
- // 嵌入 catalog：TUI 无法 import opencode Schema，生成期抽取 description/parameters
- import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
- 
-@@ -319,9 +318,41 @@
-   "CONTEXT.md",
- ]
- 
--function estimate(input: unknown) {
--  // 字符串直接估算避免序列化开销；对象走稳定序列化以保证相同结构产生可复现的 token 数
--  return estimateTokens(typeof input === "string" ? input : stableJson(input))
-+// 守护进程/step-finish 下发的输入细分字符计数（与 schema inputBreakdown 对齐）
-+export type InputBreakdown = {
-+  system: number
-+  instructions: number
-+  skills: number
-+  tools: number
-+  messages: {
-+    total: number
-+    userText: number
-+    assistantText: number
-+    reasoning: number
-+    toolInput: number
-+    toolOutput: number
-+    attachments: number
-+  }
-+}
-+
-+// 只认 step-finish.inputBreakdown：与 processor 落盘 owner 一致，禁止读 message.info
-+function latestBreakdown(raw: Array<{ info: Message; parts: Part[] }>): InputBreakdown | undefined {
-+  // 从 step-finish part 读取：producer 写在 part 上，不在 message.info
-+  for (const msg of raw.toReversed()) {
-+    if (msg.info.role !== "assistant") continue
-+    for (const p of msg.parts.toReversed()) {
-+      if ((p as { type?: string }).type !== "step-finish") continue
-+      const bd = (p as { inputBreakdown?: InputBreakdown }).inputBreakdown
-+      if (bd && bd.system >= 0 && bd.messages && bd.messages.total >= 0) return bd
-+    }
-+  }
-+  return undefined
-+}
-+
-+// 支持会话级 chars/token 比率；缺省 4 字符/token
-+function estimate(input: unknown, ratio = 4) {
-+  const text = typeof input === "string" ? input : stableJson(input)
+@@ -5,1 +5,1 @@
+-import type { Agent, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
++import type { Agent, AssistantMessage, Config, Message, Part, Provider, Session, VcsInfo } from "@opencode-ai/sdk/v2"
+@@ -7,1 +7,1 @@
+-import { estimate } from "@opencode-ai/core/util/token"
++import { Token } from "@opencode-ai/core/util/token"
+@@ -335,1 +335,43 @@
++function estimate(text: string, ratio = 4) {
 +  return Math.max(0, Math.round(text.length / ratio))
- }
- 
- // 稳定 JSON 序列化：按键排序以保证相同结构的 token 估算可复现
-@@ -337,10 +368,11 @@
-   }
- }
- 
++}
++
++function latestInputEstimate(messages: WithParts[], raw: WithParts[], model: { providerID: string; modelID: string }): Partial<NonNullable<AssistantMessage["inputEstimate"]>> {
++  // 仅无请求投影的旧 V1 数据扫描确认点；当前请求缺失估算不等于可以借用旧轮次。
++  // 已有 inputChars 的助手只取确认 parts，不能再叠加同一助手旧 carrier 的相同样本。
++  const samples = raw.toReversed().flatMap(message => {
++    const info = message.info
++    if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) return []
++    const parts = message.parts.toReversed().flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
++      ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
++    return parts.length > 0 ? parts : info.inputEstimate?.confirmed
++      ? [{ bodyChars: info.inputEstimate.bodyChars, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
++  })
++  for (const message of messages.toReversed()) {
++    const info = message.info
++    if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) continue
++    if (info.inputEstimate) return { ...info.inputEstimate, charsPerToken: info.inputEstimate.charsPerToken ?? Token.charsPerTokenFromHistory(samples) }
++    const part = message.parts.findLast(part => part.type === "step-finish" && part.inputBreakdown !== undefined)
++    if (part?.type !== "step-finish") continue
++    return { input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write,
++      bodyChars: part.inputChars ?? 0, confirmed: true, inputBreakdown: part.inputBreakdown,
++      charsPerToken: Token.charsPerTokenFromHistory(samples) }
++  }
++  return { charsPerToken: Token.charsPerTokenFromHistory(samples) }
++}
++
++function distribute<T extends { tokens: number }>(items: T[], total: number, equal = false) {
++  const weight = items.reduce((sum, item) => sum + item.tokens, 0)
++  let previous = 0
++  let cumulative = 0
++  return items.map((item) => {
++    // instructions 无权重时清零；工具允许均分，累计舍入保证非空明细与服务端分类精确同额。
++    cumulative += weight > 0 ? item.tokens / weight : equal ? 1 / items.length : 0
++    const next = Math.round(cumulative * total)
++    const tokens = next - previous
++    previous = next
++    return { ...item, tokens }
++  })
++}
++
+ function stableJson(input: unknown): string {
+@@ -348,5 +390,5 @@
 -function estimateFileToken(url: string, mime: string) {
-+function estimateFileToken(url: string, mime: string, ratio = 4) {
-   // data: URL 内联附件按 base64 解码后估算，与远程 URL 的纯字符串估算逻辑不同
++function estimateFileToken(url: string, mime: string, ratio: number) {
+   // 内联图片/PDF 沿已有编码负载启发式与图像封顶；不能把整份 data URL 当普通文本重复估算。
    if (url.startsWith("data:")) return estimateDataUrlInputTokens(url, mime)
 -  return estimate(url)
-+  // 远程/路径 URL 估算也跟随会话 ratio
 +  return estimate(url, ratio)
  }
- 
- // 过滤已压缩历史：保留最近一次压缩摘要后的尾部消息，丢弃被压缩的旧消息
-@@ -376,7 +408,8 @@
- }
- 
- // 按部件类型统计消息 token：区分用户文本、助手文本、推理、工具调用与结果、附件、压缩摘要
+@@ -388,2 +430,2 @@
 -function messageTokens(messages: WithParts[]) {
-+// ratio 必须贯穿文本/工具估算，禁止默认 /4 与会话校准分叉
-+function messageTokens(messages: WithParts[], ratio = 4) {
++function messageTokens(messages: WithParts[], ratio: number) {
    const details: ContextUsageData["details"]["messages"] = {
-     userText: 0,
-     assistantText: 0,
-@@ -398,7 +431,7 @@
-           // synthetic 和 ignored 的文本部件不发送到 API，跳过统计
-           if (part.ignored || part.synthetic) continue
-           text.push(part.text)
+@@ -409,1 +451,1 @@
 -          const tokens = estimate(part.text)
 +          const tokens = estimate(part.text, ratio)
-           if (msg.info.role === "user") details.userText += tokens
-           else if (msg.info.role === "assistant" && msg.info.summary === true) details.compactionSummary += tokens
-           else details.assistantText += tokens
-@@ -406,11 +439,11 @@
-         }
-         case "reasoning":
-           // 推理 token 单独计入输出分类，不并入助手文本以保留可观测性
+@@ -417,6 +459,6 @@
 -          details.reasoning += estimate(part.text)
 +          details.reasoning += estimate(part.text, ratio)
            break
          case "tool": {
            toolNames.add(part.tool)
--          details.toolCalls += estimate(part.state.input)
-+          details.toolCalls += estimate(part.state.input, ratio)
-           if (part.state.status === "completed") {
-             // read 工具的 loaded 元数据记录已加载文件路径
-             const loaded = part.tool === "read" ? part.state.metadata?.loaded : undefined
-@@ -419,24 +452,24 @@
-             }
-             // 已压缩的工具结果用占位符估算，避免读取已清除的大体积输出
-             details.toolResults += part.state.time.compacted
--              ? estimate("[Old tool result content cleared]")
--              : estimate(part.state.output)
-+              ? estimate("[Old tool result content cleared]", ratio)
-+              : estimate(part.state.output, ratio)
+           // JSON 标点和字段名也属于调用载荷；字符数/4 仅用于显示估算。
+-          details.toolCalls += estimate(stableJson(part.state.input))
++          details.toolCalls += estimate(stableJson(part.state.input), ratio)
+@@ -432,5 +474,5 @@
+-            details.toolResults += estimate(output)
++            details.toolResults += estimate(output, ratio)
+             // 内联证明必须来自已计入窗口的同一正文，压缩前残留 output 不能证明指令仍可见。
+             text.push(output)
              for (const attachment of part.state.attachments ?? []) {
 -              details.attachments += estimateFileToken(attachment.url, attachment.mime)
 +              details.attachments += estimateFileToken(attachment.url, attachment.mime, ratio)
-             }
-           }
-           // pending 状态估算 raw 输入：尚未执行，仅 schema 调用部分计入工具调用开销
+@@ -440,11 +482,11 @@
 -          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw)
 -          if (part.state.status === "error") details.toolResults += estimate(part.state.error)
 +          if (part.state.status === "pending") details.toolCalls += estimate(part.state.raw, ratio)
@@ -393,360 +616,899 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
            break
          }
          case "file":
-           // 文件附件按 URL 类型分流估算：data: URL 解码后算，远程 URL 估算字符串本身
+           // data URL 使用既有视觉/PDF 启发式，普通 URL 只估算引用文本，不能把二者都按 base64 长度计费。
 -          details.attachments += estimateFileToken(part.url, part.mime)
 +          details.attachments += estimateFileToken(part.url, part.mime, ratio)
            break
          case "subtask":
-           // 子任务 prompt+description 计入用户文本：子任务由用户侧发起，语义等价于用户输入
+           // subtask 是用户发起的任务载荷，不能因最终由子代理执行就挪到助手输出分类。
 -          details.userText += estimate(`${part.prompt}\n${part.description}`)
 +          details.userText += estimate(`${part.prompt}\n${part.description}`, ratio)
-           break
-       }
-     }
-@@ -793,12 +826,14 @@
- }
- 
- // 工具定义 token：#48 catalog + #49 过滤，modelInfo 来自 currentModel
-+// 工具定义估算必须吃会话 ratio，与消息密度一致
- async function toolDefinitionTokens(
-   input: ComputeContextDataInput,
-   messages: WithParts[],
-   skills: Array<{ name: string; description: string; path: string }>,
-   lastUser: Message | undefined,
-   modelInfo: { modelID: string; providerID: string },
-+  ratio = 4,
+@@ -859,2 +901,3 @@
+   modelInfo: ReturnType<typeof currentModel>,
++  ratio: number,
  ) {
-   // 与 computeContextData/currentModel 同一模型真相源
-   const scanned = baseToolDefinitions(input, modelInfo, lastUser)
-@@ -809,7 +844,7 @@
-     const parts = [byName.get(name), dynamicToolText(name, input, skills, lastUser)].filter(Boolean)
-     const joined = parts.join(String.fromCharCode(10))
-     const text = resolveTemplateVars(joined, input.paths)
+@@ -872,1 +915,1 @@
 -    details.push({ name, tokens: estimate(text || name) })
 +    details.push({ name, tokens: estimate(text || name, ratio) })
-   }
-   return details.toSorted((a, b) => a.name.localeCompare(b.name))
- }
-@@ -1145,45 +1180,107 @@
-   const lastUser = compacted.findLast((msg) => msg.info.role === "user")?.info
-   const modelInfo = currentModel(input, lastUser)
-   const maxTokens = modelInfo.model?.limit.context ?? 0
--
+@@ -960,2 +1003,1 @@
+-function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined) {
+-  const contextLimit = model?.limit.context ?? 0
++function windowDetails(input: ComputeContextDataInput, model: Provider["models"][string] | undefined, contextLimit = model?.limit.context ?? 0) {
+@@ -1076,7 +1118,16 @@
+-  const maxTokens = modelInfo.model?.limit.context ?? 0
++  // 请求投影包含 native 首包前与确认后的细分；只有没有投影的旧 V1 才读取确认 part。
++  const prepared = input.session?.request ? input.session.request.inputEstimate : latestInputEstimate(compacted, raw, modelInfo)
++  const bd = prepared?.inputBreakdown
++  // 密度冻结自本轮输入侧校准；显示窗口或模型选择变化不能重新解释服务端 prepared input。
++  const ratio = prepared?.charsPerToken && Number.isFinite(prepared.charsPerToken) && prepared.charsPerToken > 0 ? prepared.charsPerToken : 4
++  // Catalog 消失或助手被淘汰仍保留本轮预算，零不能被当前同 API 的其他 alias 替换。
++  const frozen = input.session?.request?.model?.contextLimit ?? prepared?.contextLimit
++  const windowModel = modelInfo.model && frozen !== undefined
++    ? { ...modelInfo.model, limit: { ...modelInfo.model.limit, context: frozen } } : modelInfo.model
++  const maxTokens = frozen ?? modelInfo.model?.limit.context ?? 0
+ 
 -  const msg = messageTokens(compacted)
-+  // 历史 step-finish 输入字符校准 chars/token；无历史时回落 4
-+  // getParts 按消息 ID 取 parts，供 step-finish inputChars 校准
-+  const ratio = charsPerTokenFromHistory(
-+    raw.map((m) => m.info),
-+    (id) => input.parts[id] ?? [],
-+  )
-+  // 优先使用服务端细分，避免 TUI 重装拆不准 JSON 密度
-+  const bd = latestBreakdown(raw)
-+
 +  const msg = messageTokens(compacted, ratio)
-     // 使用 raw 而非 compacted：统计全部消息的用量，不仅压缩后的尾部
+   // raw 保存整场会话用量；窗口分类仍由 compacted 估算。
    const usage = usageTotals(raw)
    const instructions = await gatherInstructionFiles(input)
 -  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content) }))
-+  let instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
-   const messageText = msg.text.join("\n")
-   // 加载的指令路径去重：已在消息文本中出现的跳过
-   const loadedInstructions = [] as Array<{ path: string; tokens: number }>
-   for (const filepath of msg.loadedInstructionPaths) {
-     if (messageText.includes(`Instructions from: ${filepath}`)) continue
-     const content = await readText(filepath)
++  const instructionDetails = instructions.map((item) => ({ path: item.path, tokens: estimate(item.content, ratio) }))
+@@ -1089,1 +1140,1 @@
 -    if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`) })
-+    if (content) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
-   }
- 
-   const skills = await gatherSkills(input)
-   const skillListing = skillsSection(skillInfo(skills))
++    if (content && !bd) loadedInstructions.push({ path: filepath, tokens: estimate(`Instructions from: ${filepath}\n${content}`, ratio) })
+@@ -1094,7 +1145,7 @@
 -  const skillTokens = estimate(skillListing)
--  const skillDetails = skills.map((skill) => ({
--    name: skill.name,
--    path: skill.path,
++  const skillTokens = bd ? Math.round(bd.skills / ratio) : estimate(skillListing, ratio)
+   const skillDetails = skills.map((skill) => ({
+     name: skill.name,
+     path: skill.path,
 -    tokens: estimate(skillsSection(skillInfo([skill]))),
--  }))
--  const toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser, { modelID: modelInfo.modelID, providerID: modelInfo.providerID })
-+  let toolDefs = await toolDefinitionTokens(input, compacted, skills, lastUser, { modelID: modelInfo.modelID, providerID: modelInfo.providerID }, ratio)
-   // 系统提示词 = 基础提示 + 环境信息 + 用户自定义 system 覆盖
-   const systemText = [
-     baseSystemPrompt(input, lastUser, modelInfo.model),
-     environmentText(input, modelInfo.modelID, modelInfo.providerID, toolDefs.map((item) => item.name)),
-     lastUser?.role === "user" ? lastUser.system : undefined,
-   ].filter(Boolean).join("\n")
++    tokens: bd ? 1 : estimate(skillsSection(skillInfo([skill])), ratio),
+   }))
+-  const toolDefs = toolDefinitionTokens(input, skills, lastUser, modelInfo)
++  const toolDefs = toolDefinitionTokens(input, skills, lastUser, modelInfo, ratio)
+@@ -1107,11 +1158,17 @@
 -  const envTokens = estimate(systemText)
 -  const instructionTokens = instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
--  const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
++  // 五类与消息六子项只消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
++  const envTokens = bd ? Math.round(bd.system / ratio) : estimate(systemText, ratio)
++  const instructionTokens = bd ? Math.round(bd.instructions / ratio) : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
 -  const toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
--  // 输入消息 = 用户文本 + 工具结果 + 附件
++  const toolDefTokens = bd ? Math.round(bd.tools / ratio) : toolDefs.reduce((sum, item) => sum + item.tokens, 0)
++  const messageDetails = bd ? {
++    userText: Math.round(bd.messages.userText / ratio), assistantText: Math.round(bd.messages.assistantText / ratio),
++    reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
++    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: Math.round(bd.messages.attachments / ratio), compactionSummary: 0,
++  } : msg.details
+   // 工具返回内容会成为下一轮输入，即使部件归助手消息也不能挪入 Output Messages。
 -  const inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
--  // 输出消息 = 助手文本 + 推理 + 工具调用 + 压缩摘要
--  const outputMessageTokens =
++  const inputMessageTokens = messageDetails.userText + messageDetails.toolResults + messageDetails.attachments
+   // 摘要本身仍是窗口内输出载荷；已裁剪的旧正文不能因 summary 还有父 ID 又被重新计入。
+   const outputMessageTokens =
 -    msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
-+  // 有 daemon inputBreakdown 时按细分字符/ratio 分类；否则 TUI 侧重建
-+  let envTokens: number
-+  let skillTokens: number
-+  let skillDetails: Array<{ name: string; path: string; tokens: number }>
-+  let toolDefTokens: number
-+  let inputMessageTokens: number
-+  let outputMessageTokens: number
-+  if (bd) {
-+    envTokens = Math.round(bd.system / ratio)
-+    skillTokens = Math.round(bd.skills / ratio)
-+    skillDetails = skills.map((skill) => ({
-+      name: skill.name,
-+      path: skill.path ?? "",
-+      tokens: estimate(skillsSection(skillInfo([skill])), ratio),
-+    }))
-+    toolDefTokens = Math.round(bd.tools / ratio)
-+    // 消息细分：user/toolOutput → 输入；assistant/reasoning/toolInput → 输出
-+    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.toolOutput + bd.messages.attachments) / ratio)
-+    outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput) / ratio)
-+  } else {
-+    skillTokens = estimate(skillListing, ratio)
-+    skillDetails = skills.map((skill) => ({
-+      name: skill.name,
-+      path: skill.path ?? "",
-+      tokens: estimate(skillsSection(skillInfo([skill])), ratio),
-+    }))
-+    envTokens = estimate(systemText, ratio)
-+    toolDefTokens = toolDefs.reduce((sum, item) => sum + item.tokens, 0)
-+    // 输入消息 = 用户文本 + 工具结果 + 附件
-+    inputMessageTokens = msg.details.userText + msg.details.toolResults + msg.details.attachments
-+    // 输出消息 = 助手文本 + 推理 + 工具调用 + 压缩摘要
-+    outputMessageTokens =
-+      msg.details.assistantText + msg.details.reasoning + msg.details.toolCalls + msg.details.compactionSummary
-+  }
-+  // bd 路径：instructions 直接用服务端细分字符/ratio，禁止再与 system 双计
-+  // 无 bd 时回落本地 instruction 文件估算
-+  const instructionTokens = bd
-+    ? Math.round(bd.instructions / ratio)
-+    : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
-+  const loadedInstructionTokens = bd ? 0 : loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
-+  // bd 路径：detail 列表按字符占比映射到 daemon 总量，禁止本地 estimate 与分类分叉
-+  // 列表展示权保留，token 权重锁到 daemon 总量，消除第二套估计
-+if (bd) {
-+    const instructionCharsTotal = instructionDetails.reduce((s, item) => s + Math.max(item.tokens, 0), 0)
-+    // instructionDetails 此时仍是本地 estimate；用其相对权重映射到 instructionTokens
-+    if (instructionCharsTotal > 0 && instructionTokens > 0) {
-+      instructionDetails = instructionDetails.map((item) => ({
-+        path: item.path,
-+        tokens: Math.round((item.tokens / instructionCharsTotal) * instructionTokens),
-+      }))
-+    } else {
-+      instructionDetails = instructionDetails.map((item) => ({ path: item.path, tokens: 0 }))
-+    }
-+    if (skillDetails.length > 0 && skillTokens > 0) {
-+      skillDetails = skillDetails.map((skill) => ({
-+        ...skill,
-+        tokens: Math.round(skillTokens / skillDetails.length),
-+      }))
-+    }
-+    const toolCharsTotal = toolDefs.reduce((s, t) => s + Math.max(t.tokens, 0), 0)
-+    if (toolCharsTotal > 0 && toolDefTokens > 0) {
-+      toolDefs = toolDefs.map((t) => ({
-+        name: t.name,
-+        tokens: Math.round((t.tokens / toolCharsTotal) * toolDefTokens),
-+      }))
-+    } else if (toolDefs.length > 0 && toolDefTokens > 0) {
-+      toolDefs = toolDefs.map((t) => ({ name: t.name, tokens: Math.round(toolDefTokens / toolDefs.length) }))
-+    }
-+  }
++    messageDetails.assistantText + messageDetails.reasoning + messageDetails.toolCalls + messageDetails.compactionSummary
    const messageTotal = inputMessageTokens + outputMessageTokens
-   const window = windowDetails(input, modelInfo.model)
-   // 已用 token = 系统提示 + 指令 + 加载指令 + 技能 + 工具定义 + 消息
-@@ -1219,7 +1316,19 @@
+-  const window = windowDetails(input, modelInfo.model)
++  const window = windowDetails(input, windowModel, maxTokens)
+@@ -1142,1 +1199,1 @@
+-    model: [modelInfo.providerID, modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
++    model: [input.session?.request?.model?.providerID ?? modelInfo.providerID, input.session?.request?.model?.modelID ?? modelInfo.modelID].filter(Boolean).join("/") || "(unknown)",
+@@ -1150,5 +1207,6 @@
+-      instructions: instructionDetails,
++      // 服务端零总额也要清零本地明细，不能只在正值分支覆盖默认估算而残留上一轮数值。
++      instructions: bd ? distribute(instructionDetails, instructionTokens) : instructionDetails,
        loadedInstructions,
-       skills: skillDetails,
-       toolDefs,
+-      skills: skillDetails,
+-      toolDefs,
 -      messages: msg.details,
-+      // bd 时 details.messages 与分类同源（daemon 细分/ratio），避免页脚与柱图双口径
-+      // toolCalls/toolResults 字段名沿用 UI，数值分别取自 toolInput/toolOutput 字符
-+      messages: bd
-+        ? {
-+            userText: Math.round(bd.messages.userText / ratio),
-+            assistantText: Math.round(bd.messages.assistantText / ratio),
-+            reasoning: Math.round(bd.messages.reasoning / ratio),
-+            toolCalls: Math.round(bd.messages.toolInput / ratio),
-+            toolResults: Math.round(bd.messages.toolOutput / ratio),
-+            attachments: Math.round(bd.messages.attachments / ratio),
-+            compactionSummary: 0,
-+          }
-+        : msg.details,
-       usage,
-       window,
-     },
++      skills: bd ? distribute(skillDetails, skillTokens, true) : skillDetails,
++      toolDefs: bd ? distribute(toolDefs, toolDefTokens, true) : toolDefs,
++      messages: messageDetails,
 diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
 --- a/packages/tui/src/util/token-estimate.ts
 +++ b/packages/tui/src/util/token-estimate.ts
-@@ -24,6 +24,44 @@
-   // PDF 按 base64 负载密度估算，每 1100 字符约 1 token
-   if (mime === "application/pdf") return Math.max(1, Math.round(payloadLength / 1100))
-   return Math.max(1, estimate(url.slice(comma + 1)))
-+}
-+
-+// 默认 chars-per-token 比率：4 字符约等于 1 token（适用于英文文本）
-+export const DEFAULT_CHARS_PER_TOKEN = 4
-+
-+// 从历史 step-finish 记录中校准 chars-per-token 比率
-+// 逆序扫描 assistant 消息的 step-finish 部件，累积 inputChars 和对应的 input/cache token 数
-+// 同时停止累积 numerator 和 denominator，保持比率准确
-+// 返回校准后的比率；若无历史数据则回退到 DEFAULT_CHARS_PER_TOKEN
-+export function charsPerTokenFromHistory(
-+  allMessages: readonly any[],
-+  getParts: (id: string) => readonly any[],
-+): number {
-+  let totalChars = 0
-+  let totalTokens = 0
-+  // 逆序遍历：近期数据更具代表性，累积到 100k 字符即停
-+  for (let i = allMessages.length - 1; i >= 0 && totalChars < 100_000; i--) {
-+    const msg = allMessages[i]
-+    if ((msg.info?.role ?? msg.role) !== "assistant") continue
-+    // getParts 接受消息 ID（字符串），不是消息对象
-+    const parts = getParts(msg.info?.id ?? msg.id ?? "")
-+    for (const p of parts) {
-+      if (p.type !== "step-finish") continue
-+      const inputChars = (p as any).inputChars
-+      const inputTokens =
-+        (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)
-+      // 样本不足 100 字符忽略，避免早期噪声主导密度
-+      if (typeof inputChars !== "number" || inputChars < 100 || inputTokens <= 0) continue
-+      totalChars += inputChars
-+      totalTokens += inputTokens
-+    }
-+  }
-+  // 累计不足 500 字符不校准，回落默认 4
-+  if (totalTokens === 0 || totalChars <= 500) return DEFAULT_CHARS_PER_TOKEN
-+  const ratio = totalChars / totalTokens
-+  // 比率合理范围：1~10，超出则使用默认值
-+  if (ratio < 1 || ratio > 10 || !Number.isFinite(ratio)) return DEFAULT_CHARS_PER_TOKEN
-+  return ratio
- }
- 
- /** 累加所有已完成 request 的 step-finish 确认 token（不含当前 step 的流式追加） */
-@@ -57,8 +95,7 @@
- export function computeFinalTokens(
-   lastAssistant: AssistantMessage,
-   lastParts: ReadonlyArray<{ type: string; [key: string]: any }>,
--  requestConfirmed: { input: number; output: number },
--) {
-+  requestConfirmed: { input: number; output: number }, ratio: number = DEFAULT_CHARS_PER_TOKEN) {
-   // 定位最后一个 step-finish 索引，划分已确认区与流式追加区
-   const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-   // 流式输出估算：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
-@@ -83,8 +120,8 @@
-       }, 0)
- 
-   // 字符数 / 4 是通用 token 估算比率，适用于英文为主的代码和文本
+@@ -80,3 +80,5 @@
+-  // 字符数 / 4 是通用 token 估算比率，适用于英文为主的代码和文本
 -  const pendingInputTokens = Math.round(pendingIn / 4)
 -  const pendingOutputTokens = Math.round(streamingOut / 4)
++  // 三个消费者只校准未确认尾部；prepared input 与零确认继续沿原投影/游标优先级取值。
++  const density = request.inputEstimate?.charsPerToken
++  const ratio = density !== undefined && Number.isFinite(density) && density > 0 ? density : 4
 +  const pendingInputTokens = Math.round(pendingIn / ratio)
 +  const pendingOutputTokens = Math.round(streamingOut / ratio)
-   // 尾部有进行中的工具调用时当前 step 尚未确认，currentStep 显示 0
-   const hasInFlightTail = !lastAssistant.time.completed && lastParts.some((_, i) => i > lastSFIdx)
-   const lastStepFinish =
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -425,3 +425,29 @@
-     expect(result).toEqual(["3", "4", "5", "6"])
+@@ -768,3 +768,82 @@
+     expect(contextUsageFooter(data, 180)).toContain("Cost $0.0100")
    })
- })
 +
-+describe("inputBreakdown step-finish contract", () => {
-+  // 契约：细分挂在 step-finish part，字段 attachments 对齐 schema
-+  test("step-finish part carries attachments field", () => {
-+    const part = {
-+      type: "step-finish" as const,
-+      inputBreakdown: {
-+        system: 100,
-+        instructions: 0,
-+        skills: 0,
-+        tools: 0,
-+        messages: {
-+          total: 200,
-+          userText: 50,
-+          assistantText: 50,
-+          reasoning: 0,
-+          toolInput: 40,
-+          toolOutput: 40,
-+          attachments: 20,
-+        },
-+      },
++  test("uses daemon inputBreakdown for every category and keeps confirmed usage separate", async () => {
++    const inputBreakdown = {
++      system: 8000, instructions: 1000, skills: 0, tools: 5000,
++      messages: { userText: 7800, assistantText: 8000, reasoning: 0, toolInput: 2000, toolOutput: 2000, attachments: 200, total: 20000 },
 +    }
-+    expect(part.type).toBe("step-finish")
-+    expect(part.inputBreakdown.messages.attachments).toBe(20)
++    const finish: Part = {
++      id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.001,
++      tokens: { input: 12000, output: 600, reasoning: 0, cache: { read: 3000, write: 2000 } }, inputChars: 34000, inputBreakdown,
++    }
++    // 可见正文刻意远小于服务端细分，能发现面板仍用短消息重建分类、覆盖 prepared 证明的回归。
++    const input: ComputeContextDataInput = {
++      messages: [user("1"), assistant("2", "1")], parts: { "1": [text("1", "short")], "2": [finish] },
++      providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [],
++    }
++    // Source 的 ratio=2.0 保留输入/cache分母；attachments 必须实际进入生产分类。
++    const legacy = await computeContextData(input)
++    expect(legacy.categories.find(item => item.name === "System prompt")?.tokens).toBe(4000)
++    expect(legacy.categories.find(item => item.name === "Instructions")?.tokens).toBe(500)
++    expect(legacy.categories.find(item => item.name === "Tool definitions")?.tokens).toBe(2500)
++    expect(legacy.categories.find(item => item.name === "Skills")?.tokens).toBe(0)
++    expect(legacy.details.messages.attachments).toBe(100)
++    expect(legacy.details.messages.toolCalls).toBe(1000)
++    expect(legacy.details.messages.toolResults).toBe(1000)
++    // 确认输出600与费用来自 step-finish；细分的17000输入估算不能重写普通输入或抹掉缓存两栏。
++    expect(legacy.details.usage).toMatchObject({ input: 12000, cacheRead: 3000, cacheWrite: 2000, output: 600, cost: 0.001 })
++    // 小额与超过输入上限的 reserved 分别验证显式覆盖和可用窗口归零，不能沿用缺省缓冲公式。
++    for (const reserved of [100, 20000]) {
++      const explicit = await computeContextData({ ...input, config: { compaction: { reserved } } })
++      expect(explicit.details.window.usableInput).toBe(Math.max(0, 19900 - reserved))
++      expect(explicit.details.window.compactionBuffer).toBe(Math.min(19900, reserved))
++      expect(explicit.details.window.providerReserve).toBe(100)
++    }
++    const request: NonNullable<Session["request"]> = { messageID: "1", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0,
++      model: { providerID: "test", modelID: "api-model", contextLimit: 8000 },
++      inputEstimate: { input: 17000, bodyChars: 34000, confirmed: false, charsPerToken: 2, inputBreakdown } }
++    const session: Session = { id: "s", slug: "s", projectID: "p", directory: ".", title: "s", version: "1", time: { created: 0, updated: 0 }, request }
++    // native 首包前或分页淘汰后可没有任何可见消息；空 transcript 仍须从同一请求投影得到五类占用。
++    const native = await computeContextData({ ...input, messages: [], parts: {}, session,
++      instructionFiles: [{ path: "a", content: "abcd" }, { path: "b", content: "abcdefgh" }],
++      toolDefinitions: [{ name: "a", text: "abcd" }, { name: "b", text: "abcdefgh" }] })
++    expect(native.categories.filter(item => !item.isDeferred).map(item => item.tokens)).toEqual([4000, 500, 0, 2500, 5000, 5000])
++    expect(native.totalTokens).toBe(17000)
++    // 4:8的本地权重不能整除500或2500，明细总额断言可捕获逐项舍入导致的余数丢失。
++    expect(native.details.instructions.reduce((sum, item) => sum + item.tokens, 0)).toBe(500)
++    expect(native.details.toolDefs.reduce((sum, item) => sum + item.tokens, 0)).toBe(2500)
++    expect(native.details.usage.total).toBe(0)
++    expect(native.maxTokens).toBe(8000)
++    expect(native.model).toBe("test/api-model")
++    // 字典仍有20000窗口，冻结预算零若被当成缺失值就会错误借用该 Catalog 上限。
++    const zero = await computeContextData({ ...input, session: { ...session, request: { ...request,
++      model: { providerID: "test", modelID: "api-model", contextLimit: 0 } } } })
++    expect(zero.maxTokens).toBe(0)
++    // parts 中保留上一请求的完整细分；新请求没有 carrier 时必须阻止旧确认点接管分类。
++    const missing = await computeContextData({ ...input, session: { ...session, request: {
++      messageID: "new", input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 } } })
++    expect(missing.categories.find(item => item.name === "Instructions")?.tokens).toBe(0)
 +  })
-+})
++
++  test("ratio=2.5 tracks JSON-heavy input and ignores user or other-model calibration", async () => {
++    const longText = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ role: "user", content: `message ${i} with JSON, code and tool results`.repeat(4) })))
++    const confirmed = Math.round(longText.length / 2.5)
++    const finish: Part = { id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.01,
++      tokens: { input: confirmed, output: 100, reasoning: 0, cache: { read: 0, write: 0 } }, inputChars: longText.length,
++      inputBreakdown: { system: 0, instructions: 0, skills: 0, tools: 0,
++        messages: { userText: longText.length, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: longText.length } } }
++    const input: ComputeContextDataInput = { messages: [user("1"), assistant("2", "1")],
++      parts: { "1": [text("1", longText), { ...finish, messageID: "1", inputChars: 100000 }], "2": [finish] },
++      providers: [provider], paths: { cwd: process.cwd() }, instructionFiles: [], skills: [], toolDefinitions: [] }
++    const data = await computeContextData(input)
++    const tokens = data.categories.find(item => item.name === "Input Messages")?.tokens ?? 0
++    expect(Math.abs(tokens - confirmed) / confirmed).toBeLessThan(0.02)
++    expect(tokens).toBeGreaterThan(Math.round(longText.length / 4))
++    // 异模型样本的十万字符足以主导比率，追加后结果不变才能证明过滤使用实际执行模型。
++    const other = { ...assistant("3", "1"), modelID: "other" }
++    const unchanged = await computeContextData({ ...input, messages: [...input.messages, other],
++      parts: { ...input.parts, "3": [{ ...finish, messageID: "3", inputChars: 100000 }] } })
++    expect(unchanged.details.messages.userText).toBe(data.details.messages.userText)
++  })
+ })
 diff --git a/packages/tui/test/util/token-estimate.test.ts b/packages/tui/test/util/token-estimate.test.ts
 --- a/packages/tui/test/util/token-estimate.test.ts
 +++ b/packages/tui/test/util/token-estimate.test.ts
-@@ -123,3 +123,67 @@
-     expect(result.totalOutput).toBe(202)
-   })
+@@ -90,2 +90,26 @@
+   expect(getContextLimit([], "p", "api-test-model", frozen.model.contextLimit)).toBe(2000)
++  // 固定prepared输入777，仅改变尾部密度；未确认字符应变而请求的4000/30确认累计必须保持。
++  const dense = { ...prepared, inputEstimate: { input: 777, bodyChars: 1943, confirmed: false, charsPerToken: 2.5 } }
++  expect(computeFinalTokens(nextAssistant, [{ ...text, messageID: "next" }], dense)).toEqual({ input: 777, output: 3, totalInput: 4777, totalOutput: 33 })
++  expect(computeFinalTokens(nextAssistant, [tool], dense)).toEqual({ input: 780, output: 1, totalInput: 4780, totalOutput: 31 })
++  // captured的游标已覆盖该工具结果，新密度不能把同一份结果再次追加到prepared输入。
++  expect(computeFinalTokens(captured, [tool], dense)).toEqual({ input: 777, output: 1, totalInput: 4777, totalOutput: 31 })
++  expect(computeFinalTokens(undefined, [], dense)).toEqual({ input: 777, output: 0, totalInput: 4777, totalOutput: 30 })
++  // 零确认part可先于Session快照到达，必须立即遮掉尚在投影中的777估算而保留请求历史累计。
++  expect(computeFinalTokens(nextAssistant, [finish], dense)).toEqual({ input: 0, output: 0, totalInput: 4000, totalOutput: 30 })
++  const pending: Part = { id: "pending", sessionID: "s", messageID: "next", type: "tool", callID: "call", tool: "bash",
++    state: { status: "pending", input: {}, raw: "pending-raw-text" } }
++  const before = { ...text, text: "ab", messageID: "next" }
++  const after = { ...text, id: "after", text: "cd", messageID: "next" }
++  // raw参数16字符与两段正文共20字符，8与5的差值能发现pending输入被丢弃或密度未传入。
++  expect(computeFinalTokens(nextAssistant, [before, pending, after], dense).output).toBe(8)
++  expect(computeFinalTokens(nextAssistant, [before, pending, after], prepared).output).toBe(5)
++  // 非法密度只影响显示估算，沿默认密度得到有限尾部值，不得产生Infinity/NaN污染整帧用量。
++  for (const density of [0, -1, NaN, Infinity]) {
++    expect(computeFinalTokens(nextAssistant, [text], { ...dense, inputEstimate: { ...dense.inputEstimate, charsPerToken: density } }).output).toBe(2)
++  }
++  const bodyEstimate = Token.estimateRequest(body, [{ bodyChars: 1000, input: 400 }], [])
++  expect(bodyEstimate.input).toBe(33)
++  expect(bodyEstimate.bodyChars).toBe(82)
++  expect(bodyEstimate.inputBreakdown?.messages.attachments).toBe(0)
  })
+diff --git a/packages/core/test/util-token.test.ts b/packages/core/test/util-token.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/test/util-token.test.ts
+@@ -0,0 +1,99 @@
++import { expect, test } from "bun:test"
++import { Schema } from "effect"
++import { SessionMessage } from "@opencode-ai/schema/session-message"
++import { SessionV1 } from "@opencode-ai/schema/session-v1"
++import { Token } from "../src/util/token"
 +
-+
-+describe("charsPerTokenFromHistory", () => {
-+  // 用 step-finish.inputChars 与 tokens 校准密度；样本须越过 500 累计阈值
-+  test("computes ratio from step-finish inputChars", async () => {
-+    const { charsPerTokenFromHistory } = await import("../../src/util/token-estimate")
-+    const msgs = [{ id: "a1", role: "assistant" }]
-+    const parts: Record<string, any[]> = {
-+      a1: [
-+        {
-+          type: "step-finish",
-+          // 1000/125 = 8，且 totalChars>500
-+          inputChars: 1000,
-+          tokens: { input: 125, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-+        },
-+      ],
-+    }
-+    expect(charsPerTokenFromHistory(msgs, (id) => parts[id] ?? [])).toBe(8)
-+  })
-+
-+  test("returns default when sample inputChars under 100", async () => {
-+    const { charsPerTokenFromHistory, DEFAULT_CHARS_PER_TOKEN } = await import("../../src/util/token-estimate")
-+    const msgs = [{ id: "a1", role: "assistant" }]
-+    const parts: Record<string, any[]> = {
-+      a1: [{ type: "step-finish", inputChars: 50, tokens: { input: 20, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }],
-+    }
-+    expect(charsPerTokenFromHistory(msgs, (id) => parts[id] ?? [])).toBe(DEFAULT_CHARS_PER_TOKEN)
-+  })
-+
-+  test("returns default when aggregate chars at or under 500", async () => {
-+    const { charsPerTokenFromHistory, DEFAULT_CHARS_PER_TOKEN } = await import("../../src/util/token-estimate")
-+    const msgs = [{ id: "a1", role: "assistant" }]
-+    const parts: Record<string, any[]> = {
-+      a1: [{ type: "step-finish", inputChars: 200, tokens: { input: 40, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }],
-+    }
-+    expect(charsPerTokenFromHistory(msgs, (id) => parts[id] ?? [])).toBe(DEFAULT_CHARS_PER_TOKEN)
-+  })
++test("calibrates input density with thresholds, cache-inclusive samples and a shared cutoff", () => {
++  expect(Token.charsPerTokenFromHistory([{ bodyChars: 100000, input: 40000 }])).toBe(2.5)
++  // 这组普通输入只有30000，结果仍为2.5才证明缓存读写也进入了输入侧样本分母。
++  expect(Token.charsPerTokenFromHistory([{ bodyChars: 100000, input: 30000 + 5000 + 5000 }])).toBe(2.5)
++  expect(Token.charsPerTokenFromHistory([{ bodyChars: 1000, input: 125 }])).toBe(8)
++  expect(Token.charsPerTokenFromHistory([])).toBe(4)
++  expect(Token.charsPerTokenFromHistory([{ bodyChars: 50, input: 10 }])).toBe(4)
++  // 500与501跨过累计门槛；它独立于单样本100字符的准入条件，两个阈值不能混为一次过滤。
++  for (const bodyChars of [200, 500]) expect(Token.charsPerTokenFromHistory([{ bodyChars, input: 40 }])).toBe(4)
++  expect(Token.charsPerTokenFromHistory([{ bodyChars: 501, input: 167 }])).toBe(3)
++  for (const input of [0, -1, Infinity, NaN]) expect(Token.charsPerTokenFromHistory([{ bodyChars: 1000, input }])).toBe(4)
++  // 第三个样本故意极端偏斜，正确结果要求达到十万字符时分子、分母一起停止接纳旧样本。
++  expect(Token.charsPerTokenFromHistory([{ bodyChars: 50000, input: 20000 }, { bodyChars: 50000, input: 20000 }, { bodyChars: 100000, input: 1 }])).toBe(2.5)
 +})
 +
-+describe("inputBreakdown step-finish contract", () => {
-+  // 契约：细分挂在 step-finish part，字段 attachments 对齐 schema
-+  test("step-finish part carries attachments field", () => {
-+    const part = {
-+      type: "step-finish" as const,
-+      inputBreakdown: {
-+        system: 100,
-+        instructions: 0,
-+        skills: 0,
-+        tools: 0,
-+        messages: {
-+          total: 200,
-+          userText: 50,
-+          assistantText: 50,
-+          reasoning: 0,
-+          toolInput: 40,
-+          toolOutput: 40,
-+          attachments: 20,
-+        },
-+      },
-+    }
-+    expect(part.type).toBe("step-finish")
-+    expect(part.inputBreakdown.messages.attachments).toBe(20)
-+  })
++test("one serializer accounts for lowered messages, tools, source sections and JSON escapes", () => {
++  let reads = 0
++  // 引号、反斜杠与换行会增加wire字符；消息另含控制字符和孤立surrogate以覆盖不同转义长度。
++  const instructions = "Instructions from: fixture\nquoted \"rule\"\\path"
++  const skills = "<available_skills>\nfixture\n</available_skills>"
++  // 同一指令被两个来源声明也只归属一次；重复来源不能把system余量扣成负值或扩大instructions。
++  const sections: Token.SystemSection[] = [{ kind: "instructions", text: instructions }, { kind: "skills", text: skills }, { kind: "instructions", text: instructions }]
++  const body = {
++    model: "api-model", system: [{ type: "text", text: ["default system", instructions, skills].join("\n\n") }],
++    messages: [
++      { role: "user", content: [{ type: "text", text: "synthetic text\u0000\ud800" }, { type: "image", source: { data: "x".repeat(1500) } }] },
++      { role: "assistant", content: [{ type: "text", text: "answer" }, { type: "thinking", thinking: "reason" }, { type: "tool_use", id: "c", name: "read", input: { messages: ["argument"], tools: ["argument"] } }] },
++      { role: "user", content: [{ type: "tool_result", tool_use_id: "c", content: "tool output" }] },
++    ],
++    tools: [{ name: "read", input_schema: { type: "object", properties: { system: { type: "string" }, messages: { type: "array" } } } }],
++    // getter是序列化次数的观察点；先断言再执行独立JSON oracle，避免oracle本身被算成第二次生产遍历。
++    get temperature() { reads++; return 0.25 },
++  }
++  const result = Token.estimateRequest(body, [], sections)
++  expect(reads).toBe(1)
++  const bd = Schema.decodeUnknownSync(SessionMessage.InputBreakdown)(result.inputBreakdown)
++  expect(result.bodyChars).toBe(JSON.stringify(body).length)
++  // 总和与原生JSON长度分别对照，既能发现跨桶重复计数，也能发现漏标点后仅靠桶内相等伪通过。
++  expect(bd.system + bd.instructions + bd.skills + bd.tools + bd.messages.total).toBe(result.bodyChars)
++  expect(Object.values(bd.messages).filter((_, index) => index < 6).every(value => value > 0)).toBe(true)
++  expect(bd.messages.total).toBe(bd.messages.userText + bd.messages.assistantText + bd.messages.reasoning + bd.messages.toolInput + bd.messages.toolOutput + bd.messages.attachments)
++  // 两个外围引号归system结构，片段只分走实际转义正文；去掉内部转义会破坏这个精确oracle。
++  expect(bd.instructions).toBe(JSON.stringify(instructions).length - 2)
++  expect(bd.skills).toBe(JSON.stringify(skills).length - 2)
++  const absent = Token.estimateRequest({ system: "default system" }, [], sections)
++  expect(absent.inputBreakdown?.instructions).toBe(0)
++  expect(absent.inputBreakdown?.skills).toBe(0)
 +})
++
++test("Chat, Responses and SDK bodies use the same estimator without reparsing schemas", () => {
++  for (const body of [
++    { messages: [{ role: "developer", content: "system" }, { role: "user", content: "hello" }, { role: "assistant", tool_calls: [{ function: { name: "read", arguments: "{}" } }] }, { role: "tool", content: "done" }] },
++    { instructions: "system", input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }, { type: "function_call", arguments: "{}" }, { type: "function_call_output", output: "done" }] },
++    { messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }], tools: [{ type: "function", name: "read", inputSchema: { type: "object" } }], providerOptions: { openai: { instructions: "system" } } },
++  ]) {
++    const result = Token.estimateRequest(body, [], [])
++    const bd = Schema.decodeUnknownSync(SessionMessage.InputBreakdown)(result.inputBreakdown)
++    expect(bd.system + bd.instructions + bd.skills + bd.tools + bd.messages.total).toBe(JSON.stringify(body).length)
++    expect(bd.messages.userText).toBeGreaterThan(0)
++    expect(bd.system).toBeGreaterThan(0)
++  }
++})
++
++test("public optional fields round-trip on the real current and V1 schemas", () => {
++  const estimate = Token.estimateRequest({ messages: [] }, [], [])
++  // undefined必须从wire省略而数值零必须保留，两者分别表达无游标与已冻结的未知预算。
++  const encoded = Schema.encodeSync(SessionMessage.InputEstimate)({ ...estimate, afterPartID: undefined, contextLimit: 0 })
++  expect(encoded).not.toHaveProperty("afterPartID")
++  expect(encoded).toHaveProperty("contextLimit", 0)
++  const part = Schema.decodeUnknownSync(SessionV1.StepFinishPart)({ id: "prt_fixture", messageID: "msg_fixture",
++    sessionID: "ses_fixture", type: "step-finish", reason: "stop", cost: 0,
++    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++    inputChars: estimate.bodyChars, inputBreakdown: estimate.inputBreakdown })
++  expect(Schema.decodeUnknownSync(SessionV1.StepFinishPart)(Schema.encodeSync(SessionV1.StepFinishPart)(part)).inputBreakdown).toEqual(estimate.inputBreakdown)
++})
++
++test("source JSON and mixed-content calibration exercises the estimator rather than a formula copy", () => {
++  const json = { messages: Array.from({ length: 50 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `code ${i} and repeated tool result text`.repeat(8) })),
++    tools: Array.from({ length: 5 }, (_, i) => ({ name: `tool_${i}`, inputSchema: { type: "object", properties: { input: { type: "string" } } } })) }
++  const chars = JSON.stringify(json).length
++  const calibrated = Token.estimateRequest(json, [{ bodyChars: 100000, input: 40000 }])
++  // 确认样本给出输入密度，oracle只计算独立正文长度；不能拿估算输出反过来充当校准数据自证。
++  expect(calibrated.input).toBe(Math.round(chars / 2.5))
++  expect(Token.estimateRequest(json, []).input).toBeLessThan(calibrated.input)
++  const mixed = "The quick brown fox jumps over the lazy dog. ".repeat(100)
++    + JSON.stringify({ key: "value", nested: { array: [1, 2, 3, 4, 5] } }).repeat(50)
++    + "function example(x: number): string { return x.toString(); }\n".repeat(30)
++  const normal = Token.estimateRequest(mixed, [])
++  const dense = Token.estimateRequest(mixed, [{ bodyChars: 90000, input: 45000 }])
++  const middle = Token.estimateRequest(mixed, [{ bodyChars: 90000, input: 30000 }])
++  expect(normal.input).toBeLessThan(middle.input)
++  expect(dense.input).toBeGreaterThan(middle.input)
++})
+diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/test/session-runner-model.test.ts
+--- a/packages/core/test/session-runner-model.test.ts
++++ b/packages/core/test/session-runner-model.test.ts
+@@ -390,1 +390,1 @@
+-          estimates.push(Token.estimateRequest(body, []))
++          estimates.push(Token.estimateRequest(body, [], [{ kind: "instructions", text: "Session system" }]))
+@@ -400,4 +400,9 @@
+       expect(calls).toEqual({ prepare: 2, frames: 2 })
+       expect(estimates).toHaveLength(2)
+       expect(Math.max(...estimates.map(item => item.bodyChars)) - Math.min(...estimates.map(item => item.bodyChars))).toBe(8000)
+       expect(Math.max(...estimates.map(item => item.input)) - Math.min(...estimates.map(item => item.input))).toBe(2000)
++      // 协议正文只增长模型默认system；8000增量与固定指令14分别归桶，运输metadata不参与。
++      expect(estimates[1]?.inputBreakdown?.system).toBe((estimates[0]?.inputBreakdown?.system ?? 0) + 8000)
++      expect(estimates.map(item => item.inputBreakdown?.instructions)).toEqual([14, 14])
++      expect(estimates.map(item => item.charsPerToken)).toEqual([4, 4])
++      expect(estimates.every(item => (item.inputBreakdown?.tools ?? 0) > 0)).toBe(true)
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -165,2 +165,6 @@
+         const assistantMessageID = SessionMessage.ID.make(`msg_native_usage_${factor}`)
++        const inputEstimate = { input: 777, bodyChars: 3108, confirmed: false, charsPerToken: 4,
++          contextLimit: factor === 1 ? 2000 : 8000,
++          inputBreakdown: { system: 2000, instructions: 108, skills: 0, tools: 200,
++            messages: { userText: 500, assistantText: 100, reasoning: 50, toolInput: 50, toolOutput: 100, attachments: 0, total: 800 } } }
+         // 首包前估算使用真实请求身份，不创建助手，也不重置历史确认累计。
+@@ -169,1 +173,1 @@
+-          model, inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
++          model, inputEstimate,
+@@ -176,4 +180,7 @@
+         expect((yield* sessions.get(sessionID)).request?.model).toEqual({ providerID: model.providerID, modelID: model.id, contextLimit: factor === 1 ? 2000 : 8000 })
++        // 此刻还没有本轮Started助手，get/list仍须从RequestEstimated持久事件得到同一carrier，不能靠消息窗口补值。
++        expect((yield* sessions.get(sessionID)).request?.inputEstimate).toEqual(inputEstimate)
++        expect((yield* sessions.list({ project: Project.ID.global })).find(item => item.id === sessionID)?.request?.inputEstimate).toEqual(inputEstimate)
+         yield* events.publish(SessionEvent.Step.Started, {
+           sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(factor), agent: "build", model,
+-          inputEstimate: { input: 777, bodyChars: 3108, confirmed: false, contextLimit: factor === 1 ? 2000 : 8000 },
++          inputEstimate,
+@@ -211,3 +218,5 @@
+       expect((yield* sessions.get(sessionID)).request?.pendingInput).toBeUndefined()
+       expect((yield* sessions.get(sessionID)).request?.estimatedInput).toBeUndefined()
++      // 确认停止 provisional input，但字段证明与冻结预算仍随同一末步投影保留。
++      expect((yield* sessions.get(sessionID)).request?.inputEstimate).toMatchObject({ confirmed: true, bodyChars: 3108, charsPerToken: 4, inputBreakdown: { system: 2000 } })
+       const selected = ModelV2.Ref.make({
+diff --git a/packages/core/test/system-context/index.test.ts b/packages/core/test/system-context/index.test.ts
+--- a/packages/core/test/system-context/index.test.ts
++++ b/packages/core/test/system-context/index.test.ts
+@@ -76,2 +76,3 @@
+ 
+-      expect(yield* SystemContext.initialize(context)).toEqual({
++      const rendered: Array<{ key: string; text: string }> = []
++      expect(yield* SystemContext.initialize(context, (key, text) => rendered.push({ key, text }))).toEqual({
+@@ -84,2 +85,5 @@
+       expect(loads).toBe(1)
++      expect(rendered).toEqual([{ key: "core/date", text: "Today's date is 2026-06-03." }, { key: "core/location", text: "Directory: /repo" }])
++      // 未变来源若为归属统计再次渲染会直接抛错，能区分正常刷新观察与额外生成第二份baseline。
++      expect(yield* SystemContext.reconcile(context, { "core/date": { value: "2026-06-03" }, "core/location": { value: "/repo" } }, () => { throw new Error("Unchanged sources must not render again") })).toEqual({ _tag: "Unchanged" })
+     }),
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -407,3 +407,4 @@
+-          system: [],
++          system: ["fixture-instructions".repeat(40)],
++          inputSections: [{ kind: "instructions", text: "fixture-instructions".repeat(40) }],
+           messages: [{ role: "user", content: "compact" }],
+           tools: {},
+@@ -414,3 +415,13 @@
+         expect(value).toBe("compact")
+         expect(parts.some((part) => part.type === "text" && part.text === "after")).toBe(true)
+         expect(parts.some((part) => part.type === "step-finish")).toBe(true)
++        const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
++        expect(finish?.inputChars).toBe(handle.message.inputEstimate?.bodyChars)
++        expect(finish?.inputBreakdown?.instructions).toBe(800)
++        const prepared = (yield* session.get(chat.id)).request?.inputEstimate
++        expect(prepared?.confirmed).toBe(true)
++        expect(prepared?.charsPerToken).toBe(4)
++        expect(prepared?.inputBreakdown).toEqual(finish?.inputBreakdown)
++        // 800字符的真实系统片段提高准备估算，但provider只确认100输入，公开账本必须服从后者。
++        expect((yield* session.get(chat.id)).request?.input).toBe(100)
++        expect(yield* llm.calls).toBe(1)
+diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test/session/llm.test.ts
+--- a/packages/opencode/test/session/llm.test.ts
++++ b/packages/opencode/test/session/llm.test.ts
+@@ -1523,2 +1523,3 @@
+ 
++        const prepared: unknown[] = []
+         yield* drainWith(llmLayerWithExecutor({ flags: { experimentalNativeLlm: true } }), {
+@@ -1538,2 +1539,3 @@
+           tools: {},
++          onRequestPrepared: body => Effect.sync(() => { prepared.push(body) }),
+         })
+@@ -1544,3 +1546,7 @@
+         expect(capture.body.model).toBe(model.id)
++        // native 的回调必须收到真正 Responses lowering 后的同一正文，而非预编译 LLMRequest。
++        expect(prepared).toHaveLength(1)
++        expect(prepared[0]).toEqual(capture.body)
++        expect(prepared[0]).not.toHaveProperty("messages")
+         expect(capture.body.stream).toBe(true)
+         expect((capture.body.reasoning as { effort?: string } | undefined)?.effort).toBe("high")
+diff --git a/packages/core/test/session-context-epoch.test.ts b/packages/core/test/session-context-epoch.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/test/session-context-epoch.test.ts
+@@ -0,0 +1,65 @@
++import { expect } from "bun:test"
++import { eq } from "drizzle-orm"
++import { Effect, Schema } from "effect"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Database } from "@opencode-ai/core/database/database"
++import { EventV2 } from "@opencode-ai/core/event"
++import { Project } from "@opencode-ai/core/project"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import { SessionContextEpoch } from "@opencode-ai/core/session/context-epoch"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { SessionContextEpochTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { SystemContext } from "@opencode-ai/core/system-context"
++import { testEffect } from "./lib/effect"
++
++const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
++
++it.effect("persists actual source attribution with the original epoch and decodes legacy snapshots", () => Effect.gen(function* () {
++  const database = yield* Database.Service
++  const db = database.db
++  const events = yield* EventV2.Service
++  const sessionID = SessionSchema.ID.make("ses_context_attribution")
++  yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
++  yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "context", directory: "/project", title: "context", version: "test" }).run()
++  const calls = { load: 0, render: 0 }
++  // 身份使用生产capture识别的领域key，普通正文中出现相同标题不能冒充instructions或skills来源。
++  const context = (instructions: string) => Effect.succeed(SystemContext.combine([
++    ["core/instructions", instructions] as const, ["core/skill-guidance", "skills"] as const,
++  ].map(([key, text]) => SystemContext.make({
++    key: SystemContext.Key.make(key), codec: Schema.toCodecJson(Schema.String),
++    load: Effect.sync(() => { calls.load++; return text }),
++    baseline: value => { calls.render++; return value },
++    update: (_previous, value) => { calls.render++; return value }, removed: () => "removed",
++  }))))
++  const initial = yield* SessionContextEpoch.initialize(db, context("old"), sessionID)
++  // initialize 在已有 epoch 时返回 undefined；此 fixture 的首次建立和 reset 后建立都必须产生快照。
++  if (initial === undefined) return yield* Effect.die("首次初始化必须创建 epoch 快照")
++  // 尚无Session事件时baseline_seq为-1，建立归属元数据不能先发布隐含事件改变历史选取起点。
++  expect(initial).toEqual({ baseline: "old\n\nskills", baselineSeq: -1,
++    sections: [{ kind: "instructions", text: "old" }, { kind: "skills", text: "skills" }] })
++  expect(calls).toEqual({ load: 2, render: 2 })
++  const updated = yield* SessionContextEpoch.prepare(db, events, context("new"), sessionID)
++  expect(updated.baseline).toBe(initial.baseline)
++  // 新指令以历史更新追加，旧baseline仍发送；来源证明必须保留old并追加new，不能只剩当前文件版本。
++  expect(updated.sections).toEqual([...initial.sections, { kind: "instructions", text: "new" }])
++  expect(calls).toEqual({ load: 4, render: 3 })
++  // 查询持久列而非内存返回值，验证source比较状态和片段证明已随ContextUpdated的commit一起保存。
++  expect((yield* db.select().from(SessionContextEpochTable).where(eq(SessionContextEpochTable.session_id, sessionID)).get())?.snapshot)
++    .toMatchObject({ sources: { "core/instructions": { value: "new" } }, sections: updated.sections })
++  const again = yield* SessionContextEpoch.prepare(db, events, context("new"), sessionID)
++  expect(again).toEqual(updated)
++  expect(calls).toEqual({ load: 6, render: 3 })
++  // 旧裸快照有比较值却没有渲染证明，必须保留存储baseline并留空归属，不能重读source伪造历史片段。
++  yield* db.update(SessionContextEpochTable).set({ snapshot: { "core/instructions": { value: "new", removed: "removed" }, "core/skill-guidance": { value: "skills", removed: "removed" } } })
++    .where(eq(SessionContextEpochTable.session_id, sessionID)).run()
++  const legacy = yield* SessionContextEpoch.prepare(db, events, context("new"), sessionID)
++  expect(legacy.baseline).toBe(initial.baseline)
++  expect(legacy.sections).toEqual([])
++  yield* SessionContextEpoch.reset(db, sessionID)
++  const reset = yield* SessionContextEpoch.initialize(db, context("reset"), sessionID)
++  if (reset === undefined) return yield* Effect.die("reset 后初始化必须创建 epoch 快照")
++  expect(reset.sections).toEqual([{ kind: "instructions", text: "reset" }, { kind: "skills", text: "skills" }])
++}))
+diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/opencode/test/server/httpapi-event.test.ts
+--- a/packages/opencode/test/server/httpapi-event.test.ts
++++ b/packages/opencode/test/server/httpapi-event.test.ts
+@@ -14,2 +14,5 @@
+ import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
++import { SessionProcessor } from "../../src/session/processor"
++import { Token } from "@opencode-ai/core/util/token"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
+ 
+@@ -49,1 +52,2 @@
+-const it = testEffect(Layer.mergeAll(httpApiLayer, LayerNode.compile(EventV2Bridge.node)))
++// 真实projector必须与bridge共享测试依赖图，否则SSE只证明事件转发，不能证明提交后的请求投影。
++const it = testEffect(Layer.mergeAll(httpApiLayer, LayerNode.compile(LayerNode.group([EventV2Bridge.node, SessionProjector.node]))))
+@@ -116,2 +120,43 @@
+   )
++
++  it.instance("projects prepared breakdown and zero confirmation through the real SSE stream", () => Effect.gen(function* () {
++    const instance = yield* TestInstance
++    const stream = yield* openEventStream(instance.directory)
++    expect(yield* readEvent(stream.reader)).toMatchObject({ type: "server.connected" })
++    const created = yield* requestInDirectory("/session", instance.directory, { method: "POST" })
++    const info = Schema.decodeUnknownSync(SessionV1.SessionInfo)(yield* created.json)
++    expect(yield* readEvent(stream.reader)).toMatchObject({ type: "session.created" })
++    const events = yield* EventV2Bridge.Service
++    const userID = MessageID.ascending()
++    const nextSnapshot = Effect.fnUntraced(function* (confirmed?: boolean) {
++      while (true) {
++        const event = yield* readEvent(stream.reader)
++        if (event.type !== "session.updated") continue
++        const data = Schema.decodeUnknownSync(Schema.Struct({ info: SessionV1.SessionInfo }))(event.properties)
++        // 同一更新可排入多个快照，按请求身份及确认版本过滤，防止上一发布的迟到快照满足下一阶段断言。
++        if (data.info.id === info.id && data.info.request?.messageID === userID && (confirmed === undefined || data.info.request.inputEstimate?.confirmed === confirmed)) return data.info
++      }
++    })
++    // 用户先持久化再发布明确parentID的助手，请求归属不能靠事件时间或当前最后用户猜测。
++    yield* events.publish(MessageV2.Event.Updated, { sessionID: info.id, info: { id: userID, sessionID: info.id, role: "user",
++      time: { created: 1 }, agent: "build", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") } } })
++    expect((yield* nextSnapshot()).request).toMatchObject({ messageID: userID, input: 0, output: 0 })
++    const inputEstimate = { ...Token.estimateRequest({ system: "fixture", messages: [{ role: "user", content: "hello" }], tools: [] }, [], []), contextLimit: 8000 }
++    const assistant: SessionV1.Assistant = { id: MessageID.ascending(), parentID: userID, sessionID: info.id,
++      role: "assistant", agent: "build", mode: "build", path: { cwd: instance.directory, root: instance.directory },
++      modelID: ModelV2.ID.make("test"), providerID: ProviderV2.ID.make("test"), time: { created: 2 }, cost: 0,
++      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, inputEstimate }
++    yield* SessionProcessor.publishAssistant(assistant, events)
++    const prepared = yield* nextSnapshot(false)
++    expect(prepared.request).toMatchObject({ messageID: userID, input: 0, output: 0, estimatedInput: inputEstimate.input, inputEstimate })
++    assistant.inputEstimate = { ...inputEstimate, confirmed: true }
++    // completed=0与全零tokens同时存在仍是权威终态；真值判断会错误保留旧estimatedInput。
++    assistant.time.completed = 0
++    yield* SessionProcessor.publishAssistant(assistant, events)
++    const settled = yield* nextSnapshot(true)
++    expect(settled.request?.estimatedInput).toBeUndefined()
++    expect(settled.request?.inputEstimate).toEqual({ ...inputEstimate, confirmed: true })
++    expect(settled.request?.model?.contextLimit).toBe(8000)
++    expect(settled.request).toMatchObject({ input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 })
++  }), { git: true, config: { formatter: false, lsp: false } })
+ })
+diff --git a/specs/session/input-breakdown.md b/specs/session/input-breakdown.md
+new file mode 100644
+--- /dev/null
++++ b/specs/session/input-breakdown.md
+@@ -0,0 +1,19 @@
++# Prepared Input Breakdown
++
++V1 processor and V2 runner estimate the body delivered by their existing prepared-request callback. Native V1 and V2 observe the validated protocol body from their single compile, matching `LLMClient.prepare<Body>`; the AI SDK path uses its post-transform middleware. Transport-only metadata and WebSocket envelopes do not expand this character-based estimate. Transport preparation, encoding and authentication keep their upstream owners, with the observer completing before frames execute. Neither path writes provisional values to confirmed `tokens.input`.
++
++`InputEstimate.bodyChars` uses one canonical JSON serialization. Its optional `inputBreakdown` partitions that same character count into system, instructions, skills, advertised tools and messages. Property names, punctuation, escaping and attachments belong to their enclosing payload category. The six message subcategories sum to `messages.total`; the five top-level categories sum to `bodyChars`. This is a character-based estimate, not a provider tokenizer or media-billing claim.
++
++System categories match only actual server-rendered instruction/skill sections inside the prepared system payload. Model defaults, plugin replacements and other unattributed system text remain in system. SystemContext's optional render observer shares the original observation/rendering; ContextEpoch persists the attribution beside the original comparison snapshot in its existing JSON column. Historical bare snapshots decode unchanged and do not invent provenance from current files. Context updates retain earlier rendered sections until epoch replacement resets the baseline/history boundary.
++
++The server freezes `charsPerToken` from same-provider/API confirmed input plus cache reads/writes. Samples under 100 characters, zero/non-finite confirmations and aggregates at or under 500 characters do not calibrate; the recent sample cutoff is 100000 characters for both numerator and denominator. Default density is four. Density does not change confirmed tokens, costs, RequestID, permissions, continuation or the number of streams.
++
++`Session.request.inputEstimate` carries the same metadata before the first native Started event and after confirmation. Existing `estimatedInput` remains the provisional-display authority; zero confirmation and completion still stop it. Prompt, sidebar and subagent footer use the shared helper's frozen density only for unconfirmed tails. The context panel consumes server categories, with legacy V1 confirmation-part support only when no request projection exists. It does not reconstruct a bootstrap input floor.
++
++## Canonical Generation
++
++The additions change public Schema reused by current Protocol events, Server HttpApi Session responses and V1 message/part events. Main must run the legacy SDK build (`bun run packages/sdk/js/script/build.ts`) and `bun run generate` from `packages/client`, then capture their actual generated and generated-effect changes. Do not edit generated code by hand. No physical database column or migration is added; only the existing ContextEpoch JSON value gains a typed wrapper with legacy decoding.
++
++## Verification
++
++Replay current71 then this patch on canonical state70, perform canonical generation, and run package typechecks. Run Core token, system-context, session-runner, prepared-model and projector tests; opencode processor, native LLM, MessageV2, compaction and HTTP/SSE tests; and the full TUI token/context suites. Keep the existing 2789/697, 8000/2000, one-stream, zero-confirmation, request-ledger and frozen-context-limit oracles. Subsequent patches 74/75 must consume the new context-details/helper owners rather than resurrect window aliases or a client bootstrap.
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -576,6 +576,8 @@
+       write: number
+     }
+   }
++  inputChars?: number
++  inputBreakdown?: SessionMessageInputBreakdown
+ }
+ 
+ export type SnapshotPart = {
+@@ -3141,6 +3143,32 @@
+   directory: string
+ }
+ 
++export type SessionMessageInputBreakdown = {
++  system: number
++  instructions: number
++  skills: number
++  tools: number
++  messages: {
++    userText: number
++    assistantText: number
++    reasoning: number
++    toolInput: number
++    toolOutput: number
++    attachments: number
++    total: number
++  }
++}
++
++export type SessionMessageInputEstimate = {
++  input: number
++  bodyChars: number
++  confirmed: boolean
++  charsPerToken?: number
++  inputBreakdown?: SessionMessageInputBreakdown
++  afterPartID?: string
++  contextLimit?: number
++}
++
+ export type SessionRequestUsage = {
+   messageID: string
+   input: number
+@@ -3151,6 +3179,7 @@
+   stepOutput: number
+   pendingInput?: number
+   estimatedInput?: number
++  inputEstimate?: SessionMessageInputEstimate
+   model?: {
+     providerID: string
+     modelID: string
+@@ -3158,14 +3187,6 @@
+   }
+ }
+ 
+-export type SessionMessageInputEstimate = {
+-  input: number
+-  bodyChars: number
+-  confirmed: boolean
+-  afterPartID?: string
+-  contextLimit?: number
+-}
+-
+ export type ModelRef = {
+   id: string
+   providerID: string
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -249,6 +249,29 @@
+       readonly stepOutput: number
+       readonly pendingInput?: number
+       readonly estimatedInput?: number
++      readonly inputEstimate?: {
++        readonly input: number
++        readonly bodyChars: number
++        readonly confirmed: boolean
++        readonly charsPerToken?: number
++        readonly inputBreakdown?: {
++          readonly system: number
++          readonly instructions: number
++          readonly skills: number
++          readonly tools: number
++          readonly messages: {
++            readonly userText: number
++            readonly assistantText: number
++            readonly reasoning: number
++            readonly toolInput: number
++            readonly toolOutput: number
++            readonly attachments: number
++            readonly total: number
++          }
++        }
++        readonly afterPartID?: string
++        readonly contextLimit?: number
++      }
+       readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
+     }
+     readonly tokens: {
+@@ -323,6 +346,29 @@
+       readonly stepOutput: number
+       readonly pendingInput?: number
+       readonly estimatedInput?: number
++      readonly inputEstimate?: {
++        readonly input: number
++        readonly bodyChars: number
++        readonly confirmed: boolean
++        readonly charsPerToken?: number
++        readonly inputBreakdown?: {
++          readonly system: number
++          readonly instructions: number
++          readonly skills: number
++          readonly tools: number
++          readonly messages: {
++            readonly userText: number
++            readonly assistantText: number
++            readonly reasoning: number
++            readonly toolInput: number
++            readonly toolOutput: number
++            readonly attachments: number
++            readonly total: number
++          }
++        }
++        readonly afterPartID?: string
++        readonly contextLimit?: number
++      }
+       readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
+     }
+     readonly tokens: {
+@@ -373,6 +419,29 @@
+       readonly stepOutput: number
+       readonly pendingInput?: number
+       readonly estimatedInput?: number
++      readonly inputEstimate?: {
++        readonly input: number
++        readonly bodyChars: number
++        readonly confirmed: boolean
++        readonly charsPerToken?: number
++        readonly inputBreakdown?: {
++          readonly system: number
++          readonly instructions: number
++          readonly skills: number
++          readonly tools: number
++          readonly messages: {
++            readonly userText: number
++            readonly assistantText: number
++            readonly reasoning: number
++            readonly toolInput: number
++            readonly toolOutput: number
++            readonly attachments: number
++            readonly total: number
++          }
++        }
++        readonly afterPartID?: string
++        readonly contextLimit?: number
++      }
+       readonly model?: { readonly providerID: string; readonly modelID: string; readonly contextLimit?: number }
+     }
+     readonly tokens: {
+@@ -627,6 +696,22 @@
+           readonly input: number
+           readonly bodyChars: number
+           readonly confirmed: boolean
++          readonly charsPerToken?: number
++          readonly inputBreakdown?: {
++            readonly system: number
++            readonly instructions: number
++            readonly skills: number
++            readonly tools: number
++            readonly messages: {
++              readonly userText: number
++              readonly assistantText: number
++              readonly reasoning: number
++              readonly toolInput: number
++              readonly toolOutput: number
++              readonly attachments: number
++              readonly total: number
++            }
++          }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+         }
+@@ -863,6 +948,22 @@
+             readonly input: number
+             readonly bodyChars: number
+             readonly confirmed: boolean
++            readonly charsPerToken?: number
++            readonly inputBreakdown?: {
++              readonly system: number
++              readonly instructions: number
++              readonly skills: number
++              readonly tools: number
++              readonly messages: {
++                readonly userText: number
++                readonly assistantText: number
++                readonly reasoning: number
++                readonly toolInput: number
++                readonly toolOutput: number
++                readonly attachments: number
++                readonly total: number
++              }
++            }
+             readonly afterPartID?: string
+             readonly contextLimit?: number
+           }
+@@ -937,6 +1038,22 @@
+             readonly input: number
+             readonly bodyChars: number
+             readonly confirmed: boolean
++            readonly charsPerToken?: number
++            readonly inputBreakdown?: {
++              readonly system: number
++              readonly instructions: number
++              readonly skills: number
++              readonly tools: number
++              readonly messages: {
++                readonly userText: number
++                readonly assistantText: number
++                readonly reasoning: number
++                readonly toolInput: number
++                readonly toolOutput: number
++                readonly attachments: number
++                readonly total: number
++              }
++            }
+             readonly afterPartID?: string
+             readonly contextLimit?: number
+           }
+@@ -1412,6 +1529,22 @@
+           readonly input: number
+           readonly bodyChars: number
+           readonly confirmed: boolean
++          readonly charsPerToken?: number
++          readonly inputBreakdown?: {
++            readonly system: number
++            readonly instructions: number
++            readonly skills: number
++            readonly tools: number
++            readonly messages: {
++              readonly userText: number
++              readonly assistantText: number
++              readonly reasoning: number
++              readonly toolInput: number
++              readonly toolOutput: number
++              readonly attachments: number
++              readonly total: number
++            }
++          }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+         }
+@@ -1486,6 +1619,22 @@
+           readonly input: number
+           readonly bodyChars: number
+           readonly confirmed: boolean
++          readonly charsPerToken?: number
++          readonly inputBreakdown?: {
++            readonly system: number
++            readonly instructions: number
++            readonly skills: number
++            readonly tools: number
++            readonly messages: {
++              readonly userText: number
++              readonly assistantText: number
++              readonly reasoning: number
++              readonly toolInput: number
++              readonly toolOutput: number
++              readonly attachments: number
++              readonly total: number
++            }
++          }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+         }
+@@ -1894,6 +2043,22 @@
+           readonly input: number
+           readonly bodyChars: number
+           readonly confirmed: boolean
++          readonly charsPerToken?: number
++          readonly inputBreakdown?: {
++            readonly system: number
++            readonly instructions: number
++            readonly skills: number
++            readonly tools: number
++            readonly messages: {
++              readonly userText: number
++              readonly assistantText: number
++              readonly reasoning: number
++              readonly toolInput: number
++              readonly toolOutput: number
++              readonly attachments: number
++              readonly total: number
++            }
++          }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+         }
+@@ -2073,6 +2238,22 @@
+           readonly input: number
+           readonly bodyChars: number
+           readonly confirmed: boolean
++          readonly charsPerToken?: number
++          readonly inputBreakdown?: {
++            readonly system: number
++            readonly instructions: number
++            readonly skills: number
++            readonly tools: number
++            readonly messages: {
++              readonly userText: number
++              readonly assistantText: number
++              readonly reasoning: number
++              readonly toolInput: number
++              readonly toolOutput: number
++              readonly attachments: number
++              readonly total: number
++            }
++          }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+         }

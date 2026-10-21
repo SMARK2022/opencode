@@ -14,20 +14,15 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
    return `<system-reminder>${ranges.join("\n")} This may or may not be relevant to the current task.</system-reminder>\n`
  }
  
-+// 模块级 Set 跟踪已初始化的 sessionID，避免 Prompt 重挂载时重置模型选择
++// 模块级记录跨 Prompt 重挂载保留，避免再次用历史消息覆盖用户选择。
 +const initializedSessionIDs = new Set<string>()
  let stashed: { prompt: PromptInfo; cursor: number } | undefined
  
  export function Prompt(props: PromptProps) {
-@@ -413,16 +415,17 @@
-     onCleanup(() => clearInterval(interval))
-   })
- 
+@@ -403,15 +405,13 @@
 -  // Initialize agent/model/variant from last user message when session changes
 -  let syncedSessionID: string | undefined
-+  // 从最后一条用户消息同步 agent/model/variant，仅在 session 首次加载时执行
-+  // Bug A：消息异步到达不得再触发同步（untrack lastUserMessage）
-+  // Bug B：Prompt 重挂载不得重置（模块级 initializedSessionIDs）
++  // 仅按会话切换初始化，不因历史消息迟到而重新写入模型选择。
    createEffect(() => {
      const sessionID = props.sessionID
 -    const msg = lastUserMessage()
@@ -36,20 +31,21 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
 -      if (!sessionID || !msg) return
 -
 -      syncedSessionID = sessionID
-+    if (!sessionID) return
-+    if (initializedSessionIDs.has(sessionID)) return
-+    // 不把 lastUserMessage 登记为响应式依赖，避免异步加载覆盖用户中途改模型
++    if (!sessionID || initializedSessionIDs.has(sessionID)) return
 +    const msg = untrack(lastUserMessage)
 +    if (!msg) return
++    // 收到历史后才标记，空历史在下次重新挂载时仍可尝试初始化。
 +    initializedSessionIDs.add(sessionID)
  
        // Only set agent if it's a primary agent (not a subagent)
        const isPrimaryAgent = local.agent.list().some((x) => x.name === msg.agent)
-@@ -434,7 +437,6 @@
+       if (msg.agent && isPrimaryAgent) {
+         // Keep command line --agent if specified.
+@@ -424,7 +424,6 @@
            local.model.variant.set(msg.model.variant)
          }
        }
 -    }
    })
- 
+
    const promptCommands = createMemo(() =>

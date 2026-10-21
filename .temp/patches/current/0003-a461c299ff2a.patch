@@ -1,12 +1,13 @@
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -262,17 +262,30 @@
+@@ -262,17 +262,35 @@
      if (!props.sessionID) return
      const session = sync.session.get(props.sessionID)
      const msg = sync.data.message[props.sessionID] ?? []
 -    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
 +    // 放宽 last 查找条件：不再要求 output > 0，流式输出中也需展示用量
++    // 尚未回传 usage 的助手也承载流式正文；按 output 筛选会错误选中上一轮回复。
 +    const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant")
      if (!last) return
  
@@ -15,16 +16,20 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
 -    if (tokens <= 0) return
 +    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 +    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
++      // ignored 文本不进入模型输出，计入字符估算会把隐藏的合成内容收费化。
 +      if (part.type === "text" && !part.ignored) return sum + part.text.length
 +      if (part.type === "reasoning") return sum + part.text.length
 +      return sum
 +    }, 0)
 +    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
++    // reasoning 与正文由 API 分开回传，输出流量必须包含两者才能覆盖思考阶段。
 +    const outputActual = last.tokens.output + last.tokens.reasoning
++    // 四字符仅是等待 API usage 时的显示近似，不写回消息或参与计费。
 +    const outputEstimated = Math.round(chars / 4)
-+    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
++    // 流式阶段取实际值与估算值的较大值，完成后回到 API 实值，避免临时峰值变成永久用量。
 +    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
 +    const tokens = input + output
++    // 仅流量全零才隐藏；缓存输入或 reasoning-only 回复仍有有效用量。
 +    if (tokens <= 0 && input <= 0 && output <= 0) return
  
      const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
@@ -36,7 +41,7 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
        context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
        cost: cost > 0 ? money.format(cost) : undefined,
      }
-@@ -1652,7 +1665,7 @@
+@@ -1652,7 +1670,7 @@
                      <Match when={usage()}>
                        {(item) => (
                          <text fg={theme.textMuted} wrapMode="none">
@@ -50,7 +55,7 @@ diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/comp
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -17,19 +17,34 @@
+@@ -17,19 +17,36 @@
    const cost = createMemo(() => session()?.cost ?? 0)
  
    const state = createMemo(() => {
@@ -74,12 +79,14 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 +      if (part.type === "reasoning") return sum + part.text.length
 +      return sum
 +    }, 0)
++    // 缓存命中仍占上下文输入，不能因为无需重复生成就从流量中扣除。
 +    const input = last.tokens.input + last.tokens.cache.read + last.tokens.cache.write
 +    const outputActual = last.tokens.output + last.tokens.reasoning
 +    const outputEstimated = Math.round(chars / 4)
 +    // 流式输出未完成时，取实际值与估算值的较大值，避免用量低估
 +    const output = last.time.completed ? outputActual : Math.max(outputActual, outputEstimated)
 +    const tokens = input + output
++    // 缺少模型 context limit 时保留 token 实数，不能捏造百分比上限。
      const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
      return {
        tokens,
@@ -88,7 +95,7 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
        percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
      }
    })
-@@ -39,6 +54,8 @@
+@@ -39,6 +56,8 @@
        <text fg={theme().text}>
          <b>Context</b>
        </text>
@@ -102,7 +109,7 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -32,12 +32,23 @@
+@@ -32,12 +32,24 @@
  
    const usage = createMemo(() => {
      const msg = messages()
@@ -117,6 +124,7 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 +    // 分离输入/输出 token 统计，流式输出时用字符数估算输出 token
 +    const chars = (sync.data.part[last.id] ?? []).reduce((sum, part) => {
 +      if (part.type === "text" && !part.ignored) return sum + part.text.length
++      // 子代理可能先流出思考而无正文；reasoning 字符也必须驱动实时输出显示。
 +      if (part.type === "reasoning") return sum + part.text.length
 +      return sum
 +    }, 0)
@@ -130,7 +138,7 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
  
      const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
      const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-@@ -49,6 +60,8 @@
+@@ -49,6 +61,8 @@
      })
  
      return {
@@ -139,7 +147,7 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
        context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
        cost: cost > 0 ? money.format(cost) : undefined,
      }
-@@ -88,7 +101,7 @@
+@@ -88,7 +102,7 @@
              <Show when={usage()}>
                {(item) => (
                  <text fg={theme.textMuted} wrapMode="none">

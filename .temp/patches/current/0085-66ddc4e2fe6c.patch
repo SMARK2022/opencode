@@ -7,57 +7,161 @@ Subject: [PATCH] =?UTF-8?q?feat(token-estimate):=20=E4=BC=98=E5=8C=96?=
  =?UTF-8?q?=E5=AD=97=E7=AC=A6=E7=9A=84=E5=BD=B1=E5=93=8D?=
 MIME-Version: 1.0
 
-diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
-index 57efcffb9c..aa1f9a7b53 100644
---- a/packages/opencode/src/session/prompt.ts
-+++ b/packages/opencode/src/session/prompt.ts
-@@ -1402,7 +1402,9 @@ const layer = Layer.effect(
-               if (!chars || chars < 100) continue
-               const tokens = (sf.tokens.input ?? 0) + (sf.tokens.cache?.read ?? 0) + (sf.tokens.cache?.write ?? 0)
-               if (typeof chars === "number" && chars > 0 && tokens > 0) {
--                historyInputChars += chars
-+                // 附件不参与输入侧 chars/token 密度校准
-+                const bd = (sf as any).inputBreakdown
-+                historyInputChars += Math.max(0, chars - (bd?.messages?.attachments ?? 0))
-                 historyInputTokens += tokens
-               }
-             }
+diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
+--- a/packages/core/src/util/token.ts
++++ b/packages/core/src/util/token.ts
+@@ -17,13 +17,14 @@ export const estimate = (input: string) => Math.max(0, Math.round(input.length / CHA
+-export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number }>) {
++export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>) {
+   const sample = history.reduce((sum, item) => {
+     // 调用方筛选同 API 的确认样本；分子分母同时截止，零确认和不足100字符的样本不校准。
+     if (sum.bodyChars >= 100_000 || !Number.isFinite(item.input) || !Number.isFinite(item.bodyChars) || item.input <= 0 || item.bodyChars < 100) return sum
+-    return { bodyChars: sum.bodyChars + item.bodyChars, input: sum.input + item.input }
++    // 附件/base64 字符不参与文本密度，确认输入与缓存 token 仍保留原分母。
++    return { bodyChars: sum.bodyChars + Math.max(0, item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
+   }, { bodyChars: 0, input: 0 })
+   // 不足 500 字符或零确认不构成比率样本，首轮继续使用通用 /4。
+   return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
+ }
+ 
+-export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number }>, sections?: ReadonlyArray<SystemSection>) {
++export function estimateRequest(body: unknown, history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>, sections?: ReadonlyArray<SystemSection>) {
+   const ratio = charsPerTokenFromHistory(history)
+   const counts = {
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -290,9 +290,9 @@ const startSnapshot = yield* snapshots.capture()
+       const samples = context.toReversed().flatMap((message) => {
+         // publisher 保存实际 provider/API model ID；边界只去除品牌，不换成 Session 的 catalog 别名。
+         if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
+           || !message.inputEstimate?.confirmed || !message.tokens) return []
+-        return [{ bodyChars: message.inputEstimate.bodyChars,
++        return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
+           input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
+       })
+       let inputEstimate: SessionMessage.InputEstimate | undefined
+       // 只使用现有 provider step；不启动第二次 stream 或 advisory wake。
+diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
+--- a/packages/opencode/src/session/processor.ts
++++ b/packages/opencode/src/session/processor.ts
+@@ -758,12 +758,12 @@ const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.
+                 // 重放/重试只读已保存样本；provider 或模型切换不能借用旧比率。
+                 if (info.role !== "assistant" || info.providerID !== ctx.model.providerID || info.modelID !== ctx.model.id) return []
+                 // V1 单助手多 step 逐确认点取样；旧64数据缺少该字段时才沿用其已确认 carrier。
+                 const steps = message.parts.flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
+-                  ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
++                  ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
+                 if (steps.length > 0) return steps.toReversed()
+                 if (!info.inputEstimate?.confirmed) return []
+-                return [{ bodyChars: info.inputEstimate.bodyChars,
++                return [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown,
+                   input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }]
+               })
+               // 每次请求准备都覆盖为未确认，旧 tokens 不得确认新请求体样本。
+               ctx.assistantMessage.inputEstimate = {
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
-index 81cb73914c..6bb53c03d4 100644
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -1234,7 +1234,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-     // 服务端细分：toolInput 记调用，toolOutput 记结果
-     toolCallTokens = Math.round(bd.messages.toolInput / ratio)
-     toolResultTokens = Math.round(bd.messages.toolOutput / ratio)
--    inputMessageTokens = Math.round((bd.messages.userText + bd.messages.attachments) / ratio)
-+    // 附件用视觉估算 tokens，不混入文本 chars/ratio 桶
-+    inputMessageTokens = Math.round(bd.messages.userText / ratio) + msg.details.attachments
-     outputMessageTokens = Math.round((bd.messages.assistantText + bd.messages.reasoning) / ratio)
-   } else {
-     skillTokens = estimate(skillListing, ratio)
-@@ -1337,7 +1338,8 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
-             reasoning: Math.round(bd.messages.reasoning / ratio),
-             toolCalls: Math.round(bd.messages.toolInput / ratio),
-             toolResults: Math.round(bd.messages.toolOutput / ratio),
--            attachments: Math.round(bd.messages.attachments / ratio),
-+            // 与 inputMessageTokens 同源：附件用 details 视觉估算
-+            attachments: msg.details.attachments,
-             compactionSummary: 0,
-           }
-         : msg.details,
-diff --git a/packages/tui/src/util/token-estimate.ts b/packages/tui/src/util/token-estimate.ts
-index 3a0365db4b..0c05837149 100644
---- a/packages/tui/src/util/token-estimate.ts
-+++ b/packages/tui/src/util/token-estimate.ts
-@@ -52,7 +52,9 @@ export function charsPerTokenFromHistory(
-         (p.tokens?.input ?? 0) + (p.tokens?.cache?.read ?? 0) + (p.tokens?.cache?.write ?? 0)
-       // 样本不足 100 字符忽略，避免早期噪声主导密度
-       if (typeof inputChars !== "number" || inputChars < 100 || inputTokens <= 0) continue
--      totalChars += inputChars
-+      // 附件字符不参与文本密度校准：视觉/base64 与自然语言密度不同
-+      const bd = p.inputBreakdown as { messages?: { attachments?: number } } | undefined
-+      totalChars += Math.max(0, inputChars - (bd?.messages?.attachments ?? 0))
-       totalTokens += inputTokens
+@@ -342,12 +342,12 @@ function latestInputEstimate(messages: WithParts[], raw: WithParts[], model: { pro
+   const samples = raw.toReversed().flatMap(message => {
+     const info = message.info
+     if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) return []
+     const parts = message.parts.toReversed().flatMap(part => part.type === "step-finish" && part.inputChars !== undefined
+-      ? [{ bodyChars: part.inputChars, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
++      ? [{ bodyChars: part.inputChars, inputBreakdown: part.inputBreakdown, input: part.tokens.input + part.tokens.cache.read + part.tokens.cache.write }] : [])
+     return parts.length > 0 ? parts : info.inputEstimate?.confirmed
+-      ? [{ bodyChars: info.inputEstimate.bodyChars, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
++      ? [{ bodyChars: info.inputEstimate.bodyChars, inputBreakdown: info.inputEstimate.inputBreakdown, input: info.tokens.input + info.tokens.cache.read + info.tokens.cache.write }] : []
+   })
+   for (const message of messages.toReversed()) {
+     const info = message.info
+     if (info.role !== "assistant" || info.providerID !== model.providerID || info.modelID !== model.modelID) continue
+     if (info.inputEstimate) return { ...info.inputEstimate, charsPerToken: info.inputEstimate.charsPerToken ?? Token.charsPerTokenFromHistory(samples) }
+@@ -1158,12 +1158,13 @@ export async function computeContextData(input: ComputeContextDataInput): Promis
+-  // 五类与消息六子项只消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
++  // 文本分类消费服务端字符证明；本地文件仅为旧数据或明细名称提供展示权重。
+   const envTokens = bd ? Math.round(bd.system / ratio) : estimate(systemText, ratio)
+   const instructionTokens = bd ? Math.round(bd.instructions / ratio) : instructionDetails.reduce((sum, item) => sum + item.tokens, 0)
+   const loadedInstructionTokens = loadedInstructions.reduce((sum, item) => sum + item.tokens, 0)
+   const toolDefTokens = bd ? Math.round(bd.tools / ratio) : toolDefs.reduce((sum, item) => sum + item.tokens, 0)
+   const messageDetails = bd ? {
+     userText: Math.round(bd.messages.userText / ratio), assistantText: Math.round(bd.messages.assistantText / ratio),
+     reasoning: Math.round(bd.messages.reasoning / ratio), toolCalls: Math.round(bd.messages.toolInput / ratio),
+-    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: Math.round(bd.messages.attachments / ratio), compactionSummary: 0,
++    // 附件沿用视觉估算，不把 base64 字符除以文本密度。
++    toolResults: Math.round(bd.messages.toolOutput / ratio), attachments: msg.details.attachments, compactionSummary: 0,
+   } : msg.details
+   const userMessageTokens = messageDetails.userText + messageDetails.attachments
+   const assistantMessageTokens = messageDetails.assistantText + messageDetails.reasoning + messageDetails.compactionSummary
+diff --git a/packages/core/test/util-token.test.ts b/packages/core/test/util-token.test.ts
+--- a/packages/core/test/util-token.test.ts
++++ b/packages/core/test/util-token.test.ts
+@@ -17,4 +17,11 @@ test("calibrates input density with thresholds, cache-inclusive samples and a shar
+   for (const input of [0, -1, Infinity, NaN]) expect(Token.charsPerTokenFromHistory([{ bodyChars: 1000, input }])).toBe(4)
+   // 第三个样本故意极端偏斜，正确结果要求达到十万字符时分子、分母一起停止接纳旧样本。
+   expect(Token.charsPerTokenFromHistory([{ bodyChars: 50000, input: 20000 }, { bodyChars: 50000, input: 20000 }, { bodyChars: 100000, input: 1 }])).toBe(2.5)
++  // 附件只从字符分子扣除；纯附件不足文本门槛时仍回到 /4。
++  const inputBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
++    messages: { userText: 1000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 99000, total: 100000 } }
++  const history = [{ bodyChars: 100000, input: 400, inputBreakdown }]
++  expect(Token.charsPerTokenFromHistory(history)).toBe(2.5)
++  expect(Token.estimateRequest({ messages: [] }, history, []).charsPerToken).toBe(2.5)
++  expect(Token.charsPerTokenFromHistory([{ ...history[0], inputBreakdown: { ...inputBreakdown, messages: { ...inputBreakdown.messages, attachments: 100000 } } }])).toBe(4)
+ })
+diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
+--- a/packages/tui/test/context-usage.test.ts
++++ b/packages/tui/test/context-usage.test.ts
+@@ -773,7 +773,7 @@ describe("context usage", () => {
+-  test("uses daemon inputBreakdown for every category and keeps confirmed usage separate", async () => {
++  test("uses daemon text breakdown and keeps confirmed usage separate", async () => {
+     const inputBreakdown = {
+       system: 8000, instructions: 1000, skills: 0, tools: 5000,
+-      messages: { userText: 7800, assistantText: 8000, reasoning: 0, toolInput: 2000, toolOutput: 2000, attachments: 200, total: 20000 },
++      messages: { userText: 8000, assistantText: 8000, reasoning: 0, toolInput: 2000, toolOutput: 2000, attachments: 0, total: 20000 },
      }
-   }
+     const finish: Part = {
+       id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.001,
+@@ -787,10 +787,10 @@ describe("context usage", () => {
+-    // Source 的 ratio=2.0 保留输入/cache分母；attachments 必须实际进入生产分类。
++    // Source 的 ratio=2.0 保留输入/cache分母；此处只验证文本分类，附件另验视觉估算。
+     const legacy = await computeContextData(input)
+     expect(legacy.categories.find(item => item.name === "System prompt")?.tokens).toBe(4000)
+     expect(legacy.categories.find(item => item.name === "Instructions")?.tokens).toBe(500)
+     expect(legacy.categories.find(item => item.name === "Tool definitions")?.tokens).toBe(2500)
+     expect(legacy.categories.find(item => item.name === "Skills")?.tokens).toBe(0)
+-    expect(legacy.details.messages.attachments).toBe(100)
++    expect(legacy.details.messages.attachments).toBe(0)
+     expect(legacy.details.messages.toolCalls).toBe(1000)
+     expect(legacy.details.messages.toolResults).toBe(1000)
+     // 确认输出600与费用来自 step-finish；细分的17000输入估算不能重写普通输入或抹掉缓存两栏。
+@@ -870,7 +870,29 @@ describe("context usage", () => {
+     expect(cleared.details.usage.total).toBe(0)
+   })
+ 
++  test("excludes attachment chars from calibration and uses image/PDF visual tokens", async () => {
++    const inputBreakdown = {
++      system: 0, instructions: 0, skills: 0, tools: 0,
++      messages: { userText: 4000, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 6000, total: 10000 },
++    }
++    const finish: Part = { id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.001,
++      tokens: { input: 1600, output: 0, reasoning: 0, cache: { read: 200, write: 200 } }, inputChars: 10000, inputBreakdown }
++    const input: ComputeContextDataInput = { messages: [user("1"), assistant("2", "1")],
++      parts: { "1": [text("1", "short"),
++        { id: "image", sessionID: "s", messageID: "1", type: "file", mime: "image/png", url: `data:image/png;base64,${"x".repeat(1500)}` },
++        { id: "pdf", sessionID: "s", messageID: "1", type: "file", mime: "application/pdf", url: `data:application/pdf;base64,${"x".repeat(2200)}` },
++      ], "2": [finish] }, providers: [provider], paths: { cwd: process.cwd() },
++      instructionFiles: [], skills: [], toolDefinitions: [] }
++    const data = await computeContextData(input)
++    // 文本密度取 (10000-6000)/2000，附件取既有视觉估算，分类与明细必须同额。
++    expect(data.details.messages.userText).toBe(2000)
++    expect(data.details.messages.attachments).toBe(4)
++    expect(data.categories.find(item => item.name === "User Messages")?.tokens).toBe(2004)
++    expect(data.totalTokens).toBe(2004)
++    expect(data.details.usage).toMatchObject({ input: 1600, cacheRead: 200, cacheWrite: 200 })
++  })
++
+   test("ratio=2.5 tracks JSON-heavy input and ignores user or other-model calibration", async () => {
+     const longText = JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ role: "user", content: `message ${i} with JSON, code and tool results`.repeat(4) })))
+     const confirmed = Math.round(longText.length / 2.5)
+     const finish: Part = { id: "sf", sessionID: "s", messageID: "2", type: "step-finish", reason: "stop", cost: 0.01,

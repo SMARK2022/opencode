@@ -1,264 +1,355 @@
+diff --git a/packages/schema/src/session.ts b/packages/schema/src/session.ts
+--- a/packages/schema/src/session.ts
++++ b/packages/schema/src/session.ts
+@@ -17,2 +17,19 @@
+ 
++// 只公开当前请求的读投影；历史请求账本仍属于后续独立功能。
++// messageID 标识用户请求，assistantID 标识最后一步，不能混用两种身份。
++export interface RequestUsage extends Schema.Schema.Type<typeof RequestUsage> {}
++export const RequestUsage = Schema.Struct({
++  messageID: Schema.String,
++  input: Schema.Finite,
++  output: Schema.Finite,
++  cost: Schema.Finite,
++  assistantID: Schema.String.pipe(optional),
++  model: Schema.Struct({
++    providerID: Schema.String,
++    modelID: Schema.String,
++  }).pipe(optional),
++}).annotate({ identifier: "Session.RequestUsage" })
++
++// 请求投影不替代 tokens；tokens 始终保留会话五项全量累计。
++// 可选字段允许没有用户请求的会话容器和既有 wire 数据继续解码。
+ export interface Info extends Schema.Schema.Type<typeof Info> {}
+@@ -25,2 +42,3 @@
+   cost: Schema.Finite,
++  request: RequestUsage.pipe(optional),
+   tokens: Schema.Struct({
+diff --git a/packages/schema/src/v1/session.ts b/packages/schema/src/v1/session.ts
+--- a/packages/schema/src/v1/session.ts
++++ b/packages/schema/src/v1/session.ts
+@@ -13,2 +13,3 @@
+ import { PermissionV1 } from "./permission"
++import { Session } from "../session"
+ 
+@@ -552,2 +553,5 @@
+   cost: optional(Schema.Finite),
++  // 兼容 HTTP 与 session.updated 共用当前请求契约，不能各自定义累计口径。
++  // 请求费用和会话费用并列，不能因都由服务端提供就视为同一范围。
++  request: optional(Session.RequestUsage),
+   tokens: optional(SessionTokens),
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -1,2 +1,4 @@
+-import { DateTime } from "effect"
++import { DateTime, Schema } from "effect"
++import { getTableColumns, sql } from "drizzle-orm"
++import { Session } from "@opencode-ai/schema/session"
+ import { AgentV2 } from "../agent"
+@@ -13,3 +15,91 @@
+ 
+-export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.Info {
++// HTTP、列表和事件共用现有 Session SELECT 的请求投影，避免各视图重复扫描历史或另建账本。
++export const selection = {
++  ...getTableColumns(SessionTable),
++  request: sql<string | null>`(
++    -- 修订、移除和 revert 直接反映存储行，无需额外 replay 去重标记。
++    -- 单表 SELECT 会剥离 Column 限定名；关联外层必须固定使用 "session"."id"。
++    WITH v1_request AS (
++      -- V1 身份取完整持久用户消息，窗口淘汰不会触发新请求零值。
++      SELECT id, time_created, NULL AS promoted_seq, 'v1' AS kind
++      FROM message WHERE session_id = "session"."id" AND json_extract(data, '$.role') = 'user'
++      ORDER BY time_created DESC, id DESC LIMIT 1
++    ), native_request AS (
++      -- native 身份取持久化 admission，不依赖显示窗口。
++      -- 两种序号同属 Session durable 序列；旧 queue 后提升要覆盖较新 steer 的 admission。
++      SELECT id, time_created, promoted_seq, 'native' AS kind, coalesce(promoted_seq, admitted_seq) AS position
++      FROM session_input WHERE session_id = "session"."id"
++      ORDER BY coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
++    ), current_request AS (
++      -- V1 首次用户写入与 native admission/promotion 共用 Session event 序列，修订不重新接管身份。
++      -- 迁移清过 event/input/native message 而保留 V1 message；无事件的旧用户属于序列开始前。
++      SELECT * FROM (
++        SELECT v.*, coalesce(min(e.seq), -1) AS position
++        FROM v1_request v LEFT JOIN event e
++          ON e.aggregate_id = "session"."id" AND e.type = 'message.updated.1'
++          AND json_extract(e.data, '$.info.id') = v.id AND json_extract(e.data, '$.info.role') = 'user'
++        GROUP BY v.id
++        UNION ALL SELECT * FROM native_request)
++      -- admission 或 promotion 决定最新身份；新 admission 等待时不能借用旧轮次。
++      ORDER BY position DESC, time_created DESC, id DESC LIMIT 1
++    ), assistants AS (
++      -- V1 明确 parentID 归属，不能只按最后助手或时间范围猜测请求。
++      SELECT m.id, m.data, m.time_created AS position, 'v1' AS kind
++      FROM message m JOIN current_request r ON r.kind = 'v1'
++      WHERE m.session_id = "session"."id" AND json_extract(m.data, '$.role') = 'assistant'
++        AND json_extract(m.data, '$.parentID') = r.id
++      UNION ALL
++      SELECT m.id, m.data, m.seq AS position, 'native' AS kind
++      FROM session_message m JOIN current_request r ON r.kind = 'native'
++      -- native 用 promoted 序列划分每个请求区间，不伪造旧协议 parentID。
++      WHERE m.session_id = "session"."id" AND m.type = 'assistant'
++        AND r.promoted_seq IS NOT NULL AND m.seq > r.promoted_seq
++        AND NOT EXISTS (
++          SELECT 1 FROM session_input i WHERE i.session_id = m.session_id
++            AND i.promoted_seq > r.promoted_seq AND i.promoted_seq < m.seq
++        )
++    ), settled AS (
++      -- V1 所有 step-finish 与 native 每步助手结算互斥，避免重复累计。
++      SELECT p.data FROM part p JOIN assistants a ON a.kind = 'v1' AND a.id = p.message_id
++      WHERE p.session_id = "session"."id" AND json_extract(p.data, '$.type') = 'step-finish'
++      UNION ALL
++      SELECT data FROM assistants WHERE kind = 'native'
++    ), last_assistant AS (
++      -- 最后助手与模型随请求读出，用户被窗口淘汰后仍能锁定同一请求尾部。
++      SELECT * FROM assistants ORDER BY position DESC, id DESC LIMIT 1
++    )
++    SELECT json_object(
++      'messageID', r.id,
++      'input', coalesce((SELECT sum(coalesce(json_extract(data, '$.tokens.input'), 0)
++        + coalesce(json_extract(data, '$.tokens.cache.read'), 0)
++        + coalesce(json_extract(data, '$.tokens.cache.write'), 0)) FROM settled), 0),
++      'output', coalesce((SELECT sum(coalesce(json_extract(data, '$.tokens.output'), 0)
++        + coalesce(json_extract(data, '$.tokens.reasoning'), 0)) FROM settled), 0),
++      -- 请求费用忠实取助手 cost，不拿全局 cost 或 token 价格反推替代。
++      'cost', coalesce((SELECT sum(json_extract(data, '$.cost')) FROM assistants), 0),
++      'assistantID', (SELECT id FROM last_assistant),
++      'model', json((SELECT json_object(
++        'providerID', coalesce(json_extract(data, '$.providerID'), json_extract(data, '$.model.providerID')),
++        'modelID', coalesce(json_extract(data, '$.modelID'), json_extract(data, '$.model.id'))
++      ) FROM last_assistant))
++    ) FROM current_request r
++  )`.mapWith((value) => {
++    // SQL 没有请求时返回 null；空请求有身份且所有累计为零，两者不能混淆。
++    if (value === null) return undefined
++    const parsed = Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(value)
++    // SQLite json_object 的缺省键是 null，转成契约的省略属性再校验。
++    const fields = Schema.decodeUnknownSync(Schema.Struct({
++      messageID: Schema.String, input: Schema.Finite, output: Schema.Finite, cost: Schema.Finite,
++      assistantID: Schema.NullOr(Schema.String),
++      model: Schema.NullOr(Schema.Struct({ providerID: Schema.String, modelID: Schema.String })),
++    }))(parsed)
++    return Session.RequestUsage.make({
++      ...fields,
++      assistantID: fields.assistantID ?? undefined,
++      model: fields.model ?? undefined,
++    })
++  }),
++}
++
++export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): SessionSchema.Info {
+   return SessionSchema.Info.make({
+@@ -28,2 +118,3 @@
+     cost: row.cost,
++    request: row.request ?? undefined,
+     tokens: {
+diff --git a/packages/core/src/v1/session.ts b/packages/core/src/v1/session.ts
+--- a/packages/core/src/v1/session.ts
++++ b/packages/core/src/v1/session.ts
+@@ -9,1 +9,2 @@
+ import { ProviderV2 } from "../provider"
++import type { Session } from "@opencode-ai/schema/session"
+@@ -52,2 +53,2 @@
+ // 同一 V1 协议的 HTTP 与事件投影共用此映射，字段演进时只维护一处。
+-export function fromRow(row: typeof SessionTable.$inferSelect): Types.DeepMutable<typeof SessionInfo.Type> {
++export function fromRow(row: typeof SessionTable.$inferSelect & { request?: Session.RequestUsage }): Types.DeepMutable<typeof SessionInfo.Type> {
+@@ -97,1 +98,4 @@
+     cost: row.cost,
++    // 复制请求快照供旧可变调用方使用；不能让插件改写查询结果的嵌套模型信息。
++    // tokens 和 cost 仍是原有全局范围，request 只是并列的公开读投影。
++    request: row.request ? { ...row.request, model: row.request.model ? { ...row.request.model } : undefined } : undefined,
+diff --git a/packages/core/src/session/store.ts b/packages/core/src/session/store.ts
+--- a/packages/core/src/session/store.ts
++++ b/packages/core/src/session/store.ts
+@@ -11,2 +11,2 @@
+ import { SessionMessageTable, SessionTable } from "./sql"
+-import { fromRow } from "./info"
++import { fromRow, selection } from "./info"
+@@ -35,2 +35,4 @@
+       get: Effect.fn("SessionStore.get")(function* (sessionID) {
+-        const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++        // 与会话行同一次读取，首次挂载不能由 TUI 的有限消息页重建请求用量。
++        // SessionStore 仍按 Session ID 读取，没有新建请求执行服务或生命周期。
++        const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -26,2 +26,2 @@
+-import { fromRow } from "./session/info"
++import { fromRow, selection } from "./session/info"
+ import { SessionRunner } from "./session/runner/index"
+@@ -291,3 +291,5 @@
+         const query = db
+-          .select()
++          // 列表和 get 返回同一请求口径，列表刷新不能擦掉已加载的请求身份。
++          // 继续使用既有分页与 placement 条件，投影不改变成员或排序。
++          .select(selection)
+           .from(SessionTable)
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -4,1 +4,3 @@
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
++import { selection } from "@opencode-ai/core/session/info"
++import { RequestUsage } from "@opencode-ai/schema/session"
+@@ -57,2 +59,2 @@
+-type SessionRow = typeof SessionTable.$inferSelect
++type SessionRow = typeof SessionTable.$inferSelect & { request?: RequestUsage }
+ 
+@@ -177,1 +179,3 @@
+   tokens: optional(Tokens),
++  // 旧 HTTP 返回请求投影；全量 tokens 不改变语义，也不缩到请求范围。
++  request: optional(RequestUsage),
+@@ -483,2 +487,2 @@
+     const get = Effect.fn("Session.get")(function* (id: SessionID) {
+-      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
++      const row = yield* db.select(selection).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+@@ -507,7 +511,9 @@
+       const query =
+         conditions.length > 0
+           ? db
+-              .select()
++              // 条件列表也使用共享投影，不能只有无筛选列表带请求数据。
++              .select(selection)
+               .from(SessionTable)
+               .where(and(...conditions))
+-          : db.select().from(SessionTable)
++          // 不另扫描 parts；当前请求计算已经封装在 Core 的同一 SELECT 内。
++          : db.select(selection).from(SessionTable)
+@@ -539,4 +545,5 @@
+     const children = Effect.fn("Session.children")(function* (parentID: SessionID) {
+       const rows = yield* db
+-        .select()
++        // 子代理独立 Session 使用自己的请求投影，不继承父请求费用。
++        .select(selection)
+         .from(SessionTable)
+@@ -940,3 +947,4 @@
+   return db
+-    .select()
++    // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
++    .select(selection)
+     .from(SessionTable)
+diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/event-v2-bridge.ts
+--- a/packages/opencode/src/event-v2-bridge.ts
++++ b/packages/opencode/src/event-v2-bridge.ts
+@@ -8,1 +8,2 @@
+ import { SessionTable } from "@opencode-ai/core/session/sql"
++import { selection } from "@opencode-ai/core/session/info"
+@@ -57,7 +58,16 @@
+           event.type === SessionV1.Event.MessageRemoved.type ||
++          // 用户更新能引入新请求；助手更新能改变请求费用或最后一步身份。
++          // 不把用户被显示窗口淘汰解释成新请求尚无回复。
++          event.type === SessionV1.Event.MessageUpdated.type ||
+           // native 结算和 revert 提交都通知同一存储行，不转交 V1 执行器或建立另一份累计。
++          // admission 先到也必须刷新，确保尚未回复的新请求与旧助手断开。
++          event.type === SessionEvent.PromptAdmitted.type ||
++          event.type === SessionEvent.Prompted.type ||
++          event.type === SessionEvent.Step.Started.type ||
+           event.type === SessionEvent.Step.Ended.type ||
+           event.type === SessionEvent.RevertEvent.Committed.type
+         ) {
+           const data = Schema.decodeUnknownSync(Schema.Struct({ sessionID: SessionV1.SessionInfo.fields.id }))(event.data)
+-          const row = yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
++          // 发布与 HTTP 相同的持久化读投影，仍然只发非 durable 的兼容快照。
++          // SQL 失败沿用 listener 错误路径，不从消息窗口构造替代累计。
++          const row = yield* database.db.select(selection).from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
-@@ -261,7 +261,15 @@
-   })
- 
-   // 将 flow 字符串替换为 input/output 数值，支持脉冲信号按字段控制颜色
+@@ -266,2 +266,4 @@
 -  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
-+  // input/output 展示"本次请求"累计；totalInput/totalOutput 展示会话总累计
-+  type UsageInfo = {
-+    input: number
-+    output: number
-+    totalInput: number
-+    totalOutput: number
-+    context: string | undefined
-+    cost: string | undefined
-+  }
++  // 主值是请求累计，括号是全局累计；数值字段仍供节流后的增长脉冲比较。
++  // context 与 cost 继续是文本，不混入 token 信号的比较口径。
++  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
  
-   const usageRaw = createMemo((): UsageInfo | undefined => {
-     if (!props.sessionID) return
-@@ -271,34 +279,45 @@
-     const msg = sync.data.message[props.sessionID] ?? []
-     // 聚合所有助手消息的 token（每轮工具调用产生新消息）
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-+    const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
-     if (assistants.length === 0) {
+@@ -280,2 +282,2 @@
        if (!isRunning) return
 -      return { input: 0, output: 0, context: undefined, cost: undefined }
 +      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
-     }
- 
--    // 累加所有助手消息的已确认 step-finish token
--    // 每轮工具调用产生新消息，需要跨消息累加而非仅取最后一条
--    const last = assistants.at(-1)!
--    const agg = assistants.reduce(
--      (acc, a) => {
--        const parts = sync.data.part[a.id] ?? []
--        const { input, output } = parts.reduce(
--          (t, p) => {
--            if (p.type !== "step-finish") return t
--            return {
--              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--              output: t.output + p.tokens.output + p.tokens.reasoning,
--            }
--          },
--          { input: 0, output: 0 },
--        )
--        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
--      },
--      { input: 0, output: 0, providerID: "", modelID: "" },
--    )
-+    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
-+    const sumConfirmed = (items: AssistantMessage[]) =>
-+      items.reduce(
-+        (acc, a) => {
-+          const parts = sync.data.part[a.id] ?? []
-+          const { input, output } = parts.reduce(
-+            (t, p) => {
-+              if (p.type !== "step-finish") return t
-+              return {
-+                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-+                output: t.output + p.tokens.output + p.tokens.reasoning,
-+              }
-+            },
-+            { input: 0, output: 0 },
-+          )
-+          return { input: acc.input + input, output: acc.output + output }
-+        },
-+        { input: 0, output: 0 },
-+      )
- 
-+    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-+    const lastUser = users.at(-1)
-+    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
-+
-+    // input/output 默认展示"本次请求"累计；括号内显示会话总累计
-+    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const globalConfirmed = sumConfirmed(assistants)
-+
-     // 从最后一条（可能正在进行中的）消息添加流式估算
-+    // 优先取本次请求的最后一条，无则回退到全局最后一条
-+    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
-+    const last = activeAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
-     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-     // 流式输出：text/reasoning 字符 + pending 工具的 raw + completed 工具的 input
-@@ -323,23 +342,35 @@
-           return sum
-         }, 0)
- 
--    const totalInput = agg.input + Math.round(pendingIn / 4)
--    const totalOutput = agg.output + Math.round(streamingOut / 4)
+@@ -284,3 +286,8 @@
+-    // 无缓存助手不代表会话无历史用量；总量仍显示，只有流式尾部按空处理。
+-    const last = assistants.at(-1)
++    // 身份和已确认请求累计来自完整投影；缓存中用户缺失不等于请求缺失。
++    // 这里只读取最后助手的流式尾部，不从 100 条显示页计算已确认总量。
++    const request = session?.request
++    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
++    const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
++    const last = requestAssistants.at(-1)
++    // #12 保留请求/全局两种累计，当前 step 的主值演进只属于 #14。
+     const agg = {
+@@ -314,17 +321,23 @@
+     const totalInput = agg.input + Math.round(pendingIn / 4)
+     const totalOutput = agg.output + Math.round(streamingOut / 4)
 -    const tokens = totalInput + totalOutput
--
 -    if (tokens <= 0) {
-+    // 拆分为本次请求和会话总累计的输入输出
-+    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
-+    const pendingInputTokens = Math.round(pendingIn / 4)
-+    const pendingOutputTokens = Math.round(streamingOut / 4)
-+    // currentInput/Output 来自本次请求的已确认 token + 流式估算
-+    const currentInput = requestConfirmed.input + pendingInputTokens
-+    const currentOutput = requestConfirmed.output + pendingOutputTokens
-+    // totalInput/Output 来自全部助手消息的已确认 token + 流式估算
-+    const totalInput = globalConfirmed.input + pendingInputTokens
-+    const totalOutput = globalConfirmed.output + pendingOutputTokens
-+    // requestTokens 用于 context 百分比，totalTokens 用于括号显示
++    // 流式估算只属于已证实的当前请求助手，同一尾部各加入一次。
++    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
++    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
 +    const requestTokens = currentInput + currentOutput
 +    const totalTokens = totalInput + totalOutput
-+
 +    if (requestTokens <= 0 && totalTokens <= 0) {
        if (!isRunning) return
 -      return { input: 0, output: 0, context: undefined, cost: undefined }
 +      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
      }
  
--    const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+-    // 模型仅能由仍可见的助手证实；缺失时显示总量而不捏造 context 上限。
+-    const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
 -    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-+    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
++    // 模型随完整请求投影提供，窗口淘汰助手后仍不丢真实上下文上限。
++    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
 +    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
      const cost = session?.cost ?? 0
      return {
-       // 返回数值而非格式化字符串，由 JSX 配合 usageFlow 信号控制显示
 -      input: totalInput,
 -      output: totalOutput,
+-      // context 与 cost 仍是展示文本，不参与流量判断，费用变化不应点亮 token 箭头。
 -      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
 +      input: currentInput,
 +      output: currentOutput,
 +      totalInput,
 +      totalOutput,
++      // context 与 cost 仍是展示文本，不参与流量判断，费用变化不应点亮 token 箭头。
 +      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
-       cost: cost > 0 ? money.format(cost) : undefined,
-     }
-   })
-@@ -1734,8 +1765,8 @@
-                       {(item) => (
-                         <text fg={theme.textMuted} wrapMode="none">
-                           {/* 使用脉冲信号控制箭头颜色，token 增加时短暂高亮 */}
+@@ -1728,3 +1741,3 @@
 -                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
 -                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
 +                          <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
 +                          <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
                            {item().context ? ` · ${item().context}` : ""}
-                           {item().cost ? ` · ${item().cost}` : ""}
-                         </text>
-
-
 diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui/src/feature-plugins/sidebar/context.tsx
 --- a/packages/tui/src/feature-plugins/sidebar/context.tsx
 +++ b/packages/tui/src/feature-plugins/sidebar/context.tsx
-@@ -1,4 +1,4 @@
--import type { AssistantMessage } from "@opencode-ai/sdk/v2"
-+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
- import type { BuiltinTuiPlugin } from "../builtins"
- import { createEffect, createMemo, createSignal } from "solid-js"
-@@ -17,39 +17,60 @@
-   const session = createMemo(() => props.api.state.session.get(props.session_id))
-   const cost = createMemo(() => session()?.cost ?? 0)
- 
+@@ -20,2 +20,4 @@
 -  type StateValue = { tokens: number; input: number; output: number; percent: number | null }
-+  // 主值展示"本次请求"累计；括号内显示会话总累计
-+  type StateValue = {
-+    tokens: number
-+    totalTokens: number
-+    input: number
-+    output: number
-+    totalInput: number
-+    totalOutput: number
-+    percent: number | null
-+  }
++  // sidebar 保持直接可读对象，新增括号累计也随同一节流快照发布。
++  // 主值属于请求，total 字段属于全局，不能复用一个变量伪装两种范围。
++  type StateValue = { tokens: number; totalTokens: number; input: number; output: number; totalInput: number; totalOutput: number; percent: number | null }
  
-   const stateRaw = createMemo((): StateValue => {
-     const messages = msg()
-     // 聚合所有助手消息的 token（每轮工具调用产生新消息）
-     const assistants = messages.filter((item): item is AssistantMessage => item.role === "assistant")
-+    const users = messages.filter((item): item is UserMessage => item.role === "user")
- 
-     if (assistants.length === 0) {
+@@ -28,2 +30,2 @@
 -      return { tokens: 0, input: 0, output: 0, percent: null }
 +      return { tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }
      }
- 
--    // 累加所有助手消息的已确认 step-finish token
--    // 每轮工具调用产生新消息，需要跨消息累加而非仅取最后一条
--    const last = assistants.at(-1)!
--    const agg = assistants.reduce(
--      (acc, a) => {
--        const parts = props.api.state.part(a.id)
--        const { input, output } = parts.reduce(
--          (t, p) => {
--            if (p.type !== "step-finish") return t
--            return {
--              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--              output: t.output + p.tokens.output + p.tokens.reasoning,
--            }
--          },
--          { input: 0, output: 0 },
--        )
--        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
--      },
--      { input: 0, output: 0, providerID: "", modelID: "" },
--    )
-+    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
-+    const sumConfirmed = (items: AssistantMessage[]) =>
-+      items.reduce(
-+        (acc, a) => {
-+          const parts = props.api.state.part(a.id)
-+          const { input, output } = parts.reduce(
-+            (t, p) => {
-+              if (p.type !== "step-finish") return t
-+              return {
-+                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-+                output: t.output + p.tokens.output + p.tokens.reasoning,
-+              }
-+            },
-+            { input: 0, output: 0 },
-+          )
-+          return { input: acc.input + input, output: acc.output + output }
-+        },
-+        { input: 0, output: 0 },
-+      )
- 
-+    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-+    const lastUser = users.at(-1)
-+    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
-+
-+    // 侧边栏主值显示"本次请求"，括号里显示会话总累计
-+    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const globalConfirmed = sumConfirmed(assistants)
-+
-     // 从最后一条消息添加流式估算
-+    // 优先取本次请求的最后一条，无则回退到全局最后一条
-+    // 回退场景：流式中尚未收到 step-finish，requestAssistants 为空
-+    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
-+    const last = activeAssistants.at(-1)!
-     const lastParts = props.api.state.part(last.id)
-     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-     // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
-@@ -73,20 +94,41 @@
-           return sum
-         }, 0)
- 
--    const totalInput = agg.input + Math.round(pendingIn / 4)
--    const totalOutput = agg.output + Math.round(streamingOut / 4)
+@@ -31,3 +33,7 @@
+-    // 本项仍是会话 all-assistant 总量，不能提前引入 parentID 请求筛选。
+-    const last = assistants.at(-1)
++    // plugin 的 session.get 已直通同步 Session，不能另建 sidebar 私有请求账本。
++    const request = session()?.request
++    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
++    const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
++    const last = requestAssistants.at(-1)
++    // 已确认全局累计仍取原有五项 tokens；显示窗口只提供当前流式尾部。
+     const agg = {
+@@ -65,7 +71,14 @@
 -    const tokens = totalInput + totalOutput
--    const model = props.api.state.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
-+    // 拆分为本次请求和会话总累计的输入输出
-+    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
-+    const pendingInputTokens = Math.round(pendingIn / 4)
-+    const pendingOutputTokens = Math.round(streamingOut / 4)
-+    // input/output 来自本次请求的已确认 token + 流式估算
-+    const input = requestConfirmed.input + pendingInputTokens
-+    const output = requestConfirmed.output + pendingOutputTokens
-+    // totalInput/Output 来自全部助手消息的已确认 token + 流式估算
-+    const totalInput = globalConfirmed.input + pendingInputTokens
-+    const totalOutput = globalConfirmed.output + pendingOutputTokens
-+    // tokens 用于百分比，totalTokens 用于括号显示
+-    const model = last ? props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
++    // 两个累计共享同一尾部估算，不把历史结算从缓存再次求和。
++    const input = requestConfirmed.input + Math.round(pendingIn / 4)
++    const output = requestConfirmed.output + Math.round(streamingOut / 4)
 +    const tokens = input + output
 +    const totalTokens = totalInput + totalOutput
-+    const model = props.api.state.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
++    const model = request?.model ? props.api.state.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
      return {
        tokens,
 -      input: totalInput,
@@ -269,150 +360,45 @@ diff --git a/packages/tui/src/feature-plugins/sidebar/context.tsx b/packages/tui
 +      totalInput,
 +      totalOutput,
        percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
-     }
-   })
- 
-   // 节流 state 信号，避免流式输出时频繁刷新导致 UI 卡顿
+@@ -77,2 +90,3 @@
 -  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, input: 0, output: 0, percent: null }, 50)
-+  const [state, setStateThrottled] = createThrottledSignal<StateValue>({
-+    tokens: 0,
-+    totalTokens: 0,
-+    input: 0,
-+    output: 0,
-+    totalInput: 0,
-+    totalOutput: 0,
-+    percent: null,
-+  }, 50)
++  // 初始值补齐 total 字段，保留 50ms 发布节奏与原来的箭头脉冲 API。
++  const [state, setStateThrottled] = createThrottledSignal<StateValue>({ tokens: 0, totalTokens: 0, input: 0, output: 0, totalInput: 0, totalOutput: 0, percent: null }, 50)
    createEffect(() => setStateThrottled(stateRaw()))
- 
-   // 创建 token 流动脉冲信号，当 input/output 变化时短暂点亮箭头
-@@ -98,8 +140,8 @@
-         <b>Context</b>
-       </text>
-       {/* 使用脉冲信号控制箭头颜色，token 增加时短暂高亮 */}
+@@ -89,3 +103,3 @@
 -      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()} · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}</text>
 -      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} tokens</text>
 +      <text fg={theme().textMuted}><span style={{ fg: flow().input ? theme().text : theme().textMuted }}>↑</span> {state().input.toLocaleString()}({state().totalInput.toLocaleString()}) · <span style={{ fg: flow().output ? theme().text : theme().textMuted }}>↓</span> {state().output.toLocaleString()}({state().totalOutput.toLocaleString()})</text>
 +      <text fg={theme().textMuted}>{state().tokens.toLocaleString()} ({state().totalTokens.toLocaleString()}) tokens</text>
        <text fg={theme().textMuted}>{state().percent ?? 0}% used</text>
-       <text fg={theme().textMuted}>{money.format(cost())} spent</text>
-     </box>
-
-
 diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/src/routes/session/subagent-footer.tsx
 --- a/packages/tui/src/routes/session/subagent-footer.tsx
 +++ b/packages/tui/src/routes/session/subagent-footer.tsx
-@@ -3,7 +3,7 @@
- import { useSync } from "../../context/sync"
- import { useTheme } from "../../context/theme"
- import { SplitBorder } from "../../ui/border"
--import type { AssistantMessage } from "@opencode-ai/sdk/v2"
-+import type { AssistantMessage, UserMessage } from "@opencode-ai/sdk/v2"
- import { Locale } from "../../util/locale"
- import { createThrottledSignal, createTokenFlowPulse } from "../../util/signal"
- import { useTerminalDimensions } from "@opentui/solid"
-@@ -38,7 +38,15 @@
-   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
- 
-   // 将 flow 字符串替换为 input/output 数值，支持脉冲信号按字段控制颜色
+@@ -42,2 +42,4 @@
 -  type UsageInfo = { input: number; output: number; context: string | undefined; cost: string | undefined }
-+  // input/output 展示"本次请求"累计；totalInput/totalOutput 展示会话总累计
-+  type UsageInfo = {
-+    input: number
-+    output: number
-+    totalInput: number
-+    totalOutput: number
-+    context: string | undefined
-+    cost: string | undefined
-+  }
++  // 子代理主值与括号使用自己的请求/全局范围，不能读父会话请求投影。
++  // 保留数值输入输出字段，节流和箭头脉冲仍消费原来契约。
++  type UsageInfo = { input: number; output: number; totalInput: number; totalOutput: number; context: string | undefined; cost: string | undefined }
  
-   const usageRaw = createMemo((): UsageInfo | undefined => {
-     // 会话运行中（非 idle）时即使没有助手回复也显示零值用量
-@@ -46,34 +54,45 @@
-     const msg = messages()
-     // 聚合所有助手消息的 token（每轮工具调用产生新消息）
-     const assistants = msg.filter((item): item is AssistantMessage => item.role === "assistant")
-+    const users = msg.filter((item): item is UserMessage => item.role === "user")
- 
-     if (assistants.length === 0) {
+@@ -53,3 +55,3 @@
        if (!isRunning) return
+       // 零值仍是有效运行快照，随后增长能与零基线比较。
 -      return { input: 0, output: 0, context: undefined, cost: undefined }
 +      return { input: 0, output: 0, totalInput: 0, totalOutput: 0, context: undefined, cost: undefined }
-     }
- 
--    // 累加所有助手消息的已确认 step-finish token
--    // 每轮工具调用产生新消息，需要跨消息累加而非仅取最后一条
--    const last = assistants.at(-1)!
--    const agg = assistants.reduce(
--      (acc, a) => {
--        const parts = sync.data.part[a.id] ?? []
--        const { input, output } = parts.reduce(
--          (t, p) => {
--            if (p.type !== "step-finish") return t
--            return {
--              input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
--              output: t.output + p.tokens.output + p.tokens.reasoning,
--            }
--          },
--          { input: 0, output: 0 },
--        )
--        return { input: acc.input + input, output: acc.output + output, providerID: a.providerID, modelID: a.modelID }
--      },
--      { input: 0, output: 0, providerID: "", modelID: "" },
--    )
-+    // 累加已确认的 step-finish token 的辅助函数，按消息列表聚合
-+    const sumConfirmed = (items: AssistantMessage[]) =>
-+      items.reduce(
-+        (acc, a) => {
-+          const parts = sync.data.part[a.id] ?? []
-+          const { input, output } = parts.reduce(
-+            (t, p) => {
-+              if (p.type !== "step-finish") return t
-+              return {
-+                input: t.input + p.tokens.input + p.tokens.cache.read + p.tokens.cache.write,
-+                output: t.output + p.tokens.output + p.tokens.reasoning,
-+              }
-+            },
-+            { input: 0, output: 0 },
-+          )
-+          return { input: acc.input + input, output: acc.output + output }
-+        },
-+        { input: 0, output: 0 },
-+      )
- 
-+    // 本次请求的助手消息 = parentID 匹配最后一条用户消息的助手消息
-+    const lastUser = users.at(-1)
-+    const requestAssistants = lastUser ? assistants.filter((item) => item.parentID === lastUser.id) : []
-+
-+    // input/output 展示"本次请求"；括号为会话累计总量
-+    const requestConfirmed = sumConfirmed(requestAssistants)
-+    const globalConfirmed = sumConfirmed(assistants)
-+
-     // 从最后一条消息添加流式估算
-+    // 优先取本次请求的最后一条，无则回退到全局最后一条
-+    const activeAssistants = requestAssistants.length > 0 ? requestAssistants : assistants
-+    const last = activeAssistants.at(-1)!
-     const lastParts = sync.data.part[last.id] ?? []
-     const lastSFIdx = lastParts.reduce((idx: number, p, i) => (p.type === "step-finish" ? i : idx), -1)
-     // 流式输出：text/reasoning + pending 工具 raw + completed 工具 input
-@@ -98,23 +117,35 @@
-           return sum
-         }, 0)
- 
--    const totalInput = agg.input + Math.round(pendingIn / 4)
--    const totalOutput = agg.output + Math.round(streamingOut / 4)
+@@ -57,2 +59,7 @@
+-    const last = assistants.at(-1)
++    // 用户消息淘汰后仍按持久化请求身份取尾部，不能退回全局最后助手。
++    const request = session()?.request
++    const requestConfirmed = { input: request?.input ?? 0, output: request?.output ?? 0 }
++    const requestAssistants = assistants.filter((item) => item.id === request?.assistantID)
++    const last = requestAssistants.at(-1)
++    // requestConfirmed 与 confirmed 分属两个范围，不重新累计显示页的 parts。
+     const agg = {
+@@ -90,14 +97,21 @@
 -    const tokens = totalInput + totalOutput
-+    // 拆分为本次请求和会话总累计的输入输出
-+    // pendingInputTokens/pendingOutputTokens 是流式中的估算值，两边共用
-+    const pendingInputTokens = Math.round(pendingIn / 4)
-+    const pendingOutputTokens = Math.round(streamingOut / 4)
-+    // currentInput/Output 来自本次请求的已确认 token + 流式估算
-+    const currentInput = requestConfirmed.input + pendingInputTokens
-+    const currentOutput = requestConfirmed.output + pendingOutputTokens
-+    // totalInput/Output 来自全部助手消息的已确认 token + 流式估算
-+    const totalInput = globalConfirmed.input + pendingInputTokens
-+    const totalOutput = globalConfirmed.output + pendingOutputTokens
-+    // requestTokens 用于 context 百分比，totalTokens 用于括号显示
++    // 只把当前请求尾部加入请求累计；全局累计仍来自服务端 tokens。
++    const currentInput = requestConfirmed.input + Math.round(pendingIn / 4)
++    const currentOutput = requestConfirmed.output + Math.round(streamingOut / 4)
 +    const requestTokens = currentInput + currentOutput
 +    const totalTokens = totalInput + totalOutput
  
@@ -423,13 +409,13 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 +      return { input: 0, output: 0, totalInput, totalOutput, context: undefined, cost: undefined }
      }
  
--    const model = sync.data.provider.find((item) => item.id === agg.providerID)?.models[agg.modelID]
+-    const model = last ? sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID] : undefined
 -    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-+    const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
++    // 原生模型信息也从当前请求投影读取，不要求先有 V1 助手消息。
++    const model = request?.model ? sync.data.provider.find((item) => item.id === request.model?.providerID)?.models[request.model.modelID] : undefined
 +    const pct = requestTokens > 0 && model?.limit.context ? `${Math.round((requestTokens / model.limit.context) * 100)}%` : undefined
      const cost = session()?.cost ?? 0
      return {
-       // 返回数值而非格式化字符串，由 JSX 配合 usageFlow 信号控制显示
 -      input: totalInput,
 -      output: totalOutput,
 -      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
@@ -438,19 +424,358 @@ diff --git a/packages/tui/src/routes/session/subagent-footer.tsx b/packages/tui/
 +      totalInput,
 +      totalOutput,
 +      context: requestTokens > 0 ? (pct ? `${Locale.number(requestTokens)} (${pct})` : Locale.number(requestTokens)) : undefined,
-       cost: cost > 0 ? money.format(cost) : undefined,
-     }
-   })
-@@ -161,8 +192,8 @@
-               {(item) => (
-                 <text fg={theme.textMuted} wrapMode="none">
-                   {/* 使用脉冲信号控制箭头颜色，token 增加时短暂高亮 */}
+@@ -152,3 +166,3 @@
 -                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)} ·{" "}
 -                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}
 +                  <span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}({Locale.number(item().totalInput)}) ·{" "}
 +                  <span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}({Locale.number(item().totalOutput)})
                    {item().context ? ` · ${item().context}` : ""}
-                   {item().cost ? ` · ${item().cost}` : ""}
-                 </text>
-
-
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -60,1 +60,7 @@
++      // 请求由真实 Prompted 事件归属，不能在测试中给 native 助手伪造 parentID。
++      yield* events.publish(SessionEvent.Prompted, {
++        sessionID, messageID: SessionMessage.ID.make("msg_native_request"), timestamp: created,
++        prompt: Prompt.make({ text: "request" }), delivery: "steer",
++      })
++      // admission 与 promotion 的边界由现有 projector 持久化，测试不另建 SQL 归属算法。
+       // 每轮给五项不同的非零计数，能发现只累加最后一轮、遗漏 reasoning 或合并 cache 的错误。
+@@ -81,1 +87,7 @@
+       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(expected)
++      // native 两轮请求必须累计五项，V1 parts 表为空也不能得到零。
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({
++        messageID: "msg_native_request", input: 42, output: 12, cost: 0.75,
++        assistantID: "msg_native_usage_2", model: { providerID: "provider", modelID: "model" },
++      })
++      // 这里检查公开 get 的投影，不在断言里重复实现事件到请求的归属计算。
+@@ -117,1 +129,26 @@
+       expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)).toMatchObject(reverted)
++      // revert 删除第二轮后请求费用只取保留助手，会话已花费用仍不退款。
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({ input: 42, output: 12, cost: 1 })
++      yield* events.publish(SessionEvent.PromptAdmitted, {
++        sessionID, messageID: SessionMessage.ID.make("msg_waiting_request"), timestamp: DateTime.makeUnsafe(6),
++        prompt: Prompt.make({ text: "waiting" }), delivery: "queue",
++      })
++      // 尚未 promoted 的最新 admission 是独立零值请求，不能消费旧助手。
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({
++        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
++      })
++      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).cost).toBe(1.5)
++      // 旧助手迟到结算不改变请求身份；只比较 admission/promotion，不比较 Ended 序号。
++      yield* events.publish(SessionEvent.Step.Ended, {
++        sessionID, assistantMessageID: SessionMessage.ID.make("msg_native_usage_1"),
++        timestamp: DateTime.makeUnsafe(7), finish: "stop", cost: 1,
++        tokens: { input: 6, output: 9, reasoning: 3, cache: { read: 15, write: 21 } },
++      })
++      expect((yield* sessions.get(sessionID)).request).toMatchObject({
++        messageID: "msg_waiting_request", input: 0, output: 0, cost: 0,
++      })
++      // get/list 同用一个 SQL owner，等待请求没有模型，也没有可借用的助手。
++      expect((yield* sessions.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* sessions.get(sessionID)).request?.model).toBeUndefined()
++      expect((yield* sessions.list({ project: Project.ID.global })).find((item) => item.id === sessionID)?.request).toEqual((yield* sessions.get(sessionID)).request)
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -25,1 +25,2 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
+@@ -2150,6 +2151,8 @@
+         [
+           LLMEvent.stepStart({ index: 0 }),
+-          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
++          // 最后 queue 的非零结算与前面的零用量 steer 区分，不能只检查模型请求顺序。
++          LLMEvent.stepFinish({ index: 0, reason: "stop",
++            usage: { inputTokens: 10, nonCachedInputTokens: 8, outputTokens: 4, reasoningTokens: 1, cacheReadInputTokens: 2 } }),
+           LLMEvent.finish({ reason: "stop" }),
+         ],
+       ]
+@@ -2163,3 +2166,3 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue first" }), delivery: "queue" })
+-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
++      const queued = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queue second" }), delivery: "queue" })
+       streamGate = secondGate
+@@ -2168,3 +2171,8 @@
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Steer before next queued input" }) })
+-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
++      const steer = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Also steer before next queued input" }) })
++      // gate 内的新 admission 尚未提升，必须有独立零请求，不能显示 Queue first 的回复。
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: steer.id, input: 0, output: 0, cost: 0 })
++      expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
++      // 放开边界后先提升 steers，再提升早接纳的 Queue second；最终身份按可见顺序。
+       yield* Deferred.succeed(secondGate, undefined)
+@@ -2186,5 +2194,13 @@
+         "Steer before next queued input",
+         "Also steer before next queued input",
+         "Queue second",
+       ])
++      const messages = yield* session.messages({ sessionID, order: "asc" })
++      const lastAssistant = messages.findLast((message) => message.type === "assistant")
++      // 上方第四轮 provider request 证明 queue 最后执行；消息只检查存在性，助手按 durable 序列取最后一步。
++      expect(messages.some((message) => message.type === "user" && message.id === queued.id)).toBe(true)
++      expect(lastAssistant).toBeDefined()
++      expect((yield* session.get(sessionID)).request).toMatchObject({
++        messageID: queued.id, assistantID: lastAssistant?.id, input: 10, output: 4, cost: 0,
++      })
+     }),
+@@ -2191,3 +2207,43 @@
+   )
+ 
++  it.effect("selects mixed entry requests by durable visibility and admission", () =>
++    Effect.gen(function* () {
++      yield* setup
++      const session = yield* SessionV2.Service
++      const events = yield* EventV2.Service
++      requests.length = 0
++      const queued = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed native queue" }), delivery: "queue", resume: false })
++      // V1 noReply 保存用户后返回；直接使用它真实的 MessageUpdated 持久边界，不模拟第二个时钟。
++      const legacy = { id: SessionV1.MessageID.ascending(), sessionID, role: "user" as const, time: { created: DateTime.toEpochMillis(queued.timeCreated) + 1 },
++        agent: "build", model: { providerID: ProviderV2.ID.make("fake"), modelID: ModelV2.ID.make("fake-model") } }
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: legacy })
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: legacy.id, input: 0, output: 0, cost: 0 })
++      response = [
++        LLMEvent.stepStart({ index: 0 }),
++        LLMEvent.stepFinish({ index: 0, reason: "stop",
++          usage: { inputTokens: 10, nonCachedInputTokens: 8, outputTokens: 4, reasoningTokens: 1, cacheReadInputTokens: 2 } }),
++        LLMEvent.finish({ reason: "stop" }),
++      ]
++      // 真实 resume 提升早接纳的 queue；V1 创建时间刻意晚于 admission，旧 UNION 时间排序会误选零值。
++      yield* session.resume(sessionID)
++      expect(userTexts(requests.at(-1)!)).toEqual(["mixed native queue"])
++      const messages = yield* session.messages({ sessionID, order: "asc" })
++      expect(messages.some((message) => message.type === "user" && message.id === queued.id)).toBe(true)
++      expect((yield* session.get(sessionID)).request).toMatchObject({
++        messageID: queued.id, assistantID: messages.findLast((message) => message.type === "assistant")?.id, input: 10, output: 4, cost: 0,
++      })
++      // 旧 V1 用户再次更新不是新请求，不能用最后 MessageUpdated 序号压过 native promotion。
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...legacy, agent: "edited" } })
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: queued.id, input: 10, output: 4, cost: 0 })
++      const nextLegacyID = SessionV1.MessageID.ascending()
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: { ...legacy, id: nextLegacyID, time: { created: legacy.time.created + 1 } } })
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: nextLegacyID, input: 0, output: 0, cost: 0 })
++      // 混合入口之后的新 admission 仍是独立零值，不能固定 native 优先或永远保留 V1 候选。
++      const waiting = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "mixed waiting" }), delivery: "queue", resume: false })
++      expect((yield* session.get(sessionID)).request).toMatchObject({ messageID: waiting.id, input: 0, output: 0, cost: 0 })
++      expect((yield* session.get(sessionID)).request?.assistantID).toBeUndefined()
++      expect((yield* session.get(sessionID)).request?.model).toBeUndefined()
++    }),
++  )
++
+   it.effect("coalesces multiple active steering prompts into one continuation turn", () =>
+diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/test/session/session.test.ts
+--- a/packages/opencode/test/session/session.test.ts
++++ b/packages/opencode/test/session/session.test.ts
+@@ -187,1 +187,7 @@
+       expect(page.some((item) => item.info.id === assistant.id)).toBe(false)
++      // 用户同样退出 100 条窗口，但完整请求身份和累计不能因此归零。
++      expect(page.some((item) => item.info.id === userID)).toBe(false)
++      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: userID, input: 1428, output: 408 })
++      // 源语义取助手 cost；fixture 的第二个 part 有额外费用，能区分请求与全局费用。
++      expect((yield* session.get(created.id)).request?.cost).toBeCloseTo(1.01)
++      expect(snapshots.at(-1)?.request?.input).toBe(1428)
+@@ -229,1 +235,13 @@
+       expect((yield* session.children(created.id)).find((item) => item.id === empty.id)?.tokens?.input).toBe(0)
++      // 旧请求仍有 100 个助手，加入新用户必须立即生成独立零请求快照。
++      const nextUserID = MessageID.ascending()
++      yield* session.updateMessage({
++        id: nextUserID, sessionID: created.id, role: "user", time: { created: 1000 },
++        agent: "build", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++      })
++      expect((yield* session.get(created.id)).request).toMatchObject({ messageID: nextUserID, input: 0, output: 0, cost: 0 })
++      expect((yield* session.get(created.id)).request?.assistantID).toBeUndefined()
++      // 身份切换只改变请求投影，已确认 Session.tokens 仍保留完整历史。
++      expect((yield* session.get(created.id)).tokens?.input).toBe(200)
++      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
++      expect(snapshots.at(-1)?.request?.cost).toBe(0)
+diff --git a/packages/opencode/src/cli/cmd/generate.ts b/packages/opencode/src/cli/cmd/generate.ts
+--- a/packages/opencode/src/cli/cmd/generate.ts
++++ b/packages/opencode/src/cli/cmd/generate.ts
+@@ -8,39 +8,3 @@
+   handler: async () => {
+-    const { Server } = await import("../../server/server")
+-    const specs = (await Server.openapi()) as {
+-      paths: Record<string, Record<string, any>>
+-    }
+-    for (const item of Object.values(specs.paths)) {
+-      for (const method of ["get", "post", "put", "delete", "patch"] as const) {
+-        const operation = item[method]
+-        if (!operation?.operationId) continue
+-        operation["x-codeSamples"] = [
+-          {
+-            lang: "js",
+-            source: [
+-              `import { createOpencodeClient } from "@opencode-ai/sdk`,
+-              ``,
+-              `const client = createOpencodeClient()`,
+-              `await client.${operation.operationId}({`,
+-              `  ...`,
+-              `})`,
+-            ].join("\n"),
+-          },
+-        ]
+-      }
+-    }
+-    const raw = JSON.stringify(specs, null, 2)
+-
+-    // Format through prettier so output is byte-identical to committed file
+-    // regardless of whether ./script/format.ts runs afterward.
+-    const prettier = await import("prettier")
+-    const babel = await import("prettier/plugins/babel")
+-    const estree = await import("prettier/plugins/estree")
+-    const format = prettier.format ?? prettier.default?.format
+-    const json = await format(raw, {
+-      parser: "json",
+-      plugins: [babel.default ?? babel, estree.default ?? estree],
+-      printWidth: 120,
+-    })
+-
++    const json = await generateOpenApiJson()
+     // Wait for stdout to finish writing before process.exit() is called
+@@ -54,1 +18,42 @@
+ } satisfies CommandModule<object, Args>
++
++// CLI 与 SDK 共用同一文档、示例和格式化工厂，防止两条输出路径产生不同的 wire 契约。
++// Server 仍按调用懒加载；SDK 可读取静态 OpenAPI，无需导入 CLI 主入口或执行 bootstrap。
++export async function generateOpenApiJson() {
++  const { Server } = await import("../../server/server")
++  const specs = (await Server.openapi()) as {
++    paths: Record<string, Record<string, any>>
++  }
++  for (const item of Object.values(specs.paths)) {
++    for (const method of ["get", "post", "put", "delete", "patch"] as const) {
++      const operation = item[method]
++      if (!operation?.operationId) continue
++      operation["x-codeSamples"] = [
++        {
++          lang: "js",
++          source: [
++            `import { createOpencodeClient } from "@opencode-ai/sdk`,
++            ``,
++            `const client = createOpencodeClient()`,
++            `await client.${operation.operationId}({`,
++            `  ...`,
++            `})`,
++          ].join("\n"),
++        },
++      ]
++    }
++  }
++  const raw = JSON.stringify(specs, null, 2)
++
++  // Format through prettier so output is byte-identical to committed file
++  // regardless of whether ./script/format.ts runs afterward.
++  const prettier = await import("prettier")
++  const babel = await import("prettier/plugins/babel")
++  const estree = await import("prettier/plugins/estree")
++  const format = prettier.format ?? prettier.default?.format
++  return await format(raw, {
++    parser: "json",
++    plugins: [babel.default ?? babel, estree.default ?? estree],
++    printWidth: 120,
++  })
++}
+diff --git a/packages/sdk/js/script/build.ts b/packages/sdk/js/script/build.ts
+--- a/packages/sdk/js/script/build.ts
++++ b/packages/sdk/js/script/build.ts
+@@ -12,3 +12,6 @@
+ const opencode = path.resolve(dir, "../../opencode")
+ 
+-await $`bun dev generate > ${dir}/openapi.json`.cwd(opencode)
++// 只在构建脚本中导入既有生成 owner，避免 CLI argv/bootstrap 副作用，不增加 SDK runtime 依赖。
++// 继续写同一 OpenAPI 输入文件，后续官方插件与修补流程完整保留，生成失败直接阻止构建。
++const { generateOpenApiJson } = await import(path.join(opencode, "src/cli/cmd/generate.ts"))
++await Bun.write(path.join(dir, "openapi.json"), await generateOpenApiJson())
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -181,7 +181,8 @@
+     files: number
+     diffs?: Array<SnapshotFileDiff>
+   }
+   cost?: number
++  request?: SessionRequestUsage
+   tokens?: {
+     input: number
+     output: number
+@@ -2219,5 +2220,6 @@
+       write: number
+     }
+   }
++  request?: SessionRequestUsage
+   share?: {
+     url: string
+@@ -3037,5 +3039,17 @@
+ export type MoveSessionDestination = {
+   directory: string
+ }
+ 
++export type SessionRequestUsage = {
++  messageID: string
++  input: number
++  output: number
++  cost: number
++  assistantID?: string
++  model?: {
++    providerID: string
++    modelID: string
++  }
++}
++
+ export type ModelRef = {
+@@ -3912,5 +3926,6 @@
+   agent?: string
+   model?: ModelRef
+   cost: number
++  request?: SessionRequestUsage
+   tokens: {
+     input: number
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -240,3 +240,11 @@
+     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+     readonly cost: number
++    readonly request?: {
++      readonly messageID: string
++      readonly input: number
++      readonly output: number
++      readonly cost: number
++      readonly assistantID?: string
++      readonly model?: { readonly providerID: string; readonly modelID: string }
++    }
+     readonly tokens: {
+@@ -302,3 +310,11 @@
+     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+     readonly cost: number
++    readonly request?: {
++      readonly messageID: string
++      readonly input: number
++      readonly output: number
++      readonly cost: number
++      readonly assistantID?: string
++      readonly model?: { readonly providerID: string; readonly modelID: string }
++    }
+     readonly tokens: {
+@@ -340,3 +356,11 @@
+     readonly model?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+     readonly cost: number
++    readonly request?: {
++      readonly messageID: string
++      readonly input: number
++      readonly output: number
++      readonly cost: number
++      readonly assistantID?: string
++      readonly model?: { readonly providerID: string; readonly modelID: string }
++    }
+     readonly tokens: {
+diff --git a/packages/sdk/js/tsconfig.json b/packages/sdk/js/tsconfig.json
+--- a/packages/sdk/js/tsconfig.json
++++ b/packages/sdk/js/tsconfig.json
+@@ -9,3 +9,4 @@
+     "lib": ["es2022", "dom", "dom.iterable"],
++    "types": ["node"],
+     "composite": true,
+     "rootDir": "src"

@@ -12,11 +12,10 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -1,4 +1,8 @@
+@@ -1,4 +1,7 @@
  #!/usr/bin/env bun
  
-+// 关键：必须在所有其他 import 之前加载 version-env，
-+// 确保在模块求值时设置 OPENCODE_VERSION 环境变量
++// 在其他 import 求值前加载 version-env，确保它们读取到 OPENCODE_VERSION。
 +import "./version-env"
 +
  import { $ } from "bun"

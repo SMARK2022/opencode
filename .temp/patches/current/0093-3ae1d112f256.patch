@@ -6,483 +6,221 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0=E7=AC=94?=
  =?UTF-8?q?=E5=A2=9E=E5=BC=BA=E5=86=85=E6=A0=B8=E9=80=89=E6=8B=A9=E5=92=8C?=
 
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-index 1ea7a541f0..7ab5dab8eb 100644
 --- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -43,14 +43,16 @@ export const VscodeNotebookDescriptions = {
- 
-   // env 描述含 restart；删除 kernel 描述块
-   // save 描述禁止 unprompted 自动落盘
-+  // #93 configure 描述与 runtime 五态对齐，禁止广告不可达状态
-   env: [
-     "Perform notebook environment operations selected via the `operation` field.",
+@@ -46,8 +46,8 @@ export const VscodeNotebookDescriptions = {
      "filePath and operation are required. `reason` is an optional brief description shown to the user.",
      "Operations:",
 -    "  info      — probe the active kernel/interpreter and report saved .ipynb metadata",
 -    "  configure — open the notebook and trigger kernel selection (run before first execution)",
-+    // info：至少执行过一 cell 后 public API 才有活动核
-+    "  info      — probe the active kernel (available after at least one cell has run) and report saved .ipynb metadata. Use to confirm runtime after first execution or to check the Python environment path and version.",
-+    "  configure — select a kernel and verify readiness. Returns status: configured (active kernel found via public executeCode probe), selected (selectKernel returned true; kernel starts on first run), needs-selection (user cancelled picker or selectKernel unavailable), selection-requested (command ran without explicit boolean result), or failed (extension missing / command error). Use before the first run; no need to call info after selected/configured.",
-     // restart 文案：清空变量后需重跑 setup cells
 -    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward.",
++    "  info      — probe the active kernel (available after at least one cell has run) and report saved .ipynb metadata. Use to confirm runtime after first execution or to check the Python environment path and version.",
++    "  configure — select a kernel and verify readiness. Returns a status: configured (active kernel found), selected (accepted, kernel starts on first run — proceed directly to run), needs-selection (user cancelled picker), selection-requested (no explicit result), or failed (error). Use before the first run; no need to call info after selected.",
 +    "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward. Only restart when strictly necessary (e.g. stuck kernel, corrupted state); prefer re-running cells over restarting when possible.",
      "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
    ].join("\n"),
- 
+ }
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
-index 1897a237e0..e57b660591 100644
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
-@@ -36,6 +36,20 @@ type SavedMetadata = {
+@@ -98,7 +98,7 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+       `Notebook saved metadata: ${formatSavedMetadata(savedMetadata)}.`,
+       activeRuntime
+         ? "运行时来源：通过 api.kernels.getKernel 与 executeCode 查询实际活动的 Jupyter 内核进程。"
+-        : "运行时来源：无；Jupyter 稳定 API 仅暴露与打开笔记本关联且已启动的内核。",
++        : "运行时来源：无；Jupyter 稳定 API 仅暴露至少执行过一个代码格后启动的内核。",
+       activeRuntime?.python?.executable ? `Python executable: ${activeRuntime.python.executable}` : undefined,
+       reason ? `Reason: ${reason}` : undefined,
+     ].filter(Boolean).join("\n"),
+@@ -120,35 +120,175 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string) {
+   }
  }
- type Operation = "info" | "configure" | "restart" | "save"
  
-+// #93 configure 五态：由 pre/post probe + selectKernel 布尔结果决定
-+type ConfigureStatus = "configured" | "selected" | "needs-selection" | "selection-requested" | "failed"
-+type ConfigureProbe = {
-+  hasKernel: boolean
-+  configured: boolean
-+  kernelLanguage?: string
-+  kernelStatus?: string
-+  probeSucceeded?: boolean
-+  probeError?: string
-+  probeDurationMs?: number
-+  elapsedMs: number
-+}
-+const PYTHON_ID = "ms-python.python"
-+
- // probe 30s 避免慢内核误判无活动内核
- // probe 30s：慢内核下过短会误判 no-active-kernel
- const PROBE_TIMEOUT_MS = 30_000
-@@ -107,32 +121,411 @@ async function infoNotebook(notebook: vscode.NotebookDocument, reason?: string)
- 
- // configure：show + selectKernel，不读 Jupyter 内部 controller
  async function configureNotebook(notebook: vscode.NotebookDocument, reason?: string) {
-+  // #93：public-API 五态机；pre/post probe + selectKernel boolean 为唯一判定源
    const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
    const startedAt = Date.now()
-+  // node1：notebook 元数据进 data，便于 agent 对照 URI/cellCount
 +  const notebookMeta = {
 +    uri: notebook.uri.toString(),
 +    cellCount: notebook.cellCount,
 +    notebookType: notebook.notebookType,
 +    isUntitled: notebook.isUntitled,
 +    isClosed: notebook.isClosed,
-+    metadataKernelSpec: (notebook.metadata as { kernelspec?: unknown })?.kernelspec ?? null,
++    metadataKernelSpec: (notebook.metadata as { kernelspec?: unknown }).kernelspec ?? null,
 +  }
-+
-   const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
+   const jupyter = vscode.extensions.getExtension("ms-toolsai.jupyter")
    if (!jupyter) {
 -    return { ran: true, summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter and select a kernel first.", data: { path: primaryPath, operation: "configure", reason, jupyterFound: false, durationMs: Date.now() - startedAt } }
-+    // 扩展缺失：failed，禁止伪装 needs-selection
 +    return configureResult({
 +      path: primaryPath,
 +      reason,
-+      // failed：扩展/命令硬错误
 +      status: "failed",
-+      // 安装指引写在 summary，不只在 data
 +      summary: "Jupyter extension is not installed. Install ms-toolsai.jupyter first.",
-+      data: {
-+        notebook: notebookMeta,
-+        jupyter: { found: false, active: false },
-+        durationMs: Date.now() - startedAt,
-+      },
++      data: { notebook: notebookMeta, jupyter: { found: false, active: false }, durationMs: Date.now() - startedAt },
 +    })
    }
-+
-+  // 记录激活耗时供诊断
 +  const jupActivateStart = Date.now()
-+  // 激活 Jupyter 后再 probe/select，避免假未注册
    if (!jupyter.isActive) await jupyter.activate()
--  await vscode.window.showNotebookDocument(notebook, { preview: false })
--  const allCommands = await vscode.commands.getCommands(true)
--  // selectKernel 未注册时仍返回，由上层 status 机解释
--  const hasSelect = allCommands.includes(SELECT_KERNEL_CMD)
--  if (hasSelect) // 绑定目标 notebook；已选核时跳过重复弹层
--    await vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
-+  const jupyterInfo = {
-+    found: true,
-+    active: jupyter.isActive,
-+    version: (jupyter.packageJSON as { version?: string })?.version,
-+    activationDurationMs: Date.now() - jupActivateStart,
-+  }
-+
-+  // Python 扩展 best-effort：激活失败不升 failed
-+  // Python-like 才 best-effort 激活 Python 扩展
++  const jupyterInfo = { ...extensionInfo("ms-toolsai.jupyter"), activationDurationMs: Date.now() - jupActivateStart }
 +  const pythonHeuristic = isPythonNotebookLike(notebook)
-+  const python = vscode.extensions.getExtension(PYTHON_ID)
-+  let pythonInfo: Record<string, unknown> = {
++  const python = vscode.extensions.getExtension("ms-python.python")
++  const pyActivateStart = Date.now()
++  const pythonActivationError = pythonHeuristic.result && python && !python.isActive
++    ? await Promise.resolve(python.activate()).then(() => undefined, (error: unknown) => error instanceof Error ? error.message : String(error))
++    : undefined
++  const pythonInfo = {
++    ...extensionInfo("ms-python.python"),
 +    isPythonLike: pythonHeuristic.result,
 +    heuristic: pythonHeuristic.heuristic,
-+    found: false,
-+    active: false,
++    activationError: pythonActivationError,
++    activationDurationMs: Date.now() - pyActivateStart,
 +  }
-+  if (pythonHeuristic.result && python) {
-+    const pyActivateStart = Date.now()
-+    try {
-+      if (!python.isActive) await python.activate()
-+      pythonInfo = {
-+        isPythonLike: pythonHeuristic.result,
-+        heuristic: pythonHeuristic.heuristic,
-+        found: true,
-+        active: python.isActive,
-+        version: (python.packageJSON as { version?: string })?.version,
-+        activationDurationMs: Date.now() - pyActivateStart,
-+      }
-+    } catch (error) {
-+      pythonInfo = {
-+        ...pythonInfo,
-+        found: true,
-+        // Python 激活错误写入 data，不改变 configure status
-+        activationError: error instanceof Error ? error.message : String(error),
-+        activationDurationMs: Date.now() - pyActivateStart,
-+      }
-+    }
-+  }
-+
-+  // visibility 节点计时
 +  const visStart = Date.now()
 +  let showNotebookSucceeded = false
-+  try {
-+    // 需要焦点以弹出 kernel picker
-+    // 非 preview 打开，避免临时编辑器丢失选择
+   try {
+-    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: true })
 +    await vscode.window.showNotebookDocument(notebook, { preview: false, preserveFocus: false })
 +    showNotebookSucceeded = true
-+  } catch {
-+    // showNotebook 失败非致命，仍尝试 select/probe
-+  }
+   } catch {
+     // 显示失败不阻止已打开文档按 URI 选核。
+   }
+-  const allCommands = await vscode.commands.getCommands(true)
+-  const hasSelect = allCommands.includes(SELECT_KERNEL_CMD)
+-  if (hasSelect) {
+-    await vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
+-      notebookUri: notebook.uri,
+-      skipIfAlreadySelected: true,
+-    })
+-  }
+-  return {
+-    ran: true,
+-    summary: ["Operation: configure", hasSelect ? "Kernel selection triggered. The kernel will start on first cell execution." : "notebook.selectKernel not registered; select manually.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
+-    data: { path: primaryPath, operation: "configure", reason, jupyterFound: true, selectKernelCommandFound: hasSelect, durationMs: Date.now() - startedAt },
+-    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
+-  }
 +  const visibility = {
 +    showNotebookSucceeded,
 +    showNotebookDurationMs: Date.now() - visStart,
 +    visibleEditorCount: vscode.window.visibleNotebookEditors.length,
 +    activeNotebookUri: vscode.window.activeNotebookEditor?.notebook.uri.toString(),
-+    // 校验 active editor 是否就是目标 notebook
-+    targetNotebookActive:
-+      vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString(),
++    targetNotebookActive: vscode.window.activeNotebookEditor?.notebook.uri.toString() === notebook.uri.toString(),
 +  }
-+
-+  // pre-check：已就绪直接 configured，避免无谓弹选核
-+  const preCheck = await probeConfigureRuntime(notebook.uri, "preCheck")
-+  // pre 已 configured：跳过 selectKernel，直接返回
++  const preCheck = await probeConfigureRuntime(notebook.uri)
 +  if (preCheck.configured) {
 +    return configureResult({
 +      path: primaryPath,
 +      reason,
-+      // data.status 与 summary Status 行必须同值
 +      status: "configured",
-+      // pre configured 短路文案
-+      summary: "Notebook already has an active kernel — runtime probe via executeCode succeeded.",
-+      data: {
-+        notebook: notebookMeta,
-+        jupyter: jupyterInfo,
-+        python: pythonInfo,
-+        visibility,
-+        preCheck,
-+        commands: null,
-+        selectKernel: null,
-+        poll: null,
-+        durationMs: Date.now() - startedAt,
-+      },
++      summary: "Notebook already has an active kernel.",
++      data: { notebook: notebookMeta, jupyter: jupyterInfo, python: pythonInfo, visibility, preCheck, durationMs: Date.now() - startedAt },
 +    })
 +  }
-+
-+  // 命令发现节点计时
 +  const cmdStart = Date.now()
-+  // 同时查 public/all 命令表，避免隐藏命令漏检
 +  const commandsPublic = await vscode.commands.getCommands(true)
 +  const commandsAll = await vscode.commands.getCommands(false)
 +  const commandInfo = {
-+    // public 列表用于诊断 UI 可见性差异
 +    selectKernelListedPublic: commandsPublic.includes(SELECT_KERNEL_CMD),
-+    // all 列表包含隐藏命令，防止漏检
 +    selectKernelListedAll: commandsAll.includes(SELECT_KERNEL_CMD),
-+    selectKernelExecuteSucceeded: false as boolean,
 +    restartKernelListed: commandsAll.includes(RESTART_CMD),
 +    notebookCellExecuteListed: commandsAll.includes("notebook.cell.execute"),
 +    discoveryDurationMs: Date.now() - cmdStart,
 +  }
-+
-+  // 命令未注册：needs-selection（非 failed）
-+  if (!commandInfo.selectKernelListedAll && !commandInfo.selectKernelListedPublic) {
-+    return configureResult({
-+      path: primaryPath,
-+      reason,
-+      // needs-selection：可手动选核后重试 configure
-+      status: "needs-selection",
-+      summary:
-+        "Kernel selection could not be invoked automatically. Select a kernel manually from the notebook toolbar.",
-+      data: {
-+        notebook: notebookMeta,
-+        jupyter: jupyterInfo,
-+        python: pythonInfo,
-+        visibility,
-+        preCheck,
-+        commands: commandInfo,
-+        // resultKind 枚举化，避免 agent 解析 raw result
-+        selectKernel: { invoked: false, resultKind: "not-invoked" },
-+        durationMs: Date.now() - startedAt,
-+      },
-+    })
-+  }
-+
-+  // selectKernel 节点计时
 +  const selStart = Date.now()
-+  let selectKernelInvoked = false
-+  let selectKernelResult: unknown = undefined
-+  let selectKernelError: string | undefined
-+  try {
-+    // 绑定 filePath 对应 notebook；已选核时跳过重复弹层；读取 boolean 返回值
-+    selectKernelResult = await vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
-+      // notebookUri 绑定 filePath 目标，禁止落到 active 编辑器
-       notebookUri: notebook.uri,
--      // 已选核跳过 picker；notebookUri 绑定 filePath 目标本
-+      // 已选核跳过 picker，减少无谓 UI
-       skipIfAlreadySelected: true,
-     })
-+    selectKernelInvoked = true
-+  } catch (error) {
-+    selectKernelError = error instanceof Error ? error.message : String(error)
-+  }
-+  // 严格 === true/false，禁止 truthy 把 unknown 当 selected
-+  const selectKernelAccepted = selectKernelResult === true
-+  // false=用户取消或未接受，映射 needs-selection
-+  const selectKernelRejected = selectKernelResult === false
++  // 命令列表只作诊断，是否接受或取消以实际调用结果为准。
++  const selection = await Promise.resolve(vscode.commands.executeCommand(SELECT_KERNEL_CMD, {
++    notebookUri: notebook.uri,
++    skipIfAlreadySelected: true,
++  })).then(
++    (result) => ({ result, error: undefined }),
++    (error: unknown) => ({ result: undefined, error: error instanceof Error ? error.message : String(error) }),
++  )
 +  const selectKernelInfo = {
-+    invoked: selectKernelInvoked,
-+    result: selectKernelResult,
-+    accepted: selectKernelAccepted,
-+    rejectedOrCancelled: selectKernelRejected,
-+    resultKind: selectKernelAccepted
-+      ? "accepted"
-+      : selectKernelRejected
-+        ? "cancelled-or-not-selected"
-+        : selectKernelError
-+          ? "error"
-+          : selectKernelInvoked
-+            ? "unknown"
-+            : "not-invoked",
-+    error: selectKernelError,
++    invoked: selection.error === undefined,
++    result: selection.result,
++    accepted: selection.result === true,
++    rejectedOrCancelled: selection.result === false,
++    error: selection.error,
 +    durationMs: Date.now() - selStart,
 +  }
-+
-+  // post probe：select 后可能仍无 active kernel，属 expected
-+  const postProbe = await probeConfigureRuntime(notebook.uri, "post-select")
-+  // pre/post 成对写入 data.probe，便于对比时序
-+  const pairedProbe = {
-+    preCheck: {
-+      hasKernel: preCheck.hasKernel,
-+      configured: preCheck.configured,
-+      kernelLanguage: preCheck.kernelLanguage,
-+      kernelStatus: preCheck.kernelStatus,
-+      probeDurationMs: preCheck.probeDurationMs,
-+    },
-+    postSelect: {
-+      hasKernel: postProbe.hasKernel,
-+      configured: postProbe.configured,
-+      kernelLanguage: postProbe.kernelLanguage,
-+      kernelStatus: postProbe.kernelStatus,
-+      probeSucceeded: postProbe.probeSucceeded,
-+      probeError: postProbe.probeError,
-+      probeDurationMs: postProbe.probeDurationMs,
-+    },
-+  }
-+  commandInfo.selectKernelExecuteSucceeded = selectKernelAccepted
-+
-+  const { status, statusSummary } = resolveConfigureStatus(
-+    postProbe.configured,
-+    selectKernelInvoked,
-+    selectKernelAccepted,
-+    selectKernelRejected,
-+    selectKernelError,
-+  )
-+
++  // 只探测一次；选核接受后尚未启动是正常状态，不能轮询等待首格执行。
++  const postProbe = await probeConfigureRuntime(notebook.uri)
++  const status = postProbe.configured
++    ? "configured"
++    : selection.result === true
++      ? "selected"
++      : selection.result === false
++        ? "needs-selection"
++        : selection.error !== undefined
++          ? "failed"
++          : "selection-requested"
 +  return configureResult({
 +    path: primaryPath,
 +    reason,
 +    status,
-+    summary: statusSummary,
++    summary: selection.error !== undefined ? `Kernel selection command failed: ${selection.error}.` : "Kernel selection command completed.",
 +    data: {
 +      notebook: notebookMeta,
 +      jupyter: jupyterInfo,
 +      python: pythonInfo,
 +      visibility,
-+      probe: pairedProbe,
-+      commands: commandInfo,
++      probe: { preCheck, postSelect: postProbe },
++      commands: { ...commandInfo, selectKernelExecuteSucceeded: selection.result === true },
 +      selectKernel: selectKernelInfo,
 +      durationMs: Date.now() - startedAt,
 +    },
 +  })
-+}
-+
-+// ---------------------------------------------------------------------------
-+// configure helpers
-+// ---------------------------------------------------------------------------
-+
-+// 判定优先级：postConfigured > accepted > rejected > error > unknown > not-invoked
-+function resolveConfigureStatus(
-+  postProbeConfigured: boolean,
-+  selectKernelInvoked: boolean,
-+  selectKernelAccepted: boolean,
-+  selectKernelRejected: boolean,
-+  selectKernelError?: string,
-+): { status: ConfigureStatus; statusSummary: string } {
-+  // 判定优先级：postConfigured > accepted > rejected > error > invoked-unknown > not-invoked
-+  // post 探针成功压过 selected，直接 configured
-+  if (postProbeConfigured) {
-+    return {
-+      status: "configured",
-+      statusSummary: "Kernel is active — runtime probe via executeCode succeeded after selection.",
-+    }
-+  }
-+  // accepted 且未 probe 成功：selected，首 cell 才起核
-+  if (selectKernelAccepted) {
-+    return {
-+      // selected 不声称内核变量已就绪
-+      status: "selected",
-+      statusSummary: [
-+        // selected 文案解释“首 cell 才起核”是 expected
-+        "Kernel selection was accepted.",
-+        "The kernel will start on the first code-cell execution — no active kernel is visible through the public Jupyter API yet, which is expected.",
-+      ].join(" "),
-+    }
-+  }
-+  // rejected/cancel：needs-selection，禁止报 selected
-+  if (selectKernelRejected) {
-+    return {
-+      status: "needs-selection",
-+      statusSummary: [
-+        // cancel 文案明确用户可能关闭 picker
-+        "Kernel selection was invoked, but no kernel was selected or accepted.",
-+        "The user may have cancelled the kernel picker or not chosen an environment.",
-+      ].join(" "),
-+    }
-+  }
-+  // 命令抛错：failed
-+  if (selectKernelError) {
-+    return {
-+      status: "failed",
-+      statusSummary: `Kernel selection command failed: ${selectKernelError}.`,
-+    }
-+  }
-+  // 有调用无 boolean：selection-requested，引导重试
-+  if (selectKernelInvoked) {
-+    return {
-+      // selection-requested：无明确 boolean，勿当 selected
-+      status: "selection-requested",
-+      statusSummary: [
-+        // unknown 文案要求 retry configure
-+        "Kernel selection command completed without an explicit boolean result.",
-+        "No active kernel was confirmed. Retry configure or select a kernel manually.",
-+      ].join(" "),
-+    }
-+  }
-+  return {
-+    status: "needs-selection",
-+    statusSummary:
-+      "Kernel selection could not be invoked automatically. Select a kernel manually from the notebook toolbar.",
-+  }
-+}
-+
-+// 统一返回 shape：summary 含 Status 行 + guidance
+ }
+ 
 +function configureResult(input: {
 +  path: string
 +  reason?: string
-+  status: ConfigureStatus
++  status: "configured" | "selected" | "needs-selection" | "selection-requested" | "failed"
 +  summary: string
 +  data: Record<string, unknown>
 +}) {
-+  // guidance 与 status 绑定，供只读 summary 的消费者决策
-+  const guidance =
-+    input.status === "configured"
-+      ? "Notebook is ready for cell execution."
-+      : input.status === "selected"
-+        ? "Proceed to run cells — the kernel will start on first execution."
-+        : input.status === "needs-selection"
-+          ? "Select a kernel manually from the notebook toolbar, then call configure to verify."
-+          : input.status === "selection-requested"
-+            ? "Retry configure or select a kernel manually."
-+            : "Check Jupyter/Python extensions and workspace trust."
-+
-   return {
-     ran: true,
--    summary: ["Operation: configure", hasSelect ? "Kernel selection triggered." : "notebook.selectKernel not registered; select manually.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
--    data: { path: primaryPath, operation: "configure", reason, jupyterFound: true, selectKernelCommandFound: hasSelect, durationMs: Date.now() - startedAt },
--    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
-+    summary: [`Status: ${input.status}`, input.summary, guidance, input.reason ? `Reason: ${input.reason}` : ""]
-+      .filter(Boolean)
-+      .join("\n"),
-+    data: {
-+      path: input.path,
-+      // 固定 operation 字段，兼容 env multi-op 消费者
-+      operation: "configure",
-+      reason: input.reason,
-+      status: input.status,
-+      ...input.data,
-+    },
-+    // 明确不做内部 API 探测
-+    // note 声明能力边界：无内部 controller 访问
-+    note: "Public-API configure. Uses api.kernels.getKernel + executeCode to confirm kernel readiness. Cannot access Jupyter internal controllerRegistration/kernelProvider.",
++  const guidance = {
++    configured: "Notebook is ready for cell execution.",
++    selected: "Kernel selection was accepted. Proceed to run cells; the kernel will start on first execution.",
++    "needs-selection": "No kernel was selected or accepted. Select a kernel manually from the notebook toolbar, then call configure to verify.",
++    "selection-requested": "No active kernel was confirmed. Retry configure or select a kernel manually.",
++    failed: "Check Jupyter/Python extensions and workspace trust.",
++  }[input.status]
++  return {
++    ran: true,
++    summary: ["Operation: configure", `Status: ${input.status}`, input.summary, guidance, input.reason ? `Reason: ${input.reason}` : undefined].filter(Boolean).join("\n"),
++    data: { path: input.path, operation: "configure", reason: input.reason, status: input.status, ...input.data },
++    note: "Public-API configure. Uses api.kernels.getKernel and the existing Python executeCode probe; no internal controllerRegistration/kernelProvider access.",
 +  }
 +}
 +
-+async function probeConfigureRuntime(uri: vscode.Uri, label?: string): Promise<ConfigureProbe> {
-+  // probe 复用 getActiveRuntime 公开 API，不读内部 controller
++async function probeConfigureRuntime(uri: vscode.Uri) {
 +  const startedAt = Date.now()
-+  const result: ConfigureProbe = { hasKernel: false, configured: false, elapsedMs: 0 }
-+  try {
-+    const runtime = await getActiveRuntime(uri)
-+    result.elapsedMs = Date.now() - startedAt
-+    result.probeDurationMs = result.elapsedMs
-+    if (!runtime) {
-+      result.hasKernel = false
-+      return result
-+    }
-+    result.hasKernel = true
-+    result.kernelLanguage = runtime.language
-+    result.kernelStatus = runtime.kernelStatus
-+    result.probeSucceeded = true
-+    // 有 runtime 即 configured：public API 已确认活动核
-+    result.configured = true
-+  } catch (error) {
-+    result.elapsedMs = Date.now() - startedAt
-+    result.probeDurationMs = result.elapsedMs
-+    result.probeError = error instanceof Error ? error.message : String(error)
++  const runtime = await getActiveRuntime(uri)
++  // info 容忍 Python 探针失败并保留 base；configure 不能据此宣称探针就绪。
++  const configured = Boolean(runtime && (runtime.language.toLowerCase() !== "python" || runtime.python))
++  return {
++    hasKernel: Boolean(runtime),
++    configured,
++    kernelLanguage: runtime?.language,
++    kernelStatus: runtime?.kernelStatus,
++    probeSucceeded: runtime?.language.toLowerCase() === "python" ? Boolean(runtime.python) : undefined,
++    probeDurationMs: Date.now() - startedAt,
 +  }
-+  // label 仅诊断占位，不影响 probe 语义
-+  void label
-+  return result
 +}
 +
-+// Python-like 判定：cells 语言或 kernelspec/language_info
 +function isPythonNotebookLike(notebook: vscode.NotebookDocument) {
-+  if (
-+    notebook.getCells().some(
-+      (c) => c.kind === vscode.NotebookCellKind.Code && c.document.languageId === "python",
-+    )
-+  ) {
-+    // cells 命中优先于 metadata 启发式
-+    return { result: true, heuristic: "cells" as const }
++  if (notebook.getCells().some((cell) => cell.kind === vscode.NotebookCellKind.Code && cell.document.languageId === "python")) {
++    return { result: true, heuristic: "cells" } as const
 +  }
-+  const meta = notebook.metadata as Record<string, unknown>
-+  const kernelspec = meta?.kernelspec as { language?: string; name?: string } | undefined
-+  const langInfo = meta?.language_info as { name?: string } | undefined
-+  const lang = langInfo?.name ?? kernelspec?.language ?? kernelspec?.name
-+  if (typeof lang === "string" && lang.toLowerCase().includes("python")) {
-+    // metadata 仅当 cells 未声明 python 时兜底
-+    return { result: true, heuristic: "metadata" as const }
-   }
-+  return { result: false, heuristic: "none" as const }
- }
- 
--// 私有 restart：仅 env.operation=restart 调用
++  const meta = notebook.metadata as {
++    kernelspec?: { language?: string; name?: string }
++    language_info?: { name?: string }
++  }
++  const language = meta.language_info?.name ?? meta.kernelspec?.language ?? meta.kernelspec?.name
++  return typeof language === "string" && language.toLowerCase().includes("python")
++    ? { result: true, heuristic: "metadata" } as const
++    : { result: false, heuristic: "none" } as const
++}
++
  async function restartNotebookKernel(notebook: vscode.NotebookDocument, reason?: string) {
    const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
    const startedAt = Date.now()
-@@ -215,6 +608,7 @@ async function saveNotebook(notebook: vscode.NotebookDocument, reason?: string)
-   const afterDirty = notebook.isDirty
-   const afterVersion = notebook.version
-   // save() false 可能是 not-dirty 或失败；以 afterDirty===false 确认成功
-+  // 保留 #92 dirty settle 成功规则
-   const saved = !afterDirty
- 
-   return {

@@ -9,119 +9,103 @@ diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-prox
 index 0ca0eff2bc..2295c89c7f 100644
 --- a/packages/core/src/network-proxy.ts
 +++ b/packages/core/src/network-proxy.ts
-@@ -5,13 +5,15 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
+@@ -5,17 +5,17 @@ export type Purpose = "local" | "provider" | "infrastructure" | "npm" | "plugin"
  
  export type Route = { type: "direct"; reason: string } | { type: "proxy"; proxy: string; reason: string }
  
--// #73：系统代理缓存 15s，平衡探测开销与变更响应
--const TTL = 15_000 // #73：缩短系统代理缓存，更快响应代理变更
-+// #76：系统代理探测缓存 TTL
-+const PROXY_TTL = 10_000 // #76：代理缓存 10s，加快代理变更感知
- const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"])
+-// 系统代理缓存缩至十五秒，代理应用重启后不长期沿用失效端口。
+-const TTL = 15_000
++// 十秒只控制代理探测缓存的新鲜度，不能当作取消后重开请求的期限。
++const PROXY_TTL = 10_000
+ // URL 会将 mapped IPv4 规范为十六进制 IPv6，两种表示都必须保持回环直连。
+ const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1"])
  
+ // 共享探测 Promise 防止并发请求各自拉起 reg/scutil 子进程。
  let cache: { expires: number; value: Promise<SystemProxy | undefined> } | undefined
--// #73：全局 fetch 包装是否已安装，避免重复包装递归
- let globalFetchInstalled = false
-+// #76：保存包装前原始 fetch，供 originalFetch 绕过路由
-+// #76：安装全局包装前保存原生 fetch
-+let savedOriginal: FetchFn | undefined
+ // 记录本模块包装函数的身份，后来替换的全局自定义 fetch 不能被误解包。
+ let globalFetchInstalled: FetchFn | undefined
+ // 显式路由复用安装前的运输函数，不能再次进入全局代理包装。
+ let savedOriginal: FetchFn | undefined
  
  type SystemProxy = {
    http?: string
-@@ -126,13 +128,12 @@ async function macProxy(): Promise<SystemProxy | undefined> {
-   return { http, https, socks, bypass: [] }
- }
- 
--// #73：支持 force refresh 绕过 TTL
- async function currentSystemProxy(refresh = false) {
-   if (process.platform !== "win32" && process.platform !== "darwin") return undefined
+@@ -155,8 +155,8 @@ async function currentSystemProxy(refresh = false) {
    if (refresh) cache = undefined
    if (!cache || cache.expires < Date.now()) {
+     // 探测失败也缓存本轮结果，避免短时系统错误让每个请求重复 spawn。
      cache = {
 -      expires: Date.now() + TTL,
 +      expires: Date.now() + PROXY_TTL,
        value: (process.platform === "win32" ? windowsProxy() : macProxy()).catch(() => undefined),
      }
    }
-@@ -162,16 +163,30 @@ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise
+@@ -189,18 +189,19 @@
+ export async function routedFetch(input: FetchInput, init?: RoutedInit): Promise<Response> {
    return fetchWithRoute(fetch, input, init)
  }
  
-+// #76：增强 fetchWithRoute：剥离 caller proxy，失败可刷新
+ // provider 的自定义 fetch 可能负责鉴权，必须在原 transport 上加路由而非换成裸 fetch。
  export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
    const url = new URL(input instanceof Request ? input.url : input.toString())
--  const { purpose = "unknown", signal, ...rest } = (init ?? {}) as RoutedInit
+   // 只解开本模块安装的全局入口；调用方传入的自定义 fetch 保持原运输职责。
+   const original = savedOriginal && fetchFn === globalFetchInstalled ? savedOriginal : fetchFn
+   // Request 自带取消信号也须参与失败判断，显式 init.signal 仍优先。
+-  const { purpose = "unknown", signal = input instanceof Request ? input.signal : undefined, ...rest } = (init ?? {}) as RoutedInit
+-  // 提供者与安装请求首次刷新，避免仍在 TTL 内的旧代理拖延交互。
 -  const route = await resolveProxyRoute(url, purpose, purpose === "provider" || purpose === "npm")
--  const direct = () => fetchFn(input, signal ? { ...rest, signal } : rest)
-+  const { purpose = "unknown", signal, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: string }
++  // 路由独占代理选择，调用方的显式代理不能泄漏到直连或恢复请求。
++  const { purpose = "unknown", signal = input instanceof Request ? input.signal : undefined, proxy: _incomingProxy, ...rest } = (init ?? {}) as RoutedInit & { proxy?: BunFetchRequestInit["proxy"] }
++  // 首次复用十秒缓存，失败仍强制刷新；高频提供者探测不应每次启动系统命令。
 +  const route = await resolveProxyRoute(url, purpose, false)
-+  
-+  // Bun caches proxy env at startup — explicit `proxy` param overrides it,
-+  // but plain fetch still honours the cached env.  Setting NO_PROXY=* once
-+  // disables that cached env so plain fetch goes direct.  The proxy() helper
-+  // passes an explicit `proxy` param which Bun always respects regardless of
-+  // NO_PROXY, so this is safe.
-+  if (!process.env.__OPENCODE_NO_PROXY_SET) {
-+    process.env.NO_PROXY = "*"
-+    process.env.__OPENCODE_NO_PROXY_SET = "1"
-+  }
-+  
-+  const fetchDirect = (overrideSignal?: AbortSignal) => 
-+    fetchFn(input, { ...rest, signal: overrideSignal ?? signal })
-+  
-   const proxy = (value: string) => fetchFn(input, { ...rest, signal, proxy: value })
- 
+   // 路由探测期间也可能取消；开始网络运输前须结算同一个信号。
+   signal?.throwIfAborted()
+   // 恢复运输仍沿原取消信号，不能通过改写用户代理环境制造直连。
+-  const direct = () => original(input, { ...rest, signal })
++  const fetchDirect = () => original(input, { ...rest, signal })
+   const proxy = (value: string) => original(input, { ...rest, signal, proxy: value })
+@@ -209,7 +210,7 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
    if (route.type === "direct") {
      try {
 -      return await direct()
 +      return await fetchDirect()
      } catch (error) {
+       // 取消是请求终点，保留首次错误对象，不能转成代理重发。
        if (signal?.aborted) throw error
        const refreshed = await resolveProxyRoute(url, purpose, true)
-@@ -187,23 +202,27 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?:
-     if (refreshed?.type === "proxy" && refreshed.proxy !== route.proxy) {
+@@ -232,10 +233,10 @@ export async function fetchWithRoute(fetchFn: FetchFn, input: FetchInput, init?: RoutedInit): Promise<Response> {
+     if (refreshed.type === "proxy" && refreshed.proxy !== route.proxy) {
        return proxy(refreshed.proxy).catch(() => { throw error })
      }
--    // When the proxy attempt consumed the abort signal, retry direct without it
--    // so the fallback has a chance to succeed.
--    if (signal?.aborted) return fetchFn(input, rest).catch(() => { throw error })
+     // 环境代理仍未变化时，裸 fetch 会重进同一代理；终止恢复并保留首次错误。
+     if (process.platform !== "win32" && process.platform !== "darwin" && refreshed.type === "proxy") throw error
 -    return direct().catch(() => { throw error })
-+    if (signal?.aborted)
-+      return fetchDirect(AbortSignal.timeout(10_000)).catch(() => { throw error })
 +    return fetchDirect().catch(() => { throw error })
    }
  }
  
--// #73：包装 globalThis.fetch，使未改调用方也走代理
-+// #76：安装全局 fetch 包装入口
- export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
--  // #73：幂等安装，禁止重复包裹
--if (globalFetchInstalled) return
-+  if (globalFetchInstalled) return
-   const original = globalThis.fetch.bind(globalThis) as FetchFn
-+  savedOriginal = original
-   globalThis.fetch = ((input: FetchInput, init?: RoutedInit) =>
-     fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })) as typeof fetch
-   globalFetchInstalled = true
+ // 插件直接使用全局 fetch 时也共享路由；显式用途不得被默认用途覆盖。
+@@ -247,7 +248,12 @@ export function installGlobalFetch(defaultPurpose: Purpose = "unknown") {
+     fetchWithRoute(original, input, { ...init, purpose: init?.purpose ?? defaultPurpose })
+   // 局部 Fetch 适配复用 Bun 的 preconnect，安装全局包装不能丢掉这个运输成员。
+   globalThis.fetch = Object.assign(globalFetchInstalled, { preconnect: globalThis.fetch.preconnect })
  }
  
-+// #76：取回包装前 fetch
++// 公开安装前的运输入口，适配器可避免再路由，自定义 fetch 无需被替换。
 +export function originalFetch() {
 +  return savedOriginal ?? globalThis.fetch.bind(globalThis) as FetchFn
 +}
 +
  export async function npmProxyOptions(registry: string) {
-   const route = await resolveProxyRoute(registry, "npm", true)
-   if (route.type === "direct") return {}
+   // registry 与安装请求共用用途，避免 ping 走代理而 Arborist 下载仍走旧 shell 路径。
 diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
 index 1558c707c3..8eec73edab 100644
 --- a/packages/opencode/src/plugin/index.ts
 +++ b/packages/opencode/src/plugin/index.ts
-@@ -93,14 +93,34 @@ function getServerPlugin(value: unknown) {
+@@ -93,14 +93,36 @@ function getServerPlugin(value: unknown) {
  }
  
  function getLegacyPlugins(mod: Record<string, unknown>) {
-+  // 优先 default 导出：大多数插件模块只导出一个 default 插件函数
++  // 默认导出是作者显式选择，混合模块的辅助导出不能被一并执行。
 +  if (isServerPlugin(mod.default)) return [mod.default]
 +
    const seen = new Set<unknown>()
@@ -130,7 +114,7 @@ index 1558c707c3..8eec73edab 100644
 -  for (const entry of Object.values(mod)) {
 -    if (seen.has(entry)) continue
 -    seen.add(entry)
-+  // 优先 *Plugin 命名导出；否则收集全部函数导出，多个无后缀则报歧义
++  // 命名后缀提供显式插件选择，模块中的其他函数不会被误当插件。
 +  const named = Object.entries(mod).filter(
 +    ([name, entry]) => name !== "default" && name.endsWith("Plugin") && isServerPlugin(entry),
 +  )
@@ -141,6 +125,7 @@ index 1558c707c3..8eec73edab 100644
 +          .filter(([name, entry]) => name !== "default" && isServerPlugin(entry))
 +          .map(([, entry]) => entry)
 +
++  // 无显式选择且有多个函数时拒绝猜测，避免误执行非插件导出。
 +  if (named.length === 0 && candidates.length > 1) {
 +    throw new TypeError(
 +      "Plugin module has multiple function exports; export a default plugin or name plugin exports with a Plugin suffix",
@@ -150,6 +135,7 @@ index 1558c707c3..8eec73edab 100644
 +  for (const entry of candidates) {
      const plugin = getServerPlugin(entry)
      if (!plugin) throw new TypeError("Plugin export is not a function")
++    // 别名导出可能引用同一插件，按函数身份去重避免双重初始化。
 +    if (seen.has(plugin)) continue
 +    seen.add(plugin)
      result.push(plugin)

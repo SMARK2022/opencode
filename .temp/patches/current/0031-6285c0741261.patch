@@ -1,12 +1,10 @@
-diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
---- a/packages/opencode/src/session/system.ts
-+++ b/packages/opencode/src/session/system.ts
-@@ -29,6 +29,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
- import { type as osType, release as osRelease } from "os"
- import { ToolRegistry } from "@/tool/registry"
- import { Shell } from "@opencode-ai/core/shell"
-+// Flag 模块已在上游重构中迁移为 RuntimeFlags，导入路径已更新
-+// 原始 SMARK patch 31 的 Flag→@opencode-ai/core/flag 迁移已由上游完成
- 
- // 将 git 状态上下文限制在固定长度，避免提示词膨胀。
- const MAX_STATUS_CHARS = 2000
+diff --git a/bunfig.toml b/bunfig.toml
+--- a/bunfig.toml
++++ b/bunfig.toml
+@@ -1,4 +1,6 @@
+ [install]
+ exact = true
++# 镜像仅作为 registry 包的默认源，保留直接 URL、锁定版本及 integrity 哈希。
++registry = "https://registry.npmmirror.com"
+ # Only install newly resolved package versions published at least 3 days ago.
+ minimumReleaseAge = 259200

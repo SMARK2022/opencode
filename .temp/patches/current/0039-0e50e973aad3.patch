@@ -1,49 +1,35 @@
 diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-opencode.yml
 --- a/.github/workflows/build-opencode.yml
 +++ b/.github/workflows/build-opencode.yml
-@@ -65,16 +65,17 @@ jobs:
+@@ -54,7 +54,8 @@ jobs:
+ 
+       - name: Package Linux .deb
+-        run: |
++        # |2 指定相对 run 键两空格的内容缩进，字段和 EOF 在 shell 中顶格，YAML 中保留公共缩进
++        run: |2
+           # Actions 先替换表达式，再由 shell 展开 VERSION，让 control 与 deb 文件名共享回退值
+           VERSION="${{ inputs.version || env.DEFAULT_VERSION }}"
+           DEB_DIR="/tmp/deb_build"
+           PKG_NAME="opencode_${VERSION}_amd64"
+@@ -69,7 +70,7 @@ jobs:
            chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
  
-           # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
-+          # control 内容必须顶格（column 0），否则 dpkg 解析字段时前导空格会导致格式错误
+-          # YAML 剥离十空格后字段与 EOF 顶格；Description 续行多一空格才是合法 deb 描述
++          # Description 续行保留第十一空格，剥离公共缩进后仍是 Debian 必需的单空格续行
+           # Linux deb 的 amd64 元数据只对应 x64 二进制，不能把 arm64 混入同一包
            cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
--          Package: opencode
--          Version: ${VERSION}
--          Section: utils
--          Priority: optional
--          Architecture: amd64
--          Maintainer: smark <smark@local>
--          Description: opencode AI-powered development tool (smark build)
--           A standalone AI coding assistant with TUI, version ${VERSION}.
--          EOF
-+Package: opencode
-+Version: ${VERSION}
-+Section: utils
-+Priority: optional
-+Architecture: amd64
-+Maintainer: smark <smark@local>
-+Description: opencode AI-powered development tool (smark build)
-+ A standalone AI coding assistant with TUI, version ${VERSION}.
-+EOF
- 
-           dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${VERSION}_amd64.deb"
- 
-@@ -123,6 +124,20 @@ jobs:
+           Package: opencode
+           Version: ${VERSION}
+@@ -128,6 +129,14 @@ jobs:
      steps:
        - uses: actions/checkout@v4
  
-+      # Windows 原生编译工具链：Bun 在 Windows 构建时需编译 native addon
-+      # setup-node 提供 node-gyp 所需的 Node.js 运行时（22 LTS）
-+      - uses: actions/setup-node@v4
-+        with:
-+          node-version: "22"
-+
-+      # setup-python：node-gyp 依赖 Python 构建 native addon，Windows runner 默认不带
++      # setup-bun 已提供 Node 24；Python 必须先就绪，供其安装阶段的 node-gyp 使用
 +      - uses: actions/setup-python@v5
 +        with:
 +          python-version: "3.12"
 +
-+      # setup-msbuild：Windows C++ 编译工具链，native addon 的 .node 文件需 MSBuild
++      # MSBuild 先于 setup-bun 的依赖安装，保留 Windows 原生 addon 的编译工具链入口
 +      - uses: microsoft/setup-msbuild@v2
 +
        - uses: ./.github/actions/setup-bun
@@ -52,11 +38,23 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 diff --git a/package.json b/package.json
 --- a/package.json
 +++ b/package.json
-@@ -101,6 +101,7 @@
+@@ -102,6 +102,7 @@
      "@typescript/native-preview": "catalog:",
      "glob": "13.0.5",
      "husky": "9.1.7",
-+    "node-gyp": "11.2.0",
++    "node-gyp": "12.3.0",
      "oxlint": "1.60.0",
      "oxlint-tsgolint": "0.21.0",
      "prettier": "3.6.2",
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -19,6 +19,8 @@
+         "@typescript/native-preview": "catalog:",
+         "glob": "13.0.5",
+         "husky": "9.1.7",
++        // 根构建依赖复用已锁定的 node-gyp@12.3.0 包条目，manifest 与 frozen 输入同步
++        "node-gyp": "12.3.0",
+         "oxlint": "1.60.0",
+         "oxlint-tsgolint": "0.21.0",
+         "prettier": "3.6.2",

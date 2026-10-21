@@ -6,87 +6,102 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-diff --git a/packages/opencode/src/tool/bash-compress.ts b/packages/opencode/src/tool/bash-compress.ts
-index 675004c80826297f357d170bc96fc5003e6408c0..3eadf40afa2397816360441f6bc5dcd64c63ae39 100644
---- a/packages/opencode/src/tool/bash-compress.ts
-+++ b/packages/opencode/src/tool/bash-compress.ts
-@@ -1133,6 +1133,8 @@
-   if (/^data:image\/[^;]+;base64,/.test(line)) return 'data-uri'
-   if (/^[{[].*[}\]]$/.test(line.trim()) && line.length > 1000) return 'minified-json'
-   if (/^[0-9a-f]{64,}$/i.test(line.trim())) return 'hex-dump'
-+  // PowerShell CLIXML 检测：识别 <Objs> 开头的 CLIXML 格式输出，用于后续解码
-+  if (/^<Objs\b/.test(line.trim())) return 'powershell-clixml'
-   return 'unknown'
+diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/bash-compress.ts
+--- a/packages/core/src/tool/bash-compress.ts
++++ b/packages/core/src/tool/bash-compress.ts
+@@ -461,7 +461,8 @@ function compressHighEntropyLines(lines: string[], config: CompressionConfig) {
+       : /^data:image\/[^;]+;base64,/.test(line) ? "data-uri"
+       : /^[0-9a-f]{64,}$/i.test(line.trim()) ? "hex-dump"
+       : /^[A-Za-z0-9+/]+=*$/.test(line.trim()) ? "base64"
++      : /^<Objs\b/.test(line.trim()) ? "powershell-clixml"
+       : /^[{\[].*[}\]]$/.test(line.trim()) && line.length > 1000 ? "minified-json" : "unknown"
+     // 首尾及哈希只读取已脱敏正文，不从 raw 重新截取样例。
+     const replacement = `<high-entropy ${type} omitted: ${byteLen(line)} bytes, hash=${simpleHash(line)}, prefix=${JSON.stringify(line.slice(0, 20) + "...")}, suffix=${JSON.stringify("..." + line.slice(-20))}>`
+     // 首尾样例与标签本身也计费，净增长摘要继续原样通过。
+@@ -941,6 +942,23 @@ export function shouldCompressOutput(text: string) {
+   return text.length >= DEFAULT_COMPRESSION_CONFIG.minInlineRunBytes
  }
  
-@@ -1365,6 +1367,44 @@
-  * 主入口：压缩传入的可见文本，返回压缩后的文本以及详细的统计信息
-  * 优化后的流水线顺序：Secret redaction → 虚拟终端渲染 → 模板化压缩 → 多行块 → 单行重复 → 高熵长行 → 行内模式
-  */
-+// CLIXML 解码器：将 PowerShell 的 CLIXML XML 格式解码为纯文本
-+// CLIXML 是 PowerShell 的 XML 错误序列化格式，将终端彩色文本包装在 <Objs><S S="...">_xHHHH_</S></Objs> 中
-+// 返回解码后的多行文本（包装在 <high-entropy powershell-clixml> 标签中），非 CLIXML 输入返回 null
-+function transformPowerShellClixml(text: string): string | null {
++// 保留源 CLIXML 节点提取与转义规则，ANSI 清洗复用现有实现。
++function transformPowerShellClixml(text: string, config: CompressionConfig) {
 +  const trimmed = text.trimStart()
-+  // CLIXML 前缀检查：必须以 <Objs 开头才是 CLIXML 格式
 +  if (!trimmed.startsWith("<Objs") && !/^[\s\S]*<Objs\b/.test(trimmed)) return null
-+
-+  // 提取 <S S="...">text</S> 节点中的文本内容
 +  const decoded = /<S\s+S="[^"]*">([^<]*)<\/S>/gi
 +  const parts: string[] = []
 +  let match: RegExpExecArray | null
 +  while ((match = decoded.exec(text)) !== null) {
-+    parts.push(clixmlDecodeHexEscapes(match[1]))
++    parts.push(match[1].replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))))
 +  }
 +  if (parts.length === 0) return null
-+
-+  let plain = parts.join("")
-+  // 清除 ANSI 控制序列：CLIXML 解码后可能残留终端颜色码
-+  plain = plain.replace(ANSI_GLOBAL_RE, "")
-+  // 统一换行符：将 \r\n 转换为 \n
-+  plain = plain.replace(/\r\n/g, "\n")
-+  plain = plain.trimEnd()
-+
++  const plain = stripAnsi(parts.join("")).replace(/\r\n/g, "\n").trimEnd()
 +  if (!plain) return null
-+
-+  return `<high-entropy powershell-clixml>${plain}</high-entropy>`
++  const replacement = `<high-entropy powershell-clixml>${plain}</high-entropy>`
++  return scoreReplacement(text, replacement, config).profitable ? replacement : null
 +}
 +
-+// 十六进制转义解码：PowerShell CLIXML 使用 _xHHHH_ 格式编码 Unicode 字符
-+function clixmlDecodeHexEscapes(value: string): string {
-+  return value.replace(/_x([0-9A-Fa-f]{4,})_/g, (_, hex) => {
-+    const num = parseInt(hex, 16)
-+    // 保留可打印 ASCII 范围；非打印控制字符原样传递（ANSI 清除在后续步骤执行）
-+    return String.fromCharCode(num)
-+  })
-+}
-+
- export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>): CompressResult {
-   const config = configOf(configInput)
-   const originalBytes = byteLen(text)
-@@ -1382,6 +1422,23 @@
-     highEntropyLines: 0,
-     secretsRedacted: 0,
-     applied: false,
-+  }
-+
-+  // 步骤 0a：PowerShell CLIXML 解码 — 在主压缩流程之前将 CLIXML 转换为纯文本
-+  const clixml = transformPowerShellClixml(text)
-+  if (clixml) {
-+    const compressedBytes = byteLen(clixml)
-+    return {
-+      text: clixml,
-+      stats: {
-+        ...emptyStats,
-+        compressedBytes,
-+        savedBytes: originalBytes - compressedBytes,
-+        savingRatio: originalBytes > 0 ? (originalBytes - compressedBytes) / originalBytes : 0,
-+        highEntropyLines: 1,
-+        applied: true,
-+      },
-+    }
+ /**
+  * 主入口：压缩传入的可见文本，返回压缩后的文本以及详细的统计信息
+  */
+@@ -967,11 +985,14 @@ export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
+   // 源 opt-out 保持逐字原样；启用后脱敏不受长度预筛或压缩收益支配。
+   if (!config.enabled) return { text, stats: emptyStats }
+   // VT可能把ANSI分隔的片段重组成密钥；规范化完成后只执行一次canonical脱敏。
+-  const cr = collapseCarriageReturns(text, config)
++  // CLIXML 解码沿用收益门槛，提交后继续 VT 与脱敏。
++  const clixml = transformPowerShellClixml(text, config)
++  const cr = collapseCarriageReturns(clixml ?? text, config)
+   const redaction = redactSecrets(cr.text)
+   const redactedBytes = byteLen(redaction.text)
+   // 短终态仍报告已提交的VT收益，独立脱敏不会被后续noapply回退撤销。
+-  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, applied: cr.groups > 0 && redactedBytes < originalBytes,
++  const redactedStats = { ...emptyStats, carriageReturnGroups: cr.groups, highEntropyLines: clixml ? 1 : 0,
++    applied: (clixml !== null || cr.groups > 0) && redactedBytes < originalBytes,
+     compressedBytes: redactedBytes, savedBytes: originalBytes - redactedBytes,
+     savingRatio: originalBytes ? (originalBytes - redactedBytes) / originalBytes : 0, secretsRedacted: redaction.redacted }
+   if (!shouldCompressOutput(redaction.text)) return { text: redaction.text, stats: redactedStats }
+@@ -1014,11 +1035,11 @@ export function compressVisibleOutput(text: string, configInput?: Partial<CompressionConfig>, command = ""): CompressResult {
+     repeatedLineGroups: same.groups,
+     inlinePatternGroups: inline.groups,
+     templateGroups: template.groups,
+-    highEntropyLines: highEntropy.groups,
++    highEntropyLines: highEntropy.groups + (clixml ? 1 : 0),
+     secretsRedacted: redaction.redacted,
+     applied:
+       compressedBytes < originalBytes &&
+-      (cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0 || compressed !== lines.join("\n")),
++      (clixml !== null || cr.groups > 0 || blocks.groups > 0 || same.groups > 0 || template.groups > 0 || highEntropy.groups > 0 || inline.groups > 0 || compressed !== lines.join("\n")),
    }
  
-   // 禁用或不值得压缩时直接返回
-
-
+   return {
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -769,6 +769,19 @@
+         const entropy = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".repeat(16)
+         expect(compressVisibleOutput(entropy).text).toContain("high-entropy base64 omitted: 1024 bytes")
+         expect(compressVisibleOutput(entropy).stats.highEntropyLines).toBe(1)
++        // CLIXML 解码仍走同一入口，覆盖脱敏、禁用、收益与后续重复压缩。
++        const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">_x001B_[31merror: _x0073_k-abcdefghijklmnopqrstuvwxyz012345_x001B_[0m_x000D__x000A_</S><S S="Error">_x4E2D__x6587__x000D__x000A_</S></Objs>'
++        const decoded = compressVisibleOutput(clixml)
++        expect(decoded.text).toBe("<high-entropy powershell-clixml>error: <REDACTED_API-KEY>\n中文</high-entropy>")
++        expect(decoded.stats).toMatchObject({ applied: true, highEntropyLines: 1, secretsRedacted: 1, originalBytes: Buffer.byteLength(clixml), compressedBytes: Buffer.byteLength(decoded.text) })
++        expect(decoded.stats.savedBytes).toBe(Buffer.byteLength(clixml) - Buffer.byteLength(decoded.text))
++        expect(decoded.stats.savingRatio).toBe(decoded.stats.savedBytes / Buffer.byteLength(clixml))
++        expect(compressVisibleOutput(clixml, { enabled: false })).toMatchObject({ text: clixml, stats: { applied: false, highEntropyLines: 0, secretsRedacted: 0 } })
++        expect(compressVisibleOutput(clixml, { minSavedBytes: 100000 }).text).toBe(clixml)
++        const clixmlRun = `<Objs><S S="Output">${"repeatable ordinary output_x000D__x000A_".repeat(20)}</S></Objs>`
++        const repeatedClixml = compressVisibleOutput(clixmlRun, { minSavingRatio: 0 })
++        expect(repeatedClixml.stats).toMatchObject({ applied: true, highEntropyLines: 1, repeatedLineGroups: 1 })
++        expect(repeatedClixml.text).toContain("high-entropy powershell-clixml")
+         const template = Array.from({ length: 20 }, (_, i) => `12:00:${String(i).padStart(2, "0")} worker completed a substantial ordinary task`).join("\n")
+         expect(compressVisibleOutput(template).stats.templateGroups).toBe(1)
+         expect(compressVisibleOutput(template, { templateNormalizationLevel: "off" }).stats.templateGroups).toBe(0)
+@@ -947,7 +960,7 @@
+         }), LayerNode.compile(AppProcess.node))
+         // 正文恰好占满字节预算，中间错误会被最终状态与恢复标记挤出 head/tail。
+         reset()
+-        const rows = Array.from({ length: 600 }, (_, i) => `${i}: ${i === 300 ? "error: UNIQUE-MIDDLE-FAILURE" : "ordinary output"}`.padEnd(84, ".") + "\n").join("")
++        const rows = Array.from({ length: Math.floor(ToolOutputStore.MAX_BYTES / 85) }, (_, i) => `${i}: ${i === Math.floor(ToolOutputStore.MAX_BYTES / 170) ? "error: UNIQUE-MIDDLE-FAILURE" : "ordinary output"}`.padEnd(84, ".") + "\n").join("")
+         const exact = rows + "z".repeat(ToolOutputStore.MAX_BYTES - Buffer.byteLength(rows))
+         result = { ...result, exitCode: 1, output: Buffer.from(exact) }
+         const clock = yield* Clock.Clock

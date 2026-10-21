@@ -1,7 +1,7 @@
 diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
 --- a/packages/opencode/src/cli/cmd/tui.ts
 +++ b/packages/opencode/src/cli/cmd/tui.ts
-@@ -1,15 +1,13 @@
+@@ -1,15 +1,12 @@
  import { cmd } from "@/cli/cmd/cmd"
 -import { Rpc } from "@/util/rpc"
 -import { type rpc } from "../tui/worker"
@@ -18,9 +18,9 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 -import type { EventSource } from "@opencode-ai/tui/context/sdk"
  import { writeHeapSnapshot } from "v8"
- import { ServerAuth } from "@/server/auth"
+-import { ServerAuth } from "@/server/auth"
  import { validateSession } from "../tui/validate-session"
-@@ -19,43 +17,160 @@
+@@ -19,43 +16,173 @@
    const OPENCODE_WORKER_PATH: string
  }
  
@@ -42,12 +42,11 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -    })
 -  }
 -  return fn as typeof fetch
-+// 仅供测试使用——通过对象暴露 spawn，便于 spy 拦截同模块内调用
++// 唯一生产 spawn seam 同时用于注入测试；测试不能另跑一条模拟发现算法。
 +export const DaemonProcess = {
-+  spawn: (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, opts),
++  // Bun 支持 windowsHide；直接启动 worker，不经可见 pwsh 窗口或改变用户弹窗工具。
++  spawn: (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => Bun.spawn(cmd, { ...opts, windowsHide: true }),
  }
-+// 兼容导出：测试与调用均可使用 _spawn 别名
-+export const _spawn = (cmd: string[], opts: Parameters<typeof Bun.spawn>[1]) => DaemonProcess.spawn(cmd, opts)
  
 -function createEventSource(client: RpcClient): EventSource {
 -  return {
@@ -64,164 +63,177 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
    const dist = new URL("./cli/tui/worker.js", import.meta.url)
 -  if (await Filesystem.exists(fileURLToPath(dist))) return dist
 -  return new URL("../tui/worker.ts", import.meta.url)
-+  // _spawn 需要文件路径字符串而非 URL 对象，统一转换为路径
++  // 编译入口与源码入口共用 argv，文件 URL 必须在启动边界转换成原生路径。
 +  if (await Filesystem.exists(fileURLToPath(dist))) return fileURLToPath(dist)
 +  return fileURLToPath(new URL("../tui/worker.ts", import.meta.url))
  }
  
-+// 可注入依赖：单服务器发现/拉起主路径，测试直接注入 mock，生产使用默认实现
-+// 可注入依赖：测试替换 read/spawn/ping，生产使用 defaultDiscoverDeps
++// 依赖注入只替换外部 I/O，身份判断与失败清理仍执行下面的生产主路径。
 +export type DiscoverDaemonDeps = {
 +  read: typeof ServerLock.read
 +  alive: typeof ServerLock.alive
 +  ping: typeof ServerLock.ping
-+  clear: typeof ServerLock.clear
++  clear: typeof ServerLock.clearIfOwner
 +  acquire: typeof Flock.acquire
 +  spawn: typeof DaemonProcess.spawn
 +  sleep: (ms: number) => Promise<unknown>
 +  resolveDaemonFile: () => Promise<string>
++  identity: typeof ServerLock.identity
++  placement: (network?: ServerLock.ServerLock["network"]) => string | undefined
++  resolveNetwork: (args: Parameters<typeof resolveNetworkOptionsNoConfig>[0]) => Promise<ReturnType<typeof resolveNetworkOptionsNoConfig>>
 +  electionTimeoutMs: number
 +  electionStaleMs: number
 +  pollMs: number
 +  waitMs: number
 +}
 +
-+// 生产默认依赖：真实 ServerLock/Flock/Bun.sleep
++// 默认依赖不缓存发现结果；新的启动方必须重新核对磁盘 owner 与认证配置。
 +const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
 +  read: ServerLock.read,
 +  alive: ServerLock.alive,
 +  ping: ServerLock.ping,
-+  clear: ServerLock.clear,
++  clear: ServerLock.clearIfOwner,
 +  acquire: Flock.acquire,
 +  spawn: DaemonProcess.spawn,
 +  sleep: (ms) => Bun.sleep(ms),
 +  resolveDaemonFile: target,
-+  // 选举租约 30s：与 SMARK 原值一致（#49 再收紧）
++  identity: ServerLock.identity,
++  placement: ServerLock.placement,
++  // 全局 server 配置与 CLI 显式值按现有 network owner 合并，复用前即解析。
++  resolveNetwork: async (args) => {
++    const { AppRuntime } = await import("@/effect/app-runtime")
++    const { resolveNetworkOptions } = await import("@/cli/network")
++    return AppRuntime.runPromise(resolveNetworkOptions(args))
++  },
++  // 选举等待只限制 contender，不缩短成功持锁者启动健康服务的完整预算。
 +  electionTimeoutMs: 30_000,
-+  // 陈旧租约 10s（#49 再收紧到 5s）
++  // staleMs 交给已有 Flock heartbeat 维护，不能凭 HTTP 超时自行打破活租约。
 +  electionStaleMs: 10_000,
-+  // 轮询间隔 100ms（#49 再收紧到 200ms）
++  // 启动轮询等待 owner 写锁，不能把尚未发布端口的进程当作可复用服务。
 +  pollMs: 100,
 +  waitMs: 30_000,
 +})
 +
-+// 单服务器发现主路径：快速复用存活守护进程，或在选举锁下拉起新 daemon
-+// 单服务器发现主路径：健康锁复用或选举后 spawn，失败则 kill+抛错
 +export async function discoverOrSpawnDaemon(
 +  networkArgs: Parameters<typeof resolveNetworkOptionsNoConfig>[0],
 +  deps: DiscoverDaemonDeps = defaultDiscoverDeps(),
-+): Promise<{ url: string; electionLease?: Awaited<ReturnType<typeof Flock.acquire>>; fwdPid?: number }> {
-+  // 快速路径：锁存活且健康则无需竞选
-+  // 快速路径：锁存活且 ping 成功则跳过竞选
-+  
-+  const quickCheck = await deps.read()
-+  const quickAlive = quickCheck && deps.alive(quickCheck.pid) && (await deps.ping(quickCheck.port))
-+  let existingUrl: string | null = quickAlive ? `http://127.0.0.1:${quickCheck!.port}` : null
-+  let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
++): Promise<{ url: string; fwdPid?: number }> {
++  // 身份与网络请求先于快速路径解析，禁止复用另一数据库或忽略显式外部端口。
++  const identity = deps.identity()
++  const network = await deps.resolveNetwork(networkArgs)
++  const external = ["--port", "--hostname", "--mdns", "--mdns-domain", "--cors"].some(hasArg) ||
++    network.mdns || network.port !== 0 || network.hostname !== "127.0.0.1" || network.cors.length > 0
++  // 每次只选择一个主身份路径；显式外部请求独立放置，不探测失败后创建备用服务。
++  const lockPath = deps.placement(external ? network : undefined)
++  async function reuse(lock: ServerLock.ServerLock | undefined) {
++    if (!lock || !deps.alive(lock.pid)) return null
++    // 活进程身份不符或认证失败均保留原锁，不另建备用 daemon，也不杀其他进程。
++    const dbPath = path.normalize(lock.dbPath)
++    const expectedPath = path.normalize(identity.dbPath)
++    if ((process.platform === "win32" ? dbPath.toLowerCase() !== expectedPath.toLowerCase() : dbPath !== expectedPath) || lock.channel !== identity.channel)
++      throw new Error("Existing opencode daemon has a different database or channel; stop it explicitly before switching")
++    if (external && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
++      throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
++    if (!(await deps.ping(lock.port))) throw new Error("Existing opencode daemon health or authentication check failed")
++    // 探测期间锁可能换主；复读 token 后才允许把地址交给 TUI。
++    const current = await deps.read(lockPath)
++    if (current?.token !== lock.token || current.pid !== lock.pid) throw new Error("Opencode daemon ownership changed during discovery")
++    return external && lock.externalUrl ? lock.externalUrl : `http://127.0.0.1:${lock.port}`
++  }
++  // 快速检查与持锁复查都调用 reuse，身份、认证与 token 校验不分叉。
++  let existingUrl = await reuse(await deps.read(lockPath))
 +  let fwdPid: number | undefined
 +
-+  // 超时失败：杀死半拉起进程并向上抛错，禁止 catch-and-success
++  // URL 为空只能进入选举或失败出口，不能返回一个猜测的旧端口作为成功。
 +      
 +  if (!existingUrl) {
-+    // 选举锁：防止多 TUI 并发同时 spawn
-+    // 选举锁：防止多 TUI 并发同时拉起 daemon
-+    
-+    electionLease = await deps.acquire("opencode.server", {
++    // Flock key 与发现路径绑定，四个并发 TUI 对同一身份只能产生一个 winner。
++    // 租约由此作用域获取并 finally 释放，调用方不能传入已持有的 lease。
++    const electionLease = await deps.acquire(`opencode.server:${lockPath ?? "default"}`, {
 +      dir: path.join(Global.Path.state, "locks"),
 +      timeoutMs: deps.electionTimeoutMs,
 +      staleMs: deps.electionStaleMs,
 +    })
-+    const lock = await deps.read()
-+    existingUrl =
-+      lock && deps.alive(lock.pid) && (await deps.ping(lock.port)) ? `http://127.0.0.1:${lock.port}` : null
-+    // 持锁后仍不可用则清理陈旧锁，避免阻塞新 daemon
-+    if (!existingUrl && lock) await deps.clear()
++    try {
++      // acquire 等待期间其他 contender 可能已完成启动，持锁后重新读取 owner。
++      const lock = await deps.read(lockPath)
++      existingUrl = await reuse(lock)
++      // 仅清除已确认死亡的 owner；短暂不可达的存活服务不能被替换。
++      if (!existingUrl && lock) await deps.clear(lock.token, lockPath)
 +
-+    if (existingUrl) {
-+      await electionLease.release()
-+      electionLease = undefined
-+    } else {
-+      const network = resolveNetworkOptionsNoConfig(networkArgs)
-+      const external =
-+        hasArg("--port") ||
-+        hasArg("--hostname") ||
-+        hasArg("--mdns") ||
-+        network.mdns ||
-+        network.port !== 0 ||
-+        network.hostname !== "127.0.0.1"
-+      const daemonFile = await deps.resolveDaemonFile()
-+      const printLogs = process.argv.includes("--print-logs")
-+      const env = Object.fromEntries(
-+        Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-+      )
-+      // 以 worker 角色 spawn 守护进程，index 入口旁路 yargs
-+      const proc = deps.spawn([process.execPath, daemonFile], {
-+        env: {
-+          ...env,
-+          OPENCODE_PROCESS_ROLE: "worker",
-+          ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
-+          ...(external
-+            ? {
-+                OPENCODE_EXTERNAL_PORT: String(network.port),
-+                OPENCODE_EXTERNAL_HOSTNAME: network.hostname,
-+                OPENCODE_EXTERNAL_MDNS: network.mdns ? "1" : "",
-+              }
-+            : {}),
-+        },
-+        stdin: "ignore",
-+        stdout: printLogs ? "inherit" : "ignore",
-+        stderr: printLogs ? "inherit" : "ignore",
-+      })
-+      proc.unref()
-+      fwdPid = proc.pid
++      if (existingUrl) {
++        return { url: existingUrl }
++      } else {
++        const daemonFile = await deps.resolveDaemonFile()
++        const printLogs = process.argv.includes("--print-logs")
++        const env = Object.fromEntries(
++          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
++        )
++        // 编译二进制必须凭 worker 环境角色旁路 yargs，不能把模块路径当成用户 project。
++        const proc = deps.spawn([process.execPath, daemonFile], {
++          env: {
++            ...env,
++            OPENCODE_PROCESS_ROLE: "worker",
++            ...(lockPath ? { OPENCODE_LOCK_PATH: lockPath } : {}),
++            // 覆盖继承的外部监听变量，避免内部请求误启动旧的外部端口。
++            OPENCODE_EXTERNAL_NETWORK: external ? JSON.stringify(network) : "",
++            ...(printLogs ? { OPENCODE_PRINT_LOGS: "1" } : {}),
++          },
++          stdin: "ignore",
++          stdout: printLogs ? "inherit" : "ignore",
++          stderr: printLogs ? "inherit" : "ignore",
++        })
++        try {
++          // exited 的拒绝先安装 observer；read/unref 的同步异常仍由两层 finally 清理。
++          void proc.exited.catch(() => undefined)
++          proc.unref()
++          fwdPid = proc.pid
 +
-+      const deadline = Date.now() + deps.waitMs
-+      // 轮询锁文件直到 pid 匹配且健康检查通过
-+      while (Date.now() < deadline) {
-+        const daemonLock = await deps.read()
-+        if (daemonLock && daemonLock.pid === proc.pid && deps.alive(daemonLock.pid)) {
-+          if (external) {
-+            if (daemonLock.externalUrl) {
-+              existingUrl = daemonLock.externalUrl
-+              break
++          const deadline = Date.now() + deps.waitMs
++          // 端口即使被其他健康服务占用，也不能替代本次子进程 PID 的发现锁。
++          while (Date.now() < deadline) {
++            const daemonLock = await deps.read(lockPath)
++            if (daemonLock && daemonLock.pid === proc.pid && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
++              // 只交付本次子进程已发布且通过认证的锁，未知 owner 不进入本次清理范围。
++              existingUrl = await reuse(daemonLock)
++              if (existingUrl) break
 +            }
-+          } else if (await deps.ping(daemonLock.port)) {
-+            existingUrl = `http://127.0.0.1:${daemonLock.port}`
-+            break
++            await deps.sleep(deps.pollMs)
 +          }
++
++          if (!existingUrl) {
++            // deadline 只结束此次交付尝试，清理随后只作用于尚未交付的 proc handle。
++            UI.error("opencode daemon failed to start within 30 seconds")
++            throw new Error("opencode daemon failed to start within 30 seconds")
++          }
++        } finally {
++          // 只终止本次启动且尚未交付的子进程；read/sleep/ping 异常也会进入此处。
++          if (!existingUrl) proc.kill()
 +        }
-+        await deps.sleep(deps.pollMs)
 +      }
-+
++    } finally {
++      // acquire 的同一作用域释放租约，spawn 同步抛错也不依赖返回值交接。
 +      await electionLease.release()
-+      electionLease = undefined
-+
-+      if (!existingUrl) {
-+        // 超时失败：杀死半拉起的进程并向上抛错
-+        UI.error("opencode daemon failed to start within 30 seconds")
-+        proc.kill()
-+        throw new Error("opencode daemon failed to start within 30 seconds")
-+      }
 +    }
 +  }
 +
-+  return { url: existingUrl!, electionLease, fwdPid }
++  if (!existingUrl) throw new Error("Opencode daemon discovery produced no ready listener")
++  return { url: existingUrl, fwdPid }
 +}
 +
  async function input(value?: string) {
    const piped = process.stdin.isTTY ? undefined : await Bun.stdin.text()
    if (!value) return piped
-@@ -187,6 +302,9 @@
+@@ -187,6 +314,8 @@
      }
  
      const unguard = win32InstallCtrlCGuard()
-+    // 选举锁与 SIGUSR2 转发句柄在外层 finally 中清理，必须声明在 try 之外
-+    let electionLease: Awaited<ReturnType<typeof Flock.acquire>> | undefined
++    // 转发句柄属于 TUI，选举租约在 discoverOrSpawnDaemon 内部闭合。
 +    let fwdReload: (() => void) | undefined
      try {
        const { TuiConfig } = await import("@/config/tui")
        if (args.fork && !args.continue && !args.session) {
-@@ -198,7 +316,6 @@
+@@ -198,7 +327,6 @@
        // Resolve relative --project paths from PWD, then use the real cwd after
        // chdir so the thread and worker share the same directory key.
        const next = resolveThreadDirectory(args.project)
@@ -229,7 +241,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
        try {
          process.chdir(next)
        } catch {
-@@ -207,53 +324,38 @@
+@@ -207,53 +335,38 @@
        }
        const cwd = Filesystem.resolve(process.cwd())
  
@@ -267,13 +279,12 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -            fetch: undefined,
 -            events: undefined,
 -            headers,
-+      // ── 服务器发现主路径：快速复用或选举锁下拉起守护进程 ──────────────
++      // chdir 后再发现服务，保证会话 directory 与配置解析使用同一个实际 cwd。
 +      let existingUrl: string
 +      try {
 +        const discovered = await discoverOrSpawnDaemon(args)
 +        existingUrl = discovered.url
-+        electionLease = discovered.electionLease
-+        // Unix 下将 SIGUSR2（配置重载）转发给守护进程
++        // Windows 不注册不支持的 SIGUSR2；TUI 也不能因重载信号走共享服务的退出路径。
 +        if (discovered.fwdPid !== undefined && process.platform !== "win32") {
 +          const pid = discovered.fwdPid
 +          fwdReload = () => {
@@ -288,14 +299,15 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -          }
 +          process.on("SIGUSR2", fwdReload)
 +        }
-+      } catch {
++      } catch (error) {
++        UI.error(errorMessage(error))
 +        process.exitCode = 1
 +        return
 +      }
  
-+      // ── 公共路径：校验会话后启动 TUI ──────────────────────────────────
-+      // 守护进程以真实 HTTP URL 提供服务，统一携带 ServerAuth 头（无密码时为 undefined）
-+      const headers = ServerAuth.headers()
++      // validateSession 和 TUI 必须使用同一发现 URL，避免校验一个库却连接另一个服务。
++      // HTTP transport 不能沿用旧内部 RPC 的免认证假设，校验与事件流必须带同一 auth header。
++      const headers = ServerLock.headers()
        try {
          await validateSession({
 -          url: transport.url,
@@ -306,22 +318,17 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
            headers,
          })
        } catch (error) {
-@@ -262,9 +364,11 @@
+@@ -262,9 +375,6 @@
          return
        }
  
 -      setTimeout(() => {
 -        client.call("checkUpgrade", { directory: cwd }).catch(() => {})
 -      }, 1000).unref?.()
-+      // 释放可能仍持有的选举锁（从路径下命中时已释放，此处为防御性清理）
-+      if (electionLease) {
-+        await electionLease.release()
-+        electionLease = undefined
-+      }
  
        try {
          const { Effect } = await import("effect")
-@@ -272,18 +376,15 @@
+@@ -272,18 +382,15 @@
          const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
          await Effect.runPromise(
            run({
@@ -331,7 +338,7 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
 -              const tui = writeHeapSnapshot("tui.heapsnapshot")
 -              const server = await client.call("snapshot", undefined)
 -              return [tui, server]
-+              // 守护进程拥有 HTTP 服务器，堆快照仅包含 TUI 进程自身
++              // 不伪造已移除的 RPC snapshot 响应；本回调只返回实际生成的本进程快照。
 +              return [writeHeapSnapshot("tui.heapsnapshot")]
              },
              config,
@@ -344,20 +351,20 @@ diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cm
              args: {
                continue: args.continue,
                sessionID: args.session,
-@@ -296,9 +397,15 @@
+@@ -296,9 +403,15 @@
            }),
          )
        } finally {
 -        await stop()
-+        // 仅清理 SIGUSR2 转发句柄；守护进程由空闲超时自行退出
++        // 共享 daemon 可能仍服务其他窗口，TUI finally 只卸载自己的信号监听。
 +        if (fwdReload) {
 +          process.off("SIGUSR2", fwdReload)
 +          fwdReload = undefined
 +        }
        }
      } finally {
-+      // 防御性释放可能残留的选举锁（如 daemon 启动失败提前 return 的路径）
-+      await electionLease?.release().catch(() => undefined)
++      // 校验会话提前返回时仍卸载转发，避免 TUI 留下 daemon 信号监听。
++      if (fwdReload) process.off("SIGUSR2", fwdReload)
        try {
          unguard?.()
        } catch {}
@@ -365,13 +372,15 @@ diff --git a/packages/opencode/src/cli/tui/server-lock.ts b/packages/opencode/sr
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/cli/tui/server-lock.ts
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,140 @@
 +import path from "path"
 +import { rename, rm } from "fs/promises"
-+import { randomUUID } from "crypto"
++import { createHash, randomUUID } from "crypto"
 +import { Global } from "@opencode-ai/core/global"
 +import { InstallationChannel } from "@opencode-ai/core/installation/version"
 +import { Database } from "@opencode-ai/core/database/database"
++import { ServerAuth } from "@/server/auth"
++import { InstallationVersion } from "@opencode-ai/core/installation/version"
 +
 +export type ServerLock = {
 +  pid: number
@@ -381,83 +390,123 @@ new file mode 100644
 +  channel: string
 +  startedAt: string
 +  externalUrl?: string
++  network?: ReturnType<typeof resolveNetworkOptionsNoConfig>
++}
++import type { resolveNetworkOptionsNoConfig } from "@/cli/network"
++
++// 数据库路径不打开连接；路径统一后再比较身份。
++export function identity() {
++  const dbPath = path.normalize(Database.path())
++  return { dbPath: process.platform === "win32" ? dbPath.toLowerCase() : dbPath, channel: InstallationChannel }
 +}
 +
-+// 可覆盖以用于测试；undefined 表示使用默认路径
++// HTTP listener 读取当前 env；显式传入相同值，避免 Flag 缓存与实际认证配置分叉。
++export function headers(credentials: ServerAuth.Credentials = {
++  password: process.env.OPENCODE_SERVER_PASSWORD ?? "",
++  username: process.env.OPENCODE_SERVER_USERNAME ?? "opencode",
++}) {
++  return ServerAuth.headers(credentials)
++}
++
++// 测试覆盖只影响发现文件；不改写 Global 路径或打开临时数据库连接。
 +let _lockPath: string | undefined
 +export function _setLockPath(p: string | undefined) {
 +  _lockPath = p
 +}
 +
-+// 锁文件路径优先级：测试覆盖 > 环境变量 > 默认 XDG state 目录
++// 显式锁路径是部署隔离边界，不能在失败时擅自改用另一个 XDG 文件继续启动。
 +function getLockPath() {
 +  return _lockPath ?? process.env.OPENCODE_LOCK_PATH ?? path.join(Global.Path.state, "tui-server.json")
 +}
 +
-+// 原子写入锁文件（tmp → rename），返回新 token 供 clearIfOwner 安全删除
-+// 原子写锁：记录 pid/port/token，供 clearIfOwner 安全删除
-+export async function write(port: number, externalUrl?: string): Promise<string> {
++// DB/channel/显式网络决定主发现身份；同身份仍由一个 Flock 串行选举。
++export function placement(network?: ServerLock["network"]) {
++  if (_lockPath || process.env.OPENCODE_LOCK_PATH) return getLockPath()
++  const key = createHash("sha256").update(JSON.stringify([identity(), network])).digest("hex").slice(0, 24)
++  return path.join(Global.Path.state, `tui-server-${key}.json`)
++}
++
++export async function write(port: number, externalUrl?: string, network?: ServerLock["network"]): Promise<string> {
++  // token 区分同 PID 的历次启动，旧退出清理不能删除新启动发布的 owner。
 +  const token = randomUUID()
 +  const lock: ServerLock = {
 +    pid: process.pid,
 +    port,
 +    token,
-+    dbPath: Database.path(),
-+    channel: InstallationChannel,
++    ...identity(),
 +    startedAt: new Date().toISOString(),
 +    ...(externalUrl ? { externalUrl } : {}),
++    ...(network ? { network } : {}),
 +  }
 +  const tmp = getLockPath() + ".tmp"
 +  await Bun.write(tmp, JSON.stringify(lock, null, 2))
++  // 完整记录用 rename 一次发布，contender 不会读到只有 PID 的半份锁。
 +  await rename(tmp, getLockPath())
 +  return token
 +}
 +
-+// 读取锁文件；文件不存在或 JSON 损坏时返回 undefined
-+export async function read(): Promise<ServerLock | undefined> {
-+  const raw = await Bun.file(getLockPath()).text().catch(() => undefined)
++// 缺失或损坏记录不能提供可信 PID；权限错误另行抛出，不能伪装成不存在。
++export async function read(lockPath = getLockPath()): Promise<ServerLock | undefined> {
++  // 只有不存在才视为无 owner；权限或 I/O 故障必须向上失败，不能启动备用 daemon。
++  const raw = await Bun.file(lockPath).text().catch((error: unknown) => {
++    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined
++    throw error
++  })
 +  if (!raw) return
 +  try {
-+    return JSON.parse(raw) as ServerLock
++    const lock: unknown = JSON.parse(raw)
++    // 锁是外部输入，字段错误不能成为 process.kill(0) 或任意端口探测的依据。
++    if (!lock || typeof lock !== "object" || !("pid" in lock) || !("port" in lock) ||
++      typeof lock.pid !== "number" || !Number.isSafeInteger(lock.pid) || lock.pid <= 0 ||
++      typeof lock.port !== "number" || !Number.isInteger(lock.port) || lock.port < 1 || lock.port > 65535 ||
++      !("token" in lock) || typeof lock.token !== "string" || !lock.token ||
++      !("dbPath" in lock) || typeof lock.dbPath !== "string" || !lock.dbPath ||
++      !("channel" in lock) || typeof lock.channel !== "string" || !lock.channel ||
++      !("startedAt" in lock) || typeof lock.startedAt !== "string") return
++    return lock as ServerLock
 +  } catch {
 +    return undefined
 +  }
 +}
 +
-+// 无条件删除锁文件（文件不存在时不报错）
-+export async function clear() {
-+  await rm(getLockPath(), { force: true }).catch(() => undefined)
++// force 只容忍已不存在；权限/I/O 错误必须让选举失败，不能吞掉后继续覆盖 owner。
++export async function clear(lockPath = getLockPath()) {
++  await rm(lockPath, { force: true })
 +}
 +
-+// 仅在 token 匹配时删除锁——防止从 TUI 或重启的服务器误删不再属于自己的锁
-+// 仅 token 匹配时删锁，避免误清他人实例
-+export async function clearIfOwner(token: string) {
-+  const lock = await read()
++export async function clearIfOwner(token: string, lockPath = getLockPath()) {
++  const lock = await read(lockPath)
++  // 只删除调用方所见 token 的 owner；复读发现换主便放弃，旧进程存活也不授权清理新锁。
 +  if (lock?.token !== token) return
-+  await clear()
++  await clear(lockPath)
 +}
 +
-+// 跨平台进程存活检测：
-+// - ESRCH  → 进程不存在 → 已终止
-+// - EPERM  → 无权限发信号但进程存在（Windows）→ 存活
-+// - 无错误 → 进程存在 → 存活
 +export function alive(pid: number) {
++  // PID 0/负数具有进程组语义，在 OS 调用前拒绝无效 PID。
++  if (!Number.isSafeInteger(pid) || pid <= 0) return false
 +  try {
++    // signal 0 只检查进程存在性，健康与身份仍由发现链独立验证。
 +    process.kill(pid, 0)
 +    return true
-+  } catch (e: any) {
-+    return e?.code !== "ESRCH"
++  } catch (e) {
++    // 仅 EPERM 表示进程存在；其他异常返回不存活，存在性本身不授权删锁或终止进程。
++    return typeof e === "object" && e !== null && "code" in e && e.code === "EPERM"
 +  }
 +}
 +
-+// 通过 HTTP 健康检查探测守护进程是否真正可用（而非仅有锁文件）
-+// 健康探测：超时内无响应视为不健康
-+export async function ping(port: number) {
++export async function ping(port: number, credentials?: ServerAuth.Credentials) {
 +  try {
++    // 固定 loopback 地址，发现文件只提供端口，不提供任意主机访问授权。
 +    const resp = await fetch(`http://127.0.0.1:${port}/global/health`, {
++      // 保留受保护的健康路由，401 不能被当作陈旧 owner 并覆盖锁。
++      headers: headers(credentials),
++      // deadline 覆盖响应与 JSON body 读取，卡住的 body 不能永久占用选举租约。
 +      signal: AbortSignal.timeout(2000),
 +    })
-+    return resp.ok
++    // 健康 JSON 与当前版本均匹配才可复用，不能接受任意监听者的 200。
++    if (!resp.ok) return false
++    const body = await resp.json()
++    return body?.healthy === true && body.version === InstallationVersion
 +  } catch {
 +    return false
 +  }
@@ -467,12 +516,13 @@ new file mode 100644
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 --- a/packages/opencode/src/cli/tui/worker.ts
 +++ b/packages/opencode/src/cli/tui/worker.ts
-@@ -11,6 +11,8 @@
+@@ -10,7 +10,9 @@
+ import { AppRuntime } from "@/effect/app-runtime"
  import { Effect } from "effect"
  import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
  import { Database } from "@opencode-ai/core/database/database"
 +import { ServerLock } from "@/cli/tui/server-lock"
-+import { onSseClientCountChange } from "@/server/routes/instance/httpapi/handlers/global"
++import { EventClients } from "@opencode-ai/server/event-clients"
  
  Heap.start()
  
@@ -484,11 +534,11 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 -GlobalBus.on("event", (event) => {
 -  Rpc.emit("global.event", event)
 -})
-+// 守护进程模式：由 index.ts 旁路启动
-+// worker 角色：RPC 旁路或 daemon 生命周期二选一
++// 相同模块保留线程 RPC 与进程 daemon 两种入口，只按明确 worker 角色选择生命周期。
++// 主进程不能同时安装线程转发，否则 GlobalBus 会向没有 parentPort 的 transport 发事件。
 +const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
  
-+// Worker 线程模式：通过 RPC 转发事件
++// 旧线程仍使用 RPC fanout，daemon 的 HTTP 客户端不能改变该兼容入口的事件来源。
 +if (!isDaemon) {
 +  GlobalBus.on("event", (event) => {
 +    Rpc.emit("global.event", event)
@@ -499,59 +549,54 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
  let server: Awaited<ReturnType<typeof Server.listen>> | undefined
  
  export const rpc = {
-@@ -81,3 +90,94 @@
+@@ -86,3 +95,109 @@
  }
  
- Rpc.listen(rpc)
+-Rpc.listen(rpc)
++// RPC 属于线程模式；主进程 daemon 不安装线程的 message handler。
++if (!isDaemon) Rpc.listen(rpc)
 +
-+// ── 守护进程生命周期 ──────────────────────────────────────────────────────
-+// 仅在守护进程模式下运行：启动内部回环 HTTP 服务器、写入锁文件、注册信号
-+// 处理与空闲超时。Worker 线程模式跳过此块，仅使用 RPC 通信。
++// 线程入口不创建第二个 HTTP listener，也不安装 daemon 的 idle 退出回调。
 +if (isDaemon) {
-+  // 先启动内部回环 HTTP 服务器（端口 0 表示由系统分配随机可用端口）
-+  const internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1" })
++  // 资源先声明再启动，外部端口绑定或写锁失败也能清理已开的内部监听。
++  let internalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
 +
-+  // 当启动方 TUI 请求时，额外启动一个外部可访问的 HTTP 服务器
++  // 外部 listener 与内部 listener 使用同一服务树，不能另建应用 runtime 或另一份计数。
 +  let externalServer: Awaited<ReturnType<typeof Server.listen>> | undefined
 +  let externalUrl: string | undefined
 +
-+  const externalPort = process.env.OPENCODE_EXTERNAL_PORT
-+  if (externalPort !== undefined) {
-+    externalServer = await Server.listen({
-+      port: Number(externalPort),
-+      hostname: process.env.OPENCODE_EXTERNAL_HOSTNAME ?? "0.0.0.0",
-+      mdns: process.env.OPENCODE_EXTERNAL_MDNS === "1",
-+    })
-+    externalUrl = externalServer.url.toString()
-+  }
-+
-+  // 原子写入锁文件（内部端口 + 可选外部 URL），返回 token 供 clearIfOwner 安全删除
-+  // daemon 启动后写锁，token 用于优雅退出清锁
++  // 只有启动成功写锁后才拥有 token；绑定失败的清理不能删除磁盘上的其他 owner。
 +  
-+  const lockToken = await ServerLock.write(internalServer.port, externalUrl)
++  let lockToken: string | undefined
++  // idle/upgrade timer 先于首次 await 声明，启动期间致命退出也可安全取消它们。
++  let idleTimer: ReturnType<typeof setTimeout> | undefined
++  let upgradeTimer: ReturnType<typeof setTimeout> | undefined
 +
-+  // ── 优雅关闭 ───────────────────────────────────────────────────────────
++  // shutdown guard 覆盖 SIGTERM、idle 与 fatal 的并发触发，不能重复 dispose 同一 listener。
 +  let shutdownInProgress = false
 +
-+  // 优雅关闭：清锁、停 HTTP、关库，避免陈旧锁残留
++  // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
 +  
-+  async function gracefulShutdown() {
++  async function gracefulShutdown(exitCode = 0) {
 +    if (shutdownInProgress) return
 +    shutdownInProgress = true
-+    // 仅当 token 匹配时删除锁，防止误删不再属于自己的锁
-+    await ServerLock.clearIfOwner(lockToken)
-+    await InstanceRuntime.disposeAllInstances()
-+    if (externalServer) await externalServer.stop(true)
-+    await internalServer.stop(true)
-+    // 关闭数据库前执行 WAL TRUNCATE 检查点，确保数据落盘
-+    Database.close()
-+    process.exit(0)
++    if (idleTimer) clearTimeout(idleTimer)
++    if (upgradeTimer) clearTimeout(upgradeTimer)
++    // 每个资源独立清理；dispose 失败不能跳过停监听或关闭 runtime 的数据库 scope。
++    const disposed = await Promise.allSettled([InstanceRuntime.disposeAllInstances()])
++    // 监听资源归 daemon 所有，共享它的 TUI 退出只释放自己的连接。
++    const stopped = await Promise.allSettled([externalServer?.stop(true), internalServer?.stop(true)])
++    // 停止监听后才释放发现锁，避免另一个启动方在旧端口尚被占用时替换 owner。
++    const cleared = await Promise.allSettled([lockToken ? ServerLock.clearIfOwner(lockToken) : Promise.resolve()])
++    const runtime = await Promise.allSettled([AppRuntime.dispose()])
++    // Database Layer 的 finalizer 在 native close 前 checkpoint，监听 scope 与 runtime 均照常释放。
++    process.exit(exitCode || ([...disposed, ...stopped, ...cleared, ...runtime].some((item) => item.status === "rejected") ? 1 : 0))
 +  }
 +
-+  // SIGTERM 触发优雅关闭
++  // SIGTERM 也必须经过 token/scope 清理；正常信号退出码与 fatal 的非零退出码分开。
 +  process.on("SIGTERM", () => void gracefulShutdown())
 +
-+  // SIGUSR2 触发配置重载（仅 Unix；Windows 不支持此信号）
++  // reload 失效配置和实例而不是停止共享 HTTP listener，其他窗口的订阅必须保持。
 +  if (process.platform !== "win32") {
 +    process.on("SIGUSR2", () => {
 +      AppRuntime.runPromise(
@@ -564,48 +609,68 @@ diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli
 +    })
 +  }
 +
-+  // ── 空闲超时 ───────────────────────────────────────────────────────────
-+  // 最后一个 SSE 客户端断开 30 秒后退出。计时器仅在首次有客户端连接后启动，
-+  // 避免启动缓慢的 TUI 与守护进程退出产生竞态。
 +  const IDLE_TIMEOUT_MS = 30_000
 +
 +  let hadClient = false
-+  let idleTimer: ReturnType<typeof setTimeout> | undefined
 +
-+  onSseClientCountChange((count) => {
++  // 所有协议与 listener 共用客户端计数，native App 不被 global-event 专属计数误判为空闲。
++  const eventClients = EventClients.make((count) => {
++    if (shutdownInProgress) return
 +    if (count > 0) {
 +      hadClient = true
 +      if (idleTimer) {
++        // 任一 listener 重连便取消归零后的宽限 timer，继续保留共享 daemon。
 +        clearTimeout(idleTimer)
 +        idleTimer = undefined
 +      }
 +      return
 +    }
-+    // 从未有客户端连接过，不启动退出计时器
-+    if (!hadClient) return
++    // 首次订阅前不计 idle；重复零通知也不重设 timer 或延长宽限期。
++    if (!hadClient || idleTimer) return
++    // 最后一个订阅释放后留出重连宽限，持续空闲才关闭 daemon。
 +    idleTimer = setTimeout(() => void gracefulShutdown(), IDLE_TIMEOUT_MS)
 +    idleTimer.unref?.()
 +  })
 +
-+  // ── 启动任务 ───────────────────────────────────────────────────────────
-+  // 启动 1 秒后非阻塞地检查升级，unref 避免阻止进程退出
-+  setTimeout(async () => {
-+    await InstanceRuntime.load({ directory: process.cwd() })
-+    await upgrade().catch(() => {})
-+  }, 1_000).unref?.()
++  try {
++    // 监听与健康路由保留 ServerAuth，客户端计数由两个 listener 共用。
++    // 内部监听必须真正绑定 0，不能消费公开零端口偏好的 4096。
++    internalServer = await Server.listen({ port: 0, hostname: "127.0.0.1", ephemeral: true, eventClients })
++    const network = process.env.OPENCODE_EXTERNAL_NETWORK
++      ? JSON.parse(process.env.OPENCODE_EXTERNAL_NETWORK) as NonNullable<ServerLock.ServerLock["network"]>
++      : undefined
++    if (network) {
++      externalServer = await Server.listen({ ...network, eventClients })
++      externalUrl = externalServer.url.toString()
++    }
++    // 内部认证监听就绪后才发布发现锁，外部 URL 不代替内部健康通道。
++    lockToken = await ServerLock.write(internalServer.port, externalUrl, network)
++  } catch {
++    // 启动失败走相同资源清理，明确非零退出，不伪造成功锁。
++    await gracefulShutdown(1)
++  }
++
++  // 升级只是 advisory，不能阻塞健康锁发布或作为发现成功的另一个条件。
++  upgradeTimer = setTimeout(() => {
++    // shutdown 已开始时 callback 不再加载新实例。
++    if (shutdownInProgress) return
++    // 仅升级任务为 advisory；实例加载失败同样观测，不能变成致命拒绝。
++    void InstanceRuntime.load({ directory: process.cwd() }).then(() => upgrade()).catch(() => {})
++  }, 1_000)
++  // unref 避免 upgrade timer 独自续命。
++  upgradeTimer.unref?.()
 +}
 diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
 --- a/packages/opencode/src/index.ts
 +++ b/packages/opencode/src/index.ts
-@@ -30,6 +30,14 @@
+@@ -30,6 +30,13 @@
  import { PluginCommand } from "./cli/cmd/plug"
  import { Heap } from "./cli/heap"
  
-+// 守护进程旁路：当编译后的二进制以 OPENCODE_PROCESS_ROLE=worker 启动时，
-+// 跳过 yargs 直接运行 worker 模块；HTTP 服务器保持事件循环存活，
-+// 直到 gracefulShutdown() 调用 process.exit(0)。
++// 编译入口只凭明确的 worker 环境角色旁路 yargs，普通用户参数仍走原 CLI parser。
 +if (process.env.OPENCODE_PROCESS_ROLE === "worker") {
 +  await import("./cli/tui/worker")
++  // listener 拥有事件循环；悬置入口防止继续启动 TUI，退出仍由 worker 的资源清理决定。
 +  await new Promise<never>(() => {})
 +}
 +
@@ -615,45 +680,59 @@ diff --git a/packages/opencode/src/index.ts b/packages/opencode/src/index.ts
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/global.ts
-@@ -30,8 +30,19 @@
-   }
- }
+@@ -12,6 +12,7 @@
+ import * as Sse from "effect/unstable/encoding/Sse"
+ import { RootHttpApi } from "../api"
+ import { GlobalUpgradeInput } from "../groups/global"
++import { EventClients } from "@opencode-ai/server/event-clients"
  
-+// 跟踪活跃 SSE 客户端数量，供守护进程实现空闲超时退出
-+let sseClientCount = 0
-+let onSseCountChange: ((n: number) => void) | undefined
-+
-+export function onSseClientCountChange(cb: (n: number) => void) {
-+  onSseCountChange = cb
-+}
-+
- function eventResponse() {
+ function eventData(data: unknown): Sse.Event {
+   return {
+@@ -25,7 +26,7 @@
+-function eventResponse() {
++function eventResponse(clients: EventClients.Interface) {
    return Effect.gen(function* () {
-+    // SSE 客户端连接计数 +1，通知守护进程空闲计时器
-+    sseClientCount++
-+    onSseCountChange?.(sseClientCount)
      yield* Effect.logInfo("global event connected")
      const events = Stream.callback<GlobalBusEvent>((queue) => {
        const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
-@@ -52,6 +63,13 @@
+       return Effect.acquireRelease(
+         Effect.sync(() => GlobalBus.on("event", handler)),
+@@ -40,9 +41,10 @@
+     return HttpServerResponse.stream(
+-      Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
++      // 计数属于响应 body 的 scope；未消费响应不虚增，取消流自动释放。
++      Stream.unwrap(Effect.as(clients.acquire, Stream.make({ payload: { id: EventV2.ID.create(), type: "server.connected", properties: {} } }).pipe(
+         Stream.concat(events.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+         Stream.map(eventData),
          Stream.pipeThroughChannel(Sse.encode()),
          Stream.encodeText,
          Stream.ensuring(Effect.logInfo("global event disconnected")),
-+        // SSE 客户端断开时计数 -1，通知守护进程可能需要启动空闲计时器
-+        Stream.ensuring(
-+          Effect.sync(() => {
-+            sseClientCount--
-+            onSseCountChange?.(sseClientCount)
-+          }),
-+        ),
-       ),
+-      ),
++      ))),
        {
-         contentType: "text/event-stream",
+@@ -62,6 +64,8 @@
+     const config = yield* Config.Service
+     const installation = yield* Installation.Service
+     const bridge = yield* EffectBridge.make()
++    // Handler 只持有注入的共享服务，不另建 global-event 专属计数器。
++    const clients = yield* EventClients.Service
+ 
+     const health = Effect.fn("GlobalHttpApi.health")(function* () {
+       return { healthy: true as const, version: InstallationVersion }
+@@ -68,7 +72,7 @@
+     })
+ 
+     const event = Effect.fn("GlobalHttpApi.event")(function* () {
+-      return yield* eventResponse()
++      return yield* eventResponse(clients)
+     })
+ 
+     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
 diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/test/cli/tui/daemon.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,181 @@
 +/**
 + * Daemon lifecycle integration tests.
 + *
@@ -669,15 +748,16 @@ new file mode 100644
 +import path from "path"
 +import { fileURLToPath } from "url"
 +import { tmpdir } from "../../fixture/fixture"
-+import * as ServerLockModule from "../../../src/cli/tui/server-lock"
++import { ServerLock } from "../../../src/cli/tui/server-lock"
 +
 +const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
++const credentials = { username: "daemon-test", password: "daemon-test-password" }
 +
 +const DAEMON_START_TIMEOUT_MS = 15_000
 +const POLL_INTERVAL_MS = 100
 +
 +afterEach(() => {
-+  ServerLockModule._setLockPath(undefined)
++  ServerLock._setLockPath(undefined)
 +})
 +
 +/**
@@ -690,22 +770,23 @@ new file mode 100644
 +      ...process.env,
 +      OPENCODE_PROCESS_ROLE: "worker",
 +      OPENCODE_LOCK_PATH: lockPath,
++      // 真实生命周期 fixture 保持健康路由受保护，显式使用与客户端相同的认证。
++      OPENCODE_SERVER_USERNAME: credentials.username,
++      OPENCODE_SERVER_PASSWORD: credentials.password,
++      OPENCODE_EXTERNAL_NETWORK: "",
 +    },
 +    stdin: "ignore",
 +    stdout: "ignore",
 +    stderr: "ignore",
 +  })
 +
-+  // 轮询直到锁文件出现且 HTTP 服务器响应健康检查
++  // 锁文件存在不足以交付 fixture；真实子 PID 与受保护的 HTTP health 必须同时成立。
 +  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
 +  while (Date.now() < deadline) {
-+    const lock = await Bun.file(lockPath)
-+      .text()
-+      .then((t) => JSON.parse(t) as ServerLockModule.ServerLock)
-+      .catch(() => undefined)
++    const lock = await ServerLock.read(lockPath)
 +
-+    if (lock && lock.pid === proc.pid && ServerLockModule.alive(lock.pid)) {
-+      const ok = await ServerLockModule.ping(lock.port)
++    if (lock && lock.pid === proc.pid && ServerLock.alive(lock.pid)) {
++      const ok = await ServerLock.ping(lock.port, credentials)
 +      if (ok) return { proc, lock }
 +    }
 +    await Bun.sleep(POLL_INTERVAL_MS)
@@ -725,14 +806,14 @@ new file mode 100644
 +
 +      const { proc, lock } = await spawnDaemon(lockPath)
 +      try {
-+        // 通过 HTTP 请求验证守护进程已就绪并响应健康检查
-+        // 验证 /global/health 端点返回 healthy: true
-+        const res = await fetch(`http://127.0.0.1:${lock.port}/global/health`)
++        // 直接请求而非复用 poll 的布尔值，确保 fixture 没把锁文件存在误当服务就绪。
++        // 已知 credentials 同时供 worker 与请求端使用，401 必须暴露为断言失败而非开放 health。
++        const res = await fetch(`http://127.0.0.1:${lock.port}/global/health`, { headers: ServerLock.headers(credentials) })
 +        expect(res.ok).toBe(true)
-+        const body = (await res.json()) as { healthy: boolean }
-+        expect(body.healthy).toBe(true)
++        const body: unknown = await res.json()
++        expect(body).toMatchObject({ healthy: true })
 +
-+        // 锁文件中的 PID 必须与启动的进程 PID 一致
++        // 临时目录若残留旧锁，本断言拒绝把旧 daemon 的健康响应当作本次启动结果。
 +        expect(lock.pid).toBe(proc.pid)
 +      } finally {
 +        proc.kill()
@@ -748,21 +829,21 @@ new file mode 100644
 +      await using tmp = await tmpdir()
 +      const lockPath = path.join(tmp.path, "tui-server.json")
 +
++      // fixture 只持有本次启动的 proc handle，不能根据全局发现文件终止其他窗口的服务。
 +      const { proc } = await spawnDaemon(lockPath)
 +
-+      // 触发优雅关闭信号，验证守护进程正确清理资源
 +      // 发送 SIGTERM：Unix 下 gracefulShutdown() 捕获后退出码 0 并清除锁；
 +      // Windows 下 TerminateProcess() 绕过信号处理器，仅验证进程退出
 +      proc.kill("SIGTERM")
 +      const exitCode = await proc.exited
 +
 +      if (process.platform !== "win32") {
-+        // Unix：gracefulShutdown() 执行 → 干净退出 + 锁文件已清除
++        // Unix 信号进入资源闭包，必须同时断言正常退出和 owner 锁消失，不能只看进程结束。
 +        expect(exitCode).toBe(0)
 +        const lockAfter = await Bun.file(lockPath).text().catch(() => undefined)
 +        expect(lockAfter).toBeUndefined()
 +      } else {
-+        // Windows：TerminateProcess() 立即终止，仅验证退出码为数字
++        // Windows 不执行 Unix SIGTERM handler，不能把 OS 终止行为冒充已验证的 finally 清锁。
 +        expect(typeof exitCode).toBe("number")
 +      }
 +    },
@@ -777,9 +858,9 @@ new file mode 100644
 +
 +      const { proc, lock } = await spawnDaemon(lockPath)
 +      try {
-+        // 连续 ping 两次，排除单次偶然响应
-+        expect(await ServerLockModule.ping(lock.port)).toBe(true)
-+        expect(await ServerLockModule.ping(lock.port)).toBe(true)
++        // 第二次独立连接排除一次性响应后已经退出的 worker，同时覆盖 auth header 的重复构造。
++        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
++        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
 +      } finally {
 +        proc.kill()
 +        await proc.exited
@@ -813,16 +894,13 @@ new file mode 100644
 +        stderr: "ignore",
 +      })
 +
-+      // 如果 bug 存在，此处超时（yargs 运行 TUI，无锁文件）；
-+      // 如果已修复，守护进程启动并写入锁文件
++      // 锁轮询对编译入口也要求同一子 PID，不能因 cwd 中另一个 daemon 已启动而掩盖 yargs 错路。
++      // 进入错误的 TUI 分支不会发布 worker owner，deadline 必须使这种路径显式失败。
 +      const deadline = Date.now() + DAEMON_START_TIMEOUT_MS
-+      let lock: ServerLockModule.ServerLock | undefined
++      let lock: ServerLock.ServerLock | undefined
 +      while (Date.now() < deadline) {
-+        lock = await Bun.file(lockPath)
-+          .text()
-+          .then((t) => JSON.parse(t) as ServerLockModule.ServerLock)
-+          .catch(() => undefined)
-+        if (lock && lock.pid === proc.pid && (await ServerLockModule.ping(lock.port))) break
++        lock = await ServerLock.read(lockPath)
++        if (lock && lock.pid === proc.pid && (await ServerLock.ping(lock.port))) break
 +        lock = undefined
 +        await Bun.sleep(POLL_INTERVAL_MS)
 +      }
@@ -830,7 +908,7 @@ new file mode 100644
 +      proc.kill()
 +      await proc.exited
 +
-+      // 必须找到锁文件——守护进程通过 role 环境变量启动而非 yargs TUI
++      // 只有 role 旁路真正运行 worker 才会得到锁，源码文本含旁路条件本身不构成这个断言。
 +      expect(lock).toBeDefined()
 +    },
 +    DAEMON_START_TIMEOUT_MS + 5_000,
@@ -840,36 +918,37 @@ diff --git a/packages/opencode/test/cli/tui/server-lock.test.ts b/packages/openc
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/test/cli/tui/server-lock.test.ts
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,134 @@
 +import { afterEach, beforeEach, describe, expect, test } from "bun:test"
++import { InstallationVersion } from "@opencode-ai/core/installation/version"
 +import path from "path"
 +import { tmpdir } from "../../fixture/fixture"
-+import * as ServerLockModule from "../../../src/cli/tui/server-lock"
++import { ServerLock } from "../../../src/cli/tui/server-lock"
 +
-+// 每个测试套件将锁文件重定向到临时目录，避免污染真实的 XDG state 目录
++// 锁 fixture 必须隔离 XDG owner；测试 clear 的行为不能影响用户实际 daemon 的发现状态。
 +describe("ServerLock", () => {
 +  let cleanup: (() => Promise<void>) | undefined
 +
 +  beforeEach(async () => {
 +    const tmp = await tmpdir()
-+    ServerLockModule._setLockPath(path.join(tmp.path, "tui-server.json"))
-+    // 保存清理函数以在 afterEach 中释放临时目录
++    ServerLock._setLockPath(path.join(tmp.path, "tui-server.json"))
++    // fixture dispose 仍负责临时目录；覆盖锁路径不是另一个文件清理机制。
 +    cleanup = tmp[Symbol.asyncDispose]
 +  })
 +
 +  afterEach(async () => {
-+    // 重置锁路径覆盖，避免影响后续测试套件
-+    ServerLockModule._setLockPath(undefined)
++    // 路径覆盖是模块级测试 seam，必须先恢复默认，后续 suite 才不会读已删除的目录。
++    ServerLock._setLockPath(undefined)
 +    await cleanup?.()
 +    cleanup = undefined
 +  })
 +
 +  describe("write / read", () => {
 +    test("round-trips pid and port", async () => {
-+      // 写入端口号 54321 到锁文件，验证 write → read 往返一致性
-+      await ServerLockModule.write(54321)
-+      const lock = await ServerLockModule.read()
-+      // 锁文件必须包含当前进程 PID 和写入的端口
++      // 使用非默认端口防止 writer 硬编码 4096 的错误在往返测试中被默认值掩盖。
++      await ServerLock.write(54321)
++      const lock = await ServerLock.read()
++      // read 的字段校验会拒绝缺失 token/身份的记录，writer 和 validator 错配不能产生成功锁。
 +      expect(lock).toBeDefined()
 +      expect(lock!.pid).toBe(process.pid)
 +      expect(lock!.port).toBe(54321)
@@ -877,19 +956,19 @@ new file mode 100644
 +    })
 +
 +    test("read returns undefined when file is absent", async () => {
-+      const lock = await ServerLockModule.read()
-+      // 文件不存在时返回 undefined 而非抛错
++      const lock = await ServerLock.read()
++      // ENOENT 是首启的正常入口，与权限失败不同；不能让不存在的锁阻止第一次选举。
 +      expect(lock).toBeUndefined()
 +    })
 +
 +    test("read returns undefined for corrupt JSON", async () => {
-+      // 直接写入损坏的 JSON 内容模拟锁文件损坏场景
++      // 故意绕过 writer 的 atomic rename，验证外部损坏记录不能被转换为可信 PID。
 +      const tmp2 = await tmpdir()
 +      const p = path.join(tmp2.path, "bad.json")
 +      await Bun.write(p, "{ not valid json }")
-+      ServerLockModule._setLockPath(p)
-+      const lock = await ServerLockModule.read()
-+      // JSON 解析失败时返回 undefined，避免崩溃调用方
++      ServerLock._setLockPath(p)
++      const lock = await ServerLock.read()
++      // SyntaxError 不能冒泡为 TUI 崩溃，也不能保留上次成功解析的 owner 缓存。
 +      expect(lock).toBeUndefined()
 +      await tmp2[Symbol.asyncDispose]()
 +    })
@@ -897,64 +976,69 @@ new file mode 100644
 +
 +  describe("clear", () => {
 +    test("removes the lock file", async () => {
-+      // 先写入再清除，验证 clear 生效后 read 返回 undefined
-+      await ServerLockModule.write(1234)
-+      await ServerLockModule.clear()
-+      // 清除后读取应返回 undefined
-+      const lock = await ServerLockModule.read()
++      // 先建立有效锁再清除，排除只对本来就不存在的路径执行 force rm 的假阳性。
++      await ServerLock.write(1234)
++      await ServerLock.clear()
++      // 从磁盘重新读取而不是检查内存变量，确保 clear 真正撤销了发现记录。
++      const lock = await ServerLock.read()
 +      expect(lock).toBeUndefined()
 +    })
 +
 +    test("does not throw when file is already absent", async () => {
-+      // 文件不存在时 clear 不应抛错（使用 rm force 选项）
-+      await expect(ServerLockModule.clear()).resolves.toBeUndefined()
++      // 两个清理出口先后处理同一已删除文件应保持幂等，其他 I/O 异常仍由真实实现报告。
++      await expect(ServerLock.clear()).resolves.toBeUndefined()
 +    })
 +  })
 +
 +  describe("alive", () => {
 +    test("current process is alive", () => {
-+      // 当前进程必然存活
-+      expect(ServerLockModule.alive(process.pid)).toBe(true)
++      // 以当前 PID 验证 signal 0 的只读存在性路径，测试不发送实际终止信号。
++      expect(ServerLock.alive(process.pid)).toBe(true)
 +    })
 +
 +    test("very large PID is not alive", () => {
-+      // PID 受 OS 限制（通常 < 400 万），20 亿必然不存在
-+      expect(ServerLockModule.alive(2_000_000_000)).toBe(false)
++      // 超大正 PID 检验不存在/无效 OS 结果，不能把任何异常都解释成 EPERM 的存活语义。
++      expect(ServerLock.alive(2_000_000_000)).toBe(false)
 +    })
 +  })
 +
 +  describe("ping", () => {
 +    test("returns true for a running HTTP server that responds with 200", async () => {
-+      // 模拟守护进程的健康检查端点
++      // fixture 有真实 HTTP socket 与认证门，不能用对 fetch 的 mock 掩盖漏带 header 的错误。
++      const credentials = { username: "health-test", password: "protected" }
 +      const server = Bun.serve({
 +        port: 0,
 +        fetch(req) {
++          // 无认证或错误密码返回 401，验证客户端不能依靠开放 health 绕过安全边界。
++          if (req.headers.get("authorization") !== ServerLock.headers(credentials)?.Authorization)
++            return new Response("unauthorized", { status: 401 })
 +          if (new URL(req.url).pathname === "/global/health")
-+            return Response.json({ healthy: true, version: "test" })
++            return Response.json({ healthy: true, version: InstallationVersion })
 +          return new Response("not found", { status: 404 })
 +        },
 +      })
 +      try {
-+        // 健康端点返回 200，ping 应返回 true
-+        expect(await ServerLockModule.ping(server.port!)).toBe(true)
++        // 同一 listener 上正误 credentials 必须得到不同结果，防止 health 被偷偷改为公共路由。
++        expect(await ServerLock.ping(server.port!, credentials)).toBe(true)
++        expect(await ServerLock.ping(server.port!, { password: "wrong" })).toBe(false)
 +      } finally {
 +        server.stop(true)
 +      }
 +    })
 +
 +    test("returns false for a port with no listener", async () => {
-+      // 绑定端口后立即释放，模拟无监听者的端口
++      // 先持有后释放端口而非猜一个固定数字，避免误探测用户机器上其他正常服务。
 +      const server = Bun.serve({ port: 0, fetch: () => new Response("ok") })
 +      const port = server.port!
 +      server.stop(true)
 +      await Bun.sleep(50)
-+      const result = await ServerLockModule.ping(port)
-+      // 端口已释放，ping 应返回 false
++      const result = await ServerLock.ping(port)
++      // 网络拒绝必须成为 false，不能 catch 后返回一个伪健康成功供 discover 复用。
 +      expect(result).toBe(false)
 +    })
 +
 +    test("returns false for health endpoint returning non-200", async () => {
-+      // 健康检查返回 502 时视为不健康
++      // HTTP 可达但状态为 502 不能算就绪，检测 resp.ok 不能退化为 fetch 未抛错。
 +      const server = Bun.serve({
 +        port: 0,
 +        fetch() {
@@ -962,7 +1046,7 @@ new file mode 100644
 +        },
 +      })
 +      try {
-+        expect(await ServerLockModule.ping(server.port!)).toBe(false)
++        expect(await ServerLock.ping(server.port!)).toBe(false)
 +      } finally {
 +        server.stop(true)
 +      }
@@ -972,20 +1056,22 @@ new file mode 100644
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts
-@@ -4,9 +4,11 @@
+@@ -4,9 +4,13 @@
  import path from "path"
  import yargs from "yargs"
  import { tmpdir } from "../../fixture/fixture"
 -import { TuiThreadCommand, resolveThreadDirectory } from "../../../src/cli/cmd/tui"
 +import { TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
 +import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
++import { resolveNetworkOptionsNoConfig } from "../../../src/cli/network"
++import { EventClients } from "@opencode-ai/server/event-clients"
  import { cliIt } from "../../lib/cli-process"
  
-+// 注入 deps 验证单服务器复用与 spawn 主路径
++// 测试真实 discover 函数的决策，只替换 I/O，不能另写一套单服务器模拟器。
  describe("tui thread", () => {
    test("loads the TUI integration lazily", async () => {
      const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
-@@ -16,10 +18,13 @@
+@@ -16,10 +20,17 @@
      expect(source).not.toContain('import("./app")')
    })
  
@@ -994,14 +1080,18 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
      const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
  
 -    expect(source).toMatch(/new Worker\(file, \{\s*env: Object\.fromEntries\(\s*Object\.entries\(process\.env\)/)
-+    // 验证 daemon spawn 主路径：deps.spawn / DaemonProcess.spawn 环境含 OPENCODE_PROCESS_ROLE=worker
++    // 入口必须同时含 worker 角色和实际 spawn seam，只有注释提到 daemon 不能通过此约束。
 +    expect(source).toContain("OPENCODE_PROCESS_ROLE")
 +    expect(source).toContain('"worker"')
 +    expect(source).toMatch(/deps\.spawn\(|DaemonProcess\.spawn\(/)
++    // 静态锁定内部 listener 的 exact-zero 入口，fixture 不能为此启动另一个 CLI 进程。
++    const worker = await Bun.file(new URL("../../../src/cli/tui/worker.ts", import.meta.url)).text()
++    expect(worker).toContain("ephemeral: true, eventClients")
++    expect(worker).toContain("Server.listen({ ...network, eventClients })")
    })
  
    async function check(project?: string) {
-@@ -90,6 +95,149 @@
+@@ -90,6 +101,195 @@
      }),
    )
  
@@ -1018,7 +1108,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +      externalUrl: undefined as string | undefined,
 +    }
 +
-+    // 注入依赖直接测 discoverOrSpawnDaemon 主路径（与 handler 同一实现）
++    // 所有场景共用 production deps 形状，新增身份字段不能只在某个测试的独立 mock 中补齐。
 +    function baseDeps(overrides: Partial<DiscoverDaemonDeps> & Pick<DiscoverDaemonDeps, "read" | "spawn">): DiscoverDaemonDeps {
 +      return {
 +        alive: () => true,
@@ -1027,6 +1117,9 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        acquire: async () => ({ release: async () => {} }) as never,
 +        sleep: async () => {},
 +        resolveDaemonFile: async () => "/tmp/daemon.ts",
++        identity: () => ({ dbPath: "/tmp/test.db", channel: "local" }),
++        placement: () => undefined,
++        resolveNetwork: async (args) => resolveNetworkOptionsNoConfig(args),
 +        electionTimeoutMs: 10_000,
 +        electionStaleMs: 5_000,
 +        pollMs: 0,
@@ -1035,7 +1128,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +      }
 +    }
 +
-+    // 默认本地网络：避免 hostname/port 未定义被当成 external 模式
++    // 显式给出本地默认值，保证用例只测试 owner 状态，不误进入 external listener 分支。
 +    const localNet = { port: 0, hostname: "127.0.0.1", mdns: false, cors: [] as string[] }
 +
 +    test("reuses existing server: returns HTTP URL, no daemon spawned", async () => {
@@ -1051,7 +1144,7 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        }),
 +        spawn: ((_cmd, _opts) => {
 +          daemonSpawnCount++
-+          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
 +        }) as DiscoverDaemonDeps["spawn"],
 +      }))
 +      expect(daemonSpawnCount).toBe(0)
@@ -1069,36 +1162,22 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        },
 +        spawn: ((_cmd, _opts) => {
 +          daemonSpawnCount++
-+          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
 +        }) as DiscoverDaemonDeps["spawn"],
 +      }))
 +      expect(daemonSpawnCount).toBe(1)
 +      expect(result.url).toBe("http://127.0.0.1:9999")
 +    })
 +
-+    test("lock exists + pid alive but HTTP ping fails: clears stale lock and spawns", async () => {
++    test("lock exists + pid alive but HTTP ping fails: preserves owner and rejects", async () => {
 +      let daemonSpawnCount = 0
 +      let clearCalled = false
-+      let readCount = 0
 +      let pingCount = 0
-+      const result = await discoverOrSpawnDaemon(localNet as never, baseDeps({
-+        read: async () => {
-+          readCount++
-+          if (readCount <= 2) {
-+            return {
-+              pid: process.pid,
-+              port: 9999,
-+              token: "stale",
-+              dbPath: "/tmp/test.db",
-+              channel: "local",
-+              startedAt: new Date().toISOString(),
-+            }
-+          }
-+          return fakeLock
-+        },
++      await expect(discoverOrSpawnDaemon(localNet as never, baseDeps({
++        read: async () => fakeLock,
 +        ping: async () => {
 +          pingCount++
-+          // 前两次（quick+under-lock）失败，spawn 后成功
++          // 认证失败与短暂不可达均不能创建同身份的第二个服务。
 +          return pingCount > 2
 +        },
 +        clear: async () => {
@@ -1108,10 +1187,9 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +          daemonSpawnCount++
 +          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
 +        }) as DiscoverDaemonDeps["spawn"],
-+      }))
-+      expect(daemonSpawnCount).toBe(1)
-+      expect(clearCalled).toBe(true)
-+      expect(result.url).toBe("http://127.0.0.1:9999")
++      }))).rejects.toThrow("health or authentication")
++      expect(daemonSpawnCount).toBe(0)
++      expect(clearCalled).toBe(false)
 +    })
 +
 +    test("lock exists but pid dead (orphan): clears and spawns new daemon", async () => {
@@ -1139,15 +1217,341 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +        },
 +        spawn: ((_cmd, _opts) => {
 +          daemonSpawnCount++
-+          return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
++          return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0), unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
 +        }) as DiscoverDaemonDeps["spawn"],
 +      }))
 +      expect(daemonSpawnCount).toBe(1)
 +      expect(clearCalled).toBe(true)
 +      expect(result.url).toBe("http://127.0.0.1:9999")
 +    })
++
++    test("releases owned leases on exceptions and rejects incompatible live identities", async () => {
++      // 一个参数化用例覆盖 handoff 前失败点，避免依赖 CLI/spawn fixture。
++      for (const stage of ["target", "spawn", "unref", "read", "sleep"]) {
++        let reads = 0
++        let releases = 0
++        let kills = 0
++        const fail = () => { throw new Error(stage) }
++        await expect(discoverOrSpawnDaemon(localNet as never, baseDeps({
++          acquire: async () => ({ release: async () => { releases++ } }) as never,
++          read: async () => { if (++reads > 2 && stage === "read") fail(); return undefined },
++          resolveDaemonFile: async () => stage === "target" ? fail() : "/tmp/daemon.ts",
++          sleep: async () => { if (stage === "sleep") fail() },
++          spawn: (() => {
++            if (stage === "spawn") fail()
++            return { pid: FAKE_DAEMON_PID, exited: Promise.resolve(0),
++              unref() { if (stage === "unref") fail() }, kill() { kills++ } } as ReturnType<typeof Bun.spawn>
++          }) as DiscoverDaemonDeps["spawn"],
++        }))).rejects.toThrow(stage)
++        expect(releases).toBe(1)
++        expect(kills).toBe(["target", "spawn"].includes(stage) ? 0 : 1)
++      }
++      // 活的跨 DB/channel/外部监听请求明确拒绝，不能清理全局 owner。
++      for (const mismatch of ["database", "channel", "network"]) {
++        let spawns = 0
++        let clears = 0
++        await expect(discoverOrSpawnDaemon(
++          (mismatch === "network" ? { ...localNet, port: 4321 } : localNet) as never,
++          baseDeps({
++            identity: () => ({ dbPath: mismatch === "database" ? "/tmp/other.db" : fakeLock.dbPath,
++              channel: mismatch === "channel" ? "beta" : fakeLock.channel }),
++            read: async () => fakeLock,
++            clear: async () => { clears++ },
++            spawn: (() => { spawns++; throw new Error("unexpected spawn") }) as DiscoverDaemonDeps["spawn"],
++          }),
++        )).rejects.toThrow(mismatch === "network" ? "incompatible network" : "different database or channel")
++        expect(spawns).toBe(0)
++        expect(clears).toBe(0)
++      }
++      // 同一服务跨两个订阅 scope 计数；其中一个失败不能让另一个活跃客户端变成 idle。
++      const counts: number[] = []
++      const clients = EventClients.make((count) => counts.push(count))
++      await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
++        yield* clients.acquire
++        yield* Effect.exit(Effect.scoped(Effect.gen(function* () {
++          yield* clients.acquire
++          return yield* Effect.fail("event stream disconnected")
++        })))
++        expect(counts).toEqual([1, 2, 1])
++      })))
++      // 外层最后释放才归零，证明 exceptional stream cleanup 与 daemon callback 使用同一 owner。
++      expect(counts).toEqual([1, 2, 1, 0])
++      // callback 不是 Scope owner；通知失败后仍必须发出归零清理，不能遗留假活跃客户端。
++      const failedCounts: number[] = []
++      const failedClients = EventClients.make((count) => { failedCounts.push(count); if (count > 0) throw new Error("callback failed") })
++      await Effect.runPromise(Effect.exit(Effect.scoped(failedClients.acquire)))
++      expect(failedCounts).toEqual([1, 0])
++    })
 +  })
 +
    cliIt.live("rejects network options in mini mode", ({ opencode }) =>
      Effect.gen(function* () {
        const result = yield* opencode.spawn(["--mini", "--port", "4096"])
+diff --git a/packages/server/src/event-clients.ts b/packages/server/src/event-clients.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/server/src/event-clients.ts
+@@ -0,0 +1,31 @@
++import { Context, Effect, Layer, Scope } from "effect"
++
++export interface Interface {
++  readonly acquire: Effect.Effect<void, never, Scope.Scope>
++}
++export class Service extends Context.Service<Service, Interface>()("@opencode/ServerEventClients") {}
++
++// 一个 daemon 创建一次，再注入内部/外部 listener；计数不是模块全局状态。
++export function make(onChange?: (count: number) => void): Interface {
++  let count = 0
++  return Service.of({
++    // acquisition 延迟到流的 scope，构造 Response 本身不能被视为客户端连接。
++    // 先登记 release 再通知 callback；通知抛错也不能泄漏刚计入的订阅。
++    acquire: Effect.acquireRelease(
++      Effect.sync(() => {
++        count++
++      }),
++      () => Effect.sync(() => {
++        // 正常结束、编码失败与取消共用 finalizer，每次 acquisition 只减一次。
++        count--
++        onChange?.(count)
++      }),
++    ).pipe(Effect.tap(() => Effect.sync(() => onChange?.(count)))),
++  })
++}
++
++// 普通 standalone server 也提供相同服务；无 daemon callback 时不改变退出策略。
++export const layer = Layer.sync(Service, () => make())
++
++// 服务由路由 Layer 提供，handler 不从 process 属性或隐式全局 registry 读取状态。
++export * as EventClients from "./event-clients"
+diff --git a/packages/opencode/src/server/server.ts b/packages/opencode/src/server/server.ts
+--- a/packages/opencode/src/server/server.ts
++++ b/packages/opencode/src/server/server.ts
+@@ -13,6 +13,7 @@
+ import { PublicApi } from "./routes/instance/httpapi/public"
+ import type { CorsOptions } from "@opencode-ai/server/cors"
+ import { lazy } from "@/util/lazy"
++import { EventClients } from "@opencode-ai/server/event-clients"
+ 
+ // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
+ globalThis.AI_SDK_LOG_WARNINGS = false
+@@ -33,6 +34,10 @@
+   port: number
+   hostname: string
+   mdns?: boolean
+   mdnsDomain?: string
++  // 内部发现监听才设置此项；公开 port=0 仍保留优先 4096 的既有行为。
++  ephemeral?: boolean
++  // 两个 listener 共享调用方创建的服务，不依赖各自的 MemoMap 恰好相同。
++  eventClients?: EventClients.Interface
+ }
+ type ListenerState = {
+@@ -100,6 +105,6 @@
+ function listenerLayer(opts: ListenOptions, port: number) {
+-  return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
++  return HttpRouter.serve(HttpApiApp.createRoutes(opts, opts.eventClients), {
+     middleware: disposeMiddleware,
+     disableLogger: true,
+     disableListenLog: true,
+   }).pipe(
+@@ -117,6 +122,7 @@
+ function startWithPortFallback(opts: ListenOptions) {
+-  if (opts.port !== 0) return startListener(opts, opts.port)
++  // ephemeral 直接 exact-bind 到 0；失败仍失败，不先占用公开端口再回退。
++  if (opts.ephemeral || opts.port !== 0) return startListener(opts, opts.port)
+   // Match the legacy listener port-resolution behavior: explicit `0` prefers
+   // 4096 first, then any free port.
+   return startListener(opts, 4096).pipe(Effect.catch(() => startListener(opts, 0)))
+ }
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/server.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+@@ -115,6 +115,7 @@
+ import { corsVaryFix } from "./middleware/cors-vary"
+ import { errorLayer } from "./middleware/error"
+ import { fenceLayer } from "./middleware/fence"
++import { EventClients } from "@opencode-ai/server/event-clients"
+ import { schemaErrorLayer } from "./middleware/schema-error"
+ 
+ export const context = Context.makeUnsafe<unknown>(new Map())
+@@ -275,6 +276,7 @@
+ export function createRoutes(
+   corsOptions?: CorsOptions,
++  eventClients?: EventClients.Interface,
+ ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
+   const locationServiceMapV2 = buildLocationServiceMap()
+ 
+   return Layer.mergeAll(
+@@ -287,6 +289,8 @@
+     uiRoute,
+   ).pipe(
++    // 在整个 legacy/native 合并树的装配边界提供同一服务，不在每个请求重建 Layer。
++    Layer.provide(eventClients ? Layer.succeed(EventClients.Service)(eventClients) : EventClients.layer),
+     Layer.provide([
+       errorLayer,
+       compressionLayer,
+       corsVaryFix,
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/event.ts
+@@ -8,6 +8,7 @@
+ import { HttpApiBuilder } from "effect/unstable/httpapi"
+ import * as Sse from "effect/unstable/encoding/Sse"
+ import { EventApi } from "../groups/event"
++import { EventClients } from "@opencode-ai/server/event-clients"
+ 
+ function eventData(data: unknown): Sse.Event {
+   return {
+@@ -25,7 +26,7 @@
+-function eventResponse(events: EventV2.Interface) {
++function eventResponse(events: EventV2.Interface, clients: EventClients.Interface) {
+   return Effect.gen(function* () {
+     const instance = yield* InstanceState.context
+     const workspaceID = yield* InstanceState.workspaceID
+     // Listener registration is eager, so events published after this point cannot
+     // be lost while the HTTP body fiber is starting or emitting server.connected.
+     const queue = yield* Queue.unbounded<EventV2.Payload>()
+@@ -70,9 +71,10 @@
+     return HttpServerResponse.stream(
+-      Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
++      // /event 使用相同 body-scope 租约，不能因为未订阅 /global/event 被误判为空闲。
++      Stream.unwrap(Effect.as(clients.acquire, Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
+         Stream.concat(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
+         Stream.map(eventData),
+         Stream.pipeThroughChannel(Sse.encode()),
+         Stream.encodeText,
+         Stream.ensuring(Effect.logInfo("event disconnected")),
+-      ),
++      ))),
+       {
+@@ -90,8 +92,10 @@
+ export const eventHandlers = HttpApiBuilder.group(EventApi, "event", (handlers) =>
+   Effect.gen(function* () {
+     const events = yield* EventV2Bridge.Service
++    // 只跨闭包传递稳定服务；原有 eager EventV2 listener 的无丢事件顺序不变。
++    const clients = yield* EventClients.Service
+     return handlers.handleRaw(
+       "subscribe",
+       Effect.fn("EventHttpApi.subscribe")(function* () {
+-        return yield* eventResponse(events)
++        return yield* eventResponse(events, clients)
+       }),
+diff --git a/packages/server/src/handlers/event.ts b/packages/server/src/handlers/event.ts
+--- a/packages/server/src/handlers/event.ts
++++ b/packages/server/src/handlers/event.ts
+@@ -5,6 +5,7 @@
+ import { HttpApiBuilder } from "effect/unstable/httpapi"
+ import * as Sse from "effect/unstable/encoding/Sse"
+ import { Api } from "../api"
++import { EventClients } from "../event-clients"
+ 
+ const subscriberCapacity = 256
+ 
+@@ -20,7 +21,9 @@
+ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers) =>
+   Effect.gen(function* () {
+     const events = yield* EventV2.Service
++    // native handler 与 legacy handler 使用装配时注入的同一个 daemon 服务。
++    const clients = yield* EventClients.Service
+     return handlers.handleRaw("event.subscribe", () =>
+       Effect.gen(function* () {
+         const connected = {
+           id: EventV2.ID.create(),
+@@ -30,7 +33,9 @@
+         const output = Stream.unwrap(
+           Effect.gen(function* () {
++            // 租约和 allBounded listener 同属此 scope，取消/失败不会留下客户端计数。
++            yield* clients.acquire
+             // Acquiring the bounded stream installs its listener before readiness is observable.
+             const live = yield* EventV2.allBounded(events, subscriberCapacity)
+             return Stream.make(connected).pipe(Stream.concat(live))
+           }),
+         ).pipe(Stream.map(eventData), Stream.pipeThroughChannel(Sse.encode()))
+diff --git a/packages/server/src/routes.ts b/packages/server/src/routes.ts
+--- a/packages/server/src/routes.ts
++++ b/packages/server/src/routes.ts
+@@ -22,6 +22,7 @@
+ import { PtyEnvironment } from "./pty-environment"
+ import { layer as locationLayer } from "./location"
+ import { sessionLocationLayer } from "./middleware/session-location"
++import { EventClients } from "./event-clients"
+ 
+ const applicationServices = LayerNode.group([
+   Database.node,
+@@ -58,6 +59,8 @@
+     Layer.provide(authorizationLayer),
+     Layer.provide(schemaErrorLayer),
+     Layer.provide(auth),
++    // standalone server 无 daemon callback，但仍满足原生 handler 的同一服务契约。
++    Layer.provide(EventClients.layer),
+     Layer.provide(serviceLayer),
+   )
+ }
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -13,6 +13,7 @@
+ } from "@opencode-ai/protocol/errors"
+ import { AbsolutePath } from "@opencode-ai/core/schema"
++import { EventClients } from "../event-clients"
+ 
+ const DefaultSessionsLimit = 50
+ const DefaultSessionHistoryLimit = 50
+ 
+@@ -19,6 +20,7 @@
+ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handlers) =>
+   Effect.gen(function* () {
+     const session = yield* SessionV2.Service
++    const clients = yield* EventClients.Service
+ 
+     return handlers
+       .handle(
+@@ -358,7 +360,8 @@
+         "session.events",
+         Effect.fn((ctx) =>
+           Effect.succeed(
+-            session.events({ sessionID: ctx.params.sessionID, after: ctx.query.after }).pipe(Stream.orDie),
++            // 按会话订阅 durable events 的客户端也持有租约，历史页终止时正常释放。
++            Stream.unwrap(Effect.as(clients.acquire, session.events({ sessionID: ctx.params.sessionID, after: ctx.query.after }).pipe(Stream.orDie))),
+           ),
+         ),
+       )
+diff --git a/packages/opencode/test/server/httpapi-control-plane.test.ts b/packages/opencode/test/server/httpapi-control-plane.test.ts
+--- a/packages/opencode/test/server/httpapi-control-plane.test.ts
++++ b/packages/opencode/test/server/httpapi-control-plane.test.ts
+@@ -6,6 +6,7 @@
+ import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
+ import { AbsolutePath } from "@opencode-ai/core/schema"
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { EventClients } from "@opencode-ai/server/event-clients"
+ import { Auth } from "../../src/auth"
+ import { Config } from "../../src/config/config"
+ import { Installation } from "../../src/installation"
+@@ -28,6 +29,8 @@
+ const apiLayer = HttpRouter.serve(
+   HttpApiBuilder.layer(RootHttpApi).pipe(
+     Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
++    // 此测试绕过 createRoutes，显式提供生产计数服务；无 idle callback，不改变测试服务器退出策略。
++    Layer.provide(EventClients.layer),
+     Layer.provide([authorizationLayer, schemaErrorLayer]),
+     // Raw HttpApi routes expose an opaque handler context at the request boundary.
+     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+diff --git a/packages/opencode/test/server/httpapi-global.test.ts b/packages/opencode/test/server/httpapi-global.test.ts
+--- a/packages/opencode/test/server/httpapi-global.test.ts
++++ b/packages/opencode/test/server/httpapi-global.test.ts
+@@ -7,6 +7,7 @@
+ import { Config } from "../../src/config/config"
+ import { Installation } from "../../src/installation"
+ import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
++import { EventClients } from "@opencode-ai/server/event-clients"
+ import { ServerAuth } from "../../src/server/auth"
+ import { RootHttpApi } from "../../src/server/routes/instance/httpapi/api"
+ import { GlobalPaths } from "../../src/server/routes/instance/httpapi/groups/global"
+@@ -20,6 +21,8 @@
+ const apiLayer = HttpRouter.serve(
+   HttpApiBuilder.layer(RootHttpApi).pipe(
+     Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
++    // 部分 RootHttpApi Layer 仍需满足 global event 的稳定服务依赖，不能在 handler 中隐式补服务。
++    Layer.provide(EventClients.layer),
+     Layer.provide([authorizationLayer, schemaErrorLayer]),
+     // Raw HttpApi routes expose an opaque handler context at the request boundary.
+     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion

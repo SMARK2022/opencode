@@ -1,13 +1,12 @@
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
-@@ -126,7 +126,8 @@
+@@ -141,7 +141,8 @@
      return Service.of({
        environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
          const ctx = yield* InstanceState.context
--        const gitContext = yield* getGitContext
-+        // getGitContext 是 Effect.fn，返回的是函数而非 Effect，必须调用以获取 Effect
-+        const gitContext = yield* getGitContext()
++        // Effect.fn 返回函数，必须调用后再 yield*，不能直接执行函数值。
+         const gitContext = yield* getGitContext()
          const references = yield* Effect.gen(function* () {
            return (yield* (yield* Reference.Service).list()).filter((reference) => reference.description !== undefined)
          }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))

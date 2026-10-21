@@ -2,16 +2,16 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
 @@ -11,7 +11,8 @@
- import { isPdfAttachment, sniffAttachmentMime, processImageWithTokenBudget, formatSize } from "@/util/media"
- import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
  
 -const DEFAULT_READ_LIMIT = 2000
-+// 默认 read 行数 1000：与截断行上限同步，减小单次工具输出
++// 只降低缺省页大小，显式 limit 与既有安全、附件分支不随默认值收紧。
 +const DEFAULT_READ_LIMIT = 1000
  const MAX_LINE_LENGTH = 2000
  const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
- // 默认最大读取字节 24KB：压低单次工具输出内存与上下文占用
-@@ -149,7 +150,7 @@
+ // 文本页预算独立于图片/PDF 的读取与附件契约，不能把媒体按正文上限裁掉。
+ const MAX_BYTES = 24 * 1024
+@@ -133,7 +134,7 @@
      description: "The line number to start reading from (1-indexed)",
    }),
    limit: Schema.optional(NonNegativeInt).annotate({
@@ -28,9 +28,9 @@ diff --git a/packages/opencode/src/tool/truncate.ts b/packages/opencode/src/tool
  const RETENTION = Duration.days(7)
  
 -export const MAX_LINES = 2000
-+// 工具输出默认最大行数 1000，与 DEFAULT_READ_LIMIT 锁步
++// 模型预览的默认行数不限制用户 override，完整原文仍沿既有恢复路径保存。
 +export const MAX_LINES = 1000
- // 截断管道默认字节上限与 read MAX_BYTES 对齐，避免双口径
+ // 这里只缩小缺省预览；显式配置和完整原文落盘仍由 limits/output 保留。
  export const MAX_BYTES = 24 * 1024
  export const DIR = TRUNCATION_DIR
 diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/test/tool/truncation.test.ts
@@ -48,27 +48,27 @@ diff --git a/packages/opencode/test/tool/truncation.test.ts b/packages/opencode/
 diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config/config.ts
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -133,7 +133,7 @@
+@@ -136,8 +136,9 @@
    tool_output: Schema.optional(
      Schema.Struct({
-       max_lines: Schema.optional(PositiveInt).annotate({
+-      max_lines: Schema.optional(PositiveInt).annotate({
++      // 数值分支携带缺省说明，SDK/OpenAPI 生成时不因 optional 剥离而丢失。
++      max_lines: Schema.optional(PositiveInt.annotate({
 -        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 2000)",
 +        description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
-       }),
-       max_bytes: Schema.optional(PositiveInt).annotate({
+-      }),
++      })),
+       // 默认说明绑定数值分支，公开 OpenAPI 剥离 optional 时仍保留生成文档。
+       max_bytes: Schema.optional(PositiveInt.annotate({
          description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -961,7 +961,7 @@
-     .replaceAll("${chaining}", chain)
-     .replaceAll("${shellGuidance}", shellGuidance)
-     .replaceAll("${listCommand}", listCommand)
+@@ -769,3 +769,3 @@
 -    .replaceAll("${maxLines}", "2000")
 +    .replaceAll("${maxLines}", "1000")
      .replaceAll("${maxBytes}", "24576")
-     .replaceAll("${compressionGuidance}", "")
- }
+     // 压缩指引由运行时提供，此处没有虚构第二套配置。
 diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
 --- a/packages/core/src/tool-output-store.ts
 +++ b/packages/core/src/tool-output-store.ts
@@ -77,21 +77,144 @@ diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-out
  import type { ToolOutput } from "@opencode-ai/llm"
  
 -export const MAX_LINES = 2_000
-+// V2 主路径工具输出默认行数与 SMARK Truncate 对齐 1000
++// 通用投影默认与 V1 对齐，不把它当作 Read 参数 schema 的硬上限。
 +export const MAX_LINES = 1_000
- // V2 主路径工具输出默认字节与 SMARK Truncate 对齐 24KB
+ // 缺省投影与 capture 内存窗口共同收紧；retain 的原始字节仍完整保存到托管文件。
  export const MAX_BYTES = 24 * 1024
  export const RETENTION = Duration.days(7)
 diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
 --- a/packages/core/src/tool/read-filesystem.ts
 +++ b/packages/core/src/tool/read-filesystem.ts
-@@ -8,7 +8,8 @@
+@@ -8,7 +8,9 @@
  import { makeLocationNode } from "../effect/app-node"
  import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
  
--export const MAX_READ_LINES = 2_000
-+// V2 read 默认行上限与 SMARK DEFAULT_READ_LIMIT 对齐 1000
-+export const MAX_READ_LINES = 1_000
- // V2 read 默认字节上限与 SMARK read MAX_BYTES 对齐 24KB
++// 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
++export const DEFAULT_READ_LINES = 1_000
+ export const MAX_READ_LINES = 2_000
+ // UTF-8 文本页按实际字节受限；原生图片仍使用独立的媒体摄入上限。
  export const MAX_READ_BYTES = 24 * 1024
  export const MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
+@@ -213,5 +215,12 @@
+       if (startsWith(first, [0x25, 0x50, 0x44, 0x46]) || extensions.has(path.extname(resource).toLowerCase()))
+         return yield* Effect.fail(new BinaryFileError({ resource }))
+-      const paged = info.size > MAX_READ_BYTES || page.offset !== undefined || page.limit !== undefined
++      // 小于字节预算也可能超过默认行数；只扫描已读取的字节，不预先解码页外的无效 UTF-8。
++      const firstLines = first.reduce((count, byte) => count + Number(byte === 10), 0) + Number(first.length > 0 && first.at(-1) !== 10)
++      const paged =
++        info.size > MAX_READ_BYTES ||
++        first.length < info.size ||
++        page.offset !== undefined ||
++        page.limit !== undefined ||
++        firstLines > DEFAULT_READ_LINES
+       if (!paged) {
+         if (binary(resource, first)) return yield* Effect.fail(new BinaryFileError({ resource }))
+@@ -234,3 +243,4 @@
+       const offset = page.offset ?? 1
+-      const limit = Math.min(page.limit ?? MAX_READ_LINES, MAX_READ_LINES)
++      // 显式页仍按原有上限 clamp，缺省才使用较小页；next 继续定位首个未返回行。
++      const limit = Math.min(page.limit ?? DEFAULT_READ_LINES, MAX_READ_LINES)
+       const lines: string[] = []
+@@ -328,3 +338,4 @@
+   const offset = page.offset ?? 1
+-  const limit = Math.min(page.limit ?? MAX_READ_LINES, MAX_READ_LINES)
++  // 目录也只改变默认页大小，显式请求与按过滤后 entries 推进 next 的行为保持不变。
++  const limit = Math.min(page.limit ?? DEFAULT_READ_LINES, MAX_READ_LINES)
+   const entries = yield* Effect.forEach(
+diff --git a/packages/core/src/config/tool-output.ts b/packages/core/src/config/tool-output.ts
+--- a/packages/core/src/config/tool-output.ts
++++ b/packages/core/src/config/tool-output.ts
+@@ -6,3 +6,6 @@
+ export class Info extends Schema.Class<Info>("ConfigV2.ToolOutput")({
+-  max_lines: PositiveInt.pipe(Schema.optional),
++  // 保持 optional 的合并契约，只广告新默认，不注入遮蔽用户配置的值。
++  max_lines: PositiveInt.annotate({
++    description: "Maximum lines of tool output before it is truncated and saved to disk (default: 1000)",
++  }).pipe(Schema.optional),
+   // 描述默认而不填充默认值，避免上层缺省文档覆盖下层显式预算。
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -28,3 +28,4 @@
+   limit: ReadToolFileSystem.PageInput.fields.limit.annotate({
+-    description: "The maximum number of directory entries or text lines to read",
++    // 模型参数广告区分默认与既有 schema 上限，避免把 1000 误解成最大可请求范围。
++    description: "The maximum number of directory entries or text lines to read (defaults to 1000, maximum 2000)",
+   }),
+diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
+--- a/packages/core/test/tool-read-filesystem.test.ts
++++ b/packages/core/test/tool-read-filesystem.test.ts
+@@ -3,1 +3,1 @@
+-import { Effect, FileSystem } from "effect"
++import { Effect, FileSystem, Schema } from "effect"
+@@ -18,1 +18,54 @@
+ describe("ReadToolFileSystem", () => {
++  it.live("separates default pages from accepted limits and preserves byte and next boundaries", () =>
++    Effect.gen(function* () {
++      const fixtureData = yield* fixture
++      const file = path.join(fixtureData.directory, "lines.txt")
++      // 正文小于字节预算却超默认页，专门覆盖完整短文件捷径绕过行数的缺口。
++      yield* fixtureData.files.writeFileString(file, Array.from({ length: 1601 }, () => "x").join("\n"))
++      const first = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
++      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 1001 })
++      expect(first.content.split("\n")).toHaveLength(1000)
++      // next 是续页 offset，末页恰好返回余下正文且不制造另一页。
++      const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset: 1001 })
++      expect(last.content.split("\n")).toHaveLength(601)
++      expect(last).toMatchObject({ truncated: false })
++      expect("next" in last ? last.next : undefined).toBeUndefined()
++      // schema 与实际执行一起锁定原有可接受范围，不能只测试绕过解码的直接调用。
++      expect(Schema.is(ReadToolFileSystem.PageInput)({ limit: 1500 })).toBe(true)
++      expect(Schema.is(ReadToolFileSystem.PageInput)({ limit: 2000 })).toBe(true)
++      expect(Schema.is(ReadToolFileSystem.PageInput)({ limit: 2001 })).toBe(false)
++      const explicit = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { limit: 1500 })
++      expect(explicit.content.split("\n")).toHaveLength(1500)
++      expect(explicit).toMatchObject({ next: 1501, truncated: true })
++      // 内部直接调用也沿原有 clamp，不因参数超上限扩大文本页。
++      yield* fixtureData.files.writeFileString(file, Array.from({ length: 2101 }, () => "x").join("\n"))
++      const clamped = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { limit: 2500 })
++      expect(clamped.content.split("\n")).toHaveLength(2000)
++      expect(clamped).toMatchObject({ truncated: true, next: 2001 })
++      // 多字节每行计 2000 字节，十二行连同换行仍可容纳，第十三行必须留给 next。
++      yield* fixtureData.files.writeFileString(file, Array.from({ length: 20 }, () => "é".repeat(1000)).join("\n"))
++      const bytes = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt")
++      expect(bytes).toMatchObject({ type: "text-page", truncated: true, next: 13 })
++      expect(bytes.content.split("\n")).toHaveLength(12)
++      expect(Buffer.byteLength(bytes.content)).toBe(24_011)
++      // 文本页预算独立于媒体摄入，不让降默认行数顺带降图片上限。
++      expect(ReadToolFileSystem.MAX_MEDIA_INGEST_BYTES).toBe(20 * 1024 * 1024)
++      const directory = path.join(fixtureData.directory, "entries")
++      yield* fixtureData.files.makeDirectory(directory)
++      // 使用真实 entries，过滤、排序和 next 都由实际 list 实现承担，不伪造 FS 返回值。
++      yield* Effect.forEach(Array.from({ length: 1501 }, (_, index) => String(index).padStart(4, "0")),
++        (name) => fixtureData.files.writeFileString(path.join(directory, name), ""), { concurrency: 16, discard: true })
++      const entries = yield* ReadToolFileSystem.list(fixtureData.fs, directory)
++      expect(entries.entries).toHaveLength(1000)
++      expect(entries).toMatchObject({ truncated: true, next: 1001 })
++      // 目录的显式 1500 不应被默认1000截断，剩余页保留正确绝对 entry offset。
++      const requested = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { limit: 1500 })
++      expect(requested.entries).toHaveLength(1500)
++      expect(requested).toMatchObject({ truncated: true, next: 1501 })
++      const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1001 })
++      expect(remaining.entries).toHaveLength(501)
++      expect(remaining.truncated).toBe(false)
++      expect(remaining.next).toBeUndefined()
++    }),
++  )
++
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -2095,9 +2095,12 @@ export type Config = {
+     url?: string
+   }
+   tool_output?: {
++    /**
++     * Maximum lines of tool output before it is truncated and saved to disk (default: 1000)
++     */
+     max_lines?: number
+     /**
+      * Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)
+      */
+     max_bytes?: number
+     /**

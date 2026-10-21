@@ -6,45 +6,30 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0=E9=87=8D?=
  =?UTF-8?q?=E6=94=AF=E6=8C=81=E6=B8=85=E9=99=A4=E8=BF=90=E8=A1=8C=E7=8A=B6?=
 
 diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-index 62df37ba73..91bbf41fcb 100644
 --- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -46,4 +46,11 @@ export const VscodeNotebookDescriptions = {
+@@ -46,4 +46,10 @@ export const VscodeNotebookDescriptions = {
      "filePath is required. Use this when debugging kernel, interpreter, package, working-directory, or environment issues.",
      "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
    ].join("\n"),
-+  // 工具描述：内核重启，清状态，filePath 必填
++
 +  kernel: [
 +    "Restart the Jupyter kernel for a VS Code notebook.",
 +    "filePath is required. Use this when the kernel is unresponsive, packages have been installed, or a clean runtime state is needed.",
 +    "Clears all variables and execution state from previous cell runs. Rerun setup or import cells before running dependent cells.",
 +  ].join("\n"),
-+
  }
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
-index 78f07dbf56..fb1cf5ea07 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -157,6 +157,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-       description: VscodeNotebookDescriptions.output,
-       args: outputArgs,
-       execute: async (args, context) => ({
-+        // 30s 覆盖 activate+restart；短于通用工具会误超时
-         output: await call("/notebook/output", args, context, 30_000),
-         metadata: { endpoint: "/notebook/output" },
-       }),
-@@ -181,6 +182,22 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+@@ -181,6 +181,17 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
          metadata: { endpoint: "/notebook/env" },
        }),
      }),
-+    // 插件工具：重启内核，30s 超时；filePath 必填
-+    // 中间工具：#92 删除并改 env.operation=restart
 +    vscode_notebook_restart_kernel: tool({
 +      description: VscodeNotebookDescriptions.kernel,
 +      args: {
 +        ...requiredFilePath,
-+        // reason 可选：只影响日志/返回 data，不改变重启语义
-+        // reason 只进日志/data，不改变重启语义
 +        reason: z.string().optional().describe("Why the kernel is being restarted, for logging and user context."),
 +      },
 +      execute: async (args, context) => ({
@@ -52,74 +37,72 @@ index 78f07dbf56..fb1cf5ea07 100644
 +        metadata: { endpoint: "/notebook/kernel" },
 +      }),
 +    }),
-+
    },
  }
  }
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
-index fb162b4200..22970b3722 100644
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts
-@@ -18,6 +18,8 @@
-  *   POST /notebook/output       – artifact-first output export
-  *   POST /notebook/cell-output  – alias for /notebook/output
-  *   POST /notebook/env          – kernel/environment snapshot
-+ // HTTP 面新增 kernel 端点，与 env 快照分离
-+ *   POST /notebook/kernel       – restart Jupyter kernel
+@@ -12,6 +12,7 @@
+  *   POST /notebook/output      - 将已有输出按原始字节导出为文件
+  *   POST /notebook/cell-output - /notebook/output 的别名，使用相同认证
+  *   POST /notebook/env         - 实际活动内核与保存的元数据分列报告
++ *   POST /notebook/kernel      - 请求重启指定笔记本的 Jupyter 内核
+  * 所有 notebook 端点要求 filePath；路径或 URI 绑定目标文档，不由当前编辑器焦点决定。
+  * 导出文件响应同时保留 artifactPath 与 artifactURI，包括远程 scheme 和 authority。
   */
- import * as http from "node:http"
- import * as vscode from "vscode"
-@@ -29,6 +31,7 @@ import { runNotebook } from "./notebook/run"
+@@ -25,5 +26,6 @@ import { runNotebook } from "./notebook/run"
  import { editNotebook } from "./notebook/edit"
  import { readNotebookCellOutput } from "./notebook/output"
  import { notebookEnv } from "./notebook/env"
 +import { restartNotebookKernel } from "./notebook/kernel"
  
- // 强制 127.0.0.1 监听，不暴露 0.0.0.0
  const BRIDGE_HOST = "127.0.0.1"
-@@ -166,7 +169,7 @@ export async function startBridge(output: { appendLine(value: string): void }):
-         .then((handle) => {
-           registry = handle
+@@ -30,7 +32,7 @@ const BRIDGE_HOST = "127.0.0.1"
+ // 桥接服务仅绑定本机回环地址，杜绝网络暴露
+ 
+ // 路由集合先决定是否读取请求体，未知路径不能因无关 JSON 内容从 404 变成 500。
+-const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env"])
++const NOTEBOOK_ROUTES = new Set(["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/edit", "/notebook/output", "/notebook/cell-output", "/notebook/env", "/notebook/kernel"])
+ 
+ export type BridgeInfo = { port: number; token: string }
+ // 导出的 BridgeInfo 必须同时携带端口与 token，终端模块不能把地址当成访问凭证。
+@@ -194,7 +196,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
+           // 注册期间的卸载仍走原关闭屏障，不交付已经取消的凭证。
+           if (closing) return reject(new Error("VS Code bridge startup cancelled"))
            output.appendLine(`[bridge] registry ${handle.id}`)
 -          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "manifest"]) {
 +          for (const ep of ["health", "notebook/summary", "notebook/source", "notebook/run", "notebook/edit", "notebook/output", "notebook/env", "notebook/kernel", "manifest"]) {
              output.appendLine(`[bridge] ${ep.padEnd(20)} ${base}/${ep}${ep === "health" ? "" : ``}`)
            }
            resolve({ port: address.port, token })
-@@ -213,6 +216,12 @@ async function routeRequest(
+@@ -226,6 +228,9 @@ async function routeRequest(
+   return await withFileLock(filePath, async () => {
+     switch (pathname) {
+       case "/notebook/env":
+         return await notebookEnv(filePath)
  
-     case "/notebook/env":
-       return await notebookEnv(isRecord(body) ? stringProp(body, "filePath") : undefined)
++      case "/notebook/kernel":
++        return await restartNotebookKernel(body)
 +
-+    // 路由到内核重启 handler，body 已在 filePath 锁内读入
-+    // 独立 kernel 端点（#91 中间态；#92 将并入 env）
-+    case "/notebook/kernel":
-+      // 内核重启：filePath 必填语义在 handler 内校验
-+      return await restartNotebookKernel(body)
-   }
- 
-   return undefined
+       case "/notebook/summary":
 diff --git a/sdks/vscode/src/notebook/commands.ts b/sdks/vscode/src/notebook/commands.ts
-index 4b0d963b7a..a947f75d93 100644
 --- a/sdks/vscode/src/notebook/commands.ts
 +++ b/sdks/vscode/src/notebook/commands.ts
-@@ -6,6 +6,7 @@
-  * They are NOT called by the bridge server — only by the user via the command palette.
-  */
- import * as vscode from "vscode"
+@@ -7,6 +7,7 @@ import { notebookSource } from "./source"
+ import { runNotebook } from "./run"
+ import { editNotebook } from "./edit"
+ import { readNotebookCellOutput } from "./output"
+ import { notebookEnv } from "./env"
 +import { restartNotebookKernel } from "./kernel"
- import { openJsonDocument } from "../util"
- import { c1, copilotLikeCellId } from "./format"
- import { notebookSummary } from "./summary"
-@@ -30,6 +31,25 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
-   // 显示 QuickPick：让用户选择 cell
- const picked = await vscode.window.showQuickPick(
-     [
+ 
+ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+@@ -55,6 +56,20 @@ export async function notebookBridgeTools(output: vscode.OutputChannel) {
+           return notebook ? await notebookEnv(notebook.uri.toString()) : undefined
+         },
+       },
 +      {
-+        // 命令面板入口：可选 reason 后重启当前笔记本内核
-+        // 面板入口可选 reason；#92 删除此 label
 +        label: "vscode_notebook_restart_kernel",
-+        // 命令面板：可选填写 reason 后重启内核
 +        description: "restart Jupyter kernel, clear all runtime state",
 +        run: async () => {
 +          const notebook = await selectNotebook()
@@ -128,26 +111,22 @@ index 4b0d963b7a..a947f75d93 100644
 +            prompt: "Restart reason (optional)",
 +            ignoreFocusOut: true,
 +          })
-+          // reason 可选：只影响日志/返回 data，不改变重启语义
-+          // 命令面板用 notebook URI 作为 filePath 主路径
-+          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason ?? undefined })
++          if (reason === undefined) return undefined
++          return restartNotebookKernel({ filePath: notebook.uri.toString(), reason: reason || undefined })
 +        },
 +      },
-+
-       {
-         label: "vscode_notebook_summary",
-         description: "structure, cells, execution, output MIME",
+     ],
+     {
+       title: "opencode Notebook Bridge Tools",
 diff --git a/sdks/vscode/src/notebook/kernel.ts b/sdks/vscode/src/notebook/kernel.ts
 new file mode 100644
-index 0000000000..a7aa581f50
 --- /dev/null
 +++ b/sdks/vscode/src/notebook/kernel.ts
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,98 @@
 +/**
 + * `vscode_notebook_restart_kernel` — restarts the Jupyter kernel for a notebook.
 + *
 + * Uses the public `jupyter.restartkernel` command. Before invocation it temporarily
-+ // 改配置前保存原值，finally 必须恢复用户偏好
 + * sets `jupyter.askForKernelRestart=false` to suppress the Jupyter restart
 + * confirmation modal, then restores the original value afterward.
 + *
@@ -155,24 +134,15 @@ index 0000000000..a7aa581f50
 + * never triggered. Kernel restart errors are swallowed by Jupyter's public command
 + * path (`.catch(noop)`), so this handler reports `requested` rather than `confirmed`.
 + */
-+import * as vscode from "vscode"
++import vscode from "vscode"
 +import { resolveNotebook } from "./resolve"
 +import { stringProp } from "../util"
 +
-+// 依赖官方 Jupyter 扩展公开命令，不走 LM tool 代理
-+// 固定扩展 ID：探测/安装文案与运行时同一字符串
 +const JUPYTER_ID = "ms-toolsai.jupyter"
-+// 使用公开 restart 命令；错误可能被 Jupyter 吞掉故报告 requested
 +const RESTART_CMD = "jupyter.restartkernel"
 +const CONFIG_SECTION = "jupyter"
-+// 临时关闭确认弹窗，避免桥接路径被 UI 模态阻塞
-+// 仅当原值为 true 才写入 false，避免无意义配置抖动
 +const CONFIG_KEY = "askForKernelRestart"
 +
-+// 重启 Jupyter 内核：清变量与执行态；reason 仅日志
-+// 临时关闭 askForKernelRestart，避免模态确认卡住 headless 桥
-+// 重启 Jupyter 内核：清变量与执行态；reason 仅用于日志上下文
-+// 报告 requested 而非 confirmed：Jupyter 公开命令内部 catch 吞错
 +export async function restartNotebookKernel(input: Record<string, unknown>) {
 +  const filePath = stringProp(input, "filePath")
 +  if (!filePath) throw new Error("filePath is required")
@@ -181,10 +151,7 @@ index 0000000000..a7aa581f50
 +  const reason = stringProp(input, "reason")
 +  const primaryPath = notebook.uri.fsPath || notebook.uri.toString()
 +
-+  // Ensure the Jupyter extension is present and active
 +  const jupyter = vscode.extensions.getExtension(JUPYTER_ID)
-+  // 未安装 Jupyter 扩展时硬失败，给出可操作 summary
-+  // 扩展未装：硬失败 summary，指导安装 ms-toolsai.jupyter
 +  if (!jupyter) {
 +    return {
 +      ran: true,
@@ -192,13 +159,9 @@ index 0000000000..a7aa581f50
 +      data: { path: primaryPath, reason, jupyterFound: false },
 +    }
 +  }
-+  // 扩展已装未激活则先 activate 再查命令注册
 +  if (!jupyter.isActive) await jupyter.activate()
 +
-+  // Ensure the public restart command is registered
 +  const allCommands = await vscode.commands.getCommands(true)
-+  // 命令未注册：扩展损坏或版本不兼容
-+  // 命令未注册：扩展损坏/版本不兼容，勿静默成功
 +  if (!allCommands.includes(RESTART_CMD)) {
 +    return {
 +      ran: true,
@@ -207,26 +170,19 @@ index 0000000000..a7aa581f50
 +    }
 +  }
 +
-+  // Temporarily suppress Jupyter's built-in restart confirmation modal.
-+  // The public command internally calls `shouldAskForRestart()` which reads
-+  // `jupyter.askForKernelRestart`; setting it to false skips the modal.
 +  const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
 +  const original = config.get<boolean>(CONFIG_KEY)
-+  // finally 必须恢复 askForKernelRestart，禁止永久改用户偏好
++  // 仅临时关闭已启用的确认，finally 恢复用户设置。
 +  const needsRestore = original === true
 +
 +  if (needsRestore) {
-+    // 全局配置改写范围与 Jupyter 读取路径一致
 +    await config.update(CONFIG_KEY, false, vscode.ConfigurationTarget.Global)
 +  }
 +
 +  const startedAt = Date.now()
 +  try {
-+    // The public command swallows errors internally (`.catch(noop)`), so
-+    // this invocation will not reject on kernel-level failures.
-+    // 不走 vscode.lm.invokeTool，避免 LM 确认弹层
++    // Jupyter 命令内部可能吞错，返回值只表示 requested。
 +    await vscode.commands.executeCommand(RESTART_CMD, {
-+      // 显式 notebookUri，避免重启错绑 active 编辑器
 +      notebookEditor: { notebookUri: notebook.uri },
 +    })
 +
@@ -241,11 +197,9 @@ index 0000000000..a7aa581f50
 +      data: {
 +        path: primaryPath,
 +        reason,
-+        // 成功仅表示已请求，不保证内核已完全清空
 +        requested: true,
 +        askForKernelRestartOriginal: original,
 +        askForKernelRestartSuppressed: needsRestore,
-+        // 诊断耗时：含 activate 与命令调用
 +        durationMs: Date.now() - startedAt,
 +      },
 +    }
@@ -262,7 +216,6 @@ index 0000000000..a7aa581f50
 +      },
 +    }
 +  } finally {
-+    // Restore the user's original setting so no permanent change is left behind
 +    if (needsRestore) {
 +      await config.update(CONFIG_KEY, original, vscode.ConfigurationTarget.Global)
 +    }

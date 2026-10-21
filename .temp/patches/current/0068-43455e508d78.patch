@@ -1,7 +1,68 @@
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1684,7 +1699,26 @@
+@@ -78,7 +78,7 @@
+ import * as Model from "../../util/model"
+ import { formatTranscript } from "../../util/transcript"
+ import { sessionEpilogue } from "../../util/presentation"
+-import { setPreLayoutSiblingMargin } from "../../util/layout"
++import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
+ import { useTuiConfig } from "../../config"
+ import { useClipboard } from "../../context/clipboard"
+ import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
+@@ -1542,7 +1542,8 @@
+   const childShortcut = useCommandShortcut("session.child.first")
+   const backgroundShortcut = useCommandShortcut("session.background")
+ 
++  // 消息导航只匹配滚动容器直接子节点的 ID；整条助手消息共用锚点，保留内部各分块的间距。
+   return (
+-    <>
++    <box id={props.message.id} flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
+       <For each={props.parts}>
+         {(part, index) => {
+@@ -1624,7 +1625,7 @@
+           </box>
+         </Match>
+       </Switch>
+-    </>
++    </box>
+   )
+ }
+ 
+@@ -1639,6 +1640,7 @@
+ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
+   const { theme } = useTheme()
+   const ctx = use()
++  const renderer = useRenderer()
+   // Collapsed by default in hide mode: a single line throughout, so the
+   // layout never shifts. Click to open the full markdown block, click to close.
+   const [expanded, setExpanded] = createSignal(false)
+@@ -1659,7 +1661,8 @@
+   const summary = createMemo(() => reasoningSummary(content()))
+   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
+ 
++  // 选区只拦截鼠标入口；共享 toggle 保留模式与加密判断，键盘切换思考模式不应受残留选区影响。
+   const toggle = () => {
+     if (!inMinimal() || opaque()) return
+     setExpanded((prev) => !prev)
+   }
+@@ -1673,16 +1676,41 @@
+         flexDirection="column"
+         flexShrink={0}
++        onMouseUp={() => {
++          // 拖选推理内容时保留展开状态，让外层应用复制选区，避免重排正文打断复制。
++          if (renderer.getSelection()?.getSelectedText()) return
++          toggle()
++        }}
+       >
+-        <box onMouseUp={toggle}>
++        <box>
+           <ReasoningHeader
+             toggleable={inMinimal() && !opaque()}
+             open={!inMinimal() || expanded()}
+             done={isDone()}
+             title={summary().title}
++            characters={opaque() ? undefined : content().length}
              duration={isDone() ? Locale.duration(duration()) : undefined}
              encrypted={opaque()}
            />
@@ -19,7 +80,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +              conceal={ctx.conceal()}
 +              fg={theme.textMuted}
 +            />
-+            {/* 超出预览行时提示可展开；展开仍走 header toggle */}
++            {/* 超出预览行时提示可展开；点击由外层推理区统一处理 */}
 +            <Show when={content().split(String.fromCharCode(10)).length > 5}>
 +              <text fg={theme.textMuted}>▼ 展开查看完整推理</text>
 +            </Show>
@@ -28,3 +89,98 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
            <box paddingLeft={inMinimal() ? 2 : 0} marginTop={1}>
              <code
+@@ -1705,8 +1733,9 @@
+   toggleable: boolean
+   open: boolean
+   done: boolean
+   title: string | null
++  characters?: number
+   duration?: string
+   encrypted?: boolean
+ }) {
+   const { theme } = useTheme()
+@@ -1713,10 +1742,12 @@
+   const fg = () =>
+     props.open
+       ? RGBA.fromValues(theme.warning.r, theme.warning.g, theme.warning.b, theme.thinkingOpacity)
+       : theme.warning
++  // 统计清理后全文，不受预览或摘要截断影响；加密块不传此值，标题不推测密文长度。
++  const characters = () => (props.characters === undefined ? "" : `${props.characters.toLocaleString()} chars`)
+   const completed = () => {
+     if (props.encrypted) return `Thought${props.duration ? ` · ${props.duration}` : ""}`
+-    const detail = [props.title, props.duration].filter(Boolean).join(" · ")
++    const detail = [props.title, characters(), props.duration].filter(Boolean).join(" · ")
+     return `${props.toggleable ? (props.open ? "- " : "+ ") : ""}Thought${detail ? `: ${detail}` : ""}`
+   }
+ 
+@@ -1724,7 +1755,9 @@
+     <Switch>
+       <Match when={!props.done}>
+         <box flexDirection="row">
+-          <Spinner color={fg()}>{props.title ? "Thinking: " + props.title : "Thinking"}</Spinner>
++          <Spinner color={fg()}>
++            {[props.title ? "Thinking: " + props.title : "Thinking", characters()].filter(Boolean).join(" · ")}
++          </Spinner>
+         </box>
+       </Match>
+       <Match when={true}>
+diff --git a/packages/tui/src/util/layout.ts b/packages/tui/src/util/layout.ts
+--- a/packages/tui/src/util/layout.ts
++++ b/packages/tui/src/util/layout.ts
+@@ -1,5 +1,7 @@
+ import type { BaseRenderable, BoxRenderable } from "@opentui/core"
+ 
++export const layoutGroups = new WeakSet<BaseRenderable>()
++
+ const previousByParent = new WeakMap<
+   BaseRenderable,
+   { frameID: number; previous: WeakMap<BaseRenderable, BaseRenderable | undefined> }
+@@ -8,8 +10,9 @@
+ export function setPreLayoutSiblingMargin(el: BoxRenderable, margin: (previous?: BaseRenderable) => number) {
+   // Run before Yoga layout so scroll geometry matches the rendered frame.
+   el.onLifecyclePass = () => {
+-    const parent = el.parent
++    // 导航分组不改变布局邻接层级，工具间距仍由消息容器的父层提供相邻内容。
++    const parent = el.parent && layoutGroups.has(el.parent) ? el.parent.parent : el.parent
+     if (!parent) return
+     const cached = previousByParent.get(parent)
+     const previous = cached?.frameID === el.ctx.frameId ? cached.previous : previousSiblings(parent, el.ctx.frameId)
+     const value = margin(previous.get(el))
+@@ -20,6 +23,10 @@
+ function previousSiblings(parent: BaseRenderable, frameID: number) {
+   const previous = new WeakMap<BaseRenderable, BaseRenderable | undefined>()
+-  parent.getChildren().forEach((child, index, children) => previous.set(child, children[index - 1]))
++  // 只展开登记的一层分组，跳过空组并保留实际末节点，避免把容器总高度当成分隔依据。
++  parent
++    .getChildren()
++    .flatMap((child) => (layoutGroups.has(child) ? child.getChildren() : [child]))
++    .forEach((child, index, children) => previous.set(child, children[index - 1]))
+   previousByParent.set(parent, { frameID, previous })
+   return previous
+ }
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -16,6 +16,7 @@
+   alwaysSeparate,
+   toolDisplay,
+ } from "../../../src/routes/session"
++import { layoutGroups } from "../../../src/util/layout"
+ 
+ let testSetup: Awaited<ReturnType<typeof testRender>> | undefined
+ 
+@@ -83,10 +84,11 @@
+ function Fixture(props: { errorExpanded?: boolean; before?: "shell" | "user" }) {
+   return (
+     <box flexDirection="column" width={72}>
+-      <box flexDirection="column">
+-        {props.before === "shell" && <ShellOutput />}
+-        {props.before === "user" && <UserMessage />}
++      {props.before === "shell" && <ShellOutput />}
++      {props.before === "user" && <UserMessage />}
++      {/* 用户和工具分属不同消息，沿用旧快照才能捕获新增分组吞掉边界空行。 */}
++      <box flexDirection="column" flexShrink={0} ref={(el: BoxRenderable) => layoutGroups.add(el)}>
+         <For each={tools}>
+           {(item) => (
+             <InlineToolRow
+               icon={item.icon}

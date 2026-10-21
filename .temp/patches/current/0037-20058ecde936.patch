@@ -2,13 +2,11 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
 new file mode 100644
 --- /dev/null
 +++ b/.github/workflows/build-opencode.yml
-@@ -0,0 +1,129 @@
-+# 构建工作流：手动触发，编译打包 OpenCode CLI 为三大平台原生二进制
-+# 产物包含 Linux(tar.gz/deb)、macOS(tar.gz)、Windows(zip) 多架构包
+@@ -0,0 +1,130 @@
 +name: Build OpenCode CLI
 +
 +on:
-+  # workflow_dispatch 手动触发：版本号作为必填输入，控制产物命名和嵌入版本
++  # workflow_dispatch 必填版本避免 Script 缺省推导分支版本，与归档输入产生分歧
 +  workflow_dispatch:
 +    inputs:
 +      version:
@@ -17,27 +15,27 @@ new file mode 100644
 +        type: string
 +
 +jobs:
-+  # 三平台并行构建：Linux/macOS/Windows 互不依赖，提升 CI 吞吐
-+  # Linux 构建：产出 tar.gz 通用包和 deb Debian 系包两种格式
 +  build-linux:
 +    runs-on: ubuntu-latest
 +    steps:
 +      - uses: actions/checkout@v4
 +
-+      # setup-bun 复用自定义 composite action，统一 Bun 版本和缓存策略
++      # setup-bun 从根 packageManager 取 Bun 版本，并保留缓存及 Windows hoisted 安装分支
 +      - uses: ./.github/actions/setup-bun
 +
++      # build.ts 会清空 dist，三平台在各自 runner 执行构建，不能共享同一构建目录
 +      - name: Build Linux
 +        run: |
 +          cd packages/opencode
-+          # --skip-embed-web-ui：跳过内嵌 Web UI 编译，CLI-only 构建减小产物体积
++          # --skip-embed-web-ui 同时排除文件映射与 UI entrypoint，沿用上游 CLI-only 构建入口
++          # --version 经 version-env 先于 Script 求值，使嵌入版本与打包版本一致
 +          bun run script/build.ts --version=${{ inputs.version }} --os=linux --skip-embed-web-ui
 +
 +      - name: Package Linux tar.gz
 +        run: |
 +          cd packages/opencode/dist/opencode-linux-x64/bin
-+          # tar.gz 打包：保留单文件二进制，解压即用
-+          tar -czf ../../../opencode-linux-x64-${{ inputs.version }}.tar.gz opencode
++          # bin 位于 dist/<target>/bin，回退两级才与 upload-artifact 的 dist 路径一致
++          tar -czf ../../opencode-linux-x64-${{ inputs.version }}.tar.gz opencode
 +
 +      - name: Package Linux .deb
 +        run: |
@@ -45,15 +43,16 @@ new file mode 100644
 +          PKG_NAME="opencode_${{ inputs.version }}_amd64"
 +          BINARY="packages/opencode/dist/opencode-linux-x64/bin/opencode"
 +
-+          # deb 包结构：DEBIAN/control 存元数据，usr/local/bin 存可执行文件（FHS 规范）
++          # 保留源包的 usr/local/bin 安装位置，control 必须放在包根的 DEBIAN 目录
 +          mkdir -p "${DEB_DIR}/${PKG_NAME}/DEBIAN"
 +          mkdir -p "${DEB_DIR}/${PKG_NAME}/usr/local/bin"
 +
 +          cp "$BINARY" "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
-+          # chmod 755：确保二进制对所有用户可执行，符合 deb 包权限规范
++          # 复制后显式赋予执行位，避免归档或 runner 文件权限影响安装后的 CLI 启动
 +          chmod 755 "${DEB_DIR}/${PKG_NAME}/usr/local/bin/opencode"
 +
-+          # heredoc 写入 control 文件：dpkg 要求字段顶格无缩进，EOF 标记结束
++          # YAML 剥离十空格后字段与 EOF 顶格；Description 续行多一空格才是合法 deb 描述
++          # Linux deb 的 amd64 元数据只对应 x64 二进制，不能把 arm64 混入同一包
 +          cat > "${DEB_DIR}/${PKG_NAME}/DEBIAN/control" <<EOF
 +          Package: opencode
 +          Version: ${{ inputs.version }}
@@ -67,7 +66,7 @@ new file mode 100644
 +
 +          dpkg-deb --build "${DEB_DIR}/${PKG_NAME}" "packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb"
 +
-+      # upload-artifact 汇总本平台产物，供后续下载或发布
++      # Linux 仅上传源集合的 x64/amd64 产物，路径从仓库根定位 dist，不能漏包或扩张架构集合
 +      - uses: actions/upload-artifact@v4
 +        with:
 +          name: opencode-linux
@@ -75,9 +74,7 @@ new file mode 100644
 +            packages/opencode/dist/opencode-linux-x64-${{ inputs.version }}.tar.gz
 +            packages/opencode/dist/opencode_${{ inputs.version }}_amd64.deb
 +
-+  # macOS 构建：arm64 (Apple Silicon) 和 x64 (Intel) 双架构
 +  build-macos:
-+    # macOS runner 原生支持跨架构编译，无需交叉编译工具链
 +    runs-on: macos-latest
 +    steps:
 +      - uses: actions/checkout@v4
@@ -87,15 +84,18 @@ new file mode 100644
 +      - name: Build macOS
 +        run: |
 +          cd packages/opencode
++          # --os=darwin 选择双架构而非 runner 本机架构，不能替换为 --single
 +          bun run script/build.ts --version=${{ inputs.version }} --os=darwin --skip-embed-web-ui
 +
 +      - name: Package macOS tar.gz
 +        run: |
++          # darwin 目标名来自 build.ts，保持原生目录名以匹配两架构打包路径
 +          cd packages/opencode/dist/opencode-darwin-arm64/bin
-+          tar -czf ../../../opencode-darwin-arm64-${{ inputs.version }}.tar.gz opencode
++          tar -czf ../../opencode-darwin-arm64-${{ inputs.version }}.tar.gz opencode
 +          cd ../../opencode-darwin-x64/bin
-+          tar -czf ../../../opencode-darwin-x64-${{ inputs.version }}.tar.gz opencode
++          tar -czf ../../opencode-darwin-x64-${{ inputs.version }}.tar.gz opencode
 +
++      # macOS 保留源双架构产物集合，分别上传原生 darwin 目标目录生成的归档
 +      - uses: actions/upload-artifact@v4
 +        with:
 +          name: opencode-macos
@@ -103,7 +103,6 @@ new file mode 100644
 +            packages/opencode/dist/opencode-darwin-arm64-${{ inputs.version }}.tar.gz
 +            packages/opencode/dist/opencode-darwin-x64-${{ inputs.version }}.tar.gz
 +
-+  # Windows 构建：x64 和 arm64 双架构，使用 pwsh 执行 PowerShell 脚本
 +  build-windows:
 +    runs-on: windows-latest
 +    steps:
@@ -120,12 +119,14 @@ new file mode 100644
 +      - name: Package Windows zip
 +        shell: pwsh
 +        run: |
++          # --os 使用 win32，而 build.ts 目录名转成 windows；pwsh 路径须沿此映射
 +          cd packages/opencode/dist/opencode-windows-x64/bin
-+          # Compress-Archive 为 Windows 标准压缩格式，用户无需额外工具解压
-+          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-x64-${{ inputs.version }}.zip"
++          # Windows 编译生成 .exe；从 bin 回退两级写入 dist，保持双架构归档与上传一致
++          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-x64-${{ inputs.version }}.zip"
 +          cd ../../opencode-windows-arm64/bin
-+          Compress-Archive -Path "opencode.exe" -DestinationPath "../../../opencode-windows-arm64-${{ inputs.version }}.zip"
++          Compress-Archive -Path "opencode.exe" -DestinationPath "../../opencode-windows-arm64-${{ inputs.version }}.zip"
 +
++      # Windows 保留源双架构 zip 集合，不把 runner 架构当作唯一发布架构
 +      - uses: actions/upload-artifact@v4
 +        with:
 +          name: opencode-windows

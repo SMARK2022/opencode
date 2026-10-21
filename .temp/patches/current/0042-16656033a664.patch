@@ -1,17 +1,17 @@
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -431,7 +431,8 @@
+@@ -345,7 +345,8 @@
  export const ShellTool = Tool.define(
    ShellID.ToolID,
    Effect.gen(function* () {
 -    const config = yield* Config.Service
-+    // 配置服务引用：重命名为 configService 避免与配置值变量混淆
++    // 捕获当前 Layer 的必需配置服务；cfg 仍在工具初始化时读取，不恢复可选探测或吞错默认值。
 +    const configService = yield* Config.Service
      const spawner = yield* ChildProcessSpawner
      const fs = yield* FSUtil.Service
      const trunc = yield* Truncate.Service
-@@ -720,7 +721,7 @@
+@@ -630,7 +631,7 @@
  
      return () =>
        Effect.gen(function* () {

@@ -14,10 +14,11 @@ index a0eb78a13e2a89b68064d9c1678ebbf1432cd38a..0e3ee596b977e7b18fda562f7b0b4742
    OPENCODE_WORKSPACE_ID: process.env["OPENCODE_WORKSPACE_ID"],
    OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
 diff --git a/packages/core/src/database/database.ts b/packages/core/src/database/database.ts
-index d61adf047eacf13ab8af01a4726cb187faebaeb0..5e73b9f20aac589570cfddda60e584a333b2696d 100644
 --- a/packages/core/src/database/database.ts
 +++ b/packages/core/src/database/database.ts
-@@ -6,11 +6,14 @@
+@@ -5,16 +5,17 @@
+-import { Context, Effect, Layer } from "effect"
++import { Cause, Context, Effect, Layer } from "effect"
  import { Global } from "../global"
  import { Flag } from "../flag/flag"
  import { isAbsolute, join } from "path"
@@ -27,12 +28,17 @@ index d61adf047eacf13ab8af01a4726cb187faebaeb0..5e73b9f20aac589570cfddda60e584a3
  import { makeGlobalNode } from "../effect/app-node"
  
  const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
-+// 模块级引用：close() 需要在 Effect Layer 外执行 TRUNCATE 检查点
-+let dbRef: DatabaseShape | undefined
  type DatabaseShape = Effect.Success<typeof makeDatabase>
  
  export interface Interface {
-@@ -24,14 +27,36 @@
+   db: DatabaseShape
+ }
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
+@@ -22,20 +23,58 @@
+-const layer = Layer.effect(
++const layer = (filename: string) => Layer.effect(
+   Service,
    Effect.gen(function* () {
      const db = yield* makeDatabase
  
@@ -41,25 +47,27 @@ index d61adf047eacf13ab8af01a4726cb187faebaeb0..5e73b9f20aac589570cfddda60e584a3
      yield* db.run("PRAGMA journal_mode = WAL")
 -    yield* db.run("PRAGMA synchronous = NORMAL")
 -    yield* db.run("PRAGMA busy_timeout = 5000")
-+    // 持久化模式：OPENCODE_DB_DURABLE=1 时使用 FULL 同步落盘
++    // 默认 NORMAL 保留吞吐；显式 durable 才升级 FULL 的提交落盘保证，不改变事务边界。
 +    yield* db.run("PRAGMA synchronous = " + (Flag.OPENCODE_DB_DURABLE ? "FULL" : "NORMAL"))
      yield* db.run("PRAGMA cache_size = -64000")
      yield* db.run("PRAGMA foreign_keys = ON")
 -    yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
 +    // PASSIVE 可能因其他进程持锁失败；警告后继续启动，不中断 open
 +    yield* db.run("PRAGMA wal_checkpoint(PASSIVE)").pipe(
-+      Effect.catch((error) =>
-+        Effect.sync(() => {
-+          console.warn("wal_checkpoint on open failed (another process may be active)", { error: String(error) })
++      Effect.catchCauseIf(
++        (cause) => !Cause.hasInterrupts(cause),
++        (cause) => Effect.sync(() => {
++          console.warn("wal_checkpoint on open failed (another process may be active)", { error: Cause.pretty(cause) })
 +        }),
 +      ),
 +    )
-+    // 大 WAL 文件检测：超过 1MB 表示上次可能异常退出未完成 checkpoint
++    // 使用本层实际打开的文件；自定义 layerFromPath 不能误检查全局数据库。
 +    try {
-+      const walStat = statSync(path() + "-wal")
++      const walStat = statSync(filename + "-wal")
 +      if (walStat.size > 1024 * 1024) {
-+        console.warn("large WAL file detected — recovering uncommitted data", {
-+          path: path() + "-wal",
++        // WAL 大小只能证明 checkpoint 未充分完成，不能声称正在恢复未提交事务。
++        console.warn("large WAL file detected after startup checkpoint", {
++          path: filename + "-wal",
 +          bytes: walStat.size,
 +        })
 +      }
@@ -68,31 +76,34 @@ index d61adf047eacf13ab8af01a4726cb187faebaeb0..5e73b9f20aac589570cfddda60e584a3
 +    }
      yield* DatabaseMigration.apply(db)
  
-+    dbRef = db
++    // 上层 finalizer 先于依赖连接释放执行，保留 checkpoint-before-close 顺序。
++    // 条件恢复仍保留 query error 类型；仅在 finalizer 边界转为 defect，剩余失败不能伪装成功。
++    yield* Effect.addFinalizer(() => checkpoint(db).pipe(Effect.orDie))
      return { db }
    }).pipe(Effect.orDie),
  )
-@@ -54,4 +79,15 @@
-   return join(Global.Path.data, `opencode-${InstallationChannel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
- }
  
-+// 关闭前仅执行 TRUNCATE 检查点；V2 Layer 管理连接生命周期，不在此 close connection / Client.reset
-+export function close() {
-+  if (!dbRef) return
-+  try {
-+    // wal_checkpoint(TRUNCATE) 将 WAL 合并进主库并截断，避免下次启动带着巨大 WAL
-+    Effect.runSync(dbRef.run("PRAGMA wal_checkpoint(TRUNCATE)"))
-+  } catch (e) {
-+    console.warn("wal_checkpoint on close failed", { error: String(e) })
-+  }
++// 调用者传入其 Layer 已持有的连接；多数据库实例不共享 dbRef 或另开连接。
++export function checkpoint(db: DatabaseShape) {
++  return db.run("PRAGMA wal_checkpoint(TRUNCATE)").pipe(
++    Effect.asVoid,
++    // 持锁失败只报告，不阻断 native Layer 随后的 close finalizer。
++    Effect.catchCauseIf(
++      (cause) => !Cause.hasInterrupts(cause),
++      (cause) => Effect.sync(() => console.warn("wal_checkpoint on close failed", { error: Cause.pretty(cause) })),
++    ),
++  )
 +}
 +
- export const node = makeGlobalNode({ service: Service, layer: layerFromPath(path()), deps: [] })
+ export function layerFromPath(filename: string) {
+-  return layer.pipe(Layer.provide(sqliteLayer({ filename })))
++  return layer(filename).pipe(Layer.provide(sqliteLayer({ filename })))
+ }
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 index b46fa75754c81f84b2ff775c075a436fbdd417ec..8fc9b91614233325d7c3558a6c2847442c8eb560 100644
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
-@@ -67,6 +67,8 @@
+@@ -112,6 +112,8 @@
  
  interface ProcessorContext extends Input {
    toolcalls: Record<string, ToolCall>
@@ -101,7 +112,7 @@ index b46fa75754c81f84b2ff775c075a436fbdd417ec..8fc9b91614233325d7c3558a6c284744
    shouldBreak: boolean
    snapshot: string | undefined
    blocked: boolean
-@@ -106,6 +108,7 @@
+@@ -151,6 +153,7 @@
          sessionID: input.sessionID,
          model: input.model,
          toolcalls: {},
@@ -109,106 +120,123 @@ index b46fa75754c81f84b2ff775c075a436fbdd417ec..8fc9b91614233325d7c3558a6c284744
          shouldBreak: false,
          snapshot: initialSnapshot,
          blocked: false,
-@@ -322,22 +325,33 @@
+@@ -366,24 +369,32 @@
  
-           case "tool-input-delta":
-             yield* ensureToolCall(value)
--            // 累积工具输入流式 delta 到 state.raw，供 TUI 估算实时输出 token
--            // value.text 是 ToolInputDelta 事件的文本字段（非 delta）
+-          case "tool-input-delta":
+-            // delta 可先于 start 到达，保留上游 ensureToolCall 才不会丢失首片参数。
+-            yield* ensureToolCall(value)
 -            yield* updateToolCall(value.id, (match) => {
+-              // 已解析的 input 属于 running/completed；迟到片段不能覆盖这种状态。
 -              if (match.state.status !== "pending") return match
 -              return {
+-                // 增量只更新参数缓存，保留原 part 的工具身份和 provider metadata 供执行协调。
 -                ...match,
 -                state: {
 -                  ...match.state,
+-                  // ToolInputDelta 的文本字段是 value.text；累积到 raw 供实时输出 token 估算。
 -                  raw: match.state.raw + value.text,
 -                },
 -              }
 -            })
-+            // 累积到内存缓冲，避免逐 token 写入数据库造成写放大
++          case "tool-input-delta": {
++            // ensureToolCall 保留 delta-before-start；已运行工具必须在缓冲及 fanout 前排除迟到片段。
++            const pending = yield* ensureToolCall(value)
++            if (!pending || pending.part.state.status !== "pending") return
++            // 上游 LLMEvent 使用 text；仅累积内存，不能恢复逐 token 的 durable PartUpdated 写入。
 +            ctx.toolInputBuffer[value.id] = (ctx.toolInputBuffer[value.id] ?? "") + value.text
-+            // 发布 bus-only delta 保持 TUI 实时渲染
-+            {
-+              const tcall = ctx.toolcalls[value.id]
-+              if (tcall)
-+                yield* session.updatePartDelta({
-+                  sessionID: tcall.sessionID,
-+                  messageID: tcall.messageID,
-+                  partID: tcall.partID,
-+                  field: "raw",
-+                  delta: value.text,
-+                })
-+            }
++            // raw 是既有 V1 wire 字段；consumer 在 pending state 内应用，不创造顶层 part.raw。
++            yield* session.updatePartDelta({
++              sessionID: pending.call.sessionID,
++              messageID: pending.call.messageID,
++              partID: pending.call.partID,
++              field: "raw",
++              delta: value.text,
++            })
              return
++          }
  
            case "tool-input-end": {
              yield* ensureToolCall(value)
-+            // 将累积的 raw 字符串一次性写入数据库
++            // end 是可重放的输入边界；提交成功才删除缓冲，写入失败仍可在 cleanup 保留。
 +            const buffered = ctx.toolInputBuffer[value.id]
 +            if (buffered) {
-+              delete ctx.toolInputBuffer[value.id]
 +              yield* updateToolCall(value.id, (match) => {
 +                if (match.state.status !== "pending") return match
 +                return { ...match, state: { ...match.state, raw: match.state.raw + buffered } }
 +              })
++              delete ctx.toolInputBuffer[value.id]
 +            }
              return
            }
  
-@@ -346,6 +360,9 @@
+@@ -393,6 +404,15 @@
                throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
              }
              yield* ensureToolCall(value)
-+            // 刷新 tool-input-end 未处理的残余缓冲
++            // 某些 provider 省略 end；先持久化 pending 原文，再转换为解析后的 running input。
 +            const pendingRaw = ctx.toolInputBuffer[value.id]
-+            if (pendingRaw) delete ctx.toolInputBuffer[value.id]
++            if (pendingRaw) {
++              yield* updateToolCall(value.id, (match) => {
++                if (match.state.status !== "pending") return match
++                return { ...match, state: { ...match.state, raw: match.state.raw + pendingRaw } }
++              })
++              delete ctx.toolInputBuffer[value.id]
++            }
              const input = isRecord(value.input) ? value.input : { value: value.input }
              yield* updateToolCall(value.id, (match) => ({
                ...match,
-@@ -600,10 +617,16 @@
+@@ -657,14 +677,18 @@
            const part = match.part
            const end = Date.now()
            const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
-+          // 合并未刷新的 raw 缓冲到 part，避免中断时丢失已累积输入
++          // 协调信号唤醒后仍须先提交工具终态；error schema 不保留 state.raw，残余原文存入 metadata。
 +          const pendingRaw = ctx.toolInputBuffer[toolCallID]
-+          if (pendingRaw) delete ctx.toolInputBuffer[toolCallID]
            yield* session.updatePart({
              ...part,
              state: {
                ...part.state,
-+              ...(part.state.status === "pending" && pendingRaw
-+                ? { raw: part.state.raw + pendingRaw }
-+                : {}),
                status: "error",
                error: "Tool execution aborted",
-               metadata: { ...metadata, interrupted: true },
-@@ -612,6 +635,7 @@
+-              metadata: { ...metadata, interrupted: true },
++              metadata: { ...metadata, interrupted: true,
++                ...(part.state.status === "pending" ? { raw: part.state.raw + (pendingRaw ?? "") } : {}),
++              },
+               time: { start: "time" in part.state ? part.state.time.start : end, end },
+             },
            })
          }
+@@ -671,5 +695,10 @@
          ctx.toolcalls = {}
++        // cleanup 终态提交后清空，重试与下一次 process 不继承上次工具的残片。
 +        ctx.toolInputBuffer = {}
          ctx.assistantMessage.time.completed = Date.now()
-         yield* session.updateMessage(ctx.assistantMessage)
-         const reqUsage2 = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+-        // cleanup 的通知恢复可中断；若提交前被取消，已安装 owner 负责闭合持久化未完成助手。
+-        yield* Effect.interruptible(publishAssistant(ctx.assistantMessage, events))
++        // 工具终态及 raw 提交后再发布助手；中断继承 ensuring 保护，error/completed 与账本同事务提交后才通知。
++        // 普通完成仍允许取消阻塞 callback；prompt caller 的 ownAssistant 继续负责其已注册的归属。
++        yield* (aborted
++          ? publishAssistant(ctx.assistantMessage, events, true)
++          : Effect.interruptible(publishAssistant(ctx.assistantMessage, events)))
+       })
 diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
 index 4139665bd2bde9201022806eac9932d596efc6ec..dec13f0f2e0e50ae10592aa10d5a7ed2158fff70 100644
 --- a/packages/opencode/src/session/retry.ts
 +++ b/packages/opencode/src/session/retry.ts
-@@ -89,10 +89,12 @@
+@@ -89,12 +89,14 @@
      const status = error.data.statusCode
      // 5xx errors are transient server failures and should always be retried,
      // even when the provider SDK doesn't explicitly mark them as retryable.
-+    // 网络异常（statusCode 为 undefined）也应重试，避免瞬时网络故障直接失败
      if (
        !error.data.isRetryable &&
        !(status !== undefined && status >= 500) &&
++      // 网络异常（statusCode 为 undefined）也应重试，避免瞬时网络故障直接失败
 +      status !== undefined &&
        !matchesRetryableMessage(error.data.message) &&
        !matchesRetryableMessage(error.data.responseBody)
      )
        return undefined
+     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
        return {
-         message: GO_UPSELL_MESSAGE,
 diff --git a/packages/opencode/src/cli/tui/worker.ts b/packages/opencode/src/cli/tui/worker.ts
 index 4cf6b2d446b3c842c18b8567a7485a6aa7ed8ae9..e70d1c1ea7eb8784ecdd6abd75d895401043854e 100644
 --- a/packages/opencode/src/cli/tui/worker.ts
@@ -221,12 +249,243 @@ index 4cf6b2d446b3c842c18b8567a7485a6aa7ed8ae9..e70d1c1ea7eb8784ecdd6abd75d89540
  
  Heap.start()
  
-@@ -72,6 +73,8 @@
+@@ -72,6 +73,16 @@
    async shutdown() {
      await InstanceRuntime.disposeAllInstances()
      if (server) await server.stop(true)
-+    // 仅在进程关闭路径做 WAL TRUNCATE；server() 重启监听时不得 close（原版仅 shutdown）
-+    Database.close()
++    // 先停止生产者再 checkpoint；server() 的监听重启不能释放进程级数据库。
++    try {
++      await AppRuntime.runPromise(Effect.gen(function* () {
++        const database = yield* Database.Service
++        yield* Database.checkpoint(database.db)
++      }))
++    } finally {
++      // checkpoint 剩余失败仍向 RPC 传播；释放不能被拒绝跳过，native close 仍由既有 Layer 负责。
++      await AppRuntime.dispose()
++    }
      process.off("unhandledRejection", onUnhandledRejection)
      process.off("uncaughtException", onUncaughtException)
    },
+
+diff --git a/packages/core/src/database/sqlite.bun.ts b/packages/core/src/database/sqlite.bun.ts
+--- a/packages/core/src/database/sqlite.bun.ts
++++ b/packages/core/src/database/sqlite.bun.ts
+@@ -160,6 +160,8 @@
+         readwrite: config.readwrite ?? true,
+         create: config.create ?? true,
+       })
+       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
++      // Native Layer 早于 Database Layer 设置 WAL，锁等待必须在这个最早的 PRAGMA 前生效。
++      native.run("PRAGMA busy_timeout = 30000")
+       if (config.disableWAL !== true) native.run("PRAGMA journal_mode = WAL;")
+       return native
+diff --git a/packages/core/src/database/sqlite.node.ts b/packages/core/src/database/sqlite.node.ts
+--- a/packages/core/src/database/sqlite.node.ts
++++ b/packages/core/src/database/sqlite.node.ts
+@@ -155,6 +155,8 @@
+         open: true,
+       })
+       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
++      // Node 与 Bun 的打开顺序一致，不能等 WAL 切换已经失败后才设置锁等待。
++      native.exec("PRAGMA busy_timeout = 30000")
+       if (config.disableWAL !== true && config.readonly !== true) native.exec("PRAGMA journal_mode = WAL;")
+       return native
+     }),
+diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
+--- a/packages/tui/src/context/sync.tsx
++++ b/packages/tui/src/context/sync.tsx
+@@ -476,6 +476,13 @@
+             event.properties.messageID,
+             produce((draft) => {
+               const part = draft[result.index]
++              // V1 raw 表示工具的未解析参数，必须更新嵌套 pending state 才能被 token 消费端读取。
++              if (event.properties.field === "raw") {
++                if (part.type === "tool" && part.state.status === "pending")
++                  part.state.raw += event.properties.delta
++                // 终态或非工具的迟到 raw 不能污染顶层字段，也不能把 running input 变回字符串。
++                return
++              }
+               const field = event.properties.field as keyof typeof part
+               const existing = part[field] as string | undefined
+               ;(part[field] as string) = (existing ?? "") + event.properties.delta
+diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx
+@@ -2,6 +2,9 @@
+ import { describe, expect, test } from "bun:test"
++import { EventV2 } from "@opencode-ai/core/event"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { tmpdir } from "../../../fixture/fixture"
+ import { mount, wait } from "./sync-fixture"
+ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
+ 
+ function branchEvent(branch: string, workspace?: string): GlobalEvent {
+@@ -17,6 +20,54 @@
+   }
+ }
+ 
++test("tool raw deltas update pending state and ignore late running fragments", async () => {
++  await using tmp = await tmpdir()
++  await Bun.write(`${tmp.path}/kv.json`, "{}")
++  const { app, emit, sync } = await mount(undefined, tmp.path)
++  // 使用真实品牌 ID 工厂，并让根级 sessionID 与嵌套 part 共用身份，覆盖生产事件的完整契约。
++  const part = {
++    id: SessionV1.PartID.ascending(),
++    messageID: SessionV1.MessageID.ascending(),
++    sessionID: SessionSchema.ID.create(), type: "tool" as const,
++    callID: "call-raw", tool: "bash", state: { status: "pending" as const, input: {}, raw: "" },
++  } satisfies SessionV1.ToolPart
++  const update = (state: typeof part.state | { status: "running"; input: { cmd: string }; time: { start: number } }) =>
++    emit({ directory: "/tmp/other", project: "proj_test", payload: {
++      id: EventV2.ID.create(),
++      type: "message.part.updated", properties: { sessionID: part.sessionID, part: { ...part, state }, time: 1 },
++    } })
++  const delta = (text: string) => emit({ directory: "/tmp/other", project: "proj_test", payload: {
++    id: EventV2.ID.create(),
++    type: "message.part.delta", properties: {
++      sessionID: part.sessionID, messageID: part.messageID, partID: part.id, field: "raw", delta: text,
++    },
++  } })
++  try {
++    // 走真实 SDK event 与 SyncProvider，避免在测试中复制 reducer 算法。
++    update(part.state)
++    await wait(() => sync.data.part[part.messageID]?.length === 1)
++    delta('{"cmd":')
++    delta('"pwd"}')
++    await wait(() => {
++      const value = sync.data.part[part.messageID]?.[0]
++      return value?.type === "tool" && value.state.status === "pending" && value.state.raw === '{"cmd":"pwd"}'
++    })
++    // 顶层 raw 即使同时有正确 state.raw 仍是协议污染，单独断言其不存在。
++    expect(Object.hasOwn(sync.data.part[part.messageID][0], "raw")).toBe(false)
++    update({ status: "running", input: { cmd: "pwd" }, time: { start: 1 } })
++    await wait(() => {
++      const value = sync.data.part[part.messageID]?.[0]
++      return value?.type === "tool" && value.state.status === "running"
++    })
++    delta("late")
++    // 同一 event 队列的哨兵确认迟到片段已处理，而不是用固定 sleep 猜测处理完成。
++    emit(branchEvent("raw-done"))
++    await wait(() => sync.data.vcs?.branch === "raw-done")
++    expect(sync.data.part[part.messageID][0]).toMatchObject({ state: { status: "running", input: { cmd: "pwd" } } })
++    expect(Object.hasOwn(sync.data.part[part.messageID][0], "raw")).toBe(false)
++  } finally { app.renderer.destroy() }
++})
++
+ describe("tui sync", () => {
+   test("refresh scopes sessions by default and lists project sessions when disabled", async () => {
+     await using tmp = await tmpdir()
+
+diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
+--- a/packages/opencode/test/session/processor-effect.test.ts
++++ b/packages/opencode/test/session/processor-effect.test.ts
+@@ -4,7 +4,7 @@
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { expect } from "bun:test"
+ import { tool } from "ai"
+-import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
++import { Cause, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+ import path from "path"
+ import z from "zod"
+ import type { Agent } from "../../src/agent/agent"
+@@ -889,6 +889,20 @@
+           model: mdl,
+         })
+ 
++        // 在真实 event owner 观察 raw；此时数据库仍是初始 pending，不允许每片都写 PartUpdated。
++        let observedRaw = ""
++        let durableRaw: string | undefined
++        const events = yield* EventV2Bridge.Service
++        const unsubscribe = yield* events.listen((event) => Effect.gen(function* () {
++          if (event.type !== MessageV2.Event.PartDelta.type) return
++          const data = Schema.decodeUnknownSync(MessageV2.Event.PartDelta.data)(event.data)
++          if (data.messageID !== msg.id || data.field !== "raw") return
++          const part = yield* session.getPart({ sessionID: chat.id, messageID: msg.id, partID: data.partID })
++          if (part?.type === "tool" && part.state.status === "pending") durableRaw = part.state.raw
++          observedRaw += data.delta
++        }))
++        yield* Effect.addFinalizer(() => unsubscribe)
++
+         const run = yield* handle
+           .process({
+             user: {
+@@ -916,6 +930,11 @@
+           ),
+           "timed out waiting for tool part",
+         )
++        // fixture 发送半段参数后挂起；等待真实 delta 再取消，避免只测到空 pending 的 cleanup。
++        yield* waitFor(Effect.sync(() => observedRaw === '{"cmd"' ? true : undefined), "tool input delta not observed")
++        expect(observedRaw).toBe('{"cmd"')
++        expect(durableRaw).toBe("")
++
+         yield* Fiber.interrupt(run)
+ 
+         const exit = yield* Fiber.await(run)
+@@ -931,6 +950,8 @@
+         if (call?.state.status === "error") {
+           expect(call.state.error).toBe("Tool execution aborted")
+           expect(call.state.metadata?.interrupted).toBe(true)
++          // 查询编码后的持久化 error，而非 callback 内存对象；raw 必须跨 schema 边界保留。
++          expect(call.state.metadata?.raw).toBe('{"cmd"')
+           expect(call.state.time.end).toBeDefined()
+         }
+       }),
+
+diff --git a/packages/llm/src/schema/errors.ts b/packages/llm/src/schema/errors.ts
+--- a/packages/llm/src/schema/errors.ts
++++ b/packages/llm/src/schema/errors.ts
+@@ -126,8 +126,9 @@
+   url: Schema.optional(Schema.String),
+   http: Schema.optional(HttpContext),
+ }) {
+   get retryable() {
+-    return false
++    // 未取得 HTTP 响应的网络异常交给既有有限 RequestExecutor 重试，不重启已开始的 Session turn。
++    return true
+   }
+ }
+ 
+diff --git a/packages/app/src/context/global-sync/event-reducer.ts b/packages/app/src/context/global-sync/event-reducer.ts
+--- a/packages/app/src/context/global-sync/event-reducer.ts
++++ b/packages/app/src/context/global-sync/event-reducer.ts
+@@ -367,6 +367,17 @@
+       if (!parts) break
+       const result = Binary.search(parts, props.partID, (part) => part.id)
+       if (!result.found) break
++      // V1 工具参数与 text accumulator 分离，不能把 raw 片段写进 part 顶层或文字恢复缓存。
++      if (props.field === "raw") {
++        input.setStore("part", props.messageID, produce((draft) => {
++          const part = draft[result.index]
++          // 状态已经解析或终结时忽略迟到参数，保留当前 input 与工具终态。
++          if (part.type === "tool" && part.state.status === "pending")
++            part.state.raw += props.delta
++        }))
++        break
++      }
++
+       const field = props.field as keyof (typeof parts)[number]
+       const current = parts[result.index]?.[field]
+       input.setStore(
+diff --git a/packages/app/src/context/server-session.ts b/packages/app/src/context/server-session.ts
+--- a/packages/app/src/context/server-session.ts
++++ b/packages/app/src/context/server-session.ts
+@@ -1209,6 +1209,18 @@
+           carried?.delete(props.partID)
+           if (carried?.size === 0) load.carriedDeltaParts.delete(props.messageID)
+         }
++        // 保留上方 hydration 变化标记；raw 不参与仅适用于文字的 deltaBases/accumulator。
++        if (props.field === "raw") {
++          setData("part", props.messageID, produce((draft) => {
++            if (!draft) return
++            const part = draft[result.index]
++            // Server session 与 global reducer 使用同一 pending/raw 语义，终态不接受迟到片段。
++            if (part.type === "tool" && part.state.status === "pending")
++              part.state.raw += props.delta
++          }))
++          return
++        }
++
+         const field = props.field as keyof (typeof parts)[number]
+         const current = parts[result.index]?.[field]
+         if (!deltaBases.has(props.partID) && typeof current === "string")
