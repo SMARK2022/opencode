@@ -60,5 +60,5 @@ diff --git a/README.en.md b/README.en.md
 --- a/README.en.md
 +++ b/README.en.md
 @@ -105,1 +105,1 @@
--需要复用 VS Code 语言服务或使用 Notebook 工具时，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.42-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 会继续使用内置 LSP，但无法使用 VS Code-backed 语言能力或 Notebook 工具。
-+需要复用 VS Code 语言服务或使用 Notebook 工具时，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.44-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 会继续使用内置 LSP，但无法使用 VS Code-backed 语言能力或 Notebook 工具。
+-使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.42-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
++使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.44-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。

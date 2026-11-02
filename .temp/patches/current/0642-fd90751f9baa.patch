@@ -1342,6 +1342,18 @@ diff --git a/packages/core/src/session/goal-progress.ts b/packages/core/src/sess
      }
    }
    return { exploration, advancement }
+@@ -279,7 +287,10 @@
+     for (const part of message.content) {
+       if (part.type !== "tool" || part.state.status !== "completed") continue
+-      const metadata = part.state.structured
++      // Native后台通知也是已结算ToolPart；只有实际任务完成才提供共享探索身份。
++      const metadata = part.name === "task" && part.state.structured.state === "completed"
++        ? { ...part.state.structured, sessionId: part.state.structured.task_id }
++        : part.state.structured
+       // Bash 首段是稳定输出，后附耗时说明不能制造验证结果变化。
+       const output = part.state.content.flatMap((content) => content.type === "text" ? [content.text] : [])[0] ?? ""
+       parts.push({
+         type: "tool",
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index a4e69cf..059b921 100644
 --- a/packages/opencode/src/session/prompt.ts
@@ -1520,20 +1532,33 @@ index e16068a..ec012f1 100644
 diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 --- a/packages/core/src/tool/goal.ts
 +++ b/packages/core/src/tool/goal.ts
-@@ -15,9 +15,9 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
-     goal: Tool.make({
--      // 首轮必须能启动受阻审计；后续确认继续遵守真实turn与reason约束。
--      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked to start a blocker audit; a second consecutive call with the same trimmed reason in the next eligible Goal turn marks it blocked. The first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-+      // 共享持久消息边界约束两代工具；去掉分段措辞不放宽确认与用户授权。
-+      description: "Use operate read before changing any goal status. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked to start a blocker audit; a second consecutive call with the same trimmed reason after the next goal-continuation message arrives marks it blocked; a repeated call while answering the same message does not count. The first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. Optionally delegate an independent audit to a subagent with the task tool before confirming. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only after the user sends a new message, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
+@@ -17,12 +17,12 @@
+         "Read the current goal, or change its status.",
+         "",
+-        "Call with `operate: \"read\"` to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST read before changing any status — the tool rejects transitions without a prior read in the same Goal turn.",
++        "Call with `operate: \"read\"` to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST read before changing any status — the tool rejects transitions without a prior read of the current goal state.",
+         "",
+         "Call with `operate` and, when required, `reason` to change the goal:",
+         "- Use `operate: \"complete\"` with a `reason` only when the objective has actually been achieved and no required work remains.",
+-        "- Use `operate: \"blocked\"` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress, call `operate: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. Do not block merely because work is hard, uncertain, or incomplete.",
+-        "- Use `operate: \"active\"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.",
+-        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least two consecutive resumed goal turns, mark as `blocked` again.",
++        "- Use `operate: \"blocked\"` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress after that verification, optionally delegate an independent audit to a subagent with the task tool, then call `operate: \"blocked\"` again with the same trimmed reason after the next goal-continuation message arrives; a repeated call while answering the same message does not count. Do not block merely because the work is hard, uncertain, or incomplete.",
++        "- Use `operate: \"active\"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only after the user has sent a new message. You cannot resume a goal that was paused or terminated by the user.",
++        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed work as a fresh blocked audit: the same blocking condition must be verified again before marking `blocked`.",
+         "- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; use `operate: \"blocked\"`.",
+         "- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+         "- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
+@@ -32,7 +32,7 @@
        input: Schema.Struct({
          // 显式 read 消除空调用歧义；可信快照仍保存在 runner 提供的同一 turn 上。
          operate: Schema.Literals(["read", "complete", "blocked", "active"]).annotate({
--          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Use blocked to start a blocker audit; a second consecutive call in the next eligible Goal turn using the same trimmed reason marks it blocked; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
-+          description: "Use read before any transition. Use complete/blocked with reason, or active to resume after the user sends a new message. Use blocked to start a blocker audit; a second consecutive call after the next goal-continuation message arrives using the same trimmed reason marks it blocked; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
+-          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
++          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker after the next goal-continuation message arrives. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal after the user sends a new message.",
          }),
          reason: Schema.String.pipe(Schema.optional).annotate({
-@@ -66,12 +66,14 @@ const layer = Layer.effectDiscard(Effect.gen(function* () {
+            description: "Required when operate is `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `read` and `active`.",
+@@ -81,14 +81,16 @@
                    "1. Restate the exact blocker and the Goal requirement it prevents.",
                    "2. Re-read the most relevant files and inspect one adjacent producer, consumer, test, or configuration path that could change the conclusion.",
                    "3. Run one different search, test, or focused check, and split the blocker into a smaller verifiable question.",
@@ -1546,38 +1571,48 @@ diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
                  ].join("\n")
                : output.status === "active"
                  ? "Goal resumed to active. Continue working toward the objective."
--                : `Goal marked as ${output.status}: ${output.reason}. The session loop will end after this turn.`,
-+                : `Goal marked as ${output.status}: ${output.reason}.${output.status === "blocked" ? " The user can resume the goal later." : ""}`,
+-                : output.status === "blocked"
+-                  ? `Goal marked as blocked: ${output.reason}. The session loop will end after this turn. The user can resume the goal later.`
+-                  : `Goal marked as complete: ${output.reason}. The session loop will end after this turn.`,
++                : output.status === "blocked"
++                  ? `Goal marked as blocked: ${output.reason}. The user can resume the goal later.`
++                  : `Goal marked as complete: ${output.reason}.`,
        }],
      }),
    }).pipe(Effect.orDie)
 diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
 --- a/packages/core/src/session/runner/llm.ts
 +++ b/packages/core/src/session/runner/llm.ts
-@@ -232,7 +232,8 @@ const layer = Layer.effect(
+@@ -276,7 +276,8 @@ const layer = Layer.effect(
              if (Option.isSome(goal) && goal.value.status === "active") {
                yield* events.publish(SessionEvent.Synthetic, {
                  sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
 -                text: SessionGoal.continuationPrompt(goal.value, continuation.mode),
 +                // 本次发布后才递增；已发布八次时，下一条才是第九次长程督促。
 +                text: SessionGoal.continuationPrompt(goal.value, continuation.mode, continuation.turns >= 8),
-               })
-               continuation.turns++
-             }
-@@ -600,6 +601,17 @@ const layer = Layer.effect(
+                 // 候选模式和额度在 admission 时采样，发布成功后才递增本 drain 的计数。
+                 metadata: {
+                   goal_continuation: true,
+@@ -824,6 +825,23 @@ const layer = Layer.effect(
        yield* failInterruptedTools(input.sessionID)
        let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
        // frontier 仅属于本次 drain；新唤醒不继承旧运行的停滞或验证基线。
        const continuation: GoalContinuation = { turns: 0, progressLedger: SessionGoalProgress.createGoalProgressLedger(), progressGate: { noProgressTurns: 0, replanRequired: false } }
 +      // 仅显式恢复且没有待提升输入时补上下文；自动wake与未回答消息保留原入口。
-+      if (input.force && !promotion && (Config.latest(configuration, "goal_max_turns") ?? 32) > 0) {
++      const maxGoalTurns = Config.latest(configuration, "goal_max_turns") ?? 32
++      if (input.force && !promotion && maxGoalTurns > 0) {
 +        const session = yield* getSession(input.sessionID)
 +        const agent = yield* agents.select(session.agent)
 +        const goal = yield* goals.get(input.sessionID)
 +        if (!session.parentID && agent.id !== "decide" && Option.isSome(goal) && goal.value.status === "active") {
 +          const answered = yield* SessionHistory.goalTurnMessages(db, input.sessionID)
 +          // 采用原生eligible历史；显式revert.commit仍由其owner消费，不能吞掉新admission。
-+          if (answered.length > 0) continuation.goal = goal.value
++          if (answered.length > 0) continuation.goal = {
++            ...goal.value, maxTurns: maxGoalTurns,
++            // 使用既有可信pending回执采样展示快照，不把恢复当成又一次完成证据。
++            viewMode: answered.some(message => message.type === "assistant" && message.content.some(part => part.type === "tool" && part.name === "goal" && part.state.status === "completed" && part.state.structured.blockedAttempt !== undefined))
++              ? "block-check" : "continue",
++          }
 +        }
 +      }
        let shouldRun = input.force || hasSteer || hasQueue
@@ -1585,7 +1620,13 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -683,6 +683,8 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+@@ -754,4 +754,4 @@
+     yield* goals.accountUsage(sessionID, 234, 26, { goalID: revised.id, generation: revised.generation })
+     const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
+-    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with operate", "two consecutive eligible Goal turns", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
++    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with operate", "after the next goal-continuation message arrives", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
+     expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
+@@ -777,6 +777,8 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
      yield* session.resume(sessionID)
      // 已排队输入先提升；随后恰好两次合成续跑，预算仅记录，不提前截断。
      expect(requests).toHaveLength(4)
@@ -1594,7 +1635,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
      expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
      expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
      // queue 先提升；其后两个无证据完成才切策略，不能按 provider step 提前计轮。
-@@ -733,7 +735,10 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+@@ -835,7 +837,10 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
      requests.length = 0
      yield* session.resume(sessionID)
      // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
@@ -1605,7 +1646,27 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
      expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({
        status: "complete", generation: 1, reason: "Verified requested end state", tokensUsed: 15,
      })
-@@ -841,6 +846,10 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a new drain", () =>
+@@ -861,11 +866,17 @@
+     // 验证真正存入事件 data 的快照；重放不能依赖只存在于实时 envelope 的字段。
+     const recorded = yield* goalDatabase.db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)
++    // 两次显式恢复各自补一次上下文，独立drain均从turn=1开始；原两条快照仍原样保留。
++    const expectedContinuations = [
++      ...continuations.map(message => message.metadata),
++      { goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 2 },
++      { goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 2 },
++    ]
+     expect(recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1)).map(event => event.data.metadata))
+-      .toEqual(continuations.map(message => message.metadata))
++      .toEqual(expectedContinuations)
+     const replayed: SessionMessageUpdater.MemoryState = { messages: [] }
+     for (const event of recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1))) {
+       yield* SessionMessageUpdater.update(SessionMessageUpdater.memory(replayed), Schema.decodeUnknownSync(SessionEvent.Synthetic)({
+         id: event.id, type: SessionEvent.Synthetic.type, data: event.data,
+       }))
+     }
+-    expect(replayed.messages.map(message => message.metadata)).toEqual(continuations.map(message => message.metadata))
++    expect(replayed.messages.map(message => message.metadata)).toEqual(expectedContinuations)
+@@ -987,6 +998,10 @@ it.effect("defaults native goal continuation to 32 and resets the allowance on a new drain", () =>
      yield* session.resume(sessionID)
      // 首轮加32次续跑，到限暂停；恢复后由新用户输入开启下一轮额度。
      expect(requests).toHaveLength(33)
@@ -1616,6 +1677,27 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
      expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("paused")
      yield* goals.set(sessionID, { status: "active" })
      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue the goal" }), resume: false })
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -33,6 +33,17 @@
+   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
+   SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
+   expect(gate).toEqual({ noProgressTurns: 2, replanRequired: true })
++  // 背景运行通知不能冒充完成；真实Native task_id在完成后才成为去重身份。
++  expect(signal([tool("task-running", "task", {}, { task_id: "ses_child", state: "running", output: "running" })])).toEqual({ exploration: false, advancement: false })
++  const task = tool("task-completed", "task", {}, { task_id: "ses_child", state: "completed", output: "finished" })
++  const explored = signal([task])
++  expect(explored).toEqual({ exploration: true, advancement: false })
++  SessionGoalProgress.updateGoalProgressGate(gate, explored)
++  // 子代理文字并非主任务状态变化，同一子会话重复返回也不能解除replan锁定。
++  expect(gate).toEqual({ noProgressTurns: 0, replanRequired: true })
++  expect(signal([task])).toEqual({ exploration: false, advancement: false })
++  expect(signal([tool("task-other", "task", {}, { task_id: "ses_other", state: "completed", output: "finished" })])).toEqual({ exploration: true, advancement: false })
++  SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
+   const read = { canonicalPath: "/project/receipt.txt", size: 3, modifiedMs: 1, fp: "head-v1", start: 1, end: 1, stub: false }
+   const receipt = tool("read", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read })
+   const first = signal([receipt])
 diff --git a/packages/opencode/test/server/httpapi-goal.test.ts b/packages/opencode/test/server/httpapi-goal.test.ts
 index 1b94f9b..0928591 100644
 --- a/packages/opencode/test/server/httpapi-goal.test.ts

@@ -5,10 +5,10 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0=20VSCode=20?=
  =?UTF-8?q?=E7=AC=94=E8=AE=B0=E6=9C=AC=E6=8F=8F=E8=BF=B0=E5=92=8C=E7=BC=96?=
  =?UTF-8?q?=E8=BE=91=E9=80=BB=E8=BE=91=EF=BC=8C=E5=A2=9E=E5=BC=BA=E5=8D=95?=
 
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
 index 7ab5dab8eb..e3dddf9c38 100644
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
 @@ -4,9 +4,9 @@ export const VscodeNotebookDescriptions = {
    summary: [
      "Inspect a VS Code notebook and return a compact cell map.",
@@ -31,6 +31,15 @@ index 7ab5dab8eb..e3dddf9c38 100644
    ].join("\n"),
  
    env: [
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -98,3 +98,5 @@
+     const definitions = yield* toolDefinitions(registry)
+     expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
+     expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
++    expect(definitions.find(item => item.name === "vscode_notebook_summary")?.description).toContain("stable within the current session for existing cells")
++    expect(definitions.find(item => item.name === "vscode_notebook_edit")?.description).toContain("updated cell ID and shifted neighbor info")
 diff --git a/sdks/vscode/src/notebook/edit.ts b/sdks/vscode/src/notebook/edit.ts
 index 63d8dce48c..dac6c9a7fa 100644
 --- a/sdks/vscode/src/notebook/edit.ts

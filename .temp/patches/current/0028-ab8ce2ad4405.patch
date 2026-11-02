@@ -1654,8 +1654,8 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
        .register({
          [name]: Tool.make({
            // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
--          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
-+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
 @@ -136,14 +160,19 @@
            input: Input,
            output: Output,
@@ -1677,7 +1677,7 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
            ],
            execute: (input, context) =>
              Effect.gen(function* () {
-@@ -184,6 +213,13 @@
+@@ -184,9 +213,36 @@
                  return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
  
 +              // leaf 消费同一配置快照中的单次覆盖，全局 false 优先于单次 true，通用 store 不读取 Bash 开关。
@@ -1685,13 +1685,36 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 +              const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
 +              const diag = new BashDiagnosticCollector()
 +              const decoder = new TextDecoder()
++              const parts: string[] = []
++              let captured = 0
++              let cut = false
++              const observe = (text: string) => {
++                // 诊断先观察全流；淘汰仅影响有界正文，原文字节仍由同一capture保留。
++                diag.push(text)
++                if (!text) return
++                parts.push(text)
++                captured += Buffer.byteLength(text)
++                for (let first = parts[0]; captured > MAX_CAPTURE_BYTES && first !== undefined; first = parts[0]) {
++                  const bytes = Buffer.from(first)
++                  let start = Math.min(bytes.length, captured - MAX_CAPTURE_BYTES)
++                  // 从完整UTF-8字符开始展示，不能因窗口淘汰制造替换字符。
++                  while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start++
++                  captured -= start
++                  parts.shift()
++                  if (start < bytes.length) parts.unshift(bytes.subarray(start).toString("utf8"))
++                  cut = true
++                }
++              }
 +              const started = yield* Clock.currentTimeMillis
 +              const limits = yield* outputStore.limits()
                // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
-               const command = ChildProcess.make(input.command, [], {
+               const powershell = process.platform === "win32" && Shell.ps(shell)
+               // 与V1同样禁用PowerShell profile和交互；仍只创建一个命令并调用一次AppProcess.run。
+               const command = ChildProcess.make(powershell ? shell : input.command,
+                 powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", input.command] : [], {
                  cwd: target.canonical,
-                 shell,
-@@ -192,36 +228,71 @@
+                 shell: powershell ? false : shell,
+@@ -192,36 +248,59 @@
                  forceKillAfter: Duration.seconds(3),
                })
                const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
@@ -1704,55 +1727,56 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
                    timeout: Duration.millis(timeout),
                    maxOutputBytes: MAX_CAPTURE_BYTES,
 +                  // 写盘失败适配既有 AppProcessError 并保留 StorageError cause；解码仍跨字节块续接。
-+                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => diag.push(decoder.decode(chunk, { stream: true }))))),
++                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.decode(chunk, { stream: true }))))),
                  })
                  .pipe(
                    Effect.catchTag("AppProcessError", (error) =>
                      isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
                    ),
                  )
-+              diag.push(decoder.decode())
++              observe(decoder.decode())
 +              diag.end()
 +              const diagnostic = diag.snapshot()
 +              const durationMs = (yield* Clock.currentTimeMillis) - started
-               if (!result) {
-+                // 超时保留已经观察到的原始流，不声称终止后尚未输出的字节也存在。
-                 return {
-+                  retain: true,
-+                  value: {
-                   output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
-                   truncated: false,
-                   timeout: true,
-                   ...(warnings.length ? { warnings } : {}),
-+                  durationMs,
-+                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, visibleOutput: "" }) ].filter(Boolean).join("\n\n"),
-+                  diagnosticErrorLikeLines: diagnostic.errorLikeLines,
-+                  diagnosticWarningLikeLines: diagnostic.warningLikeLines,
-+                  diagnosticDiscardedChars: diagnostic.discardedChars,
-+                  },
-                 }
-               }
+-              if (!result) {
+-                return {
+-                  output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
+-                  truncated: false,
+-                  timeout: true,
+-                  ...(warnings.length ? { warnings } : {}),
+-                }
+-              }
  
-               const output = result.output?.toString("utf8") || "(no output)"
+-              const output = result.output?.toString("utf8") || "(no output)"
++              // 正常结束和超时共用正文与压缩；超时不伪造退出码，也不丢弃已观察的ready等普通行。
++              const text = parts.join("")
++              const output = text || "(no output)"
++              const truncated = cut || result?.outputTruncated === true
++              const outcome = result ? { exit: result.exitCode } : { timeout: true }
++              const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
 +              const compressed = compressVisibleOutput(output, { enabled })
 +              // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
-+              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: "" })
-+              const projected = [compressed.text, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ exit: result.exitCode, truncated: result.outputTruncated === true, output, contextOutput: "", warnings })
++              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "" })
++              const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
 +              // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
-+              const visible = !compressed.stats.applied && !result.outputTruncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
-+              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: visible })
-               const notice = result.outputTruncated
++              const visible = !compressed.stats.applied && !truncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
++              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible })
+-              const notice = result.outputTruncated
++              const notice = truncated
                  ? "[output capture truncated at the in-memory safety limit]"
                  : undefined
                return {
 +                // 采样损失即使未压缩也保留原文；压缩不能被混记成进程 capture 截断。
-+                retain: compressed.stats.applied || result.outputTruncated === true || diagnostic.discardedChars > 0,
++                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || diagnostic.discardedChars > 0,
 +                value: {
-                 exit: result.exitCode,
-                 output: notice ? `${output}\n\n${notice}` : output,
-+                contextOutput: [compressed.text, notice, appendix].filter(Boolean).join("\n\n"),
+-                exit: result.exitCode,
+-                output: notice ? `${output}\n\n${notice}` : output,
++                ...outcome,
++                output: [output, notice, timeoutNotice].filter(Boolean).join("\n\n"),
++                contextOutput: [compressed.text, notice, timeoutNotice, appendix].filter(Boolean).join("\n\n"),
                    // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
-                 truncated: result.outputTruncated === true,
+-                truncated: result.outputTruncated === true,
++                truncated,
 +                compression: bashCompressionMetadata(compressed.stats),
 +                durationMs,
 +                diagnosticErrorLikeLines: diagnostic.errorLikeLines,
@@ -1765,7 +1789,7 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
                // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
 -            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
 +            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }))),
-@@ -234,5 +305,5 @@
+@@ -234,5 +313,5 @@
  export const node = makeLocationNode({
    name: "tool/bash",
    layer,
@@ -1794,15 +1818,15 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
  import { SystemContext } from "@opencode-ai/core/system-context"
  import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
  import { location } from "./fixture/location"
-@@ -70,7 +73,11 @@
+@@ -70,8 +73,11 @@
        Effect.suspend(() => {
          if (command._tag !== "StandardCommand") throw new Error("expected standard command")
-         runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
+         // 显式PowerShell argv也记录原命令和实际可执行文件，同时保留完整argv供启动边界断言。
+         runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell, args: command.args, options })
 -        return runFailure ? Effect.fail(runFailure) : Effect.succeed(result)
 +        // 原有 process 替身必须履行新的观察回调契约，不能让 settlement 测试得到空原文。
-+        return runFailure ? Effect.fail(runFailure) :
-+          (options?.onOutput ? options.onOutput(result.output ?? result.stdout) : Effect.void).pipe(
-+            Effect.andThen(Effect.succeed(result)),
++        return (options?.onOutput ? options.onOutput(result.output ?? result.stdout) : Effect.void).pipe(
++            Effect.andThen(runFailure ? Effect.fail(runFailure) : Effect.succeed(result)),
 +          )
        }),
    } as unknown as AppProcess.Interface),
@@ -1851,7 +1875,37 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
                  },
                  content: [
                    { type: "text", text: "hello\n" },
-@@ -487,4 +508,201 @@
+@@ -477,18 +497,28 @@
+       (tmp) => {
+         reset()
++        result = { ...result, output: Buffer.from("ready\n") }
+         runFailure = new AppProcess.AppProcessError({ command: "sleep", cause: new Error("Timed out") })
+         return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "sleep 60", timeout: 10 }))).pipe(
+           Effect.andThen((settled) =>
+-            Effect.sync(() => {
++            Effect.gen(function* () {
++              const text = settled.output?.content.filter(part => part.type === "text").map(part => part.text).join("") ?? ""
++              expect(text).toContain("ready\n")
++              expect(text).toContain("Command exceeded timeout of 10 ms")
++              expect(text).toContain("Retry with a larger timeout")
+               expect(settled.output?.content[1]).toMatchObject({
+                 type: "text",
+                 text: expect.stringContaining("Command timed out"),
+               })
+               expect(settled.output?.structured).toMatchObject({
+                 timeout: true,
+                 truncated: false,
+               })
++              // 模型正文与唯一恢复文件同时保留已发生输出，不能只返回timeout标志。
++              expect(settled.outputPaths).toHaveLength(1)
++              const retained = settled.outputPaths?.[0]
++              if (!retained) throw new Error("expected retained timeout output")
++              expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe("ready\n")
+             }),
+           ),
+         )
+       },
+@@ -497,4 +527,230 @@
    )
 +
 +  it.live("retains raw Bash output through canonical settlement and bounds diagnostic frames", () =>
@@ -1859,6 +1913,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +      Effect.promise(() => tmpdir()),
 +      (tmp) => Effect.gen(function* () {
 +        // 同一测试观察真实 chunk、CRLF 跨块和末帧收尾，不用复制分帧算法当 oracle。
++        const executable = `${Shell.ps(Shell.acceptable()) ? "& " : ""}"${process.execPath}"`
 +        const diag = new BashDiagnosticCollector()
 +        for (let i = 0; i < 100; i++) diag.push("x".repeat(8192))
 +        diag.push("\r")
@@ -1924,7 +1979,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +        // 三种覆盖都经过 Core Bash、AppProcess 和 registry/store，不能只测试纯转换器。
 +        for (const mode of ["default", "parameter", "config"] as const) {
 +          reset()
-+          const command = `"${process.execPath}" -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(400))"`
++          const command = `${executable} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(400))"`
 +          yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
 +            const settled = yield* settleTool(registry, call({ command, ...(mode === "parameter" ? { compress_output: false } : {}) }))
 +            expect(settled.output?.structured).toMatchObject({ compression: { compressed: mode === "default" }, truncated: false })
@@ -1945,7 +2000,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +        }
 +        // 无 LF 的尾部超过 capture 上限，诊断仍看全流，磁盘原文不能只保存内存前缀。
 +        reset()
-+        const command = `"${process.execPath}" -e "process.stdout.write('x'.repeat(${BashTool.MAX_CAPTURE_BYTES + 8192})+'RAW-END')"`
++        const command = `${executable} -e "process.stdout.write('x'.repeat(${BashTool.MAX_CAPTURE_BYTES + 8192})+'RAW-END')"`
 +        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
 +          const settled = yield* settleTool(registry, call({ command, compress_output: false }))
 +          expect(settled.output?.structured).toMatchObject({ truncated: true, diagnosticDiscardedChars: BashTool.MAX_CAPTURE_BYTES + 8192 + 7 - 4096 })
@@ -1958,6 +2013,34 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +          const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
 +          expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
 +          expect(text).toContain("diagnostic sampling omitted")
++          expect(text).toContain("RAW-END")
++        }), LayerNode.compile(AppProcess.node))
++        // 淘汰穿过中文多字节字符时仍保留最终普通结果，不以raw文件代替模型可见性。
++        reset()
++        const unicode = "中".repeat(Math.ceil(BashTool.MAX_CAPTURE_BYTES / 3) + 100) + "终结-END"
++        const unicodeCommand = `${executable} -e "process.stdout.write('中'.repeat(${Math.ceil(BashTool.MAX_CAPTURE_BYTES / 3) + 100})+'终结-END')"`
++        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++          const settled = yield* settleTool(registry, call({ command: unicodeCommand, compress_output: false }))
++          const text = settled.output?.content.filter(part => part.type === "text").map(part => part.text).join("") ?? ""
++          expect(text).toContain("终结-END")
++          expect(text).not.toContain("\ufffd")
++          expect(settled.output?.structured).toMatchObject({ truncated: true })
++          const retained = settled.outputPaths?.[0]
++          if (!retained) throw new Error("expected retained UTF-8 output")
++          expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(unicode)
++        }), LayerNode.compile(AppProcess.node))
++        // 滚动窗口仍进入原压缩器，最终构建结果和压缩收益必须同时可见。
++        reset()
++        const repeated = "repeat payload with meaningful width\n".repeat(40000) + "BUILD-COMPLETE\n"
++        const repeatedCommand = `${executable} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(40000)+'BUILD-COMPLETE\\n')"`
++        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++          const settled = yield* settleTool(registry, call({ command: repeatedCommand }))
++          const text = settled.output?.content.filter(part => part.type === "text").map(part => part.text).join("") ?? ""
++          expect(text).toContain("BUILD-COMPLETE")
++          expect(settled.output?.structured).toMatchObject({ truncated: true, compression: { compressed: true } })
++          const retained = settled.outputPaths?.[0]
++          if (!retained) throw new Error("expected retained compressed tail")
++          expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(repeated)
 +        }), LayerNode.compile(AppProcess.node))
 +        // 正文恰好占满字节预算，中间错误会被最终状态与恢复标记挤出 head/tail。
 +        reset()
@@ -2005,7 +2088,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +            Effect.tapError((error) => Effect.sync(() => observed.push(error))),
 +          ) })
 +        })).pipe(Layer.provide(LayerNode.compile(AppProcess.node)))
-+        const failedCommand = `"${process.execPath}" -e "process.stdout.write('x'.repeat(${ToolOutputStore.MAX_BYTES + 1}))"`
++        const failedCommand = `${executable} -e "process.stdout.write('x'.repeat(${ToolOutputStore.MAX_BYTES + 1}))"`
 +        // 前面已发布的日志仍属于恢复数据，失败收尾只删除本次未发布文件。
 +        const directory = path.join(tmp.path, ToolOutputStore.MANAGED_DIRECTORY)
 +        const retainedBefore = yield* Effect.promise(() => fs.readdir(directory))
@@ -2053,7 +2136,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
  })
  
  test("keeps locked deferred parity TODOs visible", async () => {
-@@ -502,5 +720,6 @@
+@@ -502,5 +758,6 @@
      "Persist background job status and define restart recovery before exposing remote observation.",
      "Revisit process-group cleanup and platform coverage with shell-specific tests if current AppProcess semantics do not fully cover it.",
      "Revisit binary output handling if stdout/stderr decoding is text-only.",

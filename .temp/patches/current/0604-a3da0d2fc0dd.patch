@@ -899,15 +899,6 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 -      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
 +      // 压缩器不再依赖command，执行与授权仍使用未改动原文。
 +      const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput })
-@@ -762,1 +762,1 @@
--      if (!file && (end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
-+      if (!file && (end.cut || compressed.text !== raw || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
-@@ -801,1 +801,1 @@
--      if (file && !cut && (compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
-+      if (file && !cut && (compressed.text !== raw || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
-@@ -849,1 +849,1 @@
--          ...((cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
-+          ...((cut || compressed.text !== raw || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
 @@ -875,5 +875,7 @@
            ? [
                "Shell output compression follows the user's default and is strongly recommended for normal commands; repetitive output, oversized lines, and terminal progress noise may be compacted.",
@@ -925,8 +916,8 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 +    // 图例服从同一用户配置，只在启用呈现压缩时向模型解释harness标记。
 +    const compressionEnabled = Object.assign({}, ...(yield* config.entries()).flatMap((entry) => entry.type === "document" ? [entry.info] : [])).tool_output?.bash_compression ?? true
 @@ -169,1 +171,2 @@
--          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
-+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.` +
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.` +
 +            (compressionEnabled ? " Short harness markers may appear inside compressed output; the command did not print them: `[... same line Nx]`, `[... repeated block Nx]`, `[... template repeated Nx]`, `[... progress N frames->final]`, `[... high-entropy <kind> <size>B head=...]` (oversized base64/JWT/hash lines), `[redacted ...]` (detected secrets; a short head is kept for identification). First occurrences and error lines are preserved; omitted content is intentionally dropped, not a failure to investigate." : ""),
 @@ -336,2 +339,2 @@
 -              // 传真实调用 command，不使用描述或重新解析执行命令。
@@ -1049,8 +1040,8 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +          ["redaction-only", sensitive, "sk-abcd…[redacted api-key]"],
 +          ["terminal-redaction", decoratedSecret, "sk-abcd…[redacted api-key]"],
 +          ["crossline-redaction", crossline, "abcdefg…[redacted]"],
-           ["clixml-low-savings", ordinaryClixml, ordinaryDecoded.text],
--          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "<high-entropy powershell-clixml>ordinary</high-entropy>"],
+           ["clixml-low-savings", ordinaryClixml, plainClixml ? ordinary : ordinaryDecoded.text],
+-          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', plainClixml ? "ordinary" : "<high-entropy powershell-clixml>ordinary</high-entropy>"],
 +          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "ordinary"],
          ]) {
 -          // 禁用适配器或收益拒绝仍走同一入口，不用私有适配函数作为测试 oracle。
@@ -1074,8 +1065,8 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 -            if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionSecretsRedacted: 1 } })
 +            if (command === "redaction-only" || command === "crossline-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
              if (command === "terminal-redaction") expect(settled.output?.structured).toMatchObject({ compression: { compressed: true, compressionSecretsRedacted: 1 } })
--            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
-+            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: 39, compressionCompressedBytes: 8, compressionSavedBytes: 0 } })
+-            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: plainClixml ? { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: 8, compressionCompressedBytes: 8, compressionSavedBytes: 0 } : { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
++            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: plainClixml ? 8 : 39, compressionCompressedBytes: 8, compressionSavedBytes: 0 } })
              if (command === "docker build .") {
 -              // 不用adapter计算预期值，直接指定步骤摘要与失败详情的归属。
 -              expect(text).toContain("#2 compile: FAILED")
@@ -1119,13 +1110,13 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
 --- a/packages/opencode/test/tool/bash-compress.test.ts
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
-@@ -1,5 +1,5 @@
- import { describe, expect, test } from "bun:test"
--import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern } from "@opencode-ai/core/tool/bash-compress"
-+import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
- 
- // #129：CLIXML 纯块解码与混合块保留
- describe("tool.bash-compress", () => {
+@@ -25,5 +25,5 @@
+     failure.end()
+     const diagnosed = renderDiagnosticAppendix(failure.snapshot(), { durationMs: 3_000, exitCode: 9, visibleOutput: "tail" })
+-    expect(diagnosed).toContain("<bash_high_signal_excerpt>")
++    expect(diagnosed).toContain('<opencode_excerpt type="shell_high_signal"')
+     expect(formatExitNotice(9, false)).toContain('reason="exit" exit_code="9"')
+   })
 @@ -75,7 +75,10 @@ describe("tool.bash-compress", () => {
      const result = compressVisibleOutput(clixml)
  

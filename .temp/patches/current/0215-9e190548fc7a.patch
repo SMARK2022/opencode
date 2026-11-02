@@ -332,7 +332,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
                },
              })
            }
-@@ -846,7 +848,8 @@ export const ShellTool = Tool.define(
+@@ -681,7 +683,8 @@ export const ShellTool = Tool.define(
        return {
          title: input.command,
          metadata: {
@@ -341,7 +341,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 +          output: displayed ? preview(display.value()) : preview(output),
            exit: code,
            truncated: cut,
-           ...((cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+           ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
 --- a/packages/opencode/test/tool/bash-compress.test.ts
 +++ b/packages/opencode/test/tool/bash-compress.test.ts

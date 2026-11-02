@@ -1,3 +1,383 @@
+diff --git a/packages/client/src/generated/client.ts b/packages/client/src/generated/client.ts
+--- a/packages/client/src/generated/client.ts
++++ b/packages/client/src/generated/client.ts
+@@ -428,7 +428,7 @@
+             method: "POST",
+             path: `/api/session/${encodeURIComponent(input.sessionID)}/compact`,
+             successStatus: 204,
+-            declaredStatuses: [404, 503, 400, 401],
++            declaredStatuses: [409, 404, 503, 400, 401],
+             empty: true,
+           },
+           requestOptions,
+@@ -451,7 +451,7 @@
+             path: `/api/session/${encodeURIComponent(input.sessionID)}/revert/stage`,
+             body: { messageID: input["messageID"], files: input["files"] },
+             successStatus: 200,
+-            declaredStatuses: [404, 500, 400, 401],
++            declaredStatuses: [409, 404, 500, 400, 401],
+             empty: false,
+           },
+           requestOptions,
+@@ -462,7 +462,7 @@
+             method: "POST",
+             path: `/api/session/${encodeURIComponent(input.sessionID)}/revert/clear`,
+             successStatus: 204,
+-            declaredStatuses: [404, 500, 400, 401],
++            declaredStatuses: [409, 404, 500, 400, 401],
+             empty: true,
+           },
+           requestOptions,
+@@ -473,7 +473,7 @@
+             method: "POST",
+             path: `/api/session/${encodeURIComponent(input.sessionID)}/revert/commit`,
+             successStatus: 204,
+-            declaredStatuses: [404, 400, 401],
++            declaredStatuses: [409, 404, 400, 401],
+             empty: true,
+           },
+           requestOptions,
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -100,6 +100,10 @@
+ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Session.NotFoundError", {
+   sessionID: SessionSchema.ID,
+ }) {}
+ 
++export class BusyError extends Schema.TaggedErrorClass<BusyError>()("Session.BusyError", {
++  sessionID: SessionSchema.ID,
++}) {}
++
+ export class OperationUnavailableError extends Schema.TaggedErrorClass<OperationUnavailableError>()(
+   "Session.OperationUnavailableError",
+@@ -120 +124 @@
+-export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError
++export type Error = NotFoundError | MessageDecodeError | OperationUnavailableError | PromptConflictError | BusyError
+@@ -163 +167 @@
+-  }) => Effect.Effect<SessionInput.Admitted, NotFoundError | PromptConflictError>
++  }) => Effect.Effect<SessionInput.Admitted, NotFoundError | PromptConflictError | BusyError>
+@@ -176 +180 @@
+-  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
++  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
+@@ -179 +183 @@
+-  readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
++  readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | SessionRunner.RunError | BusyError>
+@@ -186,3 +190,3 @@
+-    }) => Effect.Effect<Revert.State, NotFoundError | MessageNotFoundError | Snapshot.Error>
+-    readonly clear: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | Snapshot.Error>
+-    readonly commit: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
++    }) => Effect.Effect<Revert.State, NotFoundError | MessageNotFoundError | Snapshot.Error | BusyError>
++    readonly clear: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | Snapshot.Error | BusyError>
++    readonly commit: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError | BusyError>
+@@ -217 +221,18 @@
++    // 占用与Session服务同为进程级；普通运行中的steer/queue仍可入箱。
++    const reverting = new Set<SessionSchema.ID>()
++    const assertNotReverting = (sessionID: SessionSchema.ID) => Effect.suspend(() =>
++      reverting.has(sessionID) ? new BusyError({ sessionID }) : Effect.void,
++    )
++    // 获取失败不释放别人的占用，文件恢复、失败和取消共用同一释放边界。
++    const withRevert = <A, E, R>(sessionID: SessionSchema.ID, use: Effect.Effect<A, E, R>) =>
++      Effect.acquireUseRelease(
++        Effect.gen(function* () {
++          const active = yield* execution.active
++          if (active.has(sessionID) || reverting.has(sessionID)) return yield* new BusyError({ sessionID })
++          reverting.add(sessionID)
++        }),
++        () => use,
++        () => Effect.sync(() => { reverting.delete(sessionID) }),
++      )
++
+     const result = Service.of({
+@@ -407,3 +428,5 @@
+             yield* result.get(input.sessionID)
++            // 必须在durable admission之前拒绝撤回冲突，不能先写入再假称失败。
++            yield* assertNotReverting(input.sessionID)
+             const prompt = resolvePrompt(input.prompt)
+             const messageID = input.id ?? SessionMessage.ID.create()
+@@ -461,3 +484,4 @@
+       compact: Effect.fn("V2Session.compact")(function* (input) {
+         yield* result.get(input.sessionID)
++        yield* assertNotReverting(input.sessionID)
+         // 维护意图经过同一进程级所有权和 Location 路由，不能直接启动第二个 runner。
+@@ -471,3 +495,4 @@
+       resume: Effect.fn("V2Session.resume")(function* (sessionID) {
+         yield* result.get(sessionID)
++        yield* assertNotReverting(sessionID)
+         yield* execution.resume(sessionID)
+@@ -478,21 +503,27 @@
+       revert: {
+-        stage: Effect.fn("V2Session.revert.stage")(function* (input) {
+-          const session = yield* result.get(input.sessionID)
+-          return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
+-            Effect.provideService(Database.Service, database),
+-            Effect.provideService(EventV2.Service, events),
+-            Effect.provide(locations.get(session.location)),
+-          )
+-        }),
+-        clear: Effect.fn("V2Session.revert.clear")(function* (sessionID) {
+-          const session = yield* result.get(sessionID)
+-          yield* SessionRevert.clear(session).pipe(
+-            Effect.provideService(EventV2.Service, events),
+-            Effect.provide(locations.get(session.location)),
+-          )
+-        }),
+-        commit: Effect.fn("V2Session.revert.commit")(function* (sessionID) {
+-          const session = yield* result.get(sessionID)
+-          yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
+-        }),
++        stage: Effect.fn("V2Session.revert.stage")((input) =>
++          withRevert(input.sessionID, Effect.gen(function* () {
++            const session = yield* result.get(input.sessionID)
++            return yield* SessionRevert.stage({ session, messageID: input.messageID, files: input.files }).pipe(
++              Effect.provideService(Database.Service, database),
++              Effect.provideService(EventV2.Service, events),
++              Effect.provide(locations.get(session.location)),
++            )
++          })),
++        ),
++        clear: Effect.fn("V2Session.revert.clear")((sessionID) =>
++          withRevert(sessionID, Effect.gen(function* () {
++            const session = yield* result.get(sessionID)
++            yield* SessionRevert.clear(session).pipe(
++              Effect.provideService(EventV2.Service, events),
++              Effect.provide(locations.get(session.location)),
++            )
++          })),
++        ),
++        commit: Effect.fn("V2Session.revert.commit")((sessionID) =>
++          withRevert(sessionID, Effect.gen(function* () {
++            const session = yield* result.get(sessionID)
++            yield* SessionRevert.commit(session).pipe(Effect.provideService(EventV2.Service, events))
++          })),
++        ),
+       },
+diff --git a/packages/core/src/git.ts b/packages/core/src/git.ts
+--- a/packages/core/src/git.ts
++++ b/packages/core/src/git.ts
+@@ -690,28 +690,47 @@
+     const restore = Effect.fn("Git.tree.restore")(
+       (input: { repository: Repository; files: ReadonlyMap<RelativePath, TreeID> }) =>
+         locked(
+           input.repository,
+-          Effect.forEach(
+-            input.files,
+-            ([file, tree]) =>
+-              Effect.gen(function* () {
+-                if (yield* entry(input.repository, tree, file)) {
+-                  yield* repositoryOperation("restore", input.repository, ["checkout", tree, "--", file])
+-                  return
+-                }
+-                yield* fs.remove(path.join(input.repository.worktree, file), { recursive: true, force: true }).pipe(
+-                  Effect.mapError(
+-                    (cause) =>
+-                      new OperationError({
+-                        operation: "restore",
+-                        directory: input.repository.worktree,
+-                        message: `Failed to remove ${file}`,
+-                        cause,
+-                      }),
+-                  ),
+-                )
+-              }),
+-            { discard: true },
+-          ),
++          Effect.gen(function* () {
++            // 只合并相邻同树且不互相包含的路径，保留文件/目录互换顺序和100项上限。
++            const batches: [readonly [RelativePath, TreeID], ...Array<readonly [RelativePath, TreeID]>][] = []
++            for (const next of input.files) {
++              const previous = batches.at(-1)
++              if (previous && previous.length < 100 && previous.every(([file, tree]) => tree === next[1] && !file.startsWith(`${next[0]}/`) && !next[0].startsWith(`${file}/`))) {
++                previous.push(next)
++                continue
++              }
++              batches.push([next])
++            }
++            yield* Effect.forEach(
++              batches,
++              (batch) => Effect.gen(function* () {
++                // 复用原Git owner及repository参数；成功时省去逐文件ls-tree。
++                if (batch.length > 1 && (yield* repositoryOperation("restore", input.repository, ["checkout", batch[0][1], "--", ...batch.map(([file]) => file)]).pipe(Effect.match({ onFailure: () => false, onSuccess: () => true })))) return
++                // 缺失路径或checkout失败仍沿原存在性检查、恢复与删除语义，不掩盖最终错误。
++                yield* Effect.forEach(
++                  batch,
++                  ([file, tree]) => Effect.gen(function* () {
++                    if (yield* entry(input.repository, tree, file)) {
++                      yield* repositoryOperation("restore", input.repository, ["checkout", tree, "--", file])
++                      return
++                    }
++                    yield* fs.remove(path.join(input.repository.worktree, file), { recursive: true, force: true }).pipe(
++                      Effect.mapError(
++                        (cause) => new OperationError({
++                          operation: "restore",
++                          directory: input.repository.worktree,
++                          message: `Failed to remove ${file}`,
++                          cause,
++                        }),
++                      ),
++                    )
++                  }),
++                  { discard: true },
++                )
++              }),
++              { discard: true },
++            )
++          }),
+         ),
+     )
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -256 +256 @@
+-        error: [SessionNotFoundError, ServiceUnavailableError],
++        error: [ConflictError, SessionNotFoundError, ServiceUnavailableError],
+@@ -287 +287 @@
+-        error: [MessageNotFoundError, SessionNotFoundError, UnknownError],
++        error: [ConflictError, MessageNotFoundError, SessionNotFoundError, UnknownError],
+@@ -302 +302 @@
+-        error: [SessionNotFoundError, UnknownError],
++        error: [ConflictError, SessionNotFoundError, UnknownError],
+@@ -311 +311 @@
+-        error: SessionNotFoundError,
++        error: [ConflictError, SessionNotFoundError],
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -199,2 +199,5 @@
+                 ),
++                // 撤回冲突与已有durable ID冲突共用公开409合同，不变成隐藏成功。
++                Effect.catchTag("Session.BusyError", (error) =>
++                  new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
+               ),
+@@ -210,3 +213,5 @@
+-              error instanceof SessionV2.NotFoundError
++              error instanceof SessionV2.BusyError
++                ? new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })
++                : error instanceof SessionV2.NotFoundError
+                 ? new SessionNotFoundError({ sessionID: error.sessionID, message: `Session not found: ${error.sessionID}` })
+                 : new ServiceUnavailableError({ message: error.message, service: "session.compact" }),
+@@ -247,2 +252,4 @@
+               Effect.catchTag(
++                "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
++              Effect.catchTag(
+                 "Session.NotFoundError",
+@@ -285,2 +292,4 @@
+             Effect.catchTag(
++              "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
++            Effect.catchTag(
+               "Session.NotFoundError",
+@@ -314,2 +323,4 @@
+             Effect.catchTag(
++              "Session.BusyError", (error) => new ConflictError({ message: `Session is busy: ${error.sessionID}`, resource: error.sessionID })),
++            Effect.catchTag(
+               "Session.NotFoundError",
+diff --git a/packages/core/test/session-prompt.test.ts b/packages/core/test/session-prompt.test.ts
+--- a/packages/core/test/session-prompt.test.ts
++++ b/packages/core/test/session-prompt.test.ts
+@@ -1,3 +1,3 @@
+ import { describe, expect } from "bun:test"
+-import { DateTime, Effect, Fiber, Layer, Stream } from "effect"
++import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Stream } from "effect"
+ import { eq } from "drizzle-orm"
+@@ -20 +20,4 @@
+ import { SessionStore } from "@opencode-ai/core/session/store"
++import { Location } from "@opencode-ai/core/location"
++import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
++import type { LocationServices } from "@opencode-ai/core/location-services"
+@@ -26 +29,13 @@
+ const activeSessions = new Set<SessionV2.ID>()
++let restoreStarted: Deferred.Deferred<void> | undefined
++let restoreGate: Deferred.Deferred<void> | undefined
++const restoreFailure = new Error("fixture restore failed")
++const locations = Layer.effect(
++  LocationServiceMap.Service,
++  LayerMap.make((_ref: Location.Ref) => Layer.unwrap<LocationServices, never, never, never, never>(Effect.gen(function* () {
++    // 仅阻塞和失败Location构建，不加载生产Provider/MCP/文件恢复服务。
++    if (restoreStarted) yield* Deferred.succeed(restoreStarted, undefined)
++    if (restoreGate) yield* Deferred.await(restoreGate)
++    return yield* Effect.die(restoreFailure)
++  }))),
++)
+@@ -48 +63 @@
+-    [[SessionExecution.node, execution]],
++    [[SessionExecution.node, execution], [LocationServiceMap.node, locations]],
+@@ -101 +116,36 @@
+ describe("SessionV2.prompt", () => {
++  it.effect("guards native revert and releases admission after failure", () => Effect.gen(function* () {
++    yield* setup
++    const session = yield* SessionV2.Service
++    yield* Effect.addFinalizer(() => Effect.sync(() => { activeSessions.clear(); restoreStarted = undefined; restoreGate = undefined }))
++    activeSessions.add(sessionID)
++    expect(yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* session.revert.clear(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    // 正常执行期间仍允许durable steer/queue，不把busy误当成reverting。
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "steer while running" }), resume: false })
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "queue while running" }), delivery: "queue", resume: false })
++    activeSessions.clear()
++    restoreStarted = yield* Deferred.make<void>()
++    restoreGate = yield* Deferred.make<void>()
++    const reverting = yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.exit, Effect.forkScoped)
++    yield* Deferred.await(restoreStarted)
++    const before = yield* admittedCount
++    // 占用存在时拒绝提交和第二次撤回；失败获取不能清除第一个操作的占用。
++    expect(yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "blocked" }), resume: false }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* admittedCount).toBe(before)
++    expect(yield* session.revert.stage({ sessionID, messageID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* session.revert.clear(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* session.revert.commit(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    expect(yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "still blocked" }), resume: false }).pipe(Effect.flip)).toBeInstanceOf(SessionV2.BusyError)
++    yield* Deferred.succeed(restoreGate, undefined)
++    const failure = yield* Fiber.join(reverting)
++    expect(Exit.isFailure(failure)).toBe(true)
++    if (Exit.isFailure(failure)) expect(Cause.squash(failure.cause)).toBe(restoreFailure)
++    // 真失败之后原Cause不变且占用已释放；无撤回状态的commit早退同样释放。
++    yield* session.revert.commit(sessionID)
++    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "after failure" }), resume: false })
++    expect(yield* admittedCount).toBe(before + 1)
++  }))
++
+diff --git a/packages/core/test/git.test.ts b/packages/core/test/git.test.ts
+--- a/packages/core/test/git.test.ts
++++ b/packages/core/test/git.test.ts
+@@ -123,3 +123,4 @@
+         await fs.writeFile(path.join(root.path, "scope", "tracked.txt"), "one\n")
++        await fs.writeFile(path.join(root.path, "scope", "second.txt"), "second one\n")
+         await fs.writeFile(path.join(root.path, "outside.txt"), "outside\n")
+         await $`git add .`.cwd(root.path).quiet()
+@@ -137,3 +138,4 @@
+         await fs.writeFile(path.join(root.path, "scope", "tracked.txt"), "two\n")
++        await fs.writeFile(path.join(root.path, "scope", "second.txt"), "second two\n")
+         await fs.writeFile(path.join(root.path, "scope", "added.txt"), "added\n")
+         await fs.writeFile(path.join(root.path, "outside.txt"), "changed outside\n")
+@@ -145,3 +147,4 @@
+         RelativePath.make("scope/added.txt"),
++        RelativePath.make("scope/second.txt"),
+         RelativePath.make("scope/tracked.txt"),
+       ])
+@@ -150,12 +153,18 @@
+         [RelativePath.make("scope/added.txt"), "added"],
++        [RelativePath.make("scope/second.txt"), "modified"],
+         [RelativePath.make("scope/tracked.txt"), "modified"],
+       ])
+ 
+-      const files = new Map([[RelativePath.make("scope/tracked.txt"), before]])
++      // 同树两个已存在文件使用批量恢复，范围外文件和新增文件仍保持当前值。
++      const files = new Map([[RelativePath.make("scope/tracked.txt"), before], [RelativePath.make("scope/second.txt"), before]])
+       const preview = yield* git.tree.preview({ repository, current: after, files, context: 1 })
+-      expect(preview).toHaveLength(1)
+-      expect(preview[0]?.path).toBe(RelativePath.make("scope/tracked.txt"))
++      expect(preview).toHaveLength(2)
++      expect(preview.map(file => file.path)).toEqual([RelativePath.make("scope/second.txt"), RelativePath.make("scope/tracked.txt")])
+       yield* git.tree.restore({ repository, files })
+       expect(yield* read(path.join(root.path, "scope", "tracked.txt"))).toBe("one\n")
++      expect(yield* read(path.join(root.path, "scope", "second.txt"))).toBe("second one\n")
+       expect(yield* read(path.join(root.path, "scope", "added.txt"))).toBe("added\n")
+       expect(yield* read(path.join(root.path, "outside.txt"))).toBe("changed outside\n")
++      // 缺失路径使快径失败后继续原逐文件路径，只删除snapshot中不存在的文件。
++      yield* git.tree.restore({ repository, files: new Map([[RelativePath.make("scope/second.txt"), before], [RelativePath.make("scope/added.txt"), before]]) })
++      expect(yield* Effect.promise(() => Bun.file(path.join(root.path, "scope", "added.txt")).exists())).toBe(false)
 diff --git a/docs/revert-performance-retry-plan.md b/docs/revert-performance-retry-plan.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..e0a7e880da2b2d0c278df2145d1b3bc904c86db2

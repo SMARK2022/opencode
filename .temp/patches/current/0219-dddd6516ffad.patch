@@ -8,10 +8,10 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
+diff --git a/packages/core/src/ide/vscode-bridge.ts b/packages/core/src/ide/vscode-bridge.ts
 index 4fd2720357..e924b05e41 100644
---- a/packages/opencode/src/ide/vscode-bridge.ts
-+++ b/packages/opencode/src/ide/vscode-bridge.ts
+--- a/packages/core/src/ide/vscode-bridge.ts
++++ b/packages/core/src/ide/vscode-bridge.ts
 @@ -18,6 +18,23 @@ const DEFAULT_HEARTBEAT_TRUST_MS = 10_000
  // 解析缓存 5 秒：避免频繁扫描锁文件目录
  const RESOLVE_CACHE_MS = 5_000
@@ -316,6 +316,17 @@ index f500ab2a2d..9ea07ec70e 100644
    })
  })
  
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -83,4 +83,5 @@
+   )
+-  yield* Effect.promise(() => fs.writeFile(path.join(directory, "fixture.json"), JSON.stringify({
+-    schema: 1, id: "fixture", pid: process.pid, host: "127.0.0.1", port: server.port, token: "fixture-token",
++  // 原生fixture也使用扩展实际发布的UUID清单，不为测试另开非清单发现路径。
++  yield* Effect.promise(() => fs.writeFile(path.join(directory, "11111111-1111-1111-1111-111111111111.json"), JSON.stringify({
++    schema: 1, id: "11111111-1111-1111-1111-111111111111", pid: process.pid, host: "127.0.0.1", port: server.port, token: "fixture-token",
+     transport: "http", ideKind: "vscode", ideName: "fixture", createdAt: Date.now(), updatedAt: Date.now(),
 diff --git a/sdks/vscode/src/bridge-registry.ts b/sdks/vscode/src/bridge-registry.ts
 index 00432b4350..4d0fbf231e 100644
 --- a/sdks/vscode/src/bridge-registry.ts

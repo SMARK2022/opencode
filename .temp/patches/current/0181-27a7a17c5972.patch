@@ -55,7 +55,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      lines.push(...renderGroupDetails(groups, options))
      if (by === "source") {
        lines.push("Input components by source")
-       for (const group of limitRows(groups, options.limit)) {
+       for (const group of topGroups(groups, options)) {
          lines.push(`  ${group.label || group.id} ${Object.entries(group.components).map(([key, value]) => `${key}=${formatNumber(value)}`).join(" ")}`)
        }
      }
@@ -78,13 +78,13 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +
 +// #181：把 UsageGroup 列表收成 top-N 行
 +// #181：limit 后的分组投影，供顶表复用
-+const topGroups = (groups: StatsReport["models"], limit: number) =>
-+  limitRows(groups, limit).map((g) => ({
++const dashboardTopRows = (groups: StatsReport["models"], limit: number) =>
++  topGroups(groups, { limit, sort: "tokens" }).map((g) => ({
 +    id: g.id,
 +    label: g.label || g.id,
 +    tokens: g.tokens.total,
 +    cost: g.cost,
-+    calls: g.assistantCalls || g.requests,
++    calls: g.assistantCalls,
 +  }))
 +
 +// #181：响应式顶表：指标固定，趋势列随终端宽度伸缩/折叠
@@ -101,7 +101,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 +    // #181：内容宽取自 tip charts 统一口径
 +  const content = statsContentWidth()
 +    // #181：空表仍保留标题，避免布局塌陷误判
-+  const rows = topGroups(groups, options.limit ?? 5)
++  const rows = dashboardTopRows(groups, options.limit ?? 5)
 +  if (rows.length === 0) return [`▸ ${title}`, "  (empty)"]
 +    // #181：share 分母至少为 1，避免 NaN%
 +  const totalTokens = Math.max(1, globalTokenTotal)

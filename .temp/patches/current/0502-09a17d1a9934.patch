@@ -1001,6 +1001,91 @@ new file mode 100644
 +
 +The independent full-scope implementation audit approved the current R3 diff;
 +the task is verified and eligible for the explicitly requested commit.
+diff --git a/packages/llm/src/protocols/openai-chat.ts b/packages/llm/src/protocols/openai-chat.ts
+--- a/packages/llm/src/protocols/openai-chat.ts
++++ b/packages/llm/src/protocols/openai-chat.ts
+@@ -286,9 +286,23 @@ const lowerToolMessages = Effect.fn("OpenAIChat.lowerToolMessages")(function* (message: OpenAIChatRequestMessage) {
+   return { messages, images }
+ })
+ 
+-const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (message: OpenAIChatRequestMessage) {
++const lowerMessage = Effect.fn("OpenAIChat.lowerMessage")(function* (message: OpenAIChatRequestMessage, requiresReasoning: boolean) {
+   if (message.role === "user") return [yield* lowerUserMessage(message)]
+-  if (message.role === "assistant") return [yield* lowerAssistantMessage(message)]
++  if (message.role === "assistant") {
++    // 只在 Chat 降级处筛空 reasoning；其它协议仍可重放空文本携带的签名或加密元数据。
++    const content = message.content.filter((part) => {
++      if (part.type === "text") return part.text !== ""
++      if (part.type === "reasoning") return part.text.trim().length > 0
++      return true
++    })
++    // Kimi retry 的空壳整条移除，Tool call 和非空原文仍按既有协议降级。
++    if (content.length === 0) return []
++    const lowered = yield* lowerAssistantMessage({ ...message, content })
++    // DeepSeek 的必填空字段在过滤之后补回，不能重新生成已丢弃的空消息。
++    return [requiresReasoning && lowered.reasoning_content === undefined
++      ? { ...lowered, reasoning_content: "" }
++      : lowered]
++  }
+   return (yield* lowerToolMessages(message)).messages
+ })
+ 
+@@ -326,7 +340,7 @@ const lowerMessages = Effect.fn("OpenAIChat.lowerMessages")(function* (request: LLMRequest) {
+       continue
+     }
+     flushImages()
+-    messages.push(...(yield* lowerMessage(message)))
++    messages.push(...(yield* lowerMessage(message, request.model.id.toLowerCase().includes("deepseek"))))
+   }
+   flushImages()
+   return messages
+diff --git a/packages/llm/test/provider/openai-chat.test.ts b/packages/llm/test/provider/openai-chat.test.ts
+--- a/packages/llm/test/provider/openai-chat.test.ts
++++ b/packages/llm/test/provider/openai-chat.test.ts
+@@ -80,15 +80,41 @@ describe("OpenAI Chat route", () => {
+         LLM.request({
+           model,
+           messages: [
++            // retry 空块含纯空白都不形成 wire 消息；trim 仅判空，不改变有效原文。
++            Message.assistant([{ type: "reasoning", text: "" }]),
++            Message.assistant([{ type: "reasoning", text: " \n\t " }]),
+             Message.assistant([
+-              { type: "reasoning", text: "thinking" },
++              { type: "reasoning", text: "  thinking  " },
+               { type: "text", text: "Hello" },
+             ]),
++            Message.assistant([{ type: "reasoning", text: "" }, { type: "text", text: "Answer" }]),
++            Message.assistant([{ type: "reasoning", text: "" },
++              ToolCallPart.make({ id: "call_502", name: "read", input: { filePath: "a.ts" } })]),
+           ],
+         }),
+       )
+ 
+-      expect(prepared.body.messages).toEqual([{ role: "assistant", content: "Hello", reasoning_content: "thinking" }])
++      expect(prepared.body.messages).toEqual([
++        { role: "assistant", content: "Hello", reasoning_content: "  thinking  " },
++        { role: "assistant", content: "Answer" },
++        { role: "assistant", content: null, tool_calls: [{ id: "call_502", type: "function",
++          function: { name: "read", arguments: '{"filePath":"a.ts"}' } }] },
++      ])
++      // 复用真实 prepare 校验 DeepSeek：先删除空消息，再为有内容的助手补必填字段。
++      const deepseek = yield* LLMClient.prepare<OpenAIChat.OpenAIChatBody>(LLM.request({
++        model: model.route.model({ id: "deepseek-reasoner" }),
++        messages: [
++          Message.assistant([{ type: "reasoning", text: "" }]),
++          Message.assistant("Answer"),
++          Message.assistant([{ type: "reasoning", text: "  thinking  " },
++            ToolCallPart.make({ id: "call_503", name: "read", input: {} })]),
++        ],
++      }))
++      expect(deepseek.body.messages).toEqual([
++        { role: "assistant", content: "Answer", reasoning_content: "" },
++        { role: "assistant", content: null, reasoning_content: "  thinking  ",
++          tool_calls: [{ id: "call_503", type: "function", function: { name: "read", arguments: "{}" } }] },
++      ])
+     }),
+   )
+ 
 diff --git a/packages/opencode/src/provider/transform.ts b/packages/opencode/src/provider/transform.ts
 --- a/packages/opencode/src/provider/transform.ts
 +++ b/packages/opencode/src/provider/transform.ts

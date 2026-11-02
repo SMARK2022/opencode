@@ -137,6 +137,24 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              fullSyncedSessions.add(sessionID)
            })().finally(() => {
              syncingSessions.delete(sessionID)
+diff --git a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-live-hydration.test.tsx
+@@ -219,1 +219,1 @@
+-test("orphan live deltas do not suppress hydrated parts", async () => {
++test.each(["streaming", "completed"] as const)("orphan live deltas replay only onto unfinished hydrated parts: %s", async (state) => {
+@@ -249,7 +249,8 @@
+-      json([{ info: assistant, parts: [{ id: partID, sessionID, messageID, type: "text", text: "hydrated" }] }]),
++      json([{ info: assistant, parts: [{ id: partID, sessionID, messageID, type: "text", text: "hydrated", time: { start: 1, ...(state === "completed" ? { end: 2 } : {}) } }] }]),
+     )
+     await hydrate
+ 
+-    expect(sync.data.part[messageID][0]).toMatchObject({ text: "hydrated" })
++    // 未完成快照恢复早到正文；终态快照仍权威，不能追加旧 delta 污染最终值。
++    expect(sync.data.part[messageID][0]).toMatchObject({ text: state === "streaming" ? "hydratedignored until part exists" : "hydrated" })
+   } finally {
+     app.renderer.destroy()
+
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx

@@ -5,6 +5,315 @@ Subject: [PATCH] =?UTF-8?q?feat:=201.14.42=20=E5=AF=B9macOS=E5=AE=8C?=
  =?UTF-8?q?=E6=95=B4=E8=BF=9B=E8=A1=8Ctest=E9=97=AE=E9=A2=98=E4=BF=AE?=
  =?UTF-8?q?=E6=AD=A3=20=E6=9B=B4=E6=96=B0=E6=B5=8B=E8=AF=95=E7=94=A8?=
 
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -4,1 +4,1 @@
+-import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
++import { Cause, Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
+@@ -50,2 +50,5 @@
+     body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
++    onInterrupted?: () => Effect.Effect<ToolOutput>,
+   ) => Effect.Effect<A, E | Error>
++  // 取消快照只供同一次 registry settlement 消费，不是另一个模型投影入口。
++  readonly interrupted: (input: Pick<BoundInput, "sessionID" | "toolCallID">) => Effect.Effect<ToolOutput | undefined>
+@@ -127,1 +127,1 @@
+-    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error> }>()
++    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
+@@ -159,1 +159,2 @@
+       body: (write: (chunk: Uint8Array) => Effect.Effect<void, Error>) => Effect.Effect<{ value: A; retain: boolean }, E>,
++      onInterrupted?: () => Effect.Effect<ToolOutput>,
+@@ -164,8 +164,8 @@
+-      const captured = { path: "", retain: false, flush: (): Effect.Effect<string, Error> => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
++      const captured = { path: "", retain: false, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
+-        // 只屏蔽排他创建与路径登记；wx 失败没有所有权，不能删除碰撞文件。
++        // 排他创建、窗口追加与登记连续完成；wx 失败没有所有权，不能删除碰撞文件。
+         if (!captured.path) captured.path = yield* write("")
+-        // 路径已归本次 capture 所有，append 恢复可中断并保留失败 cause，ensuring 才能按所有权清理。
+-        yield* restore(Effect.forEach(chunks, (chunk) => fs.writeFile(captured.path, chunk, { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause }))), { discard: true }))
+-        // 后续 flush 不能重放已写前缀，失败时直接终止本次 capture。
++        // 窗口最多 MAX_BYTES；一次追加和消费登记不可分割，取消后不能重放已写前缀。
++        if (chunks.length) yield* fs.writeFile(captured.path, Buffer.concat(chunks), { flag: "a" }).pipe(Effect.mapError((cause) => new StorageError({ operation: "write", cause })))
++        // 只有追加成功才清空窗口；写盘失败仍由原有 typed error 和所有权清理处理。
+         chunks.length = 0
+         bytes = 0
+@@ -174,1 +174,3 @@
+       let completed = false
++      const key = captureKey(input)
++      captures.set(key, captured)
+@@ -194,5 +194,21 @@
+-        captures.set(captureKey(input), captured)
+         completed = true
+         return result.value
+-      }).pipe(Effect.ensuring(Effect.suspend(() => completed || !captured.path ? Effect.void : fs.remove(captured.path).pipe(Effect.orDie))))
++      }).pipe(
++        Effect.onExit((exit) => Effect.sync(() => {
++          // 仅纯取消保留暂存；失败/defect 仍清理，registry 随后负责发布或丢弃。
++          if (exit._tag === "Failure" && Cause.hasInterruptsOnly(exit.cause) && onInterrupted) completed = true
++        })),
++        Effect.ensuring(Effect.suspend(() => {
++          if (completed) return Effect.void
++          captures.delete(key)
++          return captured.path ? fs.remove(captured.path).pipe(Effect.orDie) : Effect.void
++        })),
++      )
+     })
++    const interrupted = Effect.fn("ToolOutputStore.interrupted")(function* (input: Pick<BoundInput, "sessionID" | "toolCallID">) {
++      const captured = captures.get(captureKey(input))
++      if (!captured?.onInterrupted) return
++      // 中断本身也是呈现变化；即使小输出未超限，也应保留已观察的原文字节。
++      captured.retain = true
++      return yield* captured.onInterrupted()
++    })
+@@ -261,1 +261,1 @@
+-    return Service.of({ limits, bound, capture, discard, cleanup })
++    return Service.of({ limits, bound, capture, interrupted, discard, cleanup })
+diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registry.ts
+--- a/packages/core/src/tool/registry.ts
++++ b/packages/core/src/tool/registry.ts
+@@ -4,1 +4,1 @@
+-import { Context, Effect, Layer, Scope } from "effect"
++import { Cause, Context, Effect, Layer, Scope } from "effect"
+@@ -32,1 +32,2 @@
+-  readonly settle: (input: ExecuteInput) => Effect.Effect<Settlement, ToolOutputStore.Error>
++  // 内部通知只接收本边界已经限幅的取消快照，不暴露 leaf 路径回调或第二个 executor。
++  readonly settle: (input: ExecuteInput, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) => Effect.Effect<Settlement, ToolOutputStore.Error>
+@@ -51,1 +51,1 @@
+-    const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
++    const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) {
+@@ -85,1 +85,12 @@
+-      }).pipe(Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })))
++      }).pipe(
++        Effect.onExit((exit) => Effect.gen(function* () {
++          if (exit._tag !== "Failure" || !Cause.hasInterruptsOnly(exit.cause) || !onInterrupted) return
++          const identity = { sessionID: input.sessionID, toolCallID: input.call.id }
++          const output = yield* resources.interrupted(identity)
++          if (!output) return
++          // 同一 bound 移交原文所有权后才能通知；存储/持久化失败不能改写成成功。
++          const bounded = yield* resources.bound({ ...identity, output })
++          yield* onInterrupted(bounded)
++        })),
++        Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })),
++      )
+@@ -121,3 +121,3 @@
+-          settle: (input) => {
++          settle: (input, onInterrupted) => {
+             const registration = registrations.get(input.call.name)
+-            if (registration) return settleWith(input, registration.identity)
++            if (registration) return settleWith(input, registration.identity, onInterrupted)
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -52,1 +52,3 @@
+   timeout: Schema.Boolean.pipe(Schema.optional),
++  // 取消没有退出码，也不能用 timeout 冒充；durable progress 保留真实终止原因。
++  interrupted: Schema.Boolean.pipe(Schema.optional),
+@@ -93,1 +93,2 @@
+   if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.`
++  if (output.interrupted) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command interrupted before completion.`
+@@ -171,1 +171,2 @@
+             ...(output.compression === undefined ? {} : { compression: output.compression }),
++            ...(output.interrupted === undefined ? {} : { interrupted: output.interrupted }),
+@@ -282,20 +282,11 @@
+-              // 原文由现有 ToolOutputStore capture 保留，leaf 只产出模型窗口，不发布托管路径或自行做通用截断。
+-              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => Effect.gen(function* () {
+-              const result = yield* appProcess
+-                .run(command, {
+-                  combineOutput: true,
+-                  timeout: Duration.millis(timeout),
+-                  maxOutputBytes: MAX_CAPTURE_BYTES,
+-                  // 写盘失败适配既有 AppProcessError 并保留 StorageError cause；解码仍跨字节块续接。
+-                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.write(chunk))))),
+-                })
+-                .pipe(
+-                  Effect.catchTag("AppProcessError", (error) =>
+-                    isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
+-                  ),
+-                )
+-              observe(decoder.end())
+-              diag.end()
++              let ended = false
++              const finish = Effect.fnUntraced(function* (result?: AppProcess.RunResult, interrupted = false) {
++              // 取消也可能发生在正常结果限幅期间；decoder/诊断尾块只能结束一次。
++              if (!ended) {
++                observe(decoder.end())
++                diag.end()
++                ended = true
++              }
+               const diagnostic = diag.snapshot()
+               const durationMs = (yield* Clock.currentTimeMillis) - started
+ 
+@@ -307,2 +307,2 @@
+-              const outcome = result ? { exit: result.exitCode } : { timeout: true }
+-              const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
++              const outcome = interrupted ? { interrupted: true } : result ? { exit: result.exitCode } : { timeout: true }
++              const timeoutNotice = result || interrupted ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
+@@ -336,2 +336,20 @@
+               }
+-              }))
++              })
++              // 原文仍由同一 capture 保留；取消快照只提供领域内容，托管路径只由 registry 发布。
++              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => appProcess.run(command, {
++                combineOutput: true,
++                timeout: Duration.millis(timeout),
++                maxOutputBytes: MAX_CAPTURE_BYTES,
++                // 单块原文写入与 decoder 观察一起完成，不能在两者之间取消而丢失刚读到的 READY。
++                onOutput: (chunk) => write(chunk).pipe(
++                  Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })),
++                  Effect.andThen(Effect.sync(() => observe(decoder.write(chunk)))),
++                  Effect.uninterruptible,
++                ),
++              }).pipe(
++                Effect.catchTag("AppProcessError", (error) => isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error)),
++                Effect.flatMap((result) => finish(result)),
++              ), () => finish(undefined, true).pipe(Effect.map(({ value }) => ({
++                structured: Schema.encodeSync(StructuredOutput)(value),
++                content: [{ type: "text", text: value.contextOutput }, { type: "text", text: modelOutput(value) }],
++              }))))
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -247,1 +247,13 @@
++  const interruptedOutput = Effect.fn("SessionRunner.interruptedToolOutput")(function* (callID: string, output: ToolOutput) {
++    // 先保存正文，再由既有终态清理发布 Failed；不可用 Success 伪装取消完成。
++    yield* events.publish(SessionEvent.Tool.Progress, {
++      sessionID: input.sessionID,
++      timestamp: yield* timestamp,
++      assistantMessageID: yield* assistantMessageIDForTool(callID),
++      callID,
++      structured: record(output.structured),
++      content: output.content,
++    }, { finalizer: true })
++  })
++
+   const publish = Effect.fn("SessionRunner.publishLLMEvent")(function* (
+@@ -420,1 +420,2 @@
+     publish,
++    interruptedOutput,
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -369,1 +369,2 @@
+-                }),
++                // 与普通工具结果共用 publication 串行器；回调只交接已限幅的取消证据。
++                }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output))),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -82,1 +82,6 @@
+ import path from "path"
++import { AppProcess } from "@opencode-ai/core/process"
++import { BashTool } from "@opencode-ai/core/tool/bash"
++import { Tools } from "@opencode-ai/core/tool/tools"
++import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
++import { tmpdir } from "./fixture/tmpdir"
+@@ -309,1 +309,2 @@
+       ToolRegistry.node,
++      ToolOutputStore.node,
+@@ -3888,1 +3888,103 @@
++  it.live("retains interrupted Bash output across settlement and durable replay", () =>
++    Effect.gen(function* () {
++      yield* setup
++      const session = yield* SessionV2.Service
++      const registry = yield* ToolRegistry.Service
++      const outputStore = yield* ToolOutputStore.Service
++      const contexts = yield* SystemContextRegistry.Service
++      const events = yield* EventV2.Service
++      const db = (yield* Database.Service).db
++      const tmp = yield* Effect.acquireRelease(Effect.promise(() => tmpdir()), (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()))
++      // 小输出和超过采集窗口的输出都经过真实 Bash/decoder/store；仅替换外部进程和 provider。
++      for (const size of [16, BashTool.MAX_CAPTURE_BYTES + 16]) {
++        const id = SessionV2.ID.make(`ses_cancel_bash_${size}`)
++        const callID = `call-cancel-bash-${size}`
++        yield* insertSession(id)
++        const ready = yield* Deferred.make<void>()
++        let processClosed = false
++        const raw = `READY\n${"x".repeat(size)}\nFINAL_RESULT=42\n完成\n`
++        const processLayer = Layer.mock(AppProcess.Service, {
++          run: (_command, options) => Effect.gen(function* () {
++            if (!options?.onOutput) return yield* Effect.die("Bash must observe the process stream")
++            const bytes = Buffer.from(raw)
++            // 跨块 Unicode 的尾字节在取消前交齐，恢复原文和直接预览均不得产生替换字符。
++            yield* options.onOutput(bytes.subarray(0, bytes.length - 2))
++            yield* options.onOutput(bytes.subarray(bytes.length - 2))
++            yield* Deferred.succeed(ready, undefined)
++            return yield* Effect.never
++          }).pipe(Effect.ensuring(Effect.sync(() => { processClosed = true }))),
++        })
++        const bash = AppNodeBuilder.build(BashTool.node, [
++          [ToolRegistry.node, Layer.merge(Layer.succeed(ToolRegistry.Service, registry), Layer.succeed(Tools.Service, Tools.Service.of({ register: registry.register })))],
++          [ToolOutputStore.node, Layer.succeed(ToolOutputStore.Service, outputStore)],
++          [Location.node, Location.boundNode({ directory: AbsolutePath.make(tmp.path) })],
++          [SystemContextRegistry.node, Layer.succeed(SystemContextRegistry.Service, contexts)],
++          [Config.node, config],
++          [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: () => Effect.void })],
++          [AppProcess.node, processLayer],
++        ])
++        yield* Effect.gen(function* () {
++          yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Run then interrupt" }), resume: false })
++          responseStream = Stream.concat(Stream.fromIterable([
++            LLMEvent.stepStart({ index: 0 }),
++            LLMEvent.toolCall({ id: callID, name: "bash", input: { command: "echo ready", compress_output: false } }),
++          ]), Stream.never)
++          const release = yield* Deferred.make<void>()
++          const off = yield* events.listen((event) => event.type === SessionEvent.Tool.Progress.type ? Deferred.await(release) : Effect.void)
++          yield* Effect.addFinalizer(() => off.pipe(Effect.andThen(Deferred.succeed(release, undefined)), Effect.asVoid))
++          const run = yield* session.resume(id).pipe(Effect.forkChild)
++          yield* Deferred.await(ready).pipe(Effect.timeout("3 seconds"))
++          // 普通监听器故意阻塞；取消末尾的 durable progress 必须使用退出安全通知。
++          const rescue = yield* Effect.sleep("2 seconds").pipe(Effect.andThen(Deferred.succeed(release, undefined)), Effect.forkChild)
++          yield* session.interrupt(id).pipe(Effect.timeout("1 second"))
++          expect(yield* Deferred.isDone(release)).toBe(false)
++          yield* Fiber.interrupt(rescue)
++          yield* off
++          yield* Deferred.succeed(release, undefined)
++          const exit = yield* Fiber.await(run)
++          expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
++          expect(processClosed).toBe(true)
++          const messages = yield* session.context(id)
++          const tool = messages.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")
++          if (tool?.type !== "tool" || tool.state.status !== "error") return yield* Effect.die("Expected an interrupted tool, never Success")
++          expect(tool.state.structured).toMatchObject({ interrupted: true, truncated: size > BashTool.MAX_CAPTURE_BYTES })
++          expect(tool.state.structured).not.toHaveProperty("exit")
++          expect(tool.state.structured).not.toHaveProperty("timeout")
++          const text = tool.state.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
++          expect(text).toContain("FINAL_RESULT=42")
++          expect(text).toContain("完成")
++          expect(text).toContain("Command interrupted before completion.")
++          expect(text).not.toContain("�")
++          if (size === 16) expect(text).toContain("READY")
++          expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
++          const retained = /captured raw output saved to (.+?) \.\.\./.exec(text)?.[1]
++          if (!retained) return yield* Effect.die("Expected the canonical raw recovery marker")
++          // 进程与 capture 已退出后仍能恢复全部原文，不能只检查一个会被 cleanup 删除的路径。
++          expect(Buffer.from(yield* Effect.promise(() => Bun.file(retained).arrayBuffer()))).toEqual(Buffer.from(raw))
++          const recorded = yield* db.select({ type: EventTable.type }).from(EventTable).where(eq(EventTable.aggregate_id, id)).orderBy(asc(EventTable.seq)).all().pipe(Effect.orDie)
++          const types = recorded.map((row) => row.type)
++          const progress = EventV2.versionedType(SessionEvent.Tool.Progress.type, 1)
++          const failed = EventV2.versionedType(SessionEvent.Tool.Failed.type, 1)
++          expect(types.filter((type) => type === progress)).toHaveLength(1)
++          expect(types.filter((type) => type === failed)).toHaveLength(1)
++          expect(types.indexOf(progress)).toBeLessThan(types.indexOf(failed))
++          expect(types).not.toContain(EventV2.versionedType(SessionEvent.Tool.Success.type, 1))
++          yield* replaySessionProjection(id)
++          expect(yield* session.context(id)).toEqual(messages)
++          expect(Buffer.from(yield* Effect.promise(() => Bun.file(retained).arrayBuffer()))).toEqual(Buffer.from(raw))
++          // 真实下一轮 request 必须同时携带失败状态和保留下来的正文，不用手工拼装 model messages 自证。
++          requests.length = 0
++          responseStream = undefined
++          response = []
++          yield* session.resume(id)
++          const result = requests[0]?.messages.find((message) => message.role === "tool")
++          expect(result).toBeDefined()
++          expect(JSON.stringify(result)).toContain("FINAL_RESULT=42")
++          expect(JSON.stringify(result)).toContain(JSON.stringify(retained).slice(1, -1))
++          expect(JSON.stringify(result)).toContain("Tool execution interrupted")
++        }).pipe(Effect.provide(bash))
++      }
++    }),
++  )
++
+   it.effect("interrupts a blocked provider turn without local tool execution", () =>
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 index 8588258363..17e3cc6342 100644
 --- a/packages/opencode/src/session/processor.ts

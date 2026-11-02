@@ -712,30 +712,27 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 +    compressionSecretsRedacted: Schema.Number,
    }).pipe(Schema.optional),
    durationMs: Schema.Number.pipe(Schema.optional),
-@@ -218,1 +222,2 @@
+@@ -237,1 +241,2 @@
 -              const diag = new BashDiagnosticCollector()
 +              // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
 +              const diag = new BashDiagnosticCollector({ enabled })
-@@ -264,1 +269,1 @@
--                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, visibleOutput: "" }) ].filter(Boolean).join("\n\n"),
-+                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, visibleOutput: "", config: { enabled } }) ].filter(Boolean).join("\n\n"),
-@@ -273,7 +278,8 @@
+@@ -303,7 +308,8 @@
 -              const compressed = compressVisibleOutput(output, { enabled })
 +              // 传真实调用 command，不使用描述或重新解析执行命令。
 +              const compressed = compressVisibleOutput(output, { enabled }, input.command)
                // 去重须计入退出状态；需要恢复标记时路径尚未发布，保守保留摘录。
--              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: "" })
-+              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: "", config: { enabled } })
-               const projected = [compressed.text, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ exit: result.exitCode, truncated: result.outputTruncated === true, output, contextOutput: "", warnings })
+-              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "" })
++              const diagnostics = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: "", config: { enabled } })
+               const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
                // 摘录放在正文末端进入既有 head/tail 预算，不在 leaf 复制通用截断。
-               const visible = !compressed.stats.applied && !result.outputTruncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
--              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: visible })
-+              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result.exitCode, visibleOutput: visible, config: { enabled } })
-@@ -284,3 +290,3 @@
+               const visible = !compressed.stats.applied && !truncated && diagnostic.discardedChars === 0 && Buffer.byteLength(projected) <= limits.maxBytes && projected.split("\n").length <= limits.maxLines ? compressed.text : ""
+-              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible })
++              const appendix = renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: result?.exitCode ?? null, visibleOutput: visible, config: { enabled } })
+@@ -314,3 +320,3 @@
 -                // 采样损失即使未压缩也保留原文；压缩不能被混记成进程 capture 截断。
--                retain: compressed.stats.applied || result.outputTruncated === true || diagnostic.discardedChars > 0,
+-                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || diagnostic.discardedChars > 0,
 +                // 脱敏即使未压缩也要求原文；既有 capture 的 lazy flush 与失败传播不变。
-+                retain: compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
++                retain: !result || truncated || (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0,
                  value: {
 
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
@@ -952,7 +949,17 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -1220,3 +1220,13 @@
+@@ -471,7 +471,8 @@
+                 expect(
+                   yield* fail(
+                     {
+-                      command: 'Get-Content "C:../outside.txt"',
++                      // 相对盘符必须跟随临时目录，跨盘运行仍验证同一外部目录权限。
++                      command: `Get-Content "${path.parse(tmp).root.slice(0, 2)}../outside.txt"`,
+                     },
+                     capture(requests, err),
+                   ),
+@@ -1220,3 +1221,13 @@
          expect(yield* fs.readFileString(retained)).toBe("a".repeat(1000))
 +        // 真实 V1 caller 的短输出没有其它压缩命中，也必须脱敏并保留未修改 raw。
 +        const secret = "sk-abcdefghijklmnopqrstuvwxyz012345"

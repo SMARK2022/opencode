@@ -1021,20 +1021,22 @@ diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/openc
 diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
 --- a/packages/core/src/permission.ts
 +++ b/packages/core/src/permission.ts
-@@ -236 +236,5 @@
--        return { effect: "deny" as const, rules: all, reason: `Auto permission preflight rejected this tool call: ${decision.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.` }
-+        // native不经V1错误getter；仅precheck终审追加无授权路径说明，reviewer原文不变。
-+        const terminal = decision.source === "precheck"
-+          ? " Use a materially safer approach. This operation is terminally forbidden: it cannot be executed even with explicit user authorization."
-+          : ""
-+        return { effect: "deny" as const, rules: all, reason: `Auto permission preflight rejected this tool call: ${decision.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.${terminal}` }
+@@ -254 +254,2 @@
+-        return { effect: "deny" as const, rules: all, reason: new PermissionV1.AutoDeniedError({ reason: decision.reason }).message }
++        // 两代共用原话getter，只有precheck终审没有用户授权路径，reviewer拒绝保持默认尾句。
++        return { effect: "deny" as const, rules: all, reason: new PermissionV1.AutoDeniedError({ reason: decision.reason, terminal: decision.source === "precheck" }).message }
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -501,2 +501,4 @@
+@@ -643,6 +643,8 @@
+     const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)
+     expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
      expect(denied.message).toContain("Do not retry the same outcome")
+-    expect(denied.message).toContain("Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.")
 +    expect(denied.message).toContain("cannot be executed even with explicit user authorization")
 +    expect(denied.message).not.toContain("ask the user for explicit confirmation")
++    expect(denied.message.match(/Use a materially safer approach/g)).toHaveLength(1)
+     expect(PermissionV2.autoDeniedMessage(denied)).toBe(denied.message)
      expect(reviewRequests).toHaveLength(0)
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts
 --- a/packages/opencode/test/permission/next.test.ts

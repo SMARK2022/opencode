@@ -15,91 +15,85 @@ diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/
 index 8f50375..eb3ce18 100644
 --- a/packages/opencode/src/config/tui.ts
 +++ b/packages/opencode/src/config/tui.ts
-@@ -80,6 +80,39 @@ function dropUnknownKeybinds(input: Record<string, unknown>) {
-   }
- }
+@@ -3,2 +3,1 @@
+-import path from "path"
+ import { mergeDeep, unique } from "remeda"
+@@ -8,18 +7,14 @@
+-import { ConfigParse } from "@/config/parse"
+-import * as ConfigPaths from "@/config/paths"
++import { ConfigPaths } from "@opencode-ai/core/config/paths"
+ import { migrateTuiConfig } from "./tui-migrate"
+-import { resolveHostAttentionSoundPaths } from "./tui-host-attention"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+-import { isRecord } from "@opencode-ai/tui/util/record"
+ import { Global } from "@opencode-ai/core/global"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { CurrentWorkingDirectory } from "./tui-cwd"
+ import { ConfigPlugin } from "@/config/plugin"
+-import { TuiKeybind } from "@opencode-ai/tui/config/keybind"
+ import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
+ import { makeRuntime } from "@opencode-ai/core/effect/runtime"
+ import { Filesystem } from "@/util/filesystem"
+-import { ConfigVariable } from "@/config/variable"
+ import { Npm } from "@opencode-ai/core/npm"
+ import { FormatError, FormatUnknownError } from "@/cli/error"
+ import { TuiConfig } from "@opencode-ai/tui/config"
++import { TuiConfigHost } from "@opencode-ai/tui/config/host"
+@@ -54,30 +49,2 @@
  
-+const DefaultVoiceTranscriber = {
-+  // 默认值只假设用户通过安装脚本能找到 browser-agent CLI；显式 MCP 路径会在后面覆盖它。
-+  command: "chatgpt-browser-agent",
-+  // `{file}` 保留给 prompt-voice-input 做 argv 字面量替换，不在配置层拼接 shell 字符串。
-+  args: ["transcribe-file", "--file", "{file}", "--json"],
-+}
-+
-+type VoiceTranscriber = NonNullable<Info["voice"]>["transcriber"]
-+
-+function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber | undefined {
-+  if (!isRecord(input) || !isRecord(input.mcp)) return
-+  for (const [key, server] of Object.entries(input.mcp)) {
-+    // 只复用名称明确包含 chatgpt 的 MCP 配置，避免把其它本地 MCP server 误当成语音后端。
-+    if (!key.toLowerCase().includes("chatgpt")) continue
-+    if (!isRecord(server)) continue
-+    // disabled 或非 local server 不代表本机存在 chatgpt.js，不能作为默认转写器来源。
-+    if (server.enabled === false) continue
-+    if (server.type !== undefined && server.type !== "local") continue
-+    if (!Array.isArray(server.command)) continue
-+    // command 是 MCP 启动 argv；这里只读取字面量数组，不解析 shell，也不执行任何命令。
-+    const command = server.command.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-+    const mcpServer = command.find((item) => path.basename(item).toLowerCase() === "mcp-server.js")
-+    if (!mcpServer || !command[0]) continue
-+    // 相对路径按当前项目目录解析，保持和本地 MCP 配置文件里的路径语义一致。
-+    const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
-+    return {
-+      command: command[0],
-+      // voice 默认只复用 ChatGPT MCP 同目录的 CLI 入口；不注册 MCP tool，也不要求 chatgpt-browser-agent 在 PATH。
-+      args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
-+    }
-+  }
-+}
-+
+-function normalize(raw: Record<string, unknown>) {
+-  const data = { ...raw }
+-  if (!("tui" in data)) return data
+-  if (!isRecord(data.tui)) {
+-    delete data.tui
+-    return data
+-  }
+-
+-  const tui = data.tui
+-  delete data.tui
+-  return {
+-    ...tui,
+-    ...data,
+-  }
+-}
+-
+-function dropUnknownKeybinds(input: Record<string, unknown>) {
+-  if (!isRecord(input.keybinds)) return input
+-
+-  const invalid = TuiKeybind.unknownKeys(input.keybinds)
+-  if (!invalid.length) return input
+-
+-  return {
+-    ...input,
+-    keybinds: Object.fromEntries(Object.entries(input.keybinds).filter(([key]) => !invalid.includes(key))),
+-  }
+-}
+-
  const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string }) {
-   const afs = yield* FSUtil.Service
-   let appliedOrder = 0
-@@ -146,6 +179,44 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
-       return yield* load(text, filepath)
-     })
- 
-+  const loadMcpVoiceTranscriberFile = (filepath: string): Effect.Effect<VoiceTranscriber | undefined> =>
-+    Effect.gen(function* () {
-+      // MCP 配置缺失是正常情况；这里只是寻找更精确的 ChatGPT agent 安装位置。
-+      const text = yield* afs.readFileStringSafe(filepath).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-+      if (!text) return
-+      const expanded = yield* Effect.promise(() =>
-+        ConfigVariable.substitute({ text, type: "path", path: filepath, missing: "empty" }),
-+      )
-+      const transcriber = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, filepath), ctx.directory)
-+      if (!transcriber) return
-+      const script = transcriber.args?.[0]
-+      // 推导出的 chatgpt.js 必须存在，否则保留默认 CLI，让 controller 在录音前给出更清晰的配置错误。
-+      if (!script || !(yield* afs.existsSafe(script))) return
-+      return transcriber
-+    }).pipe(
-+      Effect.catchCause((cause) =>
-+        Effect.sync(() => {
-+          const error = Cause.squash(cause)
-+          const reason = FormatError(error) ?? FormatUnknownError(error)
-+          Effect.logWarning("skipping invalid mcp config while resolving voice transcriber", { path: filepath, reason })
-+          return undefined
-+        }),
-+      ),
-+    )
-+
-+  const loadMcpVoiceTranscriber = (files: string[]): Effect.Effect<VoiceTranscriber | undefined> =>
-+    Effect.gen(function* () {
-+      let result: VoiceTranscriber | undefined
-+      for (const file of files) result = (yield* loadMcpVoiceTranscriberFile(file)) ?? result
-+      if (process.env.OPENCODE_CONFIG_CONTENT) {
-+        result = voiceTranscriberFromMcpConfig(
-+          ConfigParse.jsonc(process.env.OPENCODE_CONFIG_CONTENT, "OPENCODE_CONFIG_CONTENT"),
-+          ctx.directory,
-+        ) ?? result
-+      }
-+      return result
-+    })
-+
-   const mergeFile = (acc: Acc, file: string) =>
+@@ -99,22 +66,5 @@
+   const load = (text: string, configFilepath: string): Effect.Effect<Info> =>
      Effect.gen(function* () {
-       const data = yield* loadFile(file)
+-      const expanded = yield* Effect.promise(() =>
+-        ConfigVariable.substitute({ text, type: "path", path: configFilepath, missing: "empty" }),
+-      )
+-      const data = ConfigParse.jsonc(expanded, configFilepath)
+-      if (!isRecord(data)) return {} as Info
+-      // Flatten a nested "tui" key so users who wrote `{ "tui": { ... } }` inside tui.json
+-      // (mirroring the old opencode.json shape) still get their settings applied.
+-      const normalized = dropUnknownKeybinds(normalize(data))
+-      const parsed = ConfigParse.schema(Info, normalized, configFilepath)
+-      const validated = parsed.attention?.sounds
+-        ? {
+-            ...parsed,
+-            attention: {
+-              ...parsed.attention,
+-              sounds: resolveHostAttentionSoundPaths(path.dirname(configFilepath), parsed.attention.sounds),
+-            },
+-          }
+-        : parsed
++      const validated = yield* TuiConfigHost.parse(text, configFilepath)
+       return yield* resolvePlugins(validated, configFilepath)
+     }).pipe(
 @@ -174,6 +245,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
    yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
  
@@ -114,12 +108,12 @@ index 8f50375..eb3ce18 100644
  
 +  const defaultVoiceTranscriber =
 +    // 这里读取 opencode MCP 配置而不是 tui.json，复用用户已经安装好的 ChatGPT browser-agent 载体。
-+    (yield* loadMcpVoiceTranscriber([
++    (yield* TuiConfigHost.loadMcpVoiceTranscriber([
 +      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
 +      ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
 +      ...projectOpencodeFiles,
 +      ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
-+    ])) ?? DefaultVoiceTranscriber
++    ], ctx.directory)) ?? TuiConfigHost.DefaultVoiceTranscriber
 +
    const result = TuiConfig.resolve(
      {
@@ -263,6 +257,11 @@ diff --git a/packages/tui/package.json b/packages/tui/package.json
 index 88486f2..7b913fc 100644
 --- a/packages/tui/package.json
 +++ b/packages/tui/package.json
+@@ -14,3 +14,4 @@
+     "./builtins": "./src/feature-plugins/builtins.ts",
+     "./config": "./src/config/index.tsx",
++    "./config/host": "./src/config/host.ts",
+     "./context/args": "./src/context/args.tsx",
 @@ -59,2 +59,3 @@
      "clipboardy": "4.0.0",
 +    "cross-spawn": "catalog:",
@@ -921,9 +920,13 @@ new file mode 100644
 index 0000000..5b86e4b
 --- /dev/null
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -0,0 +1,438 @@
+@@ -0,0 +1,476 @@
 +import { describe, expect, test } from "bun:test"
 +import path from "path"
++import { Effect } from "effect"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { TuiConfigHost } from "../../src/config/host"
 +import { tmpdir } from "../fixture/fixture"
 +import {
 +  createVoiceInputController,
@@ -1024,7 +1027,38 @@ index 0000000..5b86e4b
 +  // 断言文本插入的是停止后的 WAV 文件结果，而不是录音中途的旧状态。
 +  // stop 后仍调用 abort，是为了删除临时文件；这个 cleanup 不应影响已插入文本。
 +  // 状态序列锁定 TUI 用户能看到的阶段，避免后续重构跳过保存或转写提示。
-+  test("toggles recording, transcribes the stopped file, and inserts returned text", async () => {
++  test.each(["default", "mcp", "explicit"] as const)("host config reaches the voice controller: %s", async (scenario) => {
++    await using tmp = await tmpdir()
++    await Bun.write(path.join(tmp.path, "tui.json"), JSON.stringify({
++      tui: { theme: "ancestor", attention: { sounds: { done: "alert.wav" } }, keybinds: { prompt_voice_toggle: "alt+x" } },
++    }))
++    const script = path.join(tmp.path, "chatgpt browser agent", "chatgpt.js")
++    // 只提供配置推导所需的脚本存在证据；转写和录音均不启动真实设备或MCP进程。
++    if (scenario !== "default") {
++      await Bun.write(script, "")
++      await Bun.write(path.join(tmp.path, "opencode.json"), JSON.stringify({ mcp: {
++        other: { command: ["unrelated", path.join(path.dirname(script), "mcp-server.js")] },
++        chatgpt: { type: "local", command: [process.execPath, path.join(path.dirname(script), "mcp-server.js")] },
++      } }))
++    }
++    if (scenario === "explicit") {
++      await Bun.write(path.join(tmp.path, ".opencode", "tui.json"), JSON.stringify({
++        voice: { transcriber: { command: "explicit-voice", args: ["{file}"] } },
++      }))
++    }
++    // 与Native CLI调用同一个host producer，配置发现、规范化和优先级不能被手写对象替代。
++    const config = await Effect.runPromise(TuiConfigHost.load(tmp.path, { terminalSuspend: false }).pipe(
++      Effect.provide(AppNodeBuilder.build(FSUtil.node)),
++    ))
++    expect(config.theme).toBe("ancestor")
++    expect(config.attention.sounds.done).toBe(path.join(tmp.path, "alert.wav"))
++    expect(config.keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+x")
++    expect(config.keybinds.get("terminal.suspend")).toEqual([])
++    expect(config.voice?.transcriber).toEqual(scenario === "explicit"
++      ? { command: "explicit-voice", args: ["{file}"] }
++      : scenario === "mcp"
++        ? { command: process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
++        : TuiConfigHost.DefaultVoiceTranscriber)
 +    const inserted: string[] = []
 +    const errors: string[] = []
 +    const states: string[] = []
@@ -1037,9 +1071,12 @@ index 0000000..5b86e4b
 +      },
 +    }
 +    const controller = createVoiceInputController({
-+      transcriber: () => ({ command: "transcriber", args: ["{file}"] }),
++      transcriber: () => config.voice?.transcriber,
 +      startRecorder: async () => recorder,
-+      transcribe: async (file) => `text from ${file}`,
++      transcribe: async (file, transcriber) => {
++        expect(config.voice?.transcriber).toEqual(transcriber)
++        return `text from ${file}`
++      },
 +      insertText: (text) => inserted.push(text),
 +      onError: (message) => errors.push(message),
 +      onStatus: (status) => states.push(status.type),
@@ -1557,3 +1594,395 @@ diff --git a/bun.lock b/bun.lock
 +
      "@pierre/theme": ["@pierre/theme@1.0.3", "", {}, "sha512-sWHv11TMoqKxKDgTIk5VbhQjdPhs8DCcBxbjh3mRlS3YOM/OcrWoGX6MM8eBGn9cUu3M46Py0JnxsG2nJaFTuA=="],
  
+diff --git a/packages/core/src/config/paths.ts b/packages/core/src/config/paths.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/config/paths.ts
+@@ -0,0 +1,44 @@
++export * as ConfigPaths from "./paths"
++
++import path from "path"
++import { Flag } from "../flag/flag"
++import { Global } from "../global"
++import { Effect } from "effect"
++import { FSUtil } from "../fs-util"
++
++export const files = Effect.fn("ConfigPaths.projectFiles")(function* (
++  name: string,
++  directory: string,
++  worktree?: string,
++) {
++  const afs = yield* FSUtil.Service
++  return (yield* afs.up({
++    targets: [`${name}.jsonc`, `${name}.json`],
++    start: directory,
++    stop: worktree,
++  })).toReversed()
++})
++
++export const directories = Effect.fn("ConfigPaths.directories")(function* (directory: string, worktree?: string) {
++  const afs = yield* FSUtil.Service
++  return [...new Set([
++    Global.Path.config,
++    ...(!Flag.OPENCODE_DISABLE_PROJECT_CONFIG
++      ? yield* afs.up({
++          targets: [".opencode"],
++          start: directory,
++          stop: worktree,
++        })
++      : []),
++    ...(yield* afs.up({
++      targets: [".opencode"],
++      start: Global.Path.home,
++      stop: Global.Path.home,
++    })),
++    ...(Flag.OPENCODE_CONFIG_DIR ? [Flag.OPENCODE_CONFIG_DIR] : []),
++  ])]
++})
++
++export function fileInDirectory(dir: string, name: string) {
++  return [path.join(dir, `${name}.json`), path.join(dir, `${name}.jsonc`)]
++}
+diff --git a/packages/opencode/src/config/paths.ts b/packages/opencode/src/config/paths.ts
+--- a/packages/opencode/src/config/paths.ts
++++ b/packages/opencode/src/config/paths.ts
+@@ -1,45 +1,1 @@
+-export * as ConfigPaths from "./paths"
+-
+-import path from "path"
+-import { Flag } from "@opencode-ai/core/flag/flag"
+-import { Global } from "@opencode-ai/core/global"
+-import { unique } from "remeda"
+-import * as Effect from "effect/Effect"
+-import { FSUtil } from "@opencode-ai/core/fs-util"
+-
+-export const files = Effect.fn("ConfigPaths.projectFiles")(function* (
+-  name: string,
+-  directory: string,
+-  worktree?: string,
+-) {
+-  const afs = yield* FSUtil.Service
+-  return (yield* afs.up({
+-    targets: [`${name}.jsonc`, `${name}.json`],
+-    start: directory,
+-    stop: worktree,
+-  })).toReversed()
+-})
+-
+-export const directories = Effect.fn("ConfigPaths.directories")(function* (directory: string, worktree?: string) {
+-  const afs = yield* FSUtil.Service
+-  return unique([
+-    Global.Path.config,
+-    ...(!Flag.OPENCODE_DISABLE_PROJECT_CONFIG
+-      ? yield* afs.up({
+-          targets: [".opencode"],
+-          start: directory,
+-          stop: worktree,
+-        })
+-      : []),
+-    ...(yield* afs.up({
+-      targets: [".opencode"],
+-      start: Global.Path.home,
+-      stop: Global.Path.home,
+-    })),
+-    ...(Flag.OPENCODE_CONFIG_DIR ? [Flag.OPENCODE_CONFIG_DIR] : []),
+-  ])
+-})
+-
+-export function fileInDirectory(dir: string, name: string) {
+-  return [path.join(dir, `${name}.json`), path.join(dir, `${name}.jsonc`)]
+-}
++export * from "@opencode-ai/core/config/paths"
+diff --git a/packages/core/src/config/parse.ts b/packages/core/src/config/parse.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/config/parse.ts
+@@ -0,0 +1,61 @@
++export * as ConfigParse from "./parse"
++
++import { type ParseError, parse, printParseErrorCode } from "jsonc-parser"
++import { Cause, Exit, Schema, SchemaIssue } from "effect"
++import type { DeepMutable } from "../schema"
++import { InvalidError, JsonError } from "../v1/config/error"
++
++export function jsonc(text: string, filepath: string): unknown {
++  const errors: ParseError[] = []
++  const data = parse(text, errors, { allowTrailingComma: true })
++  if (errors.length) {
++    const lines = text.split("\n")
++    const issues = errors
++      .map((e) => {
++        const beforeOffset = text.substring(0, e.offset).split("\n")
++        const line = beforeOffset.length
++        const column = beforeOffset[beforeOffset.length - 1].length + 1
++        const problemLine = lines[line - 1]
++
++        const error = `${printParseErrorCode(e.error)} at line ${line}, column ${column}`
++        if (!problemLine) return error
++
++        return `${error}\n   Line ${line}: ${problemLine}\n${"".padStart(column + 9)}^`
++      })
++      .join("\n")
++    throw new JsonError({
++      path: filepath,
++      message: `\n--- JSONC Input ---\n${text}\n--- Errors ---\n${issues}\n--- End ---`,
++    })
++  }
++
++  return data
++}
++
++export function schema<S extends Schema.Decoder<unknown, never>>(
++  schema: S,
++  data: unknown,
++  source: string,
++): DeepMutable<S["Type"]> {
++  const decoded = Schema.decodeUnknownExit(schema)(data, {
++    errors: "all",
++    onExcessProperty: "ignore",
++    propertyOrder: "original",
++  })
++  if (Exit.isSuccess(decoded)) return decoded.value as DeepMutable<S["Type"]>
++  const error = Cause.squash(decoded.cause)
++
++  throw new InvalidError(
++    {
++      path: source,
++      issues: Schema.isSchemaError(error)
++        ? SchemaIssue.makeFormatterStandardSchemaV1()(error.issue).issues.map((issue) => ({
++            ...issue,
++            message: issue.message,
++            path: issue.path?.map(String) ?? [],
++          }))
++        : [{ message: String(error), path: [] }],
++    },
++    { cause: error },
++  )
++}
+diff --git a/packages/opencode/src/config/parse.ts b/packages/opencode/src/config/parse.ts
+--- a/packages/opencode/src/config/parse.ts
++++ b/packages/opencode/src/config/parse.ts
+@@ -1,61 +1,1 @@
+-export * as ConfigParse from "./parse"
+-
+-import { type ParseError as JsoncParseError, parse as parseJsoncImpl, printParseErrorCode } from "jsonc-parser"
+-import { Cause, Exit, Schema as EffectSchema, SchemaIssue } from "effect"
+-import type { DeepMutable } from "@opencode-ai/core/schema"
+-import { InvalidError, JsonError } from "@opencode-ai/core/v1/config/error"
+-
+-export function jsonc(text: string, filepath: string): unknown {
+-  const errors: JsoncParseError[] = []
+-  const data = parseJsoncImpl(text, errors, { allowTrailingComma: true })
+-  if (errors.length) {
+-    const lines = text.split("\n")
+-    const issues = errors
+-      .map((e) => {
+-        const beforeOffset = text.substring(0, e.offset).split("\n")
+-        const line = beforeOffset.length
+-        const column = beforeOffset[beforeOffset.length - 1].length + 1
+-        const problemLine = lines[line - 1]
+-
+-        const error = `${printParseErrorCode(e.error)} at line ${line}, column ${column}`
+-        if (!problemLine) return error
+-
+-        return `${error}\n   Line ${line}: ${problemLine}\n${"".padStart(column + 9)}^`
+-      })
+-      .join("\n")
+-    throw new JsonError({
+-      path: filepath,
+-      message: `\n--- JSONC Input ---\n${text}\n--- Errors ---\n${issues}\n--- End ---`,
+-    })
+-  }
+-
+-  return data
+-}
+-
+-export function schema<S extends EffectSchema.Decoder<unknown, never>>(
+-  schema: S,
+-  data: unknown,
+-  source: string,
+-): DeepMutable<S["Type"]> {
+-  const decoded = EffectSchema.decodeUnknownExit(schema)(data, {
+-    errors: "all",
+-    onExcessProperty: "ignore",
+-    propertyOrder: "original",
+-  })
+-  if (Exit.isSuccess(decoded)) return decoded.value as DeepMutable<S["Type"]>
+-  const error = Cause.squash(decoded.cause)
+-
+-  throw new InvalidError(
+-    {
+-      path: source,
+-      issues: EffectSchema.isSchemaError(error)
+-        ? SchemaIssue.makeFormatterStandardSchemaV1()(error.issue).issues.map((issue) => ({
+-            ...issue,
+-            message: issue.message,
+-            path: issue.path?.map(String) ?? [],
+-          }))
+-        : [{ message: String(error), path: [] }],
+-    },
+-    { cause: error },
+-  )
+-}
++export { ConfigParse } from "@opencode-ai/core/config/parse"
+diff --git a/packages/tui/src/config/host.ts b/packages/tui/src/config/host.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/config/host.ts
+@@ -0,0 +1,132 @@
++export * as TuiConfigHost from "./host"
++
++import path from "path"
++import { fileURLToPath } from "node:url"
++import { Cause, Effect } from "effect"
++import { mergeDeep } from "remeda"
++import { ConfigParse } from "@opencode-ai/core/config/parse"
++import { ConfigPaths } from "@opencode-ai/core/config/paths"
++import { ConfigVariable } from "@opencode-ai/core/config/variable"
++import { Flag } from "@opencode-ai/core/flag/flag"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { Global } from "@opencode-ai/core/global"
++import { TuiConfig } from "."
++import { TuiKeybind } from "./keybind"
++import { isRecord } from "../util/record"
++
++export const DefaultVoiceTranscriber = {
++  // 默认CLI和MCP推导共用字面量argv，配置阶段不启动转写器或解释shell。
++  command: "chatgpt-browser-agent",
++  args: ["transcribe-file", "--file", "{file}", "--json"],
++}
++type VoiceTranscriber = NonNullable<TuiConfig.Info["voice"]>["transcriber"]
++
++export const parse = Effect.fn("TuiConfigHost.parse")(function* (text: string, filepath: string) {
++  const expanded = yield* Effect.promise(() =>
++    ConfigVariable.substitute({ text, type: "path", path: filepath, missing: "empty" }),
++  )
++  const raw = ConfigParse.jsonc(expanded, filepath)
++  if (!isRecord(raw)) return {}
++  // 保持旧tui包装展开规则：外层同名设置覆盖内层，而不是新增一层配置语义。
++  const { tui, ...outer } = raw
++  const data = { ...(isRecord(tui) ? tui : {}), ...outer }
++  const invalid = isRecord(data.keybinds) ? TuiKeybind.unknownKeys(data.keybinds) : []
++  if (isRecord(data.keybinds) && invalid.length) {
++    data.keybinds = Object.fromEntries(Object.entries(data.keybinds).filter(([key]) => !invalid.includes(key)))
++  }
++  const parsed = ConfigParse.schema(TuiConfig.Info, data, filepath)
++  if (!parsed.attention?.sounds) return parsed
++  // 声音路径仍相对所属配置文件，不能因Native从项目cwd启动而漂移。
++  return {
++    ...parsed,
++    attention: {
++      ...parsed.attention,
++      sounds: Object.fromEntries(Object.entries(parsed.attention.sounds).flatMap(([name, file]) => {
++        if (!file) return []
++        return [[name, file.startsWith("file://") ? fileURLToPath(file) : path.resolve(path.dirname(filepath), file)]]
++      })),
++    },
++  }
++})
++
++function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber {
++  if (!isRecord(input) || !isRecord(input.mcp)) return
++  for (const [key, server] of Object.entries(input.mcp)) {
++    // 只有明确命名的本地ChatGPT服务是转写载体，普通MCP与远程配置不参与推导。
++    if (!key.toLowerCase().includes("chatgpt") || !isRecord(server)) continue
++    if (server.enabled === false || (server.type !== undefined && server.type !== "local")) continue
++    if (!Array.isArray(server.command)) continue
++    const command = server.command.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
++    const mcpServer = command.find((item) => path.basename(item).toLowerCase() === "mcp-server.js")
++    if (!mcpServer || !command[0]) continue
++    // 与原本地MCP一致，相对脚本以项目目录解析，不以配置文件目录解析。
++    const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
++    return { command: command[0], args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] }
++  }
++}
++
++export const loadMcpVoiceTranscriber = Effect.fn("TuiConfigHost.loadMcpVoiceTranscriber")(function* (
++  files: string[], cwd: string,
++) {
++  const fs = yield* FSUtil.Service
++  let result: VoiceTranscriber
++  for (const filepath of files) {
++    const transcriber = yield* Effect.gen(function* () {
++      const text = yield* fs.readFileStringSafe(filepath)
++      if (!text) return
++      const expanded = yield* Effect.promise(() =>
++        ConfigVariable.substitute({ text, type: "path", path: filepath, missing: "empty" }),
++      )
++      const value = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, filepath), cwd)
++      const script = value?.args?.[0]
++      // 缺失脚本不覆盖前一个有效配置；默认CLI仍由同一controller在录音前校验。
++      if (!script || !(yield* fs.existsSafe(script))) return
++      return value
++    }).pipe(Effect.catchCause((cause) => Effect.logWarning("skipping invalid mcp config while resolving voice transcriber", {
++      path: filepath, reason: Cause.squash(cause),
++    }).pipe(Effect.as(undefined))))
++    result = transcriber ?? result
++  }
++  if (process.env.OPENCODE_CONFIG_CONTENT) {
++    result = voiceTranscriberFromMcpConfig(
++      ConfigParse.jsonc(process.env.OPENCODE_CONFIG_CONTENT, "OPENCODE_CONFIG_CONTENT"), cwd,
++    ) ?? result
++  }
++  return result
++})
++
++export const load = Effect.fn("TuiConfigHost.load")(function* (directory: string, options: TuiConfig.ResolveOptions) {
++  const fs = yield* FSUtil.Service
++  const directories = yield* ConfigPaths.directories(directory)
++  const dirs = directories.filter((dir) => dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR)
++  const projectFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("tui", directory)
++  const projectMcpFiles = Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? [] : yield* ConfigPaths.files("opencode", directory)
++  // 与旧host保持同一优先级；此入口只读配置，不迁移文件或安装插件。
++  const files = [
++    ...ConfigPaths.fileInDirectory(Global.Path.config, "tui"),
++    ...(Flag.OPENCODE_TUI_CONFIG ? [Flag.OPENCODE_TUI_CONFIG] : []),
++    ...projectFiles,
++    ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "tui")),
++  ]
++  let result: TuiConfig.Info = {}
++  for (const filepath of files) {
++    const data = yield* Effect.gen(function* () {
++      const text = yield* fs.readFileStringSafe(filepath)
++      return text ? yield* parse(text, filepath) : {}
++    }).pipe(Effect.catchCause((cause) => Effect.logWarning("skipping invalid tui config", {
++      path: filepath, reason: Cause.squash(cause),
++    }).pipe(Effect.as({}))))
++    result = mergeDeep(result, data)
++  }
++  const transcriber = yield* loadMcpVoiceTranscriber([
++    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
++    ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
++    ...projectMcpFiles,
++    ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
++  ], directory)
++  // 显式TUI设置优先于MCP推导和默认CLI，两代最后均交同一个canonical resolve。
++  return TuiConfig.resolve({
++    ...result,
++    voice: { ...result.voice, transcriber: result.voice?.transcriber ?? transcriber ?? DefaultVoiceTranscriber },
++  }, options)
++})
+diff --git a/packages/cli/src/tui.ts b/packages/cli/src/tui.ts
+--- a/packages/cli/src/tui.ts
++++ b/packages/cli/src/tui.ts
+@@ -2,11 +2,13 @@
+-import { TuiConfig } from "@opencode-ai/tui/config"
++import { TuiConfigHost } from "@opencode-ai/tui/config/host"
+ import { Effect } from "effect"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { Global } from "@opencode-ai/core/global"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ 
+ export function runTui(transport: { url: string; headers: RequestInit["headers"] }) {
+-  const config = TuiConfig.resolve({}, { terminalSuspend: false })
+-  return run({
++  // Native必须读取真实host配置；保留该入口的终端挂起策略，避免空配置禁用语音。
++  return TuiConfigHost.load(process.cwd(), { terminalSuspend: false }).pipe(Effect.flatMap((config) => run({
+     ...transport,
+     args: {},
+     config,
+@@ -19,2 +21,2 @@
+-  }).pipe(Effect.provide(AppNodeBuilder.build(Global.node)))
++  })), Effect.provide(AppNodeBuilder.build(LayerNode.group([Global.node, FSUtil.node]))))
+ }

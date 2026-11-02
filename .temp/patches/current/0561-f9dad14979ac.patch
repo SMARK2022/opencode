@@ -1200,9 +1200,8 @@ new file mode 100644
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1727,15 +1727,21 @@ const scenarios: Scenario[] = [
-       // 空 sessionIDs 返回空对象
-       check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
+@@ -1767,14 +1767,20 @@ const scenarios: Scenario[] = [
+       check(Object.keys(body).length === 0, "empty native sessionIDs should return empty object")
      }),
 -  // #558：session.search.scan gate 差集登记——POST 载荷为全库扫描（非单会话），断言集合返回形态。
 +  // #561：session.search.scan seeded progressive 契约——seeded session 必须命中且单批扫尽（done=true、无后续 cursor）。

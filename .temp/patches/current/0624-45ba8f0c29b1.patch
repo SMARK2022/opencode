@@ -765,6 +765,42 @@ diff --git a/packages/core/test/filesystem/search.test.ts b/packages/core/test/f
 +  const search = Context.get(built, FileSystemSearch.Service)
 +  expect((yield* search.find({ query: "", type: "file" })).map((entry) => String(entry.path))).toEqual(["src/a.ts", "src/b.ts"])
 +}))
+diff --git a/packages/core/src/session/history-proof.ts b/packages/core/src/session/history-proof.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/history-proof.ts
+@@ -0,0 +1,6 @@
++export * as HistoryProof from "./history-proof"
++
++// 两代保留各自完整JSON/tuple编码，只无损压缩常驻key，不以hash或字段裁剪代替精确比较。
++export function encodeProofKey(json: string) {
++  return Buffer.from(Bun.zstdCompressSync(Buffer.from(json), { level: 1 })).toString("latin1")
++}
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -9,1 +9,2 @@
+ import { SessionContextEpochTable, SessionMessageTable } from "./sql"
++import { encodeProofKey } from "./history-proof"
+@@ -113,2 +114,3 @@
+   // 包含data、seq和cold key/ref/stats，原位修改、隐藏和冷热迁移都会在首个分歧处失效。
+-  const proof = rows.map(row => JSON.stringify(row))
++  // 与V1共用无损表示，完整row的每个字段和顺序仍参加exact proof，不另造版本或缓存。
++  const proof = rows.map(row => encodeProofKey(JSON.stringify(row)))
+diff --git a/packages/core/test/session-history.test.ts b/packages/core/test/session-history.test.ts
+--- a/packages/core/test/session-history.test.ts
++++ b/packages/core/test/session-history.test.ts
+@@ -202,2 +202,10 @@
+       expect(changed[1]?.message).toMatchObject({ text: "changed" })
++      // 继续使用真实Native row和原位修改：大正文不复制进常驻proof，但逐字段编码可完整还原。
++      const text = "large proof payload ".repeat(64 * 1024)
++      yield* db.update(SessionMessageTable).set({ data: Schema.encodeSync(SessionMessage.Synthetic)(SessionMessage.Synthetic.make({ id: ids[2], sessionID: created.id, type: "synthetic", text, time: { created: DateTime.makeUnsafe(2) } })) }).where(eq(SessionMessageTable.id, ids[2])).run().pipe(Effect.orDie)
++      yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
++      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, ids[2])).get().pipe(Effect.orDie)
++      const decodedKeys = cache.proof.map(key => Buffer.from(Bun.zstdDecompressSync(Buffer.from(key, "latin1"))).toString("utf8"))
++      expect(decodedKeys).toContain(JSON.stringify(row))
++      expect(cache.proof.every(key => key.length < 64 * 1024)).toBe(true)
+       // 最新隐藏用户不得消耗limit(2)；普通技术Synthetic也不产生Goal turn。
 diff --git a/packages/core/src/session/part-view.ts b/packages/core/src/session/part-view.ts
 new file mode 100644
 --- /dev/null
@@ -893,15 +929,10 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 diff --git a/packages/server/src/handlers/message.ts b/packages/server/src/handlers/message.ts
 --- a/packages/server/src/handlers/message.ts
 +++ b/packages/server/src/handlers/message.ts
-@@ -6,2 +6,4 @@
+@@ -7,2 +7,3 @@
  import { InvalidCursorError, SessionNotFoundError, UnknownError } from "@opencode-ai/protocol/errors"
-+import { HttpServerRequest } from "effect/unstable/http"
 +import { PartView } from "@opencode-ai/core/session/part-view"
  
-@@ -33,2 +35,3 @@
-       Effect.fn(function* (ctx) {
-+        const request = yield* HttpServerRequest.HttpServerRequest
-         if (ctx.query.cursor && ctx.query.order !== undefined)
 @@ -71,3 +74,8 @@
          return {
 -          data: messages,
@@ -962,9 +993,13 @@ diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.t
 -              structured: event.data.structured,
 +              // TUI存储与native viewer传输共用幂等投影；进程内测试注入也不保留重复patch。
 +              structured: PartView.projectFields(event.data.structured),
-@@ -430 +434 @@
--            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
-+            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } })
+@@ -460,5 +464,6 @@
+             // Native同样请求无逐轮summary的viewer；正文/附件仍完整，默认客户端不受影响。
++            // 保留既有viewer信号；共享返回边界同时剪重复diff，不改分页或完整SDK合同。
+             const result = await sdk.client.v2.session.messages(
+               { sessionID },
+               { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } },
+             )
 diff --git a/packages/tui/test/cli/tui/data.test.tsx b/packages/tui/test/cli/tui/data.test.tsx
 --- a/packages/tui/test/cli/tui/data.test.tsx
 +++ b/packages/tui/test/cli/tui/data.test.tsx
@@ -1713,31 +1748,11 @@ diff --git a/packages/opencode/src/cli/cmd/run.ts b/packages/opencode/src/cli/cm
 diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
 --- a/packages/opencode/src/lsp/lsp.ts
 +++ b/packages/opencode/src/lsp/lsp.ts
-@@ -187,9 +187,9 @@ const layer = Layer.effect(
- 
+@@ -133,3 +133,4 @@
+         // 产品固定停用 LSP；true 或自定义 server 配置也不能恢复子进程。
++        // 本项默认关闭收益由该更强产品策略承载，不恢复配置opt-in；formatter保持独立。
          const servers: Record<string, LSPServer.Info> = {}
- 
--        // [local-smark] 默认启用 LSP：未配置时视为 true，仅 false 显式禁用。
--        // LSP 按需启动（touchFile 时 spawn），不影响启动性能
--        if (cfg.lsp === false) {
-+        // LSP 采用显式启用：配置注释约定省略或 false 均关闭，仅 true 或对象开启。
-+        // 默认路径不创建任何内置 server，避免为未启用语言功能的用户常驻数 GB 的 LSP 进程。
-+        if (!cfg.lsp) {
-           yield* Effect.logInfo("all LSPs are disabled")
-         } else {
-           for (const server of Object.values(LSPServer)) {
-@@ -198,9 +198,8 @@ const layer = Layer.effect(
- 
-           filterExperimentalServers(servers, flags)
- 
--          // [local-smark] cfg.lsp 为 undefined（默认启用）时跳过自定义配置遍历，
--          // 防止 Object.entries(undefined) 报错；仅对象类型才进入自定义配置
--          if (cfg.lsp && cfg.lsp !== true) {
-+          // cfg.lsp 为 true 时无自定义配置可遍历；仅对象类型才进入自定义配置。
-+          if (cfg.lsp !== true) {
-             for (const [name, item] of Object.entries(cfg.lsp)) {
-               const existing = servers[name]
-               if (item.disabled) {
+         yield* Effect.logInfo("all LSPs are disabled")
 
 diff --git a/packages/opencode/src/plugin/tui/runtime.ts b/packages/opencode/src/plugin/tui/runtime.ts
 --- a/packages/opencode/src/plugin/tui/runtime.ts
@@ -1834,11 +1849,12 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/globa
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -29,6 +29,7 @@ import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
+@@ -29,6 +29,8 @@ import { and, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm"
  import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
  // #0500：boundary-first 读取的权威——compaction 边界决定 hydrate 范围，message-v2 不得自行扫描 marker。
  import { CompactionBoundary } from "@opencode-ai/core/session/compaction-boundary"
 +import { PartView } from "@opencode-ai/core/session/part-view"
++import { encodeProofKey } from "@opencode-ai/core/session/history-proof"
  import { Option } from "effect"
  import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
  import { ProviderError } from "@/provider/error"
@@ -1874,7 +1890,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
        }
      }
  
-@@ -1320,15 +1320,23 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
+@@ -1320,15 +1322,16 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
      // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
      messages: messageRows.map((row) => ({
        id: row.id,
@@ -1888,22 +1904,15 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 -        parts.get(row.id) ?? [],
 -      ]),
 +      // zstd(level 1)转latin1无损保存完整tuple，保留exact相等且不让warm槽重复常驻原文。
-+      key: Buffer.from(
-+        Bun.zstdCompressSync(
-+          Buffer.from(
-+            JSON.stringify([
-+              row.id,
-+              row.timeCreated,
-+              row.timeUpdated,
-+              row.data,
-+              row.coldRef,
-+              row.coldKey,
-+              parts.get(row.id) ?? [],
-+            ]),
-+          ),
-+          { level: 1 },
-+        ),
-+      ).toString("latin1"),
++      key: encodeProofKey(JSON.stringify([
++        row.id,
++        row.timeCreated,
++        row.timeUpdated,
++        row.data,
++        row.coldRef,
++        row.coldKey,
++        parts.get(row.id) ?? [],
++      ])),
      })),
    }
  })
@@ -1991,47 +2000,22 @@ diff --git a/packages/opencode/test/fixture/tui-plugin.ts b/packages/opencode/te
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -320,7 +321,7 @@ describe("lsp.spawn", () => {
-   )
- 
-   it.instance(
--    "spawns builtin LSP for files inside instance when LSP is unset (default enabled)",
-+    "does not spawn builtin LSP for files inside instance when LSP is unset (opt-in default)",
-     () =>
-       LSP.Service.use((lsp) =>
-         Effect.gen(function* () {
-@@ -333,8 +334,9 @@ describe("lsp.spawn", () => {
-               line: 0,
-               character: 0,
-             })
--            // [local-smark] 未配置 lsp 时默认启用，会尝试 spawn
--            expect(spy).toHaveBeenCalledTimes(1)
-+            // [0624] 未配置 lsp 时默认关闭（与 config schema 注释一致），不得尝试 spawn 任何内置 server。
-+            expect(spy).toHaveBeenCalledTimes(0)
+@@ -94,4 +94,5 @@
+             // 默认值也不能恢复LSP，与既有true/custom配置防复活测试一致。
+             expect(spy).toHaveBeenCalledTimes(0)
 +            expect(yield* lsp.status()).toEqual([])
            } finally {
              spy.mockRestore()
-           }
 
 diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
 --- a/packages/opencode/test/lsp/lifecycle.test.ts
 +++ b/packages/opencode/test/lsp/lifecycle.test.ts
-@@ -67,12 +67,12 @@ describe("LSP service lifecycle", () => {
-     { config: { lsp: false } },
-   )
- 
--  it.instance("hasClients() returns true for .ts files when LSP is unset (default enabled)", () =>
-+  it.instance("hasClients() returns false for .ts files when LSP is unset (opt-in default)", () =>
-     LSP.Service.use((lsp) =>
-       Effect.gen(function* () {
+@@ -73,4 +73,5 @@
          const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
--        // [local-smark] 未配置 lsp 时默认启用，hasClients 对 .ts 返回 true
--        expect(result).toBe(true)
-+        // [0624] 未配置 lsp 时默认关闭（与 config schema 注释一致），hasClients 对 .ts 返回 false
-+        expect(result).toBe(false)
+         // 没有活动后端时保持false，不以配置默认值伪造可用状态。
+         expect(result).toBe(false)
++        expect(yield* lsp.status()).toEqual([])
        }),
-     ),
-   )
 
 diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/opencode/test/server/httpapi-event.test.ts
 --- a/packages/opencode/test/server/httpapi-event.test.ts
@@ -2420,6 +2404,16 @@ diff --git a/packages/tui/src/context/sdk.tsx b/packages/tui/src/context/sdk.tsx
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
+@@ -30,7 +30,8 @@
+ import { useExit } from "./exit"
+ import { useEpilogue } from "./epilogue"
+ import { useArgs } from "./args"
+-import { batch, onCleanup, onMount } from "solid-js"
++import { useRoute } from "./route"
++import { batch, createEffect, onCleanup, onMount } from "solid-js"
+ import path from "path"
+ import { SessionPath } from "@opencode-ai/core/session/path"
+ // #132：会话 path 规范化
 @@ -40,6 +40,7 @@ import { usePermission } from "./permission"
  import { logPartDeltaTiming, partDeltaTimingKey, PART_DELTA_TIMING_LIMIT } from "./stream-timing"
  // #529：浏览窗口/上限常量与 dialog 搜索同源，避免两处窗口再次分叉
@@ -2428,9 +2422,15 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
  
  // 同一私有 viewer 信号收窄 Message 与 diff；默认 SDK/Web App 请求不带它，完整合同不变。
  // 该常量只属于 TUI transport，不进入 OpenAPI query 或 generated SDK，避免把内部投影固化成公共 API。
-@@ -244,6 +245,12 @@ export const {
-     }
- 
+@@ -137,6 +139,7 @@
+   name: "Sync",
+   init: () => {
+     const startup = useTuiStartup()
++    const route = useRoute()
+     const kv = useKV()
+     const permission = usePermission()
+     const [store, setStore] = createStore<{
+@@ -228,4 +229,10 @@ export const {
      const fullSyncedSessions = new Set<string>()
 +    // [0624 正文消费计数] 只有当前 route、可见 Task 卡片与显式插件 acquisition 持有 Session 正文使用权。
 +    // 最后一个消费者离开时立即释放已持久终态正文；fullSyncedSessions 只是加载成功标记，不代表仍有人使用。
@@ -2476,7 +2476,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +      releasedTerminalParts.add(part.id)
 +      dropBufferedDeltas((event) => event.properties.partID === part.id)
 +      const parts = store.part[part.messageID] ?? []
-+      const index = parts.indexOf(part)
++      const index = parts.findIndex(item => item.id === part.id)
 +      if (index !== -1) {
 +        setStore(
 +          "part",
@@ -2584,7 +2584,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              touchPart(part.sessionID, part.id)
              removedPartIDs.add(part.id)
              dropBufferedDeltas((event) => event.properties.partID === part.id)
-@@ -1057,6 +1155,18 @@ export const {
+@@ -1057,26 +1155,38 @@ export const {
            // 只登 part 会让请求期间新 Message 的整体被 HTTP 页覆盖。
            touchMessage(event.properties.part.sessionID, event.properties.part.messageID)
            touchPart(event.properties.part.sessionID, event.properties.part.id)
@@ -2600,9 +2600,37 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +            // [0624] 有消费者时新的合法 durable 更新可以覆盖已释放事实。
 +            releasedTerminalParts.delete(part.id)
 +          }
-           const parts = store.part[event.properties.part.messageID]
+-          const parts = store.part[event.properties.part.messageID]
++          const parts = store.part[part.messageID]
            if (!parts) {
-             setStore("part", event.properties.part.messageID, [event.properties.part])
+-            setStore("part", event.properties.part.messageID, [event.properties.part])
++            setStore("part", part.messageID, [part])
+             // part 首次创建：replay 在 part.updated 之前到达的缓冲 delta
+-            replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
++            replayOrphanDeltas(part.id, part.messageID)
+             break
+           }
+-          const result = search(parts, event.properties.part.id, (part) => part.id)
++          const result = search(parts, part.id, item => item.id)
+           if (result.found) {
+             // 合并守卫：防止 fire-and-forget 竞态导致短快照覆盖长流式文本
+-            setStore("part", event.properties.part.messageID, result.index, reconcile(mergeLivePart(parts[result.index], event.properties.part)))
++            setStore("part", part.messageID, result.index, reconcile(mergeLivePart(parts[result.index], part)))
+             break
+           }
+           setStore(
+             "part",
+-            event.properties.part.messageID,
++            part.messageID,
+             produce((draft) => {
+-              draft.splice(result.index, 0, event.properties.part)
++              draft.splice(result.index, 0, part)
+             }),
+           )
+           // part 插入到已有数组：replay 在 part.updated 之前到达的缓冲 delta
+-          replayOrphanDeltas(event.properties.part.id, event.properties.part.messageID)
++          replayOrphanDeltas(part.id, part.messageID)
+           break
 @@ -1085,7 +1195,8 @@ export const {
          case "message.part.delta": {
            // #186：进入队列合并，applyPartDelta 内仍走 #157 raw 路径
@@ -2622,9 +2650,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      })
  
      const args = useArgs()
-@@ -1310,5 +1423,16 @@ export const {
-     // route 与 Session 快照都参与依赖追踪，bootstrap 列表到达后自动补拉正确作用域。
-     createEffect(() => void refreshLsp())
+@@ -1279,5 +1394,16 @@ export const {
+     }
  
 +    // [0624] 当前 route 持有其 Session 的正文使用权；离开即释放，后台完成事件不再把正文补进 store。
 +    let routeParts: string | undefined
@@ -2639,6 +2666,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +
      onMount(() => {
        void bootstrap()
+     })
 @@ -1436,12 +1570,15 @@ export const {
                      continue
                    }
@@ -2702,12 +2730,13 @@ diff --git a/packages/tui/src/plugin/adapters.tsx b/packages/tui/src/plugin/adap
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -14,6 +14,7 @@ import {
+@@ -14,7 +14,8 @@ import {
    untrack,
    useContext,
  } from "solid-js"
 +import { createStore, produce } from "solid-js/store"
  import { sessionMessageContentWidth } from "./layout"
+ import { goalContinuation } from "./goal-continuation"
  
  // #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
 @@ -51,6 +52,7 @@ import { Spinner } from "../../component/spinner"

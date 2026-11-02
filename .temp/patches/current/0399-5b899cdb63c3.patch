@@ -745,19 +745,19 @@ new file mode 100644
 +| restart 验证 | 确认 restart 实际生效 |
 +| readJson 错误 | 6 个 JSON 解析错误获得可诊断的错误消息 |
 +| 全工具错误指引 | 任何错误都告诉 agent 下一步该调用什么工具/操作 |
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -49,3 +49,5 @@
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
+@@ -54,3 +54,5 @@
      "  restart   — restart the Jupyter kernel, clearing all variables and execution state. Rerun setup cells afterward. Only restart when strictly necessary (e.g. stuck kernel, corrupted state); prefer re-running cells over restarting when possible.",
      "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
 +    "  stop      — interrupt the currently executing cell without restarting the kernel. Variables and imports are preserved. Use after a run timeout or when a cell is stuck, instead of the heavier restart.",
 +    "  create    — create a new empty .ipynb file at the given filePath and open it. Use this instead of writing raw JSON with the write tool. After create, use vscode_notebook_edit with editType=insert to add cells, or operation=configure to select a kernel.",
    ].join("\n"),
-diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
---- a/packages/opencode/src/plugin/vscode-bridge.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -285,3 +285,8 @@
+diff --git a/packages/core/src/tool/notebook-view.ts b/packages/core/src/tool/notebook-view.ts
+--- a/packages/core/src/tool/notebook-view.ts
++++ b/packages/core/src/tool/notebook-view.ts
+@@ -145,3 +145,8 @@
      status,
      guidance,
 +    // 保留新增操作的紧凑观察字段；requested与可访问性都不等同于执行成功。
@@ -766,16 +766,88 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
 +    alreadyExists: booleanValue(data.alreadyExists),
 +    verified: booleanValue(data.verified),
      runtime: recordValue(data.runtime),
-@@ -447,1 +447,2 @@
+diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
+--- a/packages/opencode/src/plugin/vscode-bridge.ts
++++ b/packages/opencode/src/plugin/vscode-bridge.ts
+@@ -191,1 +191,2 @@
 -        operation: z.enum(["info", "configure", "restart", "save"]).describe("Which notebook environment operation to perform."),
 +        // 操作仍为显式枚举，新增中断与创建不改变其它环境操作的权限入口。
 +        operation: z.enum(["info", "configure", "restart", "save", "stop", "create"]).describe("Which notebook environment operation to perform."),
-@@ -453,3 +454,4 @@
-         // save 写回磁盘，专属工具许可之后仍须通过通用 edit 门禁。
+@@ -197,3 +198,3 @@
+-        // save 写回磁盘，专属工具许可之后仍须通过通用 edit 门禁。
 -        if (args.operation === "save") await ask(context, "edit", args)
 +        // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
 +        if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
          return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -50,5 +50,5 @@
+-// 四操作与原生唯一env入口一致，不能在CLI缺省成info而丢弃模型的操作意图。
++// 六操作共用原生env入口，不能在CLI丢弃显式中断或创建意图。
+ export const EnvInput = Schema.Struct({
+   filePath,
+-  operation: Schema.Literals(["info", "configure", "restart", "save"]).annotate({ description: "Which notebook environment operation to perform." }),
++  operation: Schema.Literals(["info", "configure", "restart", "save", "stop", "create"]).annotate({ description: "Which notebook environment operation to perform." }),
+   reason: Schema.String.annotate({ description: "Brief description of why this operation is being performed, shown to the user." }).pipe(Schema.optional),
+@@ -109,5 +109,5 @@
+       // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
+       execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(
+-        // save写回磁盘，专属审批通过后仍须服从通用edit，拒绝时不发现或调用桥。
+-        Effect.andThen(args.operation === "save" ? ask("edit", args, context) : Effect.void),
++        // 创建和保存都写磁盘；通用edit拒绝时仍不进入发现或RPC。
++        Effect.andThen(args.operation === "save" || args.operation === "create" ? ask("edit", args, context) : Effect.void),
+         Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -12,2 +12,3 @@
+ import { NotebookTools } from "@opencode-ai/core/tool/notebook"
++import { NotebookView } from "@opencode-ai/core/tool/notebook-view"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+@@ -273,6 +274,42 @@
+     [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(
+       Effect.andThen(input.action === deniedAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void),
+     ) })],
+     [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+   ])))
+ }))
++
++it.effect("keeps Notebook lifecycle schema, permissions, and observations aligned", () => Effect.gen(function* () {
++  const filePath = path.resolve("notebook-lifecycle.ipynb")
++  const permissions: PermissionV2.AssertInput[] = []
++  let deniedAction = "vscode_notebook_env"
++  yield* Effect.gen(function* () {
++    const registry = yield* ToolRegistry.Service
++    // 检查真实广告与解码路径，不在测试中复制六操作schema。
++    const definitions = yield* toolDefinitions(registry)
++    expect(definitions.find(item => item.name === "vscode_notebook_env")?.description).toContain("stop      — interrupt")
++    expect(definitions.find(item => item.name === "vscode_notebook_env")?.description).toContain("create    — create")
++    for (const operation of ["stop", "create"] as const) {
++      deniedAction = operation === "create" ? "edit" : "vscode_notebook_env"
++      const before = permissions.length
++      const result = yield* settleTool(registry, {
++        sessionID: SessionV2.ID.make("ses_notebook_lifecycle"), ...toolIdentity,
++        call: { type: "tool-call", id: `lifecycle-${operation}`, name: "vscode_notebook_env", input: { filePath, operation } },
++      })
++      expect(result.result.type).toBe("error")
++      expect(permissions.slice(before).map(item => item.action)).toEqual(operation === "create" ? ["vscode_notebook_env", "edit"] : ["vscode_notebook_env"])
++      expect(permissions.slice(before).every(item => item.resources[0] === filePath)).toBe(true)
++    }
++    // 显式false必须与true同样保留，观察字段不能被当作成功状态补写。
++    for (const observed of [false, true]) {
++      const data = { operation: "stop", requested: observed, created: observed, alreadyExists: observed, verified: observed }
++      expect(NotebookView.build("/notebook/env", { filePath }, { data })).toMatchObject({ view: "env", path: filePath, ...data })
++    }
++  }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
++    [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(path.dirname(filePath)) })))],
++    // 拒绝仍由实际执行叶子处理；两次调用均在发现桥之前结束，不创建监听或IDE宿主。
++    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input) }).pipe(
++      Effect.andThen(input.action === deniedAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void),
++    ) })],
++    [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
++  ])))
++}))
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts

@@ -7,7 +7,7 @@ diff --git a/packages/tui/src/routes/session/pending-tool-input.ts b/packages/tu
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/routes/session/pending-tool-input.ts
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,294 @@
 +// #187：pending 工具输入的可展示统计（路径/文件数/增减行）
 +export type PendingToolInputStats = {
 +  // #187：filePath 可空（多文件 patch 时用 fileCount）
@@ -56,34 +56,39 @@ new file mode 100644
 +// #187：edit 扫 filePath/oldString/newString，added=new 行 removed=old 行
 +function createEditInputParser() {
 +  let filePath = ""
++  let nativePath = ""
 +  // #187：old/new 分开计数，对应 UI -N +M
 +  const oldString = createLineCounter()
 +  const newString = createLineCounter()
-+  const scanner = createJsonStringFieldScanner(["filePath", "oldString", "newString"], (field, value) => {
++  const scanner = createJsonStringFieldScanner(["filePath", "path", "oldString", "newString"], (field, value) => {
 +    // #187：字段值可能分片到达，路径用 += 拼接
 +    if (field === "filePath") filePath += value
++    if (field === "path") nativePath += value
 +    if (field === "oldString") oldString.push(value)
 +    if (field === "newString") newString.push(value)
 +  })
 +  return {
 +    push: scanner.push,
-+    // #187：edit 单文件；added=newString 行，removed=oldString 行
-+    stats: () => pendingStats(filePath, filePath ? 1 : 0, newString.count(), oldString.count()),
++    // 两代路径分别累积，兼有字段时保持 legacy filePath 优先而不拼接两个路径。
++    stats: () => pendingStats(filePath || nativePath, filePath || nativePath ? 1 : 0, newString.count(), oldString.count()),
 +  }
 +}
 +
 +// #187：write 扫 filePath/content，added=content 行 removed=0
 +function createWriteInputParser() {
 +  let filePath = ""
++  let nativePath = ""
 +  const content = createLineCounter()
-+  const scanner = createJsonStringFieldScanner(["filePath", "content"], (field, value) => {
++  const scanner = createJsonStringFieldScanner(["filePath", "path", "content"], (field, value) => {
 +    // #187：content 分片按字符计行，不缓存全文
 +    if (field === "filePath") filePath += value
++    if (field === "path") nativePath += value
 +    if (field === "content") content.push(value)
 +  })
 +  return {
 +    push: scanner.push,
-+    stats: () => pendingStats(filePath, filePath ? 1 : 0, content.count(), 0),
++    // Write 与 Edit 使用相同路径优先级，流式正文仍只做预览计行。
++    stats: () => pendingStats(filePath || nativePath, filePath || nativePath ? 1 : 0, content.count(), 0),
 +  }
 +}
 +
@@ -418,10 +423,12 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
              }
              when={props.complete || props.failed}
            >
-@@ -2532,6 +2607,21 @@ function Write(props: ToolProps) {
+@@ -2532,8 +2607,23 @@ function Write(props: ToolProps) {
    const { theme, syntax } = useTheme()
    const pathFormatter = usePathFormatter()
    const ctx = use()
+   // 两代输入采用不同字段名，展示使用实际调用路径，不改写模型输入。
+   const filepath = createMemo(() => stringValue(props.input.filePath) ?? stringValue(props.input.path))
 +  // #187：流式 raw → 路径/+行 统计
 +  const writePendingStats = createPendingToolInputStats(() => props.part)
 +  // #187：无路径且无 added 时回落 Preparing write...
@@ -442,9 +449,9 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const code = createMemo(() => {
 @@ -2620,3 +2728,3 @@ function Write(props: ToolProps) {
       <Match when={true}>
--        <InlineTool icon="←" pending="Preparing write…" complete={stringValue(props.input.filePath)} part={props.part}>
-+        <InlineTool icon="←" pending={writePending()} complete={stringValue(props.input.filePath)} part={props.part}>
-          Write {pathFormatter.format(stringValue(props.input.filePath))}
+-        <InlineTool icon="←" pending="Preparing write…" complete={filepath()} part={props.part}>
++        <InlineTool icon="←" pending={writePending()} complete={filepath()} part={props.part}>
+          Write {pathFormatter.format(filepath())}
 @@ -2906,6 +2996,21 @@ function Edit(props: ToolProps) {
    const ctx = use()
    const { theme, syntax } = useTheme()
@@ -513,7 +520,7 @@ diff --git a/packages/tui/test/routes/session/pending-tool-input.test.ts b/packa
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/routes/session/pending-tool-input.test.ts
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,121 @@
 +import { describe, expect, test } from "bun:test"
 +import { createRoot, createSignal } from "solid-js"
 +import {
@@ -521,7 +528,6 @@ new file mode 100644
 +  formatPendingCounts,
 +  formatPendingPathLabel,
 +} from "../../../src/routes/session/pending-tool-input"
-+import { createPendingToolInputStats } from "../../../src/routes/session/index"
 +
 +describe("pending tool input parser (#187)", () => {
 +  test("edit parser counts old/new lines from streamed raw JSON", () => {
@@ -539,6 +545,10 @@ new file mode 100644
 +    expect(stats?.filePath).toBe("src/a.ts")
 +    expect(stats?.removed).toBe(2)
 +    expect(stats?.added).toBe(3)
++    // canonical Edit 使用 path；同一解析器保留完整 old/new 计行语义。
++    const native = createPendingToolInputParser("edit")
++    native.push(JSON.stringify({ path: "src/native.ts", oldString: "one\ntwo\n", newString: "new\n" }))
++    expect(native.stats()).toMatchObject({ filePath: "src/native.ts", removed: 2, added: 1 })
 +  })
 +
 +  test("write parser counts content lines and path", () => {
@@ -549,6 +559,10 @@ new file mode 100644
 +    expect(stats?.filePath).toBe("b.ts")
 +    expect(stats?.added).toBe(3)
 +    expect(stats?.removed).toBe(0)
++    // 两字段分别累积，兼有时优先 filePath，不能生成 b.tsother.ts。
++    const native = createPendingToolInputParser("write")
++    native.push(JSON.stringify({ filePath: "b.ts", path: "other.ts", content: "a\nb\nc" }))
++    expect(native.stats()).toMatchObject({ filePath: "b.ts", added: 3, removed: 0 })
 +  })
 +
 +  test("apply_patch parser tracks file headers and diff lines", () => {
@@ -610,6 +624,7 @@ new file mode 100644
 +  const part = (raw: string) => ({ id: "p1", tool: "edit", state: { status: "pending", raw } })
 +
 +  test("throttles streamed raw into stats", async () => {
++    const { createPendingToolInputStats } = await import("../../../src/routes/session/index")
 +    // #187：节流窗口内不更新，窗口后产出路径与 +/- 计数
 +    let stats: (() => { filePath?: string; added: number; removed: number } | undefined) | undefined
 +    const early: unknown[] = []

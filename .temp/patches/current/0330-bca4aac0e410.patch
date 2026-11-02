@@ -339,14 +339,15 @@ diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.
 -      ORDER BY coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
 +      -- 未提升的queue/steer不能接管当前轮；没有提升记录时仍显示首次admission。
 +      ORDER BY (promoted_seq IS NOT NULL) DESC, coalesce(promoted_seq, admitted_seq) DESC LIMIT 1
-     ), current_request AS (
-@@ -42,4 +47,8 @@
--        UNION ALL SELECT * FROM native_request)
+     ), active_compaction AS (
+@@ -52,4 +57,9 @@
+-        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction)
 -      -- admission 或 promotion 决定最新身份；新 admission 等待时不能借用旧轮次。
 -      ORDER BY position DESC, time_created DESC, id DESC LIMIT 1
-+        UNION ALL SELECT * FROM native_request) candidates
++        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction) candidates
 +      -- 混合入口同样优先已开始的请求；无回复V1输入不能压过正在执行的native轮次。
-+      ORDER BY CASE WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
++      -- 活跃压缩拥有真实独立估算，继续以其durable位置参与最新执行请求选择。
++      ORDER BY CASE WHEN kind = 'compaction' THEN 1 WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
 +        SELECT 1 FROM message a WHERE a.session_id = "session"."id"
 +          AND json_extract(a.data, '$.role') = 'assistant'
 +          AND json_extract(a.data, '$.parentID') = candidates.id
@@ -373,6 +374,19 @@ diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/
 -      expect(snapshots.at(-1)?.request?.cost).toBe(0)
 +      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
 +      expect(snapshots.at(-1)?.request?.cost).toBe(1)
+@@ -252,1 +252,2 @@
+       GlobalBus.off("event", listener)
++      const observed = snapshots.length
+@@ -258,2 +259,3 @@
+-      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
+-      expect((yield* session.get(created.id)).request?.messageID).toBe(unobserved.id)
++      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
++      expect(snapshots).toHaveLength(observed)
++      expect((yield* session.get(created.id)).request?.messageID).toBe(userID)
+@@ -263,1 +265,2 @@
+-      expect(snapshots.at(-1)?.request?.messageID).toBe(unobserved.id)
++      expect(snapshots.at(-1)?.request?.messageID).toBe(userID)
++      expect(snapshots.length).toBeGreaterThan(observed)
 diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
 --- a/packages/core/test/session-projector.test.ts
 +++ b/packages/core/test/session-projector.test.ts

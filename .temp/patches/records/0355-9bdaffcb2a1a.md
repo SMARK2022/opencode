@@ -77,3 +77,14 @@
 - 355 累计失败来自旧 V1 路径，实际分类器已迁移至 Core；将整套 splitter/evaluateShell/raw 注释修改转到共享 owner，保留现有测试入口及所有断言。
 - 仅迁移所属路径，继续保持 fd-merge 原子消费、opaque/tainted 分段与既有 general 边界，不增加第二分类器。
 - 最新355累计与30 workspace通过，precheck既有及新增用例包含在本轮226项通过的聚焦测试中。完整原始命令文本只交分类器，不启动shell或真实应用。
+
+## 2026-10-26 原项复核
+- 主代理完整读取original/current的189行历史方案、全部生产与五组测试hunks，并核对353前态Core evaluateShell/splitCommands及V1 re-export。current已落共享owner，保留原实现，不为风格或一般残隙重写。
+- 本项修复干净兄弟段被opaque丢弃，以及fd-merge未原子消费的真实缺陷；opaque/tainted、动态变量、glob、文件重定向、单&与换行仍保持源general边界，非全量fail-closed。raw dangerous/cautious与现有包装器判定不动，不恢复旧记录暗示的额外加固。
+- 354本轮165项行为验证已绿；本项下一步统一累计355与纯字符串precheck验证，未宣称本轮355已闭合。测试命令文本不会进入真实shell。
+- 统一正式报告`typecheck-0355-2026-10-25T20-26-41-543Z.md`：355/355、reusedPrefix354、base0354-20d6946a935e、appliedThisRun1、30 workspace passed；frozen安装复用`56f628acec0337dadf9a5e400f45c8503010a286a2560e3c1658309185c4f614`，source/target unchanged，官方只保留355/354/353/352/350五态。
+- 安全行为cwd：355唯一安装宿主`packages/core`。每命令独立`D:/Temp/opencode/check-355-<guid>` HOME/USERPROFILE/四XDG/explicit-config，清空继承OPENCODE与Provider/MCP/AWS/GitHub凭据；OPENCODE_DB=:memory:，TEMP/TMP/TMPDIR仅D:/Temp/opencode，RECORD/CHATGPT_VOICE_E2E/GITHUB_ACTIONS=false，禁LSP下载/文件watcher/模型fetch。
+- 命令一：`bun test --timeout 30000 --only-failures test/session-runner-message.test.ts test/tool-read.test.ts test/tool-edit.test.ts test/tool-apply-patch.test.ts test/file-mutation.test.ts test/session-compaction.test.ts ../opencode/test/tool/read.test.ts ../opencode/test/tool/edit.test.ts ../opencode/test/session/file-evidence.test.ts ../opencode/test/tool/task.inspected-files.test.ts ../opencode/test/permission/precheck.test.ts`。完整输出：`bun test v1.3.14 (0d9b296a); 265 pass; 0 fail; 1243 expect() calls; Ran 265 tests across 11 files. [39.02s]`。
+- 命令二：`bun test --timeout 30000 --only-failures test/session-runner.test.ts --test-name-pattern 'executes and resumes canonical task sessions with durable results and scoped permissions|durably settles local tool failures before continuing'`。完整输出：`bun test v1.3.14 (0d9b296a); 2 pass; 93 filtered out; 0 fail; 51 expect() calls; Ran 2 tests across 1 file. [6.25s]`。只运行已核查fake-provider与内存Session；93为名称筛选，未改skip或断言换绿。
+- 命令三为352纯显示宽度用例：完整命令与1/0/5输出在352本轮记录。三组合计268 pass/0 fail/1299断言；不启产品/TUI/daemon/MCP/录音设备、不执行被分类的危险命令文本。无新增Native安全分支，source既有general残隙与注释冗长记N。现交完整351–355全新正反独立双审，不先放行后项。
+- 本轮新完整正审`ses_e8b3c92c8ffeY618HELKpK3vt0`、反审`ses_e8b3c9291ffe1bYxp7zIKqQ6jH`一致351–355全部PASS/B0/G0，355唯一共享分类器与实际两代权限消费者闭合。源general边界是接受的N，不升级成全面fail-closed或新增第二分类器。

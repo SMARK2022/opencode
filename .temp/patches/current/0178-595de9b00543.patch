@@ -92,16 +92,15 @@ diff --git a/sdks/vscode/src/notebook/source.ts b/sdks/vscode/src/notebook/sourc
    } else if (more) {
      output += `\n\n(Showing lines ${globalStart}-${lastRenderedLine} of ${totalLines}. Use offset=${lastRenderedLine + 1} to continue.)`
    }
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -10,6 +10,9 @@ export const VscodeNotebookDescriptions = {
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
+@@ -10,6 +10,8 @@ export const VscodeNotebookDescriptions = {
    ].join("\n"),
  
    source: [
-+    // #178：与 notebook source 默认 16KiB 对齐
-+    "Returned source is capped at 16 KB; use offset/limit for larger cells.",
-+    
++    // 两代描述与同一 Notebook 源码分页预算同步，保留原有全局坐标续读契约。
++    "Returned source is capped at 16 KB; use offset/limit to continue.",
      "Read notebook source as a paginated virtual text document with 1-based global line numbers.",
      "Use this instead of reading raw .ipynb JSON when source content is needed. filePath is required. Pass cellId=#VSC-xxx to focus one cell; use offset/limit to page through large notebooks.",
      "Line numbers are global virtual source lines across notebook cell sources. Headers and visual separators are unnumbered; line ranges are not per-cell local line numbers.",
@@ -118,10 +117,22 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
      .max(1000)
      .optional()
 -    .describe("Maximum rendered source lines to return, capped at 1000."),
-+    .describe("Maximum rendered source lines to return, capped at 1000 lines / 16 KB."),
++    .describe("Maximum rendered source lines to return, capped at 1000. Output is also capped at 16 KB."),
  }
  
  const runArgs = {
+diff --git a/packages/core/src/config/tool-output.ts b/packages/core/src/config/tool-output.ts
+--- a/packages/core/src/config/tool-output.ts
++++ b/packages/core/src/config/tool-output.ts
+@@ -13,1 +13,1 @@
+-    description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 24576)",
++    description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 16384)",
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -58,1 +58,1 @@
+-            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 24 KiB per read; displayed lines are limited to 2000 characters.\nLine accounting scans at most 256 KiB beyond the returned page. If `<range total_exact=\"false\">` appears, `total` is a lower bound; otherwise it is exact.\nIf a result returns `<stub status=\"...\">`, use the already visible content in the current context instead of reading the same range again.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed.",
++            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 16 KiB per read; displayed lines are limited to 2000 characters.\nLine accounting scans at most 256 KiB beyond the returned page. If `<range total_exact=\"false\">` appears, `total` is a lower bound; otherwise it is exact.\nIf a result returns `<stub status=\"...\">`, use the already visible content in the current context instead of reading the same range again.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed.",
 diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
 --- a/packages/core/test/tool-read-filesystem.test.ts
 +++ b/packages/core/test/tool-read-filesystem.test.ts

@@ -1425,17 +1425,16 @@ index 063cbb1f0387e8e57db691b617bf866b82d1e52a..1f6c794439bbd50fb7bf0699e962037b
 +- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless the user explicitly requires them.
  - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
  - Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
-diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
---- a/packages/opencode/src/session/system.ts
-+++ b/packages/opencode/src/session/system.ts
-@@ -44,6 +44,7 @@ export function provider(model: Provider.Model) {
-   if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-     return [PROMPT_BEAST]
-   if (model.api.id.includes("gpt")) {
+diff --git a/packages/core/src/system-context/prompts.ts b/packages/core/src/system-context/prompts.ts
+--- a/packages/core/src/system-context/prompts.ts
++++ b/packages/core/src/system-context/prompts.ts
+@@ -25,5 +25,6 @@
+   // 保留上游选择优先级，不能先匹配宽泛GPT分支改变已有模型的模板。
+   if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
+   if (id.includes("gpt")) {
 +    // 与上游保持路由优先级：GPT-6（含 Codex 名称）使用本地 Astra 模板。
-     if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
-     if (model.api.id.includes("codex")) {
-       return [PROMPT_CODEX]
+     if (id.includes("gpt-6")) return PROMPT_ASTRA
+     if (id.includes("codex")) return PROMPT_CODEX
 diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
 --- a/packages/core/src/system-context/builtins.ts
 +++ b/packages/core/src/system-context/builtins.ts
@@ -1460,9 +1459,9 @@ diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/sy
 +Treat new messages received during ongoing work as updates to the active task. Apply corrections and constraints, answer questions briefly, and continue the remaining work. Stop or replace the task only when the user clearly requests it or gives an incompatible objective.
  The conversation may be compacted or resumed from a summary when context gets long.
 
-diff --git a/packages/opencode/src/session/prompt/gpt-astra.txt b/packages/opencode/src/session/prompt/gpt-astra.txt
---- a/packages/opencode/src/session/prompt/gpt-astra.txt
-+++ b/packages/opencode/src/session/prompt/gpt-astra.txt
+diff --git a/packages/core/src/system-context/prompt/gpt-astra.txt b/packages/core/src/system-context/prompt/gpt-astra.txt
+--- a/packages/core/src/system-context/prompt/gpt-astra.txt
++++ b/packages/core/src/system-context/prompt/gpt-astra.txt
 @@ -1,46 +1,107 @@
  You are an AI agent powered by OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.
  
@@ -1599,9 +1598,9 @@ diff --git a/packages/opencode/src/session/prompt/gpt-astra.txt b/packages/openc
 +
 +For large or complex changes, lead with the solution, then explain what you did and why. For casual chat, just chat. If something couldn’t be done (tests, builds, etc.), say so. Suggest next steps only for work outside the original request; do not offer requested work as suggestions; if you list options, use numbered items.
 
-diff --git a/packages/opencode/src/session/prompt/gpt.txt b/packages/opencode/src/session/prompt/gpt.txt
---- a/packages/opencode/src/session/prompt/gpt.txt
-+++ b/packages/opencode/src/session/prompt/gpt.txt
+diff --git a/packages/core/src/system-context/prompt/gpt.txt b/packages/core/src/system-context/prompt/gpt.txt
+--- a/packages/core/src/system-context/prompt/gpt.txt
++++ b/packages/core/src/system-context/prompt/gpt.txt
 @@ -8,15 +8,15 @@ You are a deeply pragmatic, effective software engineer. You take engineering qu
  ## Editing Approach
  
@@ -1658,9 +1657,9 @@ diff --git a/packages/core/src/git-safety.txt b/packages/core/src/git-safety.txt
 +- Create the PR when instructed; if it needs a branch or push that isn't yet authorized, ask for that specifically.
  - Use `gh` for GitHub tasks, including PRs, issues, checks, and releases; return the PR URL when done.
 
-diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
---- a/packages/opencode/src/tool/task.txt
-+++ b/packages/opencode/src/tool/task.txt
+diff --git a/packages/core/src/tool/task.txt b/packages/core/src/tool/task.txt
+--- a/packages/core/src/tool/task.txt
++++ b/packages/core/src/tool/task.txt
 @@ -31,7 +31,7 @@ Usage notes:
  - Launch independent agents in parallel in one response when their scopes do not overlap.
  - Trust completed agent results by default, but inspect changed files before integrating or reporting final success.
@@ -1692,11 +1691,11 @@ diff --git a/packages/opencode/test/session/system.test.ts b/packages/opencode/t
  import { RuntimeFlags } from "../../src/effect/runtime-flags"
  import { InstanceState } from "../../src/effect/instance-state"
  import { testEffect } from "../lib/effect"
-+import PROMPT_ASTRA from "../../src/session/prompt/gpt-astra.txt"
-+import PROMPT_GPT from "../../src/session/prompt/gpt.txt"
-+import PROMPT_CODEX from "../../src/session/prompt/codex.txt"
-+import PROMPT_BEAST from "../../src/session/prompt/beast.txt"
-+import PROMPT_ANTHROPIC from "../../src/session/prompt/anthropic.txt"
++import PROMPT_ASTRA from "../../../core/src/system-context/prompt/gpt-astra.txt"
++import PROMPT_GPT from "../../../core/src/system-context/prompt/gpt.txt"
++import PROMPT_CODEX from "../../../core/src/system-context/prompt/codex.txt"
++import PROMPT_BEAST from "../../../core/src/system-context/prompt/beast.txt"
++import PROMPT_ANTHROPIC from "../../../core/src/system-context/prompt/anthropic.txt"
  
  const skills: Skill.Info[] = [
    {
@@ -1753,13 +1752,15 @@ diff --git a/packages/opencode/test/tool/parameters.test.ts b/packages/opencode/
 diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 --- a/packages/core/src/tool/goal.ts
 +++ b/packages/core/src/tool/goal.ts
-@@ -16,1 +16,2 @@
--      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-+      // 首轮必须能启动受阻审计；后续确认继续遵守真实turn与reason约束。
-+      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked to start a blocker audit; a second consecutive call with the same trimmed reason in the next eligible Goal turn marks it blocked. The first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-@@ -20,1 +21,1 @@
--          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Blocked requires two consecutive eligible Goal turns using the same trimmed reason; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
-+          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Use blocked to start a blocker audit; a second consecutive call in the next eligible Goal turn using the same trimmed reason marks it blocked; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
+@@ -21,4 +21,4 @@
+         "Call with `operate` and, when required, `reason` to change the goal:",
+         "- Use `operate: \"complete\"` with a `reason` only when the objective has actually been achieved and no required work remains.",
+-        "- Use `operate: \"blocked\"` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress, call `operate: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. Do not block merely because work is hard, uncertain, or incomplete.",
++        "- Use `operate: \"blocked\"` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress, call `operate: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. Do not block merely because work is hard, uncertain, or incomplete.",
+         "- Use `operate: \"active\"` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.",
+@@ -35,1 +35,1 @@
+-          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
++          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` to start a blocker audit; a second consecutive call with the same trimmed reason marks the goal blocked. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
 diff --git a/packages/core/src/tool/question.ts b/packages/core/src/tool/question.ts
 --- a/packages/core/src/tool/question.ts
 +++ b/packages/core/src/tool/question.ts
@@ -1782,12 +1783,51 @@ diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
 diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
 --- a/packages/core/src/tool/apply-patch.ts
 +++ b/packages/core/src/tool/apply-patch.ts
-@@ -75,3 +75,4 @@
+@@ -86,3 +86,4 @@
 +            // 保留原批量与错误契约；新文件边界只补在已有description可见面。
              description:
--              "Apply one patch containing add, update, and delete file operations. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
-+              "Apply one patch containing add, update, and delete file operations. Create a new file only when the user explicitly requires it. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
+-              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
++              "Apply one patch containing add, update, delete, and move file operations. Create a new file only when the user explicitly requires it. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
              input: Input,
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -128,1 +128,1 @@
+-              "- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.",
++              "- If need, ALWAYS prefer editing existing files in the codebase. NEVER write new files unless the user explicitly requires them.",
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -84,3 +84,6 @@
+ import PROMPT_META from "../src/system-context/prompt/meta.txt"
+ import PROMPT_TRINITY from "../src/system-context/prompt/trinity.txt"
+ import PROMPT_KIMI from "../src/system-context/prompt/kimi.txt"
++import PROMPT_ASTRA from "../src/system-context/prompt/gpt-astra.txt"
++import PROMPT_GPT from "../src/system-context/prompt/gpt.txt"
++import PROMPT_BEAST from "../src/system-context/prompt/beast.txt"
+@@ -2092,8 +2095,16 @@
+       const samples = [
+         ["MiniMax-M2", "moonshotai", PROMPT_MINIMAX],
+         ["mini-max-M2", "gateway", PROMPT_MINIMAX],
+         ["deepseek-v4", "gateway", PROMPT_DEEPSEEK],
+         ["claude-opus-4-6", "anthropic", PROMPT_ANTHROPIC],
+         ["gpt-5-codex", "openai", PROMPT_CODEX],
++        // 源七组API-id也经过真实Native请求，不能只验证V1 selector或遗漏独立正文。
++        ["gpt-6-astra", "openai", PROMPT_ASTRA],
++        ["gpt-6", "openai", PROMPT_ASTRA],
++        ["gpt-6-codex", "openai", PROMPT_ASTRA],
++        ["gpt-5.6-luna", "openai", PROMPT_GPT],
++        ["gpt-5.4-codex", "openai", PROMPT_CODEX],
++        ["gpt-4.1", "openai", PROMPT_BEAST],
++        ["claude-sonnet-4", "anthropic", PROMPT_ANTHROPIC],
+         ["muse-deepseek", "meta", PROMPT_META.replaceAll("{{MODEL_NAME}}", "Muse Spark")],
+         ["trinity-deepseek", "gateway", PROMPT_TRINITY],
+@@ -2112,3 +2123,4 @@
+         expect(parts).toEqual([expectedToolGuidance, prompt, "Initial context",
+-          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
++          // 新增Sonnet样本仍须保留既有知识截止元数据，不能把路由断言变成身份信息裁剪。
++          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : id === "claude-sonnet-4" ? "\nKnowledge cutoff: January 2025" : ""}`])
+         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
 diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
 --- a/packages/core/test/system-context/builtins.test.ts
 +++ b/packages/core/test/system-context/builtins.test.ts

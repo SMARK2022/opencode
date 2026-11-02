@@ -1031,12 +1031,20 @@ diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/ses
 -            `  Today's date: ${new Date().toDateString()}`,
 +            // baseline保留初始日期；比较snapshot推进到今天也不能改写旧前缀。
 +            `  ${epoch.baseline.slice(epoch.snapshot["smark/git"].value.length + 1)}`,
-@@ -183,1 +194,1 @@
+@@ -183,5 +194,5 @@
+             ...(ctx.worktree !== ctx.directory ? ["  Run ALL commands from the working directory; do NOT cd to the original repository root."] : []),
+             `</env>`,
+           ].join("\n")
 -        return [
 +        return { system: [
-@@ -205,1 +216,1 @@
+           references.length === 0
+@@ -205,5 +216,5 @@
+           SystemContextBuiltIns.ACTION_GUIDANCE,
+           SystemContextBuiltIns.OUTPUT_GUIDANCE,
+           environment,
 -        ].filter((part): part is string => part !== undefined)
 +        ].filter((part): part is string => part !== undefined), updates: epoch.updates }
+       }),
 @@ -253,1 +264,1 @@
 -  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node],
 +  deps: [Skill.node, MCP.node, locationServiceMapNode, Git.node, RuntimeFlags.node, Config.node, Database.node],

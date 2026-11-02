@@ -1,5 +1,9 @@
 # 0198 — feat(permission): add reviewer auto decision service
 
+## 2026-10-24 完整批次复审
+- current未改；匹配 `typecheck-0200-2026-10-24T04-01-10-009Z`，200/200及30 workspace通过。原生真实Permission/reviewer链通过虚拟LLM边界执行，完整38/0命令与未变纯测试30/0复用证据见#199。
+- 完整196–200新正审 `ses_e93e33883ffetgmsSfrV5wc5Rg` 与新逆审 `ses_e93e33832ffe43nqf9uTiuOf1Y` 一致五项PASS，B0/G0。默认Catalog模型、逐段省略标记及咨询性熔断注释的低影响差异保留N，不增加安全框架。
+
 ## 2026-10-16 原生共享决策
 - 确定性 auto 路由、Assessment、提示模板和默认策略移到 Core，V1 路径只重导出。两种运行时共享原始 precheck/strict/失败降级规则与政策，不复制第二套规则。
 - 原生 reviewer 接入现有模型 resolver、只读 SessionStore 和单次结构化 LLM 调用；保留配置策略、超时、禁用及 fallback=user 语义，后续 199 在原 Permission owner 统一消费。

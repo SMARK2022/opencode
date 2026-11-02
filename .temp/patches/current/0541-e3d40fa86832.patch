@@ -412,12 +412,12 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 index d9653d0e5..e492c1a8e 100644
 --- a/packages/core/src/storage/cold-storage.ts
 +++ b/packages/core/src/storage/cold-storage.ts
-@@ -998,6 +998,41 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
+@@ -1091,6 +1091,47 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
    return result
  }
  
 +// status 的 F4 raw 需要每个 pack 的 distinct cold_key 数；owners/keys 才是 entry 共享倍率。
-+// 只扫 message/part：session-summary 无 entry key，仍用 ownerCounts 的 raw×owners。
++// 三类transcript owner都按entry key计量；session-summary无key，仍用ownerCounts的raw×owners。
 +// 返回值只含 keys：owner 数继续由 ownerCounts 反算，避免两套计数口径分叉。
 +// 与 ownerCounts 同走 DEFAULT_BATCH_SIZE 分批，遵守 SQLite 变量上限的约束在此处同样成立。
 +function packKeyStats(db: TxOrDb, hashes: string[]) {
@@ -448,13 +448,19 @@ index d9653d0e5..e492c1a8e 100644
 +      // 正常 kind 下同一 hash 只会出现在 message 或 part 一侧；相加仅防御异常双引用。
 +      if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.keys)
 +    }
++    // Native pack同样有多entry；只读取同行BLOB key，不解压或热化原消息。
++    for (const row of db.select({ hash: SessionMessageTable.cold_ref, keys: sql<number>`count(distinct ${SessionMessageTable.cold_key})` })
++      .from(SessionMessageTable).where(inArray(SessionMessageTable.cold_ref, batch))
++      .groupBy(SessionMessageTable.cold_ref).all()) {
++      if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.keys)
++    }
 +  }
 +  return result
 +}
- function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: "part-pack" | "session-summary") {
+ function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: PackKind | "session-summary") {
    // unique hash 去重只减少 SQL 工作量，不改变每个真实 owner 对 ref_count 的贡献。
    const unique = [...new Set(hashes)]
-@@ -3453,8 +3488,29 @@ export function status(db: TxOrDb): StatusReport {
+@@ -3801,8 +3842,29 @@ export function status(db: TxOrDb): StatusReport {
    // logical raw 使用 owner 反算数；当 persisted ref_count 损坏时，status 仍给出真实共享量并单独报告 mismatch。
    // orphan payload 计入物理 compressedBytes，但不参与 referencedRaw/sharedBytes，避免无 owner blob 扭曲去重收益。
    // verify/cleanup 才拥有修复或删除权限，status 的真实计数不能顺带改写 persisted ref_count。
@@ -472,7 +478,7 @@ index d9653d0e5..e492c1a8e 100644
 +    const owners = counts.get(row.hash) ?? 0
 +    // orphan 的 unique raw 只进 referencedRaw/compressed，不进逻辑 Raw 展开。
 +    if (owners === 0) return total
-+    if (row.kind === "message-pack" || row.kind === "part-pack") {
++    if (row.kind === "message-pack" || row.kind === "part-pack" || row.kind === "session-message-pack") {
 +      const distinctKeys = keyCounts.get(row.hash) ?? 0
 +      // keys==0 的 v2 损坏行不回退 F0，避免再次把整包按 owner 连乘放大。
 +      if (distinctKeys <= 0) return total
@@ -486,7 +492,7 @@ index d9653d0e5..e492c1a8e 100644
    // unique compressed 包含 orphan 的真实占用，cleanup 前仍须显示可回收空间。
    const compressedBytes = payloads.reduce((total, row) => total + row.compressed_bytes, 0)
    const referencedRawBytes = payloads.reduce(
-@@ -3482,7 +3538,7 @@ export function status(db: TxOrDb): StatusReport {
+@@ -3830,7 +3892,7 @@ export function status(db: TxOrDb): StatusReport {
      payloads: payloads.length,
      rawBytes,
      compressedBytes,
@@ -496,6 +502,31 @@ index d9653d0e5..e492c1a8e 100644
      refCountMismatches,
      orphans,
 
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -132,6 +132,8 @@
+       const cold = (yield* db.select().from(SessionMessageTable).all()).filter(row => row.cold_ref !== null)
+       expect(cold.map(row => row.id).sort()).toEqual([oldID, hiddenID].sort())
+       const payload = yield* db.select().from(ColdStorageTable).get()
+       if (!payload) return yield* Effect.die("Missing shared Native payload")
+       expect(payload.ref_count).toBe(2)
++      // 相同entry的真实共享仍计两份逻辑Raw，不能把所有pack简单按blob计一次。
++      expect(new Set(cold.map(row => row.cold_key?.toString("hex"))).size).toBe(1)
+       // 破坏真实payload后整段读取必须回滚，不能交回空reasoning或消耗引用。
+@@ -185,6 +187,12 @@
+       const packed = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
+       expect(new Set(packed.map(row => row.cold_ref)).size).toBe(1)
+       expect(new Set(packed.map(row => row.cold_key?.toString("hex"))).size).toBe(2)
++      const packPayload = yield* db.select().from(ColdStorageTable).get()
++      if (!packPayload) return yield* Effect.die("Missing multi-key Native pack")
++      // 两个不同entry已包含在一包中；独立期望来自真实metadata，不复制F4公式。
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        expect(ColdStorage.status(sync)).toMatchObject({ rawBytes: packPayload.raw_bytes, compressedBytes: packPayload.compressed_bytes, sharedBytes: 0 })
++      })
+       const bad = packed.find(row => row.id === hiddenID)
+       if (!bad?.cold_key) return yield* Effect.die("Native pack key is missing")
+       const key = Buffer.from(bad.cold_key)
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 index f64075a52..f75d05a71 100644
 --- a/packages/opencode/test/storage/cold.test.ts

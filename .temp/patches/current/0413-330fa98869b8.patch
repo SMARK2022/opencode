@@ -594,13 +594,11 @@ index 0000000000000000000000000000000000000000..a88cc48ccb46356cfe09ac76803fde92
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
-@@ -109,11 +109,13 @@ export const GrepTool = Tool.define(
-             ...patterns(params.include),
-             ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
-           ]
+@@ -99,10 +99,11 @@ export const GrepTool = Tool.define(
+           // 默认值在执行层而非 schema 层兜底，避免 wire schema 对未传字段产生隐式值
+           const timeout = params.timeout ?? DEFAULT_TIMEOUT
 -          const emptyTimedOut = () => ({
-+          // [local-smark] 源 :1626-1631 契约：timeout 与 partial 可并存（exit 2 竞态），
-+          // 四态 metadata 均须持久化——文案归因 timeout，partial 独立记录路径跳过
++          // timeout与partial可并存，权限信息不能被预算文案吞掉。
 +          const emptyTimedOut = (partial = false) => ({
              // #244：title 沿用 pattern 与普通结果对齐，调用方按 title 聚合时不受影响
              title: params.pattern,
@@ -624,7 +622,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +          if (result.items.length === 0 && result.partial)
 +            return {
 +              title: params.pattern,
-+              metadata: { matches: 0, truncated: true, partial: true },
++              metadata: { matches: 0, truncated: false, partial: true },
 +              output: [
 +                "No files found, but the search could not access some paths (permission denied).",
 +                "Results may be incomplete. Narrow the search path or adjust include/exclude patterns.",
@@ -632,7 +630,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +            }
            if (result.items.length === 0) return empty
  
-           // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文
+           // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文；
 @@ -168,7 +182,17 @@ export const GrepTool = Tool.define(
            const totalMatches = rows.length
            // #244：超时语义优先于空结果语义：即使 rg 曾输出匹配但文件随后在 stat
@@ -643,7 +641,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +          if (final.length === 0 && result.partial)
 +            return {
 +              title: params.pattern,
-+              metadata: { matches: 0, truncated: true, partial: true },
++              metadata: { matches: 0, truncated: false, partial: true },
 +              output: [
 +                "No files found, but the search could not access some paths (permission denied).",
 +                "Results may be incomplete. Narrow the search path or adjust include/exclude patterns.",
@@ -671,8 +669,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
 --- a/packages/core/src/ripgrep.ts
 +++ b/packages/core/src/ripgrep.ts
-@@ -110,7 +110,10 @@ export interface SearchResult {
- 
+@@ -105,5 +105,8 @@
  export interface Interface {
    readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
 -  readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
@@ -681,9 +678,8 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
 +    Error
 +  >
    readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
-   // #244：grep 工具需要 timedOut/truncated/partial 元数据来判断「空结果」与「受控截断」；
-   // grep() 保留纯匹配列表形状给既有 HTTP/debug 调用方。
-@@ -122,8 +125,12 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
+   readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
+@@ -113,8 +116,12 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/v2
  
  const failure = (message: string, cause?: unknown) => new Error({ message, cause })
  
@@ -697,26 +693,15 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
  
  const layer = Layer.effect(
    Service,
-@@ -213,6 +220,10 @@ const layer = Layer.effect(
-           if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
-             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
-           }
-+          // --no-messages后的非空诊断不是可忽略的遍历拒绝，不能伪装成部分成功。
-+          if (code === 2 && stderr.trim() !== "") {
-+            return yield* failure(stderr.trim())
-+          }
+@@ -190,5 +197,5 @@ const layer = Layer.effect(
+-          // 原 source 对无匹配且带诊断的 exit2 判为失败，不能伪装成 partial 空结果。
+-          if (code === 2 && rows.length === 0 && stderr.trim() && !timedOut) return yield* failure(stderr.trim())
++          // 交互搜索抑制遍历诊断后仍有stderr就是真错误；find保留原前缀语义。
++          if (code === 2 && stderr.trim() && (input.args.includes("--no-messages") || rows.length === 0 && !timedOut)) return yield* failure(stderr.trim())
            if (code !== 0 && code !== 1 && code !== 2) {
              return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
            }
-@@ -270,5 +281,7 @@
-                   "--no-config",
-                   "--files",
-                   "--hidden",
-+                  // 预扫与正文搜索共用I/O诊断策略，权限拒绝不能在候选阶段升级失败。
-+                  "--no-messages",
-                   ...patterns(input.include).map((item) => `--glob=${item}`),
-                   ...patterns(input.exclude).map((item) => `--glob=${item.startsWith("!") ? item : `!${item}`}`),
-@@ -368,9 +381,15 @@ const layer = Layer.effect(
+@@ -224,9 +231,15 @@ const layer = Layer.effect(
            cwd: input.cwd,
            limit: input.limit,
            signal: input.signal,
@@ -732,7 +717,7 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
              ...(input.hidden ? ["--hidden"] : []),
              ...(input.follow ? ["--follow"] : []),
              `--glob=${input.pattern}`,
-@@ -385,14 +402,19 @@ const layer = Layer.effect(
+@@ -241,14 +254,19 @@ const layer = Layer.effect(
                  .replaceAll("\\", "/"),
              ),
          }).pipe(
@@ -755,6 +740,14 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
            Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
          ),
        find: (input) =>
+@@ -309,5 +327,7 @@
+                   "--no-config",
+                   "--files",
+                   "--hidden",
++                  // 预扫与正文搜索共用I/O诊断策略，权限拒绝不能在候选阶段升级失败。
++                  "--no-messages",
+                   ...globs.map((item) => `--glob=${item}`),
+                   "--glob=!**/.git/**",
 diff --git a/packages/core/src/filesystem/search.ts b/packages/core/src/filesystem/search.ts
 --- a/packages/core/src/filesystem/search.ts
 +++ b/packages/core/src/filesystem/search.ts
@@ -801,8 +794,10 @@ diff --git a/packages/core/src/tool/glob.ts b/packages/core/src/tool/glob.ts
 +                { ...output, files: output.files.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })) },
                ),
              },
-@@ -80,12 +88,14 @@ const layer = Layer.effectDiscard(
-                   limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+@@ -80,12 +88,15 @@ const layer = Layer.effectDiscard(
+-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
++                  // 默认同V1有界，Native显式limit仍保留其参数能力。
++                  limit: input.limit ?? 100,
                  })
                  .pipe(
 -                  Effect.map((result) =>
@@ -819,85 +814,6 @@ diff --git a/packages/core/src/tool/glob.ts b/packages/core/src/tool/glob.ts
 -                  ),
 +                  })),
                  )
-diff --git a/packages/core/src/tool/grep.ts b/packages/core/src/tool/grep.ts
---- a/packages/core/src/tool/grep.ts
-+++ b/packages/core/src/tool/grep.ts
-@@ -34,17 +34,25 @@
--export const Output = Schema.Array(FileSystem.Match)
-+export const Output = Schema.Struct({
-+  items: Schema.Array(FileSystem.Match),
-+  partial: Schema.Boolean,
-+  truncated: Schema.Boolean,
-+  timedOut: Schema.optional(Schema.Boolean),
-+})
- type ModelOutput = typeof Output.Encoded
- 
--/** Format raw search matches into the familiar concise model output. */
-+// 保留原匹配文本；权限partial、截断与超时是独立事实，不能互相覆盖。
- export const toModelOutput = (output: ModelOutput) => {
--  const lines = output.length === 0 ? ["No files found"] : [`Found ${output.length} matches`]
-+  const lines = output.items.length === 0 ? ["No files found"] : [`Found ${output.items.length} matches`]
-   let current = ""
--  for (const match of output) {
-+  for (const match of output.items) {
-     if (current !== match.entry.path) {
-       if (current) lines.push("")
-       current = match.entry.path
-       lines.push(`${match.entry.path}:`)
-     }
-     lines.push(`  Line ${match.line}: ${match.text}`)
-   }
-+  if (output.truncated) lines.push("Results truncated; narrow the search path or pattern.")
-+  if (output.timedOut) lines.push("Search timed out; results may be incomplete.")
-+  if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
-   return lines.join("\n")
- }
-@@ -71,8 +79,8 @@ const layer = Layer.effectDiscard(
-               text: toModelOutput(
--                output.map((match) => ({
-+                { ...output, items: output.items.map((match) => ({
-                   ...match,
-                   entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
--                })),
-+                })) },
-               ),
-             },
-           ],
-@@ -95,7 +103,7 @@ const layer = Layer.effectDiscard(
-               const target = path.resolve(location.directory, input.path ?? ".")
-               const info = yield* fs.stat(target).pipe(Effect.catch(() => Effect.succeed(undefined)))
-               return yield* ripgrep
--                .grep({
-+                .search({
-                   cwd: info?.type === "Directory" ? target : path.dirname(target),
-                   pattern: input.pattern,
-                   file: info?.type === "File" ? path.basename(target) : undefined,
-@@ -106,20 +114,22 @@ const layer = Layer.effectDiscard(
--                  Effect.map((result) =>
--                    result.map((match) =>
-+                  // 主搜索owner已产生完整性状态，leaf只转换资源路径。
-+                  Effect.map((result) => ({
-+                    ...result,
-+                    items: result.items.map((match) =>
-                       FileSystem.Match.make({
-                         ...match,
-                         entry: FileSystem.Entry.make({
-                           ...match.entry,
-                           path: RelativePath.make(
-                             path.relative(
-                               location.directory,
-                               path.resolve(
-                                 info?.type === "Directory" ? target : path.dirname(target),
-                                 match.entry.path,
-                               ),
-                             ),
-                           ),
-                         }),
-                       }),
-                     ),
--                  ),
-+                  })),
-                 )
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
@@ -905,7 +821,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
          if (part.type === "tool") {
            toolNames.add(part.tool)
            if (part.state.status === "completed") {
-+            // 目标已无Search History表，剪枝回放仍须保留同一搜索的partial，不能把无正文当作完整阴性。
++            // 剪枝占位与共享Search History一起保留partial，不能把无正文当作完整阴性。
              const outputText = part.state.time.compacted
 -              ? formatCompactionClearedNotice()
 +              ? formatCompactionClearedNotice() + ((part.tool === "glob" || part.tool === "grep") && part.state.metadata.partial === true ? "\nSearch incomplete: some paths were inaccessible and skipped." : "")
@@ -948,29 +864,28 @@ diff --git a/packages/core/test/filesystem/search.test.ts b/packages/core/test/f
          const result = yield* (yield* Ripgrep.Service).glob({ cwd, pattern: "**/*.ts", limit: 10 })
 -        expect(result.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
 +        // [local-smark] glob 返回值改为 { files, partial, timedOut } 包装
-+expect(result.files.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
++        expect(result.files.map((item) => item.path)).toEqual([RelativePath.make("src/match.ts")])
        }),
      ),
    )
 diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
 --- a/packages/core/test/ripgrep.test.ts
 +++ b/packages/core/test/ripgrep.test.ts
-@@ -1,9 +1,14 @@
+@@ -1,10 +1,13 @@
  import { describe, expect } from "bun:test"
  import fs from "fs/promises"
  import path from "path"
--import { Effect } from "effect"
-+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Sink, Stream } from "effect"
+-import { Effect, Layer, Schema } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema, Sink, Stream } from "effect"
 +import { ChildProcessSpawner } from "effect/unstable/process"
-+import { AppProcess } from "@opencode-ai/core/process"
 +import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
 +import { GlobTool } from "@opencode-ai/core/tool/glob"
-+import { GrepTool } from "@opencode-ai/core/tool/grep"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Ripgrep } from "@opencode-ai/core/ripgrep"
- import { RelativePath } from "@opencode-ai/core/schema"
- import { tmpdir } from "./fixture/tmpdir"
- import { testEffect } from "./lib/effect"
+ import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { AppProcess } from "@opencode-ai/core/process"
+ import { Location } from "@opencode-ai/core/location"
 @@ -125,6 +125,83 @@ describe("Ripgrep", () => {
      ),
    )
@@ -1055,20 +970,21 @@ diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.tes
    // #244：timeout 存在时，正则语法错误仍是 rg 的真实失败，
    // 不能被降级成「超时后的空部分结果」
    it.live("search timeout does not hide invalid regex errors", () =>
-@@ -167,3 +249,107 @@
+@@ -167,3 +249,131 @@
    )
  
  })
 +
 +const scriptedCases: Array<{ name: string; code: number; stdout?: string; stderr?: string; pending?: boolean }> = [
 +  { name: "partial", code: 2, stdout: "accessible.ts\n" },
++  { name: "partial-empty", code: 2 },
 +  { name: "search-partial", code: 2, stdout: JSON.stringify({ type: "match", data: { path: { text: "accessible.ts" }, lines: { text: "needle\n" }, line_number: 1, absolute_offset: 0, submatches: [{ match: { text: "needle" }, start: 0, end: 6 }] } }) + "\n" },
 +  { name: "invalid", code: 2, stderr: "error parsing glob '[': unclosed character class" },
 +  { name: "unknown-diagnostic", code: 2, stderr: "unknown decoder error" },
 +  { name: "unknown-code", code: 3 },
 +  { name: "empty", code: 1 },
 +  { name: "arguments", code: 1 },
-+  { name: "find-diagnostics", code: 1 },
++  { name: "find-diagnostics", code: 2, stdout: "accessible.ts\n", stderr: "blocked/: Permission denied (os error 13)" },
 +  { name: "bounded", code: 0, pending: true, stdout: Array.from({ length: 11 }, (_, index) => `file-${index}.ts`).join("\n") + "\n" },
 +  { name: "abort", code: 0, pending: true },
 +]
@@ -1116,7 +1032,7 @@ diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.tes
 +      return
 +    }
 +    if (scenario.name === "find-diagnostics") {
-+      expect(yield* rg.find({ cwd: process.cwd(), pattern: "*", limit: 10 })).toEqual([])
++      expect((yield* rg.find({ cwd: process.cwd(), pattern: "*", limit: 10 })).map(item => item.path)).toEqual([RelativePath.make("accessible.ts")])
 +      expect(calls[0]).not.toContain("--no-messages")
 +      return
 +    }
@@ -1139,11 +1055,34 @@ diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.tes
 +    expect(Exit.isSuccess(exit)).toBe(true)
 +    if (Exit.isFailure(exit)) return yield* exit
 +    const result = exit.value
-+    expect(result.partial).toBe(scenario.name === "partial")
++    expect(result.partial).toBe(scenario.name.startsWith("partial"))
 +    expect(result.truncated).toBe(scenario.name === "bounded")
-+    if (scenario.name === "partial") {
-+      expect(result.files.map((item) => item.path)).toEqual([RelativePath.make("accessible.ts")])
++    if (scenario.name === "partial" || scenario.name === "partial-empty") {
++      expect(result.files.map((item) => item.path)).toEqual(scenario.name === "partial" ? [RelativePath.make("accessible.ts")] : [])
 +      expect(GlobTool.toModelOutput(result)).toContain("could not be accessed")
++      // 真实Native注册/settle消费相同结果；只替换进程、搜索和授权，不启动产品运行时。
++      const limits: number[] = []
++      const graph = AppNodeBuilder.build(
++        LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, GlobTool.node, GrepTool.node]),
++        [
++          [Ripgrep.node, Layer.succeed(Ripgrep.Service, Ripgrep.Service.of({ ...rg, glob: input => Effect.sync(() => limits.push(input.limit)).pipe(Effect.andThen(rg.glob(input))), search: () => Effect.succeed({ items: [], partial: true, truncated: false }) }))],
++          [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(process.cwd()) })))],
++          [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: () => Effect.void })],
++          [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
++        ],
++      )
++      yield* Effect.gen(function* () {
++        const registry = yield* ToolRegistry.Service
++        for (const name of ["glob", "grep"]) {
++          const settled = yield* settleTool(registry, {
++            sessionID: SessionSchema.ID.make("ses_native_partial"), ...toolIdentity,
++            call: { type: "tool-call", id: `partial-${name}`, name, input: { pattern: name === "grep" ? "needle" : "*.ts" } },
++          })
++          expect(settled.output?.structured).toMatchObject({ partial: true, truncated: false })
++          expect(settled.result.type === "text" ? settled.result.value : "").toContain("could not be accessed")
++        }
++      }).pipe(Effect.provide(graph))
++      expect(limits).toEqual([100])
 +    }
 +    if (scenario.name === "empty") {
 +      expect(result.files).toEqual([])
@@ -1179,18 +1118,22 @@ diff --git a/packages/opencode/src/cli/cmd/debug/ripgrep.ts b/packages/opencode/
 diff --git a/packages/opencode/src/tool/glob.ts b/packages/opencode/src/tool/glob.ts
 --- a/packages/opencode/src/tool/glob.ts
 +++ b/packages/opencode/src/tool/glob.ts
-@@ -47,7 +47,10 @@ export const GlobTool = Tool.define(
+@@ -47,8 +47,11 @@ export const GlobTool = Tool.define(
            })
  
            const limit = 100
 -          const files = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit })
 +          // [local-smark] glob 通道透出 partial：零匹配不再等同于确定性无匹配
-+        const globResult = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit, signal: ctx.abort })
-+        const globPartial = globResult.partial
-+        const files = globResult.files
-           const truncated = files.length === limit
-           // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
-           const originalCount = files.length
++          const globResult = yield* ripgrep.glob({ cwd: search, pattern: params.pattern, limit, signal: ctx.abort })
++          const globPartial = globResult.partial
++          const files = globResult.files
+-          const truncated = files.length === limit
+-          // [local-smark] 在截断前捕获真实文件数，供 metadata.total 使用
+-          const originalCount = files.length
++          const truncated = globResult.truncated
++          // Core观察到limit+1才截断；恰好100条不能被误报为100+。
++          const originalCount = files.length + Number(truncated)
+           // [local-smark] total: 截断前的真实文件数（rg 按 limit 截停时为下界）
 @@ -55,7 +58,11 @@ export const GlobTool = Tool.define(
            const totalFiles = originalCount
  
@@ -1269,7 +1212,7 @@ diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/t
 +      // partial 空结果的三态可区分：metadata.partial 是模型判断
 +      // 「结果可能不完整」的唯一信号；输出不得是确定性 "No files found"
 +      expect(result.metadata.matches).toBe(0)
-+      expect(result.metadata.truncated).toBe(true)
++      expect(result.metadata.truncated).toBe(false)
 +      expect((result.metadata as Record<string, unknown>).partial).toBe(true)
 +      expect(result.output).toContain("could not access some paths")
 +      expect(result.output).not.toBe("No files found")
@@ -1389,7 +1332,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  // #185：可见 part 判定（空 text / 隐藏 completed tool 不占首距）
  export const isVisibleAssistantPart = (
 -  part: { type?: string; text?: string; state?: { status?: string } },
-+  part: { type?: string; tool?: string; text?: string; state?: { status?: string; metadata?: { partial?: unknown } } },
++  part: { type?: string; tool?: string; text?: string; state?: { status?: string; metadata?: { partial?: unknown }; structured?: unknown } },
    opts: { showDetails: boolean; showThinking: boolean },
  ) => {
    // #185：text 仅非空可见
@@ -1403,7 +1346,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +    const completedPartialSearch =
 +      (part.tool === "glob" || part.tool === "grep") &&
 +      part.state?.status === "completed" &&
-+      part.state?.metadata?.partial === true
++      (part.state?.metadata?.partial === true || toolDisplayMetadata(part.state).partial === true)
 +    if (!opts.showDetails && part.state?.status === "completed" && !completedPartialSearch) return false
      return true
    }
@@ -1511,7 +1454,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  
 -function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
 +const REASONING_PREVIEW_ROWS = 5
-@@ -1845,121 +1892,135 @@
+@@ -1845,121 +1892,134 @@
 -  const { theme } = useTheme()
 -  const ctx = use()
 -  const renderer = useRenderer()
@@ -1658,23 +1601,25 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +  const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
 +  // 加密占位仍显示上游Thought标题，不从metadata猜测正文或长度。
 +  const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
-+  const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
-+  const [displayTexts, setDisplayTexts] = createThrottledSignal<string[]>([], 50)
++  // 标题、预算和每个正文共用同一次文本快照，不各自启动节流窗口。
++  const texts = createMemo(() => parts().map((part) => ({ part, text: normalizeReasoning(part.text) })))
++  const [displayTexts, setDisplayTexts] = createThrottledSignal<ReturnType<typeof texts>>([], 50)
 +  createEffect(() => setDisplayTexts(texts()))
-+  const renderedTexts = createMemo(() => displayTexts().length ? displayTexts() : texts())
++  const renderedParts = createMemo(() => displayTexts().length ? displayTexts() : texts())
++  const renderedTexts = createMemo(() => renderedParts().map((entry) => entry.text))
 +  const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
 +  const previews = createMemo(() => {
 +    let remaining = REASONING_PREVIEW_ROWS
-+    return parts().flatMap((part, index) => {
++    return renderedParts().flatMap((entry, index) => {
 +      // 后续成员必须同时分到marker及至少一行正文，不能留下孤立标记。
 +      const markerRows = index === 0 ? 0 : 1
 +      if (remaining <= markerRows) return []
-+      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
++      const bodyRows = Math.min(reasoningRows(entry.text, ctx.width), remaining - markerRows)
 +      remaining -= markerRows + bodyRows
-+      return [{ part, index, bodyRows }]
++      return [{ ...entry, index, bodyRows }]
 +    })
 +  })
-+  const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
++  const overflow = createMemo(() => renderedParts().reduce((rows, entry, index) => rows + reasoningRows(entry.text, ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
 +  const expanded = createMemo(() => !overflow() || (override() ?? ctx.thinkingMode() === "show"))
 +  const done = createMemo(() => props.parts.every((part) => part.time.end !== undefined))
 +  const duration = createMemo(() => Math.max(0, Math.max(...props.parts.map((part) => part.time.end ?? part.time.start)) - Math.min(...props.parts.map((part) => part.time.start))))
@@ -1694,31 +1639,28 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +          duration={done() ? Locale.duration(duration()) : undefined} encrypted={opaque()} />
 +        {/* 总预览只有五行，且与普通正文同宽，不再额外增加横向padding。 */}
 +        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
-+          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part}
-+            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`} rows={preview.bodyRows}
++          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part} text={preview.text}
++            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${renderedParts().length}]`} rows={preview.bodyRows}
 +            width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />}</For>
 +        </box>
 +        {/* 首次展开后保留full树，仅切visible，避免复用已销毁的CodeRenderable。 */}
 +        <Show when={bodyMounted()}><box visible={expanded()}>
-+          <For each={parts().map((part) => part.id)}>{(id) => {
-+            const part = createMemo(() => parts().find((item) => item.id === id)!)
-+            const index = createMemo(() => parts().findIndex((item) => item.id === id))
-+            return <ReasoningBody id={`text-${id}`} part={part()} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
++          <For each={renderedParts().map((entry) => entry.part.id)}>{(id) => {
++            const item = createMemo(() => renderedParts().find((entry) => entry.part.id === id)!)
++            const index = createMemo(() => renderedParts().findIndex((entry) => entry.part.id === id))
++            return <ReasoningBody id={`text-${id}`} part={item().part} text={item().text} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${renderedParts().length}]`}
 +              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
 +          }}</For>
 +        </box></Show>
-+        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${parts().length > previews().length ? ` · +${parts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
++        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${renderedParts().length > previews().length ? ` · +${renderedParts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
 +      </box>
 +    </Show>
 +  )
 +}
 +
-+function ReasoningBody(props: { id: string; part: ReasoningPart; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
++function ReasoningBody(props: { id: string; part: ReasoningPart; text: string; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
 +  const { theme } = useTheme()
-+  const content = createMemo(() => normalizeReasoning(props.part.text))
-+  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
-+  createEffect(() => setDisplayContent(content()))
-+  const renderedContent = createMemo(() => displayContent() || content())
++  const renderedContent = createMemo(() => props.text)
 +  // 保留上游per-Part完成判定，不等待父消息或其他成员结束。
 +  const done = createMemo(() => props.part.time.end !== undefined)
 +  const completedKey = createMemo(() => `${props.width}\u0000${renderedContent()}`)
@@ -1957,7 +1899,7 @@ diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/pack
 diff --git a/packages/tui/test/routes/session/session-message-spacing.test.ts b/packages/tui/test/routes/session/session-message-spacing.test.ts
 --- a/packages/tui/test/routes/session/session-message-spacing.test.ts
 +++ b/packages/tui/test/routes/session/session-message-spacing.test.ts
-@@ -21,4 +21,35 @@ describe("assistant visible parts (#185)", () => {
+@@ -21,4 +21,39 @@ describe("assistant visible parts (#185)", () => {
        isVisibleAssistantPart({ type: "tool", state: { status: "completed" } }, { showDetails: true, showThinking: true }),
      ).toBe(true)
    })
@@ -1978,6 +1920,10 @@ diff --git a/packages/tui/test/routes/session/session-message-spacing.test.ts b/
 +      ),
 +    ).toBe(true)
 +    // 同形状但无 partial 标记：维持 #185 隐藏语义，豁免不扩大化
++    expect(isVisibleAssistantPart(
++      { type: "tool", tool: "glob", state: { status: "completed", structured: { files: [], partial: true } } },
++      { showDetails: false, showThinking: true },
++    )).toBe(true)
 +    expect(
 +      isVisibleAssistantPart(
 +        { type: "tool", tool: "glob", state: { status: "completed", metadata: {} } },
@@ -2103,8 +2049,8 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +    }),
 +  )
 +
-+  // [local-smark] 截断边界：limit=100 打满时 truncated/total 下界口径必须保持，
-+  // 提示行携带 "Total: 100+ files"（目标 total 为截断前真实条数下界）
++  // sentinel证明第101条存在，total下界与真实截断状态必须一同保留。
++  // 恰好100条的完整结果不适用此case，不能仅从返回长度推断。
 +  it.instance("preserves the bounded total when results are truncated", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -2131,9 +2077,9 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +      const result = yield* glob.execute({ pattern: "*.ts", path: test.directory }, ctx)
 +
 +      expect(result.metadata.count).toBe(100)
-+      expect(result.metadata.total).toBe(100)
++      expect(result.metadata.total).toBe(101)
 +      expect(result.metadata.truncated).toBe(true)
-+      expect(result.output).toContain("Total: 100+ files")
++      expect(result.output).toContain("Total: 101+ files")
 +    }),
 +  )
 +
@@ -2152,4 +2098,55 @@ diff --git a/packages/opencode/test/tool/glob.test.ts b/packages/opencode/test/t
 +      expect(result.output).toContain(path.join(search, "match.ts"))
 +    }),
 +  )
+ })
+diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
+--- a/packages/opencode/src/session/file-evidence.ts
++++ b/packages/opencode/src/session/file-evidence.ts
+@@ -15,5 +15,6 @@
+     const pattern = part.state.input.pattern
+     if (typeof pattern !== "string" || !pattern) return []
+     const count = part.tool === "grep" ? part.state.metadata.totalMatches ?? part.state.metadata.matches : part.state.metadata.total ?? part.state.metadata.count
+-    return [{ tool: part.tool, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: typeof count === "number" ? count : 0 }]
++    // 剪枝之后仍保存权限不完整性，不能只把零匹配交给下一轮。
++    return [{ tool: part.tool, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: typeof count === "number" ? count : 0, partial: part.state.metadata.partial === true }]
+   })), directory, commands: messages.flatMap(message => message.parts.flatMap(part => {
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -149,10 +149,11 @@
+       const output = part.state.structured
+-      // 数组领域结果经publisher.record包装为value；不能拿正文行数伪造匹配数。
+-      const items = part.name === "grep" ? output.items : output.value
++      // 新Glob保留files及完整性；旧持久数组仍读value，不从正文猜测条数。
++      const items = part.name === "grep" ? output.items : output.files ?? output.value
+       if (!Array.isArray(items)) continue
+       searches.push({ tool: part.name, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: items.length,
+-        partial: part.name === "grep" ? output.partial === true || output.truncated === true || output.timedOut === true : typeof part.state.input.limit === "number" && items.length >= part.state.input.limit,
++        partial: output.partial === true || output.truncated === true || output.timedOut === true ||
++          part.name === "glob" && !Array.isArray(output.files) && typeof part.state.input.limit === "number" && items.length >= part.state.input.limit,
+       })
+     }
+   }
+   return { receipts, searches, commands, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
+diff --git a/packages/core/src/session/file-evidence.ts b/packages/core/src/session/file-evidence.ts
+--- a/packages/core/src/session/file-evidence.ts
++++ b/packages/core/src/session/file-evidence.ts
+@@ -114,1 +114,2 @@
+-    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? "+" : ""} |`)] : []),
++    // 数量与完整性是独立事实，保留source原话而非把权限遗漏伪装成更多匹配。
++    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? " (incomplete)" : ""} |`)] : []),
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -142,3 +142,11 @@
+     expect(inspected).toHaveLength(untouched)
++    // 同一共享交接器保留partial空结果；完整空结果仍是确定性零匹配且不读盘。
++    const searchHandoff = yield* FileEvidence.render([], observed, tmp.path, { searches: [
++      { tool: "grep", pattern: "needle", path: ".", matches: 0, partial: true },
++      { tool: "glob", pattern: "*.missing", path: ".", matches: 0 },
++    ] })
++    expect(searchHandoff).toContain("| grep | needle | . | 0 (incomplete) |")
++    expect(searchHandoff).toContain("| glob | *.missing | . | 0 |")
++    expect(inspected).toHaveLength(untouched)
+   }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
  })

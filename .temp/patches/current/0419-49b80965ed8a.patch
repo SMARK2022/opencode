@@ -854,44 +854,38 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -70,1 +70,3 @@
+@@ -74,1 +74,3 @@
    durationMs: Schema.Number.pipe(Schema.optional),
 +  // typed输出与投影共同保留适配标记，不能只写一个会被Schema丢弃的临时属性。
 +  commandAdaptation: Schema.String.pipe(Schema.optional),
-@@ -179,1 +181,2 @@
+@@ -184,1 +186,2 @@
              ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
 +            ...(output.commandAdaptation === undefined ? {} : { commandAdaptation: output.commandAdaptation }),
-@@ -189,1 +192,4 @@
+@@ -195,1 +198,4 @@
                const shell = selectedShell(entries)
 +              const normalization = Shell.normalizePowerShellInlinePython(input.command, shell)
 +              // 两道权限门共享最终源码；原始command仍是授权与保存资源，audit只用于拒绝。
-+              const evidence = normalization ? { inline_scripts: [normalization.source], raw_patterns: [normalization.audit] } : {}
-@@ -227,1 +233,1 @@
++              const evidence = normalization ? { inline_scripts: [normalization.source] } : {}
+@@ -251,1 +257,1 @@
 -                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
 +                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
-@@ -242,1 +248,1 @@
--                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
-+                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
-@@ -262,1 +268,1 @@
+@@ -266,7 +272,9 @@
+                 metadata: {
+                   action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent,
++                  ...evidence,
+                   // 只有leaf产生的AST证据参与规则匹配；原资源与save继续表示整条原始调用。
+                   ...(scan.patterns.length && (scan.patterns.length !== 1 || scan.patterns[0] !== input.command) ? { canonical_patterns: scan.patterns } : {}),
+-                  ...(scan.raw.length ? { raw_patterns: scan.raw } : {}),
++                  // 规范化audit补充同一AST的拒绝证据，不能覆盖env等原始差异。
++                  ...(scan.raw.length || normalization ? { raw_patterns: [...scan.raw, ...(normalization ? [normalization.audit] : [])] } : {}),
+                 },
+                 source,
+@@ -325,1 +333,1 @@
 -              const invocation = Shell.cmd(shell, input.command)
 +              const invocation = Shell.cmd(shell, normalization?.command ?? input.command)
-@@ -313,1 +319,2 @@
-                   durationMs,
-+                  ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
-@@ -347,1 +354,2 @@
+@@ -388,1 +396,2 @@
                  durationMs,
 +                ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
-diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
---- a/packages/core/src/permission.ts
-+++ b/packages/core/src/permission.ts
-@@ -161,3 +161,6 @@
-     function denied(input: AssertInput, rules: Permission.Ruleset) {
--      return input.resources.some((resource) => evaluate(input.action, resource, rules).effect === "deny")
-+      const raw = input.action === "bash" && Array.isArray(input.metadata?.raw_patterns) ? input.metadata.raw_patterns.filter((value): value is string => typeof value === "string") : []
-+      // 新audit仅命中具体deny，不使用保存批准、不扩大allow，也不让兜底*吞掉规范化证据。
-+      const adapted = raw.some((resource) => rules.some((rule) => rule.effect === "deny" && rule.resource !== "*" && Wildcard.match(input.action, rule.action) && Wildcard.match(resource, rule.resource)))
-+      return adapted || input.resources.some((resource) => evaluate(input.action, resource, rules).effect === "deny")
-     }
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts
@@ -1398,7 +1392,7 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 @@ -199,1 +199,9 @@
        expect(yield* service.list()).toEqual([])
 +      // audit仅触发具体deny；不能获得allow，也不能把通配兜底deny变成新阻塞。
-+      const adapted = assertion({ action: "bash", resources: ["python-original"], metadata: { raw_patterns: ["python-adapted"] } })
++      const adapted = assertion({ id: PermissionV2.ID.create("per_adapted"), action: "bash", resources: ["python-original"], metadata: { raw_patterns: ["python-adapted"] } })
 +      yield* setRules([{ action: "bash", resource: "python-adapted", effect: "deny" }, { action: "bash", resource: "*", effect: "allow" }])
 +      expect(yield* service.ask(adapted)).toMatchObject({ effect: "deny" })
 +      yield* setRules([{ action: "bash", resource: "*", effect: "deny" }, { action: "bash", resource: "python-original", effect: "allow" }])
@@ -1423,7 +1417,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +                  expect(assertions[1]?.resources).toEqual([command])
 +                  expect(assertions[1]?.save).toEqual([command])
 +                  expect(runs).toHaveLength(1)
-+                  const encoded = runs[0]?.args.at(-1)
++                  const encoded = runs[0]?.args?.at(-1)
 +                  if (!encoded) throw new Error("expected captured transport")
 +                  const script = Buffer.from(encoded, "base64").toString("utf16le")
 +                  expect(script).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")

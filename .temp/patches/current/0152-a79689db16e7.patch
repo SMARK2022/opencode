@@ -78,13 +78,14 @@ index ab8046ebcc..1bf227c1fb 100644
 +  })
 +
 +  SessionActivity.onChange(armIdleTimer)
-diff --git a/packages/opencode/src/session/activity.ts b/packages/opencode/src/session/activity.ts
+diff --git a/packages/core/src/session/activity.ts b/packages/core/src/session/activity.ts
 new file mode 100644
 index 0000000000..60b575c22e
 --- /dev/null
-+++ b/packages/opencode/src/session/activity.ts
-@@ -0,0 +1,33 @@
++++ b/packages/core/src/session/activity.ts
+@@ -0,0 +1,42 @@
 +import { EventEmitter } from "events"
++import { Effect } from "effect"
 +
 +const emitter = new EventEmitter()
 +const active = new Set<string>()
@@ -103,6 +104,14 @@ index 0000000000..60b575c22e
 +  }
 +}
 +
++// 只登记实际 work 的生命周期；join/排队等待者不取得也不提前释放活动所有权。
++export const track = <A, E, R>(id: string, work: Effect.Effect<A, E, R>) =>
++  Effect.acquireUseRelease(
++    Effect.sync(() => begin(id)),
++    () => work,
++    (end) => Effect.sync(end),
++  )
++
 +// #152：当前活跃 runner 数量
 +export function count() {
 +  return active.size
@@ -117,6 +126,27 @@ index 0000000000..60b575c22e
 +}
 +
 +export * as SessionActivity from "./activity"
+diff --git a/packages/opencode/src/session/activity.ts b/packages/opencode/src/session/activity.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/session/activity.ts
+@@ -0,0 +1,2 @@
++// 两代会话与daemon观察同一集合，不能在V1 façade维护第二份活动计数。
++export { SessionActivity, begin, track, count, onChange } from "@opencode-ai/core/session/activity"
+diff --git a/packages/core/src/session/execution/local.ts b/packages/core/src/session/execution/local.ts
+--- a/packages/core/src/session/execution/local.ts
++++ b/packages/core/src/session/execution/local.ts
+@@ -8,1 +8,2 @@
+ import { SessionExecution } from "../execution"
++import { SessionActivity } from "../activity"
+@@ -18,1 +18,3 @@
++        // 进程级drain贯穿位置解析、执行与退出清理；SSE断线不能误判仍活动的V2工作。
++        return yield* SessionActivity.track(`native:${sessionID}`, Effect.gen(function* () {
+         const session = yield* store.get(sessionID)
+@@ -27,2 +29,3 @@
+         )
++        }))
+       }),
 diff --git a/packages/opencode/src/session/run-state.ts b/packages/opencode/src/session/run-state.ts
 index 5cefdd04a3..116c7a9dee 100644
 --- a/packages/opencode/src/session/run-state.ts
@@ -129,23 +159,19 @@ index 5cefdd04a3..116c7a9dee 100644
  import { SessionStatus } from "./status"
  
  export interface Interface {
-@@ -90,7 +91,14 @@ const layer = Layer.effect(
+@@ -90,7 +91,10 @@ const layer = Layer.effect(
        onInterrupt: Effect.Effect<SessionV1.WithParts>,
        work: Effect.Effect<SessionV1.WithParts>,
      ) {
 -      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
 +      // 登记实际 work 而非等待者，排队或取消等待不提前释放活动标记。
-+      const tracked = Effect.acquireUseRelease(
-+        Effect.sync(() => SessionActivity.begin(`session:${sessionID}`)),
-+        () => work,
-+        (end) => Effect.sync(end),
-+      )
++      const tracked = SessionActivity.track(`session:${sessionID}`, work)
 +      const current = yield* runner(sessionID, onInterrupt)
 +      return yield* current.ensureRunning(tracked)
      })
  
      const startShell = Effect.fn("SessionRunState.startShell")(function* (
-@@ -99,9 +107,15 @@ const layer = Layer.effect(
+@@ -99,9 +103,11 @@ const layer = Layer.effect(
        work: Effect.Effect<SessionV1.WithParts>,
        ready?: Latch.Latch,
      ) {
@@ -153,17 +179,70 @@ index 5cefdd04a3..116c7a9dee 100644
 -        .startShell(work, ready)
 -        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
 +      // Shell 与 loop 独立标记，拒绝启动的 shell 不影响已有运行。
-+      const tracked = Effect.acquireUseRelease(
-+        Effect.sync(() => SessionActivity.begin(`shell:${sessionID}`)),
-+        () => work,
-+        (end) => Effect.sync(end),
-+      )
++      const tracked = SessionActivity.track(`shell:${sessionID}`, work)
 +      const current = yield* runner(sessionID, onInterrupt)
 +      return yield* current.startShell(tracked, ready)
 +        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
      })
  
      return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
+diff --git a/packages/core/test/session-run-coordinator.test.ts b/packages/core/test/session-run-coordinator.test.ts
+--- a/packages/core/test/session-run-coordinator.test.ts
++++ b/packages/core/test/session-run-coordinator.test.ts
+@@ -4,1 +4,2 @@
+ import { testEffect } from "./lib/effect"
++import { SessionActivity } from "@opencode-ai/core/session/activity"
+@@ -105,1 +105,5 @@
++        const baseline = SessionActivity.count()
++        const changes: number[] = []
++        const off = SessionActivity.onChange((count) => changes.push(count - baseline))
++        yield* Effect.addFinalizer(() => Effect.sync(off))
+         const firstStarted = yield* Deferred.make<void>()
+@@ -111,3 +115,4 @@
+-            Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined).pipe(
++            // 使用生产execution相同的资源边界，不用手写计数替身模拟其释放。
++            SessionActivity.track(`native:${key}`, Deferred.succeed(key === "first" ? firstStarted : secondStarted, undefined).pipe(
+               Effect.andThen(Deferred.await(key === "first" ? firstGate : secondGate)),
+-            ),
++            )),
+@@ -119,1 +124,2 @@
+         expect(Array.from(yield* coordinator.active)).toEqual(["first"])
++        expect(SessionActivity.count()).toBe(baseline + 1)
+@@ -124,1 +130,9 @@
+ 
++        expect(SessionActivity.count()).toBe(baseline + 2)
++        const joined = yield* coordinator.run("first").pipe(Effect.forkChild)
++        yield* Effect.yieldNow
++        expect(SessionActivity.count()).toBe(baseline + 2)
++        // 中断join等待者只终止等待，不释放仍由实际drain拥有的活动。
++        yield* Fiber.interrupt(joined)
++        expect(SessionActivity.count()).toBe(baseline + 2)
++
+@@ -127,1 +142,2 @@
+         expect(Array.from(yield* coordinator.active)).toEqual(["second"])
++        expect(SessionActivity.count()).toBe(baseline + 1)
+@@ -130,1 +146,3 @@
+         expect(Array.from(yield* coordinator.active)).toEqual([])
++        expect(SessionActivity.count()).toBe(baseline)
++        expect(changes).toEqual([1, 2, 1, 0])
+@@ -138,1 +156,2 @@
+         const failure = new Error("failed")
++        const baseline = SessionActivity.count()
+@@ -141,1 +160,1 @@
+-          drain: (key: string) => (key === "failure" ? Effect.fail(failure) : Effect.die(defect)),
++          drain: (key: string) => SessionActivity.track(`native:${key}`, key === "failure" ? Effect.fail(failure) : Effect.die(defect)),
+@@ -150,1 +169,2 @@
+         expect(Array.from(yield* coordinator.active)).toEqual([])
++        expect(SessionActivity.count()).toBe(baseline)
+@@ -157,1 +177,2 @@
+       const started = yield* Deferred.make<void>()
++      const baseline = SessionActivity.count()
+@@ -161,1 +182,1 @@
+-            drain: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
++            drain: () => SessionActivity.track("native:scope", Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))),
+@@ -170,1 +191,2 @@
+       expect(Array.from(yield* coordinator.active)).toEqual([])
++      expect(SessionActivity.count()).toBe(baseline)
 diff --git a/packages/opencode/src/snapshot/index.ts b/packages/opencode/src/snapshot/index.ts
 index 4da9bc3ca8..1c4b009ad4 100644
 --- a/packages/opencode/src/snapshot/index.ts

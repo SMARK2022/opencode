@@ -7,39 +7,44 @@ Subject: [PATCH] =?UTF-8?q?fix(summary):=20Modified=20Files=20=E6=94=B9?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
-适配：summary.ts 类型为 SessionV1.WithParts、layer 依赖 events/config、node 架构替代
-defaultLayer（A2 拆为 toWorktreeRel 注释 + node deps 去 Snapshot.node 两处）；write.ts
-按真实嵌套同时补齐格式化及未格式化的新文件 diff；race 测试
+适配：两代摘要复用Core ToolDiffs聚合，均移除整树git兜底，保留请求归属及隐藏消息过滤；
+Native Write已有最终内容diff，V1 write.ts按真实嵌套同时补齐格式化及未格式化的新文件diff；race测试
 重锚 140/176（无 description 参数、SessionV1.ToolPart）；summary-tool-diff 测试 env
 group 显式补 Snapshot.node（SessionSummary deps 移除后 track() 需独立供给）。
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
 --- a/packages/opencode/src/session/summary.ts
 +++ b/packages/opencode/src/session/summary.ts
-@@ -79,4 +79,3 @@
+@@ -3,1 +3,0 @@
+-import path from "path"
+diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
+--- a/packages/opencode/src/session/summary.ts
++++ b/packages/opencode/src/session/summary.ts
+@@ -82,5 +82,4 @@
      const sessions = yield* Session.Service
 -    const snapshot = yield* Snapshot.Service
      const events = yield* EventV2Bridge.Service
+     const nativeMessages = yield* SessionStore.Service
      const config = yield* Config.Service
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
 --- a/packages/opencode/src/session/summary.ts
 +++ b/packages/opencode/src/session/summary.ts
-@@ -84,44 +84,11 @@
+@@ -88,47 +87,10 @@
      const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: SessionV1.WithParts[] }) {
 -      // 修改文件追踪以「工具调用流」为主源：edit/write/apply_patch 各自携带落盘前后的
 -      // 文件改动证据（part.state.metadata），按文件聚合后能区分不同工具/并行 subagent
 -      // 的改动归属，避免 git 整树快照把并发改动并集成 A∪B。
 -      // worktree 与 snapshot.diffFull 同款依赖（后者内部已用 InstanceState），故此处取用不引入新运行时依赖。
-+      // 修改文件追踪以「工具调用流」为唯一来源：edit/write/apply_patch 各自携带
-+      // 落盘前后的文件改动证据（part.state.metadata），按文件聚合后能区分不同工具/
-+      // 并行 subagent 的改动归属。不使用 git 整树快照 diff（diffFull）兜底——后者在
-+      // 同目录多 session 场景下会把其他 session 的改动并入（A∪B 问题），也无法区分
-+      // 工具改动与外部改动。工具未覆盖的文件（bash/MCP/手动编辑）不出现在 diff 中，
-+      // 这是有意为之的取舍：宁可遗漏非工具改动，也不混入其他 session 的改动。
++      // 修改文件只按本会话已完成工具的真实metadata归因；整树快照会混入同目录其他会话的改动。
++      // Bash/MCP/手工改动不进入此列表是source明确取舍，隐藏或撤回消息也不能重新计入。
        const ctx = yield* InstanceState.context
 -      // worktree 是 git 项目的根（与 git numstat、apply_patch 的相对基一致）；
 -      // 非 git 项目 worktree="/"（见 project.fromDirectory），此时退回 directory 作为相对基。
        const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
--      const byTool = collectToolDiffs(input.messages, base)
+-      const byTool = ToolDiffs.collect(input.messages.flatMap((message) => message.info.hidden ? [] :
++      return ToolDiffs.collect(input.messages.flatMap((message) => message.info.hidden ? [] :
+         message.parts.flatMap((part) => part.hidden || part.type !== "tool" || part.state.status !== "completed"
+           ? [] : [part.state.metadata]),
+       ), base)
 -
 -      // git 兜底：未被任何工具记录的文件改动（write 新文件、MCP、bash、手动编辑）
 -      // 仍由整树快照 diff 补齐，保证「无工具的纯 shell turn」行为不回归。
@@ -73,34 +78,28 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
 -        return rel === item.file ? item : { ...item, file: rel }
 -      })
 -      return [...byTool, ...gitMerged.filter((item) => item.file === undefined || !covered.has(item.file))]
-+      return collectToolDiffs(input.messages, base)
      })
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
 --- a/packages/opencode/src/session/summary.ts
 +++ b/packages/opencode/src/session/summary.ts
-@@ -176,5 +176,4 @@
+@@ -188,10 +150,2 @@
 -// 将路径统一为相对 base 的正斜杠路径，与 git numstat 输出格式对齐，
 -// 保证工具来源与 git 兜底来源能在合并去重时按同一 key 匹配。
 -// 相对路径按 fromBase（默认 base 本身）解析为绝对再求相对：git 路径来自 directory，
 -// 工具的 apply_patch relativePath 来自 worktree，两者需各自正确的解析基。
-+// 将路径统一为相对 base 的正斜杠路径，使不同工具来源（edit 的绝对路径、
-+// apply_patch 的 worktree 相对路径）能按同一 key 聚合去重。
-+// 相对路径按 fromBase（默认 base 本身）解析为绝对再求相对。
- function toWorktreeRel(base: string, target: string, fromBase: string = base) {
+-function toWorktreeRel(base: string, target: string, fromBase: string = base) {
+-  const abs = path.isAbsolute(target) ? target : path.resolve(fromBase, target)
+-  return path.relative(base, abs).replaceAll("\\", "/")
+-}
+ 
+ export const DiffInput = Schema.Struct({
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
 --- a/packages/opencode/src/session/summary.ts
 +++ b/packages/opencode/src/session/summary.ts
-@@ -259,1 +259,1 @@
--      // write：filepath+diff（仅 exists=true 时 diff 存在；新文件写由 git 兜底补齐）
-+      // write：filepath+diff（exists=true 时 diff 为旧→新内容；exists=false 时 diff 为空→新内容）
-diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
---- a/packages/opencode/src/session/summary.ts
-+++ b/packages/opencode/src/session/summary.ts
-@@ -305,1 +305,3 @@
--  deps: [Session.node, Snapshot.node, EventV2Bridge.node, Config.node],
-+  // #477：computeDiff 不再消费 Snapshot——diff() 方法经 Snapshot.node 之外的持久化
-+  // 路径读取，node deps 随之收缩；FileDiff 类型 import 保留供 Interface 签名使用。
-+  deps: [Session.node, EventV2Bridge.node, Config.node],
+@@ -206,1 +160,2 @@
+-  deps: [Session.node, Snapshot.node, EventV2Bridge.node, Config.node, SessionStore.node],
++  // 两代摘要读取仍使用各自持久消息表，不再为Modified Files构造整树快照。
++  deps: [Session.node, EventV2Bridge.node, Config.node, SessionStore.node],
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
@@ -302,3 +301,61 @@ diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/
 +    )
 +  })
  })
+diff --git a/packages/core/src/session/tool-diffs.ts b/packages/core/src/session/tool-diffs.ts
+--- a/packages/core/src/session/tool-diffs.ts
++++ b/packages/core/src/session/tool-diffs.ts
+@@ -7,3 +7,2 @@
+ import { Database } from "../database/database"
+-import { Snapshot } from "../snapshot"
+ import { SessionMessage } from "./message"
+@@ -75,5 +74,3 @@
+   directory: string
+   worktree: string
+-  snapshot?: Snapshot.ID
+-  diff: Snapshot.Interface["diff"]
+ }) {
+@@ -98,12 +95,6 @@
++  // Native与V1同样只消费当前请求的完成工具；整树快照既不参与归因，也不再吞错补成功。
+   const byTool = collect(messages.flatMap(message => message.content.flatMap(part =>
+     part.type === "tool" && part.state.status === "completed" ? [part.state.structured] : [],
+   )), input.worktree, input.directory)
+-  const from = messages.find(message => message.snapshot?.start)?.snapshot?.start
+-  // 只补工具未覆盖文件，保留纯shell/MCP的快照收益；快照关闭时仍能使用已完成的工具证据。
+-  const gitDiffs = from && input.snapshot ? yield* input.diff({ from: Snapshot.ID.make(from), to: input.snapshot })
+-    .pipe(Effect.catch(() => Effect.succeed([]))) : []
+-  const covered = new Set(byTool.map(item => item.file))
+-  return { messageID, diffs: [...byTool, ...gitDiffs.filter(item => !covered.has(item.path)).map(item => ({
+-    file: item.path, patch: item.patch, additions: item.additions, deletions: item.deletions, status: item.status,
+-  }))] }
++  return { messageID, diffs: byTool }
+ })
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -595,5 +595,4 @@
+             const summary = yield* ToolDiffs.summarize(db, {
+               sessionID: session.id, assistantMessageID: yield* publisher.startAssistant(finalizer),
+               directory: location.directory, worktree: location.project.directory,
+-              snapshot: endSnapshot, diff: snapshots.diff,
+             })
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -168,1 +168,1 @@
+-      const withoutSnapshots = yield* ToolDiffs.summarize(db, { ...input, diff: () => Effect.die("must not read snapshots") })
++      const withoutSnapshots = yield* ToolDiffs.summarize(db, input)
+@@ -171,8 +171,7 @@
+-      const summary = yield* ToolDiffs.summarize(db, { ...input, snapshot: Snapshot.ID.make("tree_after"), diff: () => Effect.succeed([
+-        { path: RelativePath.make("app/a.ts"), status: "modified", patch: "+wrong\n", additions: 99, deletions: 0 },
+-        { path: RelativePath.make("shell.ts"), status: "added", patch: "+shell\n", additions: 1, deletions: 0 },
+-      ]) })
+-      // 快照只能补未覆盖文件，同文件必须保留当前请求工具的真实patch和计数。
+-      expect(summary?.diffs.slice(0, 3)).toEqual(withoutSnapshots?.diffs)
+-      expect(summary?.diffs[3]).toMatchObject({ file: "shell.ts", patch: "+shell\n" })
++      const withSnapshots = { ...input, snapshot: Snapshot.ID.make("tree_after"),
++        diff: () => Effect.die("tool-only summary must not read whole-tree snapshots") }
++      const summary = yield* ToolDiffs.summarize(db, withSnapshots)
++      // 即使消息及旧调用载荷仍有快照，也只保留工具文件；shell等外部变更不再偷偷补入。
++      expect(summary?.diffs).toEqual(withoutSnapshots?.diffs)
++      expect(summary?.diffs[3]).toBeUndefined()
+       expect(summary?.diffs[0]).toMatchObject({ file: "app/a.ts", patch: "+edit\n+patch\n", additions: 2, deletions: 0, status: "modified" })

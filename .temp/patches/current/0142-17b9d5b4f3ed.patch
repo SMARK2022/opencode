@@ -5,6 +5,522 @@ Subject: [PATCH] =?UTF-8?q?feat(read):=20=E5=AE=8C=E6=95=B4=E9=87=8D?=
  =?UTF-8?q?=E6=9E=84read=E5=B7=A5=E5=85=B7=E3=80=81=E9=80=9A=E8=BF=87?=
  =?UTF-8?q?=E5=85=83=E6=95=B0=E6=8D=AE=E5=A4=84=E7=90=86=E5=92=8C=E5=AD=98?=
 
+diff --git a/packages/core/src/tool/read-presentation.ts b/packages/core/src/tool/read-presentation.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/read-presentation.ts
+@@ -0,0 +1,149 @@
++export * as ReadPresentation from "./read-presentation"
++
++import { Schema } from "effect"
++import { FSUtil } from "../fs-util"
++export const OutlineOutput = Schema.Struct({ items: Schema.Array(Schema.String), truncated: Schema.Boolean })
++
++const MAX_LINE_LENGTH = 2000
++const OVERLAP_MIN_LINES = 20
++const OVERLAP_MIN_RATIO = 0.3
++
++// 两代读取共用版本与实际返回区间；没有稳定 mtime 的结果仍展示，但不能授权 stub。
++export const ReadRangeMeta = Schema.Struct({
++  path: Schema.String,
++  canonicalPath: Schema.String,
++  type: Schema.Literal("file"),
++  size: Schema.Number,
++  modified: Schema.String,
++  modifiedMs: Schema.optional(Schema.Number),
++  start: Schema.Number,
++  end: Schema.Number,
++  total: Schema.Number,
++  totalExact: Schema.Boolean,
++  returned: Schema.Number,
++  stub: Schema.Boolean,
++  stubStatus: Schema.optional(Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible"])),
++  coveredBy: Schema.optional(Schema.String),
++  cut: Schema.optional(Schema.Boolean),
++})
++export type ReadRangeMeta = { -readonly [K in keyof typeof ReadRangeMeta.Type]: (typeof ReadRangeMeta.Type)[K] }
++export const isReadRangeMeta: (input: unknown) => input is ReadRangeMeta = Schema.is(ReadRangeMeta)
++
++export function canonicalReadPath(filepath: string) {
++  return process.platform === "win32" ? FSUtil.normalizePath(filepath).toLowerCase() : filepath
++}
++
++export function escapeXmlText(input: string) {
++  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
++}
++
++export function escapeXmlAttr(input: string) {
++  return escapeXmlText(input).replaceAll('"', "&quot;").replaceAll("'", "&apos;")
++}
++
++export function formatModified(ms: number) {
++  const date = new Date(ms)
++  const pad = (n: number) => String(n).padStart(2, "0")
++  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
++}
++
++export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
++  if (current.modifiedMs === undefined) return undefined
++  const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
++  const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
++  if (sameRange) return { status: "stub_same_range_visible" as const }
++  const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
++  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
++  return undefined
++}
++
++export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
++  if (current.modifiedMs === undefined) return undefined
++  const best = visibleReads
++    .filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
++    .map((item) => ({ start: Math.max(item.start, current.start), end: Math.min(item.end, current.end) }))
++    .filter((item) => item.end >= item.start)
++    .sort((a, b) => (b.end - b.start) - (a.end - a.start))[0]
++  if (!best) return undefined
++  const lines = best.end - best.start + 1
++  // 源策略要求最佳单个交集同时达到两项门限，重复历史不能叠加成虚假的重叠。
++  if (lines < OVERLAP_MIN_LINES || lines / Math.max(1, current.end - current.start + 1) < OVERLAP_MIN_RATIO) return undefined
++  return `${best.start}-${best.end}`
++}
++
++function renderContentLines(raw: readonly string[], offset: number) {
++  return raw
++    .map((line, i) => {
++      // #142：结构化包装字段转义；内容行 escape 防破坏 XML 结构（#145 改为原文）
++      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${escapeXmlText(line)}`
++      return `${i + offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
++    })
++    .join("\n")
++}
++
++export function renderReadOutput(input: {
++  path: string
++  size: number
++  modified: string
++  start: number
++  end: number
++  total: number
++  totalExact: boolean
++  returned: number
++  raw: readonly string[]
++  cut: boolean
++  more: boolean
++  outline?: typeof OutlineOutput.Type
++  overlap?: string
++}) {
++  const output = [
++    `<path>${escapeXmlText(input.path)}</path>`,
++    `<type>file</type>`,
++    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
++    `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="${input.returned}" />`,
++  ]
++  // #142：outline 仅插入结构提示区
++  if (input.outline?.items.length) {
++    output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
++    output.push(input.outline.items.map(escapeXmlText).join("\n"))
++    output.push("</outline>")
++  }
++  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)
++  output.push("<content>", renderContentLines(input.raw, input.start), "</content>")
++  if (input.cut) output.push(`<more offset="${input.end + 1}" reason="byte_limit" />`)
++  else if (input.more) output.push(`<more offset="${input.end + 1}" reason="line_limit" />`)
++  return output.join("\n")
++}
++
++export function renderNativeRead(output: { content: string; read: ReadRangeMeta; truncated?: unknown; outline?: unknown }, overlap?: string) {
++  return renderReadOutput({
++    ...output.read,
++    raw: output.read.returned === 0 ? [] : output.content.split("\n"),
++    cut: output.read.cut === true,
++    more: output.truncated === true,
++    outline: Schema.is(OutlineOutput)(output.outline) ? output.outline : undefined,
++    overlap,
++  })
++}
++
++export function renderReadStub(input: {
++  path: string
++  size: number
++  modified: string
++  start: number
++  end: number
++  total: number
++  totalExact: boolean
++  status: "stub_same_range_visible" | "stub_covered_range_visible"
++  coveredBy?: string
++}) {
++  return [
++    `<path>${escapeXmlText(input.path)}</path>`,
++    `<type>file</type>`,
++    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
++    `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="0" />`,
++    `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${escapeXmlAttr(input.coveredBy)}"` : ""}>`,
++    input.status === "stub_same_range_visible" ? "Requested range is already visible in the current context." : "Requested range is already covered by a visible read result.",
++    "</stub>",
++  ].join("\n")
++}
+diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+--- a/packages/core/src/tool/read-filesystem.ts
++++ b/packages/core/src/tool/read-filesystem.ts
+@@ -9,1 +9,3 @@
+ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
++import { ReadPresentation } from "./read-presentation"
++import { readOutline } from "./read-outline"
+@@ -13,1 +15,2 @@
+-export const DEFAULT_READ_LINES = 400
++export const DEFAULT_READ_LINES = 200
++const MAX_SCAN_BYTES = 256 * 1024
+@@ -80,1 +83,9 @@
++const readFields = {
++  read: Schema.optional(ReadPresentation.ReadRangeMeta),
++  outline: Schema.optional(ReadPresentation.OutlineOutput),
++}
++export const Content = Schema.Struct({ ...FileSystem.Content.fields, ...readFields })
++export type Content = typeof Content.Type
++
+ export class TextPage extends Schema.Class<TextPage>("ReadTool.TextPage")({
++  ...readFields,
+@@ -90,1 +101,2 @@
+   entries: Schema.Array(FileSystem.Entry),
++  total: Schema.optional(Schema.Number),
+@@ -101,1 +113,1 @@
+-  ) => Effect.Effect<FileSystem.Content | TextPage, ReadError>
++  ) => Effect.Effect<Content | TextPage, ReadError>
+@@ -249,1 +261,37 @@
++      let scanned = 0
++      let totalLines = 0
++      let lastByte: number | undefined
++      // 额外计数只看行界字节，页外的坏 UTF-8 或 NUL 不得推翻已成功读取的页。
++      const count = (chunk: Uint8Array) => {
++        scanned += chunk.length
++        totalLines += chunk.reduce((sum, byte) => sum + Number(byte === 10), 0)
++        lastByte = chunk.at(-1)
++      }
++      count(first)
++      const finish = Effect.fnUntraced(function* (offset: number, returned: number, cut: boolean, eof: boolean) {
++        const total = totalLines + Number(scanned > 0 && lastByte !== 10)
++        const exact = eof || scanned === Number(info.size)
++        const outline = yield* Effect.promise(() => readOutline(real, total, offset, exact))
++        const after = yield* file.stat
++        const modified = Option.getOrUndefined(info.mtime)?.getTime()
++        const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
++        return {
++          read: {
++            path: real,
++            canonicalPath: ReadPresentation.canonicalReadPath(real),
++            type: "file" as const,
++            size: Number(info.size),
++            modified: modified === undefined ? "unknown" : ReadPresentation.formatModified(modified),
++            ...(stable ? { modifiedMs: Math.floor(modified) } : {}),
++            start: offset,
++            end: Math.max(offset - 1, offset + returned - 1),
++            total,
++            totalExact: exact && stable,
++            returned,
++            stub: false,
++            cut,
++          },
++          ...(outline === undefined ? {} : { outline }),
++        }
++      })
+       // 小于字节预算也可能超过默认行数；只扫描已读取的字节，不预先解码页外的无效 UTF-8。
+@@ -264,1 +310,2 @@
+           if (Option.isNone(chunk)) break
++          count(chunk.value)
+@@ -272,1 +319,2 @@
+           mime: FSUtil.mimeType(real),
++          ...(yield* finish(1, totalLines + Number(scanned > 0 && lastByte !== 10), false, true)),
+@@ -283,1 +332,2 @@
+       let next: number | undefined
++      let consumed = 0
+@@ -329,1 +379,2 @@
+           const segment = chunk.subarray(start, end)
++          consumed += segment.length
+@@ -340,1 +388,2 @@
+         if (Option.isNone(chunk)) break
++        count(chunk.value)
+@@ -348,1 +397,13 @@
++      // 正文停止后最多再计数固定字节预算；总行数不足 EOF 时明确作为下界。
++      const scanEnd = consumed + MAX_SCAN_BYTES
++      let eof = !done
++      while (!eof && scanned < Number(info.size) && scanned < scanEnd) {
++        const chunk = yield* file.readAlloc(Math.min(64 * 1024, scanEnd - scanned))
++        if (Option.isNone(chunk)) {
++          eof = true
++          break
++        }
++        count(chunk.value)
++      }
++      const metadata = yield* finish(offset, lines.length, next !== undefined && lines.length < limit, eof)
+       return new TextPage({
+@@ -354,1 +415,2 @@
+         ...(next === undefined ? {} : { next }),
++        ...metadata,
+@@ -388,1 +450,1 @@
+-  return new ListPage({ entries: selected, truncated, ...(truncated ? { next: offset + selected.length } : {}) })
++  return new ListPage({ entries: selected, total: visible.length, truncated, ...(truncated ? { next: offset + selected.length } : {}) })
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -19,1 +19,2 @@
+ import { Tools } from "./tools"
++import { ReadPresentation } from "./read-presentation"
+@@ -34,1 +35,1 @@
+-    description: "The maximum number of directory entries or text lines to read (defaults to 400, maximum 2000)",
++    description: "The maximum number of directory entries or text lines to read (defaults to 200, maximum 2000)",
+@@ -39,1 +40,1 @@
+-  Schema.Struct({ ...FileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
++  Schema.Struct({ ...ReadToolFileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
+@@ -57,1 +58,1 @@
+-            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.",
++            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 24 KiB per read; displayed lines are limited to 2000 characters.\nLine accounting scans at most 256 KiB beyond the returned page. If `<range total_exact=\"false\">` appears, `total` is a lower bound; otherwise it is exact.\nIf a result returns `<stub status=\"...\">`, use the already visible content in the current context instead of reading the same range again.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed.",
+@@ -66,1 +67,6 @@
++              if (ReadPresentation.isReadRangeMeta(output.read)) return [
++                ...(HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1)) ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
++                { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
++                ...reminders,
++              ]
+               const risky = HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1))
+@@ -118,1 +123,1 @@
+-              const attach = (value: FileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
++              const attach = (value: ReadToolFileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -10,1 +10,1 @@
+-import { ReadToolFileSystem } from "../../tool/read-filesystem"
++import { ReadPresentation } from "../../tool/read-presentation"
+@@ -173,35 +173,34 @@
+-  const reads = new Set<string>()
++  const reads: ReadPresentation.ReadRangeMeta[] = []
+   return messages.flatMap((message) => {
+-    if (message.type === "compaction") reads.clear()
++    if (message.type === "compaction") reads.length = 0
+     if (message.type !== "assistant") return toLLMMessage(message, model)
+     const content = message.content.map((item): SessionMessage.AssistantContent => {
+       // provider 托管、被裁剪或带媒体的结果不具备本地完整文本 Read 的证明。
+       if (item.type !== "tool" || item.name !== "read" || item.provider?.executed === true ||
+           item.state.status !== "completed" || item.time.pruned !== undefined) return item
+       const output = item.state.structured
+-      if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
+-          (output.encoding !== "utf8" && output.type !== "text-page")) return item
+-      // 下一页到达请求末界说明本页完整；字节提前截断与长行裁剪仍不能作为版本证明。
+-      // 请求范围与实际reader共用默认常量，降默认页长后仍识别同一完整页面。
+-      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES)
+-      if (output.type === "text-page" &&
+-          ((output.next === undefined ? output.truncated !== false : output.next !== pageEnd) ||
+-          output.content.includes("... (line truncated to 2000 chars)"))) return item
++      // 旧记录缺少版本/范围时保留正文；不能以请求路径或相同前缀臆造证明。
++      if (typeof output.content !== "string" || !ReadPresentation.isReadRangeMeta(output.read) ||
++          (output.encoding !== "utf8" && output.type !== "text-page") || output.read.stub ||
++          (output.read.returned === 0 && output.read.size > 0)) return item
+       if (item.state.outputPaths?.length || item.state.attachments?.length ||
+           item.state.content.some((part) => part.type !== "text")) return item
+-      // generic 限幅后的模型正文可能少于 structured；只接受实际可见的完整编码结果。
++      const page = { ...output, content: output.content, read: output.read }
++      const body = ReadPresentation.renderNativeRead(page)
++      // 与真实 leaf 共用呈现，generic 限幅后的短正文不能预热覆盖证明。
+       if (item.state.content.length > 0 && !item.state.content.some((part) =>
+-          part.type === "text" && part.text === JSON.stringify(output))) return item
+-      // 默认化同一路径/范围，并比较新鲜 durable 结果及提醒；call ID 不代表版本。
+-      const key = JSON.stringify([item.state.input.path, item.state.input.offset ?? 1,
+-        item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES, output, item.state.content])
+-      if (!reads.has(key)) {
+-        reads.add(key)
+-        return item
+-      }
+-      // 只复制模型投影，保留首个完整结果与所有原始持久化内容、工具调用和权限事实。
+-      return { ...item, state: { ...item.state, content: [{
+-        type: "text",
+-        text: "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.",
+-      }] } }
++          part.type === "text" && part.text === body)) return item
++      const stub = ReadPresentation.findReadStub(reads, page.read)
++      const overlap = ReadPresentation.findOverlapNote(reads, page.read)
++      if (!stub) reads.push(page.read)
++      if (!stub && !overlap) return item
++      const text = stub ? ReadPresentation.renderReadStub({ ...page.read, ...stub }) : ReadPresentation.renderNativeRead(page, overlap)
++      // 只替换当前模型正文；新规则和安全提醒保留，持久消息完全不改。
++      const replacement = { type: "text" as const, text }
++      return { ...item, state: { ...item.state,
++        structured: stub ? { ...output, read: { ...page.read, returned: 0, stub: true, stubStatus: stub.status,
++          coveredBy: "coveredBy" in stub ? stub.coveredBy : undefined } } : output,
++        content: item.state.content.length === 0 ? [replacement] : item.state.content.map(part =>
++          part.type === "text" && part.text === body ? replacement : part),
++      } }
+     })
+diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
+--- a/packages/core/test/tool-read-filesystem.test.ts
++++ b/packages/core/test/tool-read-filesystem.test.ts
+@@ -26,11 +26,14 @@
+-      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 401 })
+-      expect(first.content.split("\n")).toHaveLength(400)
++      expect(first).toMatchObject({ type: "text-page", truncated: true, next: 201 })
++      expect(first.content.split("\n")).toHaveLength(200)
++      expect("read" in first ? first.read : undefined).toMatchObject({ start: 1, end: 200, returned: 200, total: 1601, totalExact: true, size: 3201, stub: false })
++      expect("read" in first ? first.read?.modifiedMs : undefined).toBeNumber()
++      // 默认和显式上限分别验证，不能用扩大后续请求来绕过新的 200 行分页。
+       // 每个中间页都用默认值锁定连续 next，不能把末页改为显式大页绕过新默认。
+-      yield* Effect.forEach([401, 801, 1201], (offset) => Effect.gen(function* () {
++      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201, 1401], (offset) => Effect.gen(function* () {
+         const page = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset })
+-        expect(page.content.split("\n")).toHaveLength(400)
+-        expect(page).toMatchObject({ truncated: true, next: offset + 400 })
++        expect(page.content.split("\n")).toHaveLength(200)
++        expect(page).toMatchObject({ truncated: true, next: offset + 200 })
+       }))
+       // next 是续页 offset，末页恰好返回余下正文且不制造另一页。
+       const last = yield* ReadToolFileSystem.read(fixtureData.fs, file, "lines.txt", { offset: 1601 })
+       expect(last.content.split("\n")).toHaveLength(1)
+@@ -65,2 +68,2 @@
+-      expect(entries.entries).toHaveLength(400)
+-      expect(entries).toMatchObject({ truncated: true, next: 401 })
++      expect(entries.entries).toHaveLength(200)
++      expect(entries).toMatchObject({ total: 1501, truncated: true, next: 201 })
+@@ -72,7 +75,7 @@
+-      yield* Effect.forEach([401, 801], (offset) => Effect.gen(function* () {
++      yield* Effect.forEach([201, 401, 601, 801, 1001, 1201], (offset) => Effect.gen(function* () {
+         const page = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset })
+-        expect(page.entries).toHaveLength(400)
+-        expect(page).toMatchObject({ truncated: true, next: offset + 400 })
++        expect(page.entries).toHaveLength(200)
++        expect(page).toMatchObject({ total: 1501, truncated: true, next: offset + 200 })
+       }))
+-      const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1201 })
+-      expect(remaining.entries).toHaveLength(301)
++      const remaining = yield* ReadToolFileSystem.list(fixtureData.fs, directory, { offset: 1401 })
++      expect(remaining.entries).toHaveLength(101)
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -23,1 +23,2 @@
+ import { ReadToolFileSystem } from "@opencode-ai/core/tool/read-filesystem"
++import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
+@@ -250,1 +251,17 @@
++      const source = path.join(nested, "large.ts")
++      yield* fs.writeFileString(source, Array.from({ length: 700 }, (_, index) => index === 9 ? "export function alpha() {}" : index === 119 ? "export class Beta {}" : `// line ${index + 1} ${"x".repeat(2048)}`).join("\n"))
++      const sourceRead = (offset: number) => settleTool(registry, { sessionID, ...toolIdentity,
++        call: { type: "tool-call", id: "outline-read", name: "read", input: { path: source, offset, limit: 20 } } })
++      const head = yield* sourceRead(1)
++      expect(head.output?.structured).toMatchObject({ read: { start: 1, totalExact: false, stub: false, cut: true } })
++      const metadata = Schema.decodeUnknownSync(Schema.Struct({ read: ReadPresentation.ReadRangeMeta }))(head.output?.structured).read
++      expect(metadata.total).toBeLessThan(600)
++      const body = head.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n") ?? ""
++      expect(body).toContain("<outline")
++      expect(body).toContain("10 function alpha")
++      expect(body).toContain("120 class Beta")
++      expect(body).toContain('total_exact="false"')
++      expect(body).toContain('reason="byte_limit"')
++      expect((yield* sourceRead(50)).output?.structured).not.toHaveProperty("outline")
++      // 原生 schema 和 registry 后的真实结果必须保留证据，不能只测试纯 helper。
+       const before = lookups
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -10,1 +10,2 @@
+ import { DateTime } from "effect"
++import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
+@@ -17,66 +18,76 @@
+   test("deduplicates complete Read versions only within the supplied visible history", () => {
+-    const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1" }
++    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
++    const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1", read: metadata }
+     const read = (value: string, structured: Record<string, unknown> = output,
+       input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
+       content: SessionMessage.ToolStateCompleted["content"] = []) => SessionMessage.Assistant.make({
+       id: id(value), type: "assistant", agent: "build",
+       model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+       content: [SessionMessage.AssistantTool.make({
+         type: "tool", id: value, name: "read", time: { created, completed: created },
+         state: SessionMessage.ToolStateCompleted.make({ status: "completed", input, structured, content }),
+       })],
+       time: { created, completed: created },
+     })
+     const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
+       .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
+     const first = read("first")
+-    const second = read("second", output, { path: "note.txt", offset: 1, limit: 400 })
++    const second = read("second", output, { path: "./note.txt", offset: 1, limit: 200 })
+     // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
+     expect(results(first, second)[0]).toEqual({ type: "json", value: output })
+     expect(results(first, second)[1]).toMatchObject({ type: "text" })
+-    expect(JSON.stringify(results(first, second)[1])).toContain("File unchanged since last read")
++    expect(JSON.stringify(results(first, second)[1])).toContain("stub_same_range_visible")
+     expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
+     // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
+-    expect(results(first, read("v2", { ...output, content: "v2" }))[1]).toMatchObject({ type: "json" })
+-    expect(results(first, read("range", output, { path: "note.txt", limit: 1 }))[1]).toMatchObject({ type: "json" })
+-    expect(results(first, read("path", output, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
++    expect(results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1]).toMatchObject({ type: "json" })
++    expect(results(first, read("range", { ...output, read: { ...metadata, end: 2, returned: 2 } }))[1]).toMatchObject({ type: "json" })
++    expect(results(first, read("path", { ...output, read: { ...metadata, canonicalPath: "/other.txt" } }, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
+     // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
+     expect(results(second)).toEqual([{ type: "json", value: output }])
+     const checkpoint = SessionMessage.Compaction.make({
+       id: id("checkpoint"), type: "compaction", reason: "auto", summary: "summary", recent: "recent", time: { created },
+     })
+     expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
+-    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2 }
++    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2, read: metadata }
+     const range = { path: "note.txt", offset: 1, limit: 1 }
+     // 文件有后续页不等于本次请求被截断；相同完整页保留首份并只压缩重复模型结果。
+     expect(JSON.stringify(results(read("page1", page, range), read("page2", page, range))[1]))
+-      .toContain("File unchanged since last read")
++      .toContain("stub_same_range_visible")
+     // 版本与请求范围仍独立参与证明，不能用相同前缀冒充新版或更大页面。
+-    expect(results(read("page3", page, range), read("page4", { ...page, content: "changed" }, range))[1])
+-      .toMatchObject({ type: "json", value: { ...page, content: "changed" } })
+-    expect(results(read("page5", page, range), read("page6", page, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
++    const changed = { ...page, content: "changed", read: { ...metadata, size: 7, modifiedMs: 2 } }
++    expect(results(read("page3", page, range), read("page4", changed, range))[1]).toEqual({ type: "json", value: changed })
++    expect(results(read("page5", page, range), read("page6", { ...page, read: { ...metadata, end: 2, returned: 2 } }, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
+     // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
+     expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
+-    // 默认400与显式400是同一完整页；显式2000仍请求不同范围，不能被前页证明替代。
+-    const defaultPage = { ...page, content: Array.from({ length: 400 }, () => "line").join("\n"), next: 401 }
+-    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 400 }))[1]))
+-      .toContain("File unchanged since last read")
+-    expect(results(read("default3", defaultPage), read("default4", defaultPage, { path: "note.txt", limit: 2000 }))[1])
+-      .toEqual({ type: "json", value: defaultPage })
+-
+-    // 不足请求范围的页面、行内截断与媒体仍不具备完整正文证明。
++    const defaultPage = { ...page, content: Array.from({ length: 200 }, () => "line").join("\n"), next: 201,
++      read: { ...metadata, size: 5000, end: 200, total: 1000, returned: 200 } }
++    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 200 }))[1])).toContain("stub_same_range_visible")
++    const wider = { ...defaultPage, truncated: false, next: undefined, content: "line\n".repeat(999) + "line", read: { ...defaultPage.read, end: 1000, returned: 1000 } }
++    expect(results(read("default3", defaultPage), read("default4", wider, { path: "note.txt", limit: 2000 }))[1]).toEqual({ type: "json", value: wider })
++    // 按实际区间判断覆盖，不能把请求 limit 当作已经交付的正文；小交集不额外提示。
++    const covering = { ...defaultPage, content: "line\n".repeat(99) + "line", read: { ...defaultPage.read, end: 100, returned: 100 } }
++    const covered = { ...page, content: "line\n".repeat(10) + "line", offset: 10, next: 21, read: { ...defaultPage.read, start: 10, end: 20, returned: 11 } }
++    expect(JSON.stringify(results(read("wide", covering), read("covered", covered))[1])).toContain("stub_covered_range_visible")
++    const overlap = { ...defaultPage, content: "line\n".repeat(99) + "line", offset: 151, next: 251, read: { ...defaultPage.read, start: 151, end: 250, returned: 100 } }
++    expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
++    // 缺少稳定版本、只有 stub 或未交付正文的结果仍不能证明覆盖。
+     for (const partial of [
+-      { type: "text-page", content: "prefix", offset: 1, truncated: true, next: 2 },
+-      { type: "text-page", content: "prefix... (line truncated to 2000 chars)", offset: 1, truncated: false },
++      { ...page, read: undefined },
++      { ...page, read: { ...metadata, modifiedMs: undefined } },
++      { ...page, read: { ...metadata, returned: 0 } },
++      { ...page, read: { ...metadata, stub: true } },
+       { ...output, encoding: "base64", mime: "image/png" },
+     ]) expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
+     // structured 仍完整不代表模型看到了全文：generic 限幅后的 content 不能预热去重。
+     const bounded = [{ type: "text" as const, text: "... output truncated ..." }]
+     expect(results(read("b1", output, undefined, bounded), read("b2", output, undefined, bounded))[1])
+       .toEqual({ type: "text", value: bounded[0].text })
+     // 完整安全提醒投影可以去重；提醒变化本身也会改变相等性证明。
+-    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: JSON.stringify(output) }]
++    const visible = [{ type: "text" as const, text: "reminder" }, { type: "text" as const, text: ReadPresentation.renderNativeRead(output) }]
+     expect(JSON.stringify(results(read("r1", output, undefined, visible), read("r2", output, undefined, visible))[1]))
+-      .toContain("File unchanged since last read")
+-    expect(results(read("r3", output, undefined, visible), read("r4", output))[1]).toMatchObject({ type: "json" })
++      .toContain("stub_same_range_visible")
++    expect(JSON.stringify(results(read("r3", output), read("r4", output, undefined, visible))[1])).toContain("reminder")
++    const pruned = read("pruned")
++    const prunedContent = pruned.content.map(tool => tool.type === "tool" ? { ...tool, time: { ...tool.time, pruned: DateTime.makeUnsafe(0) } } : tool)
++    expect(results({ ...pruned, content: prunedContent }, second)[1]).toEqual({ type: "json", value: output })
+   })
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 index c6000c109b..b70f7bce5b 100644
 --- a/packages/opencode/src/tool/read.ts
@@ -22,114 +538,32 @@ index c6000c109b..b70f7bce5b 100644
 +// #142：默认 200 行，配合 range/outline 做定点读取
 +// #142：默认 200 行与 source 对齐
 +const DEFAULT_READ_LIMIT = 200
-@@ -21,1 +24,12 @@
+@@ -21,1 +24,4 @@
  const MAX_CONTENT_TOKENS = 16000
 +// #142：正文限幅后只追加有界计数，避免为 total 扫描整个超大文件
 +const MAX_SCAN_BYTES = 256 * 1024
-+// #142：单行展示上限
-+// #142：单行展示截断阈值
-+const MAX_LINE_LENGTH = 2000
-+// #142：重叠提示阈值
-+// #142：重叠提示最少行数
-+const OVERLAP_MIN_LINES = 20
-+// #142：重叠占比阈值
-+const OVERLAP_MIN_RATIO = 0.3
 +
-@@ -143,13 +158,235 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
+@@ -143,13 +150,49 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
  // purpose in the LLM tool-call path (the model emits typed JSON). The JSON
  // Schema output is identical (`type: "number"`), so the LLM view is
  // unchanged; purely CLI-facing uses must now send numbers rather than strings.
 +
-+// #142：可见上下文 stub 状态
-+// #142：stub 两种语义：同区间已见 / 被更大区间覆盖
-+type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
++import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub } from "@opencode-ai/core/tool/read-presentation"
 +
-+// #142：区间元数据写入 metadata.read，供后续 stub 比对
-+type ReadRangeMeta = {
-+  path: string
-+  canonicalPath: string
-+  type: "file"
-+  size: number
-+  modified: string
-+  modifiedMs: number
-+  start: number
-+  end: number
-+  total: number
-+  totalExact: boolean
-+  returned: number
-+  stub: boolean
-+  stubStatus?: ReadStubStatus
-+  coveredBy?: string
-+}
-+
-+// #142：统一 metadata 形状，保证 read 字段可选
-+// #142：统一返回 Metadata，避免 Tool.define 推断分裂
++// V1 保留自己的消息适配，范围证明和模型呈现与原生读取共用。
 +function readToolMetadata(input: Metadata) {
 +  return input
 +}
 +
-+// #142：结构标签转义，防止 path/content 破坏 XML 外壳
-+// #142：结构字段 escape
-+function escapeXmlText(input: string) {
-+  return input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-+}
-+
-+// #142：属性值额外转义引号
-+// #142：属性引号 escape
-+function escapeXmlAttr(input: string) {
-+  return escapeXmlText(input).replaceAll('"', "&quot;").replaceAll("'", "&apos;")
-+}
-+
-+// #142：mtime 稳定字符串，供 stub 版本比对
-+// #142：mtime 显示串
-+function formatModified(ms: number) {
-+  const date = new Date(ms)
-+  const pad = (n: number) => String(n).padStart(2, "0")
-+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
-+    date.getMinutes(),
-+  )}:${pad(date.getSeconds())}`
-+}
-+
-+// #142：兼容 bigint/number size
-+// #142：size 统一 number
 +function fileSizeOf(stat: { size: unknown }) {
-+  return typeof stat.size === "bigint" ? Number(stat.size) : Number(stat.size)
++  return Number(stat.size)
 +}
 +
-+// #142：Windows 规范化后小写，保证同路径可见集合
-+// #142：路径规范化键
-+function canonicalReadPath(filepath: string) {
-+  return process.platform === "win32" ? FSUtil.normalizePath(filepath).toLowerCase() : filepath
-+}
-+
-+// #142：Option<Date> 解包为 ms
-+// #142：Option mtime 解包
 +function modifiedMsOf(stat: { mtime: Option.Option<Date> }) {
 +  return Math.floor(Option.getOrElse(stat.mtime, () => new Date(0)).getTime())
 +}
 +
-+// #142：metadata.read 运行时守卫
-+// #142：read 元数据 type guard
-+function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
-+  if (!input || typeof input !== "object") return false
-+  const item = input as Record<string, unknown>
-+  return (
-+    typeof item.path === "string" &&
-+    typeof item.canonicalPath === "string" &&
-+    item.type === "file" &&
-+    typeof item.size === "number" &&
-+    typeof item.modified === "string" &&
-+    typeof item.modifiedMs === "number" &&
-+    typeof item.start === "number" &&
-+    typeof item.end === "number" &&
-+    typeof item.total === "number" &&
-+    typeof item.returned === "number" &&
-+    typeof item.stub === "boolean"
-+  )
-+}
-+
-+// #142：从会话历史收集同文件、未 stub 的可见读取
-+// #142：扫描 assistant 已完成 read
++// 可见性仍取自本次会话实际历史，不能以路径缓存代替正文证明。
 +function collectVisibleReads(messages: Array<{ info: { role: string }; parts: any[] }>, canonicalPath: string) {
 +  const reads: ReadRangeMeta[] = []
 +  for (let i = messages.length - 1; i >= 0; i--) {
@@ -146,118 +580,6 @@ index c6000c109b..b70f7bce5b 100644
 +    }
 +  }
 +  return reads
-+}
-+
-+// #142：决定是否 stub
-+function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
-+  // #142：仅当同文件版本已在上下文可见时抑制输出
-+  // #142：仅同 size+mtime 视为同文件版本
-+  const sameVersion = visibleReads.filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
-+  // #142：完全相同 start-end 优先 stub_same_range
-+  const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
-+  if (sameRange) return { status: "stub_same_range_visible" as const }
-+  // #142：完全覆盖子区间也可 stub
-+  const covering = sameVersion.find((item) => item.start <= current.start && item.end >= current.end)
-+  // #142：子区间被已见区间覆盖
-+  if (covering) return { status: "stub_covered_range_visible" as const, coveredBy: `${covering.start}-${covering.end}` }
-+  return undefined
-+}
-+
-+// #142：计算 overlap note
-+function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
-+  const overlaps = visibleReads
-+    .filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
-+    .map((item) => {
-+      const start = Math.max(item.start, current.start)
-+      const end = Math.min(item.end, current.end)
-+      return end >= start ? { start, end, lines: end - start + 1 } : undefined
-+    })
-+    .filter((item): item is { start: number; end: number; lines: number } => !!item)
-+  if (!overlaps.length) return undefined
-+  const lines = overlaps.reduce((sum, item) => sum + item.lines, 0)
-+  const span = Math.max(1, current.end - current.start + 1)
-+  // #142：小重叠不提示，避免噪音
-+  if (lines < OVERLAP_MIN_LINES && lines / span < OVERLAP_MIN_RATIO) return undefined
-+  return overlaps.map((item) => `${item.start}-${item.end}`).join(",")
-+}
-+
-+// #142：渲染 content 行
-+function renderContentLines(raw: string[], offset: number) {
-+  return raw
-+    .map((line, i) => {
-+      // #142：结构化包装字段转义；内容行 escape 防破坏 XML 结构（#145 改为原文）
-+      if (line.length <= MAX_LINE_LENGTH) return `${i + offset}: ${escapeXmlText(line)}`
-+      return `${i + offset}: ${escapeXmlText(line.slice(0, MAX_LINE_LENGTH))} (line truncated to ${MAX_LINE_LENGTH} chars)`
-+    })
-+    .join("\n")
-+}
-+
-+// #142：完整结构化输出
-+function renderReadOutput(input: {
-+  path: string
-+  size: number
-+  modified: string
-+  start: number
-+  end: number
-+  total: number
-+  totalExact: boolean
-+  returned: number
-+  raw: string[]
-+  cut: boolean
-+  more: boolean
-+  outline?: Outline
-+  overlap?: string
-+}) {
-+  // #142：结构外壳 path/type/file/range 固定顺序
-+  const output: string[] = [
-+    `<path>${escapeXmlText(input.path)}</path>`,
-+    `<type>file</type>`,
-+    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-+    `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="${input.returned}" />`,
-+  ]
-+  // #142：outline 仅插入结构提示区
-+  if (input.outline?.items.length) {
-+    output.push(`<outline truncated="${input.outline.truncated ? "true" : "false"}">`)
-+    output.push(input.outline.items.map(escapeXmlText).join("\n"))
-+    output.push("</outline>")
-+  }
-+  // #142：部分重叠仍返回内容，附加 note
-+  if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)
-+  // #142：content 包裹可见行（#145 决定是否 escape 行文本）
-+  output.push("<content>")
-+  output.push(renderContentLines(input.raw, input.start))
-+  output.push("</content>")
-+  // #142：字节截断与行截断用不同 reason
-+  if (input.cut) output.push(`<more offset="${input.end + 1}" reason="byte_limit" />`)
-+  else if (input.more) output.push(`<more offset="${input.end + 1}" reason="line_limit" />`)
-+  return output.join("\n")
-+}
-+
-+// #142：stub 结构化输出
-+function renderReadStub(input: {
-+  path: string
-+  size: number
-+  modified: string
-+  start: number
-+  end: number
-+  total: number
-+  totalExact: boolean
-+  status: ReadStubStatus
-+  coveredBy?: string
-+}) {
-+  const msg =
-+    input.status === "stub_same_range_visible"
-+      ? "Requested range is already visible in the current context."
-+      : `Requested range is covered by already visible range ${input.coveredBy}.`
-+  return [
-+    `<path>${escapeXmlText(input.path)}</path>`,
-+    `<type>file</type>`,
-+    `<file size="${input.size}" modified="${escapeXmlAttr(input.modified)}" />`,
-+    `<range start="${input.start}" end="${input.end}" total="${input.total}"${input.totalExact ? "" : ' total_exact="false"'} returned="0" />`,
-+    `<stub status="${input.status}"${input.coveredBy ? ` covered_by="${escapeXmlAttr(input.coveredBy)}"` : ""}>`,
-+    msg,
-+    "</stub>",
-+  ].join("\n")
 +}
 +
 +
@@ -540,11 +862,11 @@ index c6000c109b..b70f7bce5b 100644
        }
      })
  
-diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
+diff --git a/packages/core/src/tool/read-outline.ts b/packages/core/src/tool/read-outline.ts
 new file mode 100644
 index 0000000000..3e4db15021
 --- /dev/null
-+++ b/packages/opencode/src/tool/read-outline.ts
++++ b/packages/core/src/tool/read-outline.ts
 @@ -0,0 +1,311 @@
 +// #142：源文件大纲提示（非语义索引），限制扫描行数与条目预算
 +// #142：仅 offset=1 且足够长的源码文件才生成 outline
@@ -857,6 +1179,12 @@ index 0000000000..3e4db15021
 +  // #142：返回大纲
 +return { items, truncated }
 +}
+diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/tool/read-outline.ts
+@@ -0,0 +1,1 @@
++export { readOutline, type Outline } from "@opencode-ai/core/tool/read-outline"
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 index 4cf1074a1d..475b1ea3c7 100644
 --- a/packages/opencode/test/tool/read.test.ts
@@ -897,12 +1225,17 @@ index 4cf1074a1d..475b1ea3c7 100644
        // 恢复范围确实命中，避免拒绝断言仅因测试历史失配而偶然成立。
 -      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toBe(FILE_UNCHANGED_STUB)
 +      expect((yield* exec(dir, request, { ...ctx, messages: current })).output).toContain('status="stub_same_range_visible"')
-@@ -391,8 +398,8 @@
+@@ -391,8 +398,13 @@
 -      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toBe(FILE_UNCHANGED_STUB)
 +      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain('status="stub_same_range_visible"')
        yield* put(target, "x".repeat(3000) + "changed")
 -      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).output).toContain("changed")
-+      expect((yield* exec(dir, request, { ...ctx, messages: history(whole) })).metadata.read?.size).toBe(3007)
++      const changed = yield* exec(dir, request, { ...ctx, messages: history(whole) })
++      expect(changed.metadata.read).toMatchObject({ size: 3007, returned: 1, stub: false })
++      expect(changed.output).toContain("<content>")
++      expect(changed.output).not.toContain("<stub")
++      expect(changed.output).toContain("line truncated to 2000 chars")
++      expect((yield* exec(dir, request, { ...ctx, messages: history(changed) })).output).toContain('status="stub_same_range_visible"')
        // 字节预算省略的正文仍不构成完整版本证明。
        yield* put(target, "x".repeat(24 * 1024 + 1))
        const partial = yield* exec(dir, request)
@@ -1256,12 +1589,12 @@ index 4cf1074a1d..475b1ea3c7 100644
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const file = path.join(test.directory, "overlap.txt")
-+      const body = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n") + "\n"
++      const body = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n") + "\n"
 +      yield* put(file, body)
-+      const first = yield* run({ filePath: file, offset: 1, limit: 20 })
++      const first = yield* run({ filePath: file, offset: 1, limit: 40 })
 +      expect(first.metadata.read?.stub).toBe(false)
 +      const second = yield* run(
-+        { filePath: file, offset: 10, limit: 20 },
++        { filePath: file, offset: 21, limit: 40 },
 +        {
 +          ...ctx,
 +          messages: [

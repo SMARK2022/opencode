@@ -35,17 +35,41 @@ diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
  import { makeLocationNode } from "../effect/app-node"
  import { SessionGoal } from "../session/goal"
  import { ToolRegistry } from "./registry"
-@@ -13,18 +13,36 @@
+@@ -13,28 +13,50 @@
    const goals = yield* SessionGoal.Service
    yield* tools.register({
      goal: Tool.make({
--      description: "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user.",
+-      description: [
+-        "Update the existing goal.",
+-        "Use this tool only to mark the goal achieved or genuinely blocked.",
+-        "Set status to `complete` only when the objective has actually been achieved and no required work remains.",
+-        "Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.",
+-        "If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.",
+-        "Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.",
+-        "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+-        "Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
+-        "You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.",
+-      ].join("\n"),
 -      input: Schema.Struct({ status: Schema.Literals(["complete", "blocked"]) }),
 -      output: SessionGoal.Goal,
-+      description: "Get the current goal with no arguments, including objective, status, token usage, budget, remaining tokens and elapsed time, or update its status. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user. When marking a budgeted goal achieved, report the final token usage from the tool result to the user.",
++      description: [
++        "Get the current goal, or update its status.",
++        "",
++        "Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, and remaining token budget.",
++        "",
++        "Call with `status` to mark the goal achieved or genuinely blocked:",
++        "- Set status to `complete` only when the objective has actually been achieved and no required work remains.",
++        "- Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.",
++        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.",
++        "- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.",
++        "- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
++        "- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
++        "- You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.",
++        "- When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
++      ].join("\n"),
 +      input: Schema.Struct({
 +        status: Schema.Literals(["complete", "blocked"]).pipe(Schema.optional).annotate({
-+          description: "Set to complete when achieved or blocked when genuinely stuck after three consecutive failed attempts. Omit to get the current goal.",
++          description: "Set to `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Omit to get the current goal status.",
 +        }),
 +      }),
 +      // 无目标用null表示，仍由现有工具输出编码器验证完整Goal快照。
@@ -88,7 +112,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 @@ -513,7 +513,10 @@
              // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
              const tokens = stepSettlement.tokens
-             const seconds = Math.max(0, Math.floor((DateTime.toEpochMillis(yield* DateTime.now) - startedAt) / 1000))
+             const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
 -            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(Effect.ignore)
 +            // 与V1相同：记录计费defect，不能静默丢失或让诊断变成第二个结算路径。
 +            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(
@@ -100,8 +124,24 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -687,8 +687,30 @@
+@@ -709,7 +709,13 @@
+     yield* goals.accountUsage(sessionID, 500, 10)
+     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+     expect(yield* goals.set(sessionID, { status: "paused" }).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
+-    for (const invalid of [{ objective: "   " }, { objective: "a".repeat(4001) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
++    for (const invalid of [{ objective: "   " }, { objective: "a".repeat(6401) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
+       expect(yield* goals.set(sessionID, invalid).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
+     }
++    // 真实共享存储接受6400、拒绝6401并保持原值；清除边界fixture后继续原CRUD场景。
++    const boundary = yield* goals.set(sessionID, { objective: "a".repeat(6400) })
++    expect(boundary.objective).toHaveLength(6400)
++    expect((yield* goals.set(sessionID, { objective: "a".repeat(6401) }).pipe(Effect.flip)).message).toBe("goal objective must be at most 6400 characters")
++    expect(Option.getOrThrow(yield* goals.get(sessionID))).toEqual(boundary)
++    yield* goals.clear(sessionID)
+     const original = yield* goals.set(sessionID, { objective: "  original  ", tokenBudget: 50000 })
+@@ -758,9 +764,31 @@
      expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
+     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description).toBe(GOAL_DESCRIPTION.trimEnd())
      const paused = yield* goals.get(sessionID)
      expect(Option.getOrThrow(paused).status).toBe("paused")
      expect(Option.getOrThrow(paused).tokensUsed).toBe(12)

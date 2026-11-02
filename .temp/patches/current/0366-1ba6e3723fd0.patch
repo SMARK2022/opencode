@@ -18,6 +18,363 @@ textFromUserMessage 完全对齐，EXISTS 子查询确保无 text part 的用户
 SessionID 品牌校验异常。预览行数(2)、session 上限(400)、扫描范围(全部
 用户消息)均不退化。
 
+diff --git a/packages/client/src/generated-effect/client.ts b/packages/client/src/generated-effect/client.ts
+--- a/packages/client/src/generated-effect/client.ts
++++ b/packages/client/src/generated-effect/client.ts
+@@ -232,6 +232,16 @@
+     Effect.map((value) => value.data),
+   )
+ 
++type Endpoint3_20Request = Parameters<RawClient["server.session"]["session.preview"]>[0]
++type Endpoint3_20Input = {
++  readonly sessionIDs: Endpoint3_20Request["payload"]["sessionIDs"]
++  readonly limit?: Endpoint3_20Request["payload"]["limit"]
++}
++const Endpoint3_20 = (raw: RawClient["server.session"]) => (input: Endpoint3_20Input) =>
++  raw["session.preview"]({ payload: { sessionIDs: input["sessionIDs"], limit: input["limit"] } }).pipe(
++    Effect.mapError(mapClientError),
++  )
++
+ const adaptGroup3 = (raw: RawClient["server.session"]) => ({
+   list: Endpoint3_0(raw),
+   create: Endpoint3_1(raw),
+@@ -253,6 +263,7 @@
+   events: Endpoint3_17(raw),
+   interrupt: Endpoint3_18(raw),
+   message: Endpoint3_19(raw),
++  preview: Endpoint3_20(raw),
+ })
+ 
+ type Endpoint4_0Request = Parameters<RawClient["server.message"]["session.messages"]>[0]
+diff --git a/packages/client/src/generated/client.ts b/packages/client/src/generated/client.ts
+--- a/packages/client/src/generated/client.ts
++++ b/packages/client/src/generated/client.ts
+@@ -43,6 +43,8 @@
+   SessionsInterruptOutput,
+   SessionsMessageInput,
+   SessionsMessageOutput,
++  SessionsPreviewInput,
++  SessionsPreviewOutput,
+   MessagesListInput,
+   MessagesListOutput,
+   ModelsListInput,
+@@ -533,6 +535,18 @@
+           },
+           requestOptions,
+         ).then((value) => value.data),
++      preview: (input: SessionsPreviewInput, requestOptions?: RequestOptions) =>
++        request<SessionsPreviewOutput>(
++          {
++            method: "POST",
++            path: `/api/session/preview`,
++            body: { sessionIDs: input["sessionIDs"], limit: input["limit"] },
++            successStatus: 200,
++            declaredStatuses: [401, 400],
++            empty: false,
++          },
++          requestOptions,
++        ),
+     },
+     messages: {
+       list: (input: MessagesListInput, requestOptions?: RequestOptions) =>
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -2395,6 +2395,13 @@
+       }
+ }["data"]
+ 
++export type SessionsPreviewInput = {
++  readonly sessionIDs: { readonly sessionIDs: ReadonlyArray<string>; readonly limit?: number | undefined }["sessionIDs"]
++  readonly limit?: { readonly sessionIDs: ReadonlyArray<string>; readonly limit?: number | undefined }["limit"]
++}
++
++export type SessionsPreviewOutput = { readonly [x: string]: ReadonlyArray<string> }
++
+ export type MessagesListInput = {
+   readonly sessionID: { readonly sessionID: string }["sessionID"]
+   readonly limit?: {
+diff --git a/packages/client/test/promise.test.ts b/packages/client/test/promise.test.ts
+--- a/packages/client/test/promise.test.ts
++++ b/packages/client/test/promise.test.ts
+@@ -107,6 +107,7 @@
+       if (url.includes("/message/")) return Response.json({ data: modelSwitchedMessage })
+       if (url.endsWith("/api/session/active")) return Response.json({ data: { ses_test: { type: "running" } } })
+       if (init?.method === "POST" && url.endsWith("/api/session")) return Response.json(session)
++      if (url.endsWith("/api/session/preview")) return Response.json({ ses_test: ["latest user", "earlier user"] })
+       if (init?.method === "POST") return new Response(null, { status: 204 })
+       return Response.json({ data: [session.data], cursor: { next: "next" } })
+     },
+@@ -137,6 +138,9 @@
+   for await (const event of client.sessions.events({ sessionID: "ses_test", after: 0 })) events.push(event)
+   await client.sessions.interrupt({ sessionID: "ses_test" })
+   const message = await client.sessions.message({ sessionID: "ses_test", messageID: "msg_model" })
++  // 生成客户端必须暴露真实批量POST，不得回到逐会话分页。
++  const previews = await client.sessions.preview({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 })
++  expect(previews).toEqual({ ses_test: ["latest user", "earlier user"] })
+ 
+   expect(page.cursor.next).toBe("next")
+   expect(active).toEqual({ ses_test: { type: "running" } })
+@@ -162,7 +166,9 @@
+     ["GET", "http://localhost:3000/api/session/ses_test/event?after=0"],
+     ["POST", "http://localhost:3000/api/session/ses_test/interrupt"],
+     ["GET", "http://localhost:3000/api/session/ses_test/message/msg_model"],
++    ["POST", "http://localhost:3000/api/session/preview"],
+   ])
++  expect(requests.at(-1)?.init?.body).toBe(JSON.stringify({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 }))
+   const body = requests.find((request) => request.url.endsWith("/api/session/ses_test/prompt"))?.init?.body
+   if (typeof body !== "string") throw new Error("Expected JSON request body")
+   expect(JSON.parse(body)).toEqual({
+diff --git a/packages/core/src/session/preview.ts b/packages/core/src/session/preview.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/preview.ts
+@@ -0,0 +1,93 @@
++export * as SessionPreview from "./preview"
++
++import { Effect } from "effect"
++import { sql } from "drizzle-orm"
++import type { Database } from "../database/database"
++import { MessageTable, PartTable, SessionMessageTable } from "./sql"
++
++export const load = Effect.fn("SessionPreview.load")(function* (
++  db: Database.Interface["db"],
++  input: { sessionIDs: readonly string[]; limit?: number },
++  version: "v1" | "native" = "native",
++) {
++  const result: Record<string, string[]> = {}
++  // 空请求保持源端点的空映射语义，不生成IN ()或逐会话补查。
++  if (input.sessionIDs.length === 0) return result
++  const limit = input.limit ?? 2
++  // ID始终作为绑定值；两代查询只读各自存储，不把另一代历史当fallback。
++  const ids = sql.join(input.sessionIDs.map(id => sql`${id}`), sql`, `)
++  const rows = yield* db.all<{ session_id: string; joined_text: string | null }>(
++    version === "v1" ? sql`
++      WITH ranked_messages AS (
++        SELECT ${MessageTable.id} as message_id, ${MessageTable.session_id},
++          ROW_NUMBER() OVER (
++            PARTITION BY ${MessageTable.session_id}
++            ORDER BY ${MessageTable.time_created} DESC, ${MessageTable.id} DESC
++          ) as msg_rn
++        FROM ${MessageTable}
++        WHERE json_extract(${MessageTable.data}, '$.role') = 'user'
++          AND json_type(${MessageTable.data}, '$.hidden') IS NULL
++          AND ${MessageTable.session_id} IN (${ids})
++          AND EXISTS (
++            SELECT 1 FROM ${PartTable}
++            WHERE ${PartTable.message_id} = ${MessageTable.id}
++              AND json_extract(${PartTable.data}, '$.type') = 'text'
++              AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
++              AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
++              AND json_type(${PartTable.data}, '$.hidden') IS NULL
++          )
++      ),
++      preview_parts AS (
++        SELECT rm.session_id, rm.msg_rn, ${PartTable.id} as part_id,
++          json_extract(${PartTable.data}, '$.text') as text
++        FROM ranked_messages rm
++        INNER JOIN ${PartTable} ON ${PartTable.message_id} = rm.message_id
++          AND json_extract(${PartTable.data}, '$.type') = 'text'
++          AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
++          AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
++          AND json_type(${PartTable.data}, '$.hidden') IS NULL
++        WHERE rm.msg_rn <= ${limit}
++      )
++      SELECT session_id, group_concat(text, ' ') as joined_text
++      -- 多part先按ID排序再聚合；无可见text的消息不占窗口名额。
++      FROM (SELECT * FROM preview_parts ORDER BY part_id)
++      GROUP BY session_id, msg_rn
++      ORDER BY session_id, msg_rn
++    ` : sql`
++      WITH ranked_messages AS (
++        SELECT ${SessionMessageTable.session_id} as session_id,
++          json_extract(${SessionMessageTable.data}, '$.text') as joined_text,
++          ROW_NUMBER() OVER (
++            PARTITION BY ${SessionMessageTable.session_id}
++            ORDER BY ${SessionMessageTable.seq} DESC
++          ) as msg_rn
++        FROM ${SessionMessageTable}
++        -- 只读已提升user；synthetic、摘要及尚在inbox的输入不会混入预览。
++        WHERE ${SessionMessageTable.type} = 'user'
++          AND ${SessionMessageTable.session_id} IN (${ids})
++          AND json_extract(${SessionMessageTable.data}, '$.text') <> ''
++          -- 与Native Hidden合同一致：false或不完整metadata不构成隐藏标记。
++          AND coalesce(
++            json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
++            AND json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') IN ('integer', 'real')
++            AND json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0
++            AND json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') <= 9007199254740991
++            AND CAST(json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') AS INTEGER)
++              = json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time'), 0
++          ) = 0
++      )
++      -- 不经SessionHistory的压缩边界：最近用户正文来自完整durable历史。
++      SELECT session_id, joined_text FROM ranked_messages
++      WHERE msg_rn <= ${limit}
++      ORDER BY session_id, msg_rn
++    `,
++  ).pipe(Effect.orDie)
++  // 沿用源端点的截断后空白归一化；空白消息可能少展示一行，不另加扫描fallback。
++  for (const row of rows) {
++    const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()
++    if (!text) continue
++    if (!result[row.session_id]) result[row.session_id] = []
++    result[row.session_id].push(text)
++  }
++  return result
++})
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -398,6 +398,22 @@
+           }),
+         ),
+     )
++    .add(
++      // 批量请求没有单一Session归属，不能套用:sessionID的Location中间件。
++      HttpApiEndpoint.post("session.preview", "/api/session/preview", {
++        payload: Schema.Struct({
++          sessionIDs: Schema.Array(Schema.String),
++          limit: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10))),
++        }),
++        success: Schema.Record(Schema.String, Schema.Array(Schema.String)),
++      }).annotateMerge(
++        OpenApi.annotations({
++          identifier: "v2.session.preview",
++          summary: "Batch session preview",
++          description: "Retrieve the most recent user message text for multiple sessions in a single request.",
++        }),
++      ),
++    )
+     .annotateMerge(
+       OpenApi.annotations({
+         title: "sessions",
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -1,5 +1,7 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
+ import { SessionGoal } from "@opencode-ai/core/session/goal"
++import { SessionPreview } from "@opencode-ai/core/session/preview"
++import { Database } from "@opencode-ai/core/database/database"
+ import { DateTime, Effect, Stream } from "effect"
+ import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
+ import { Api } from "../api"
+@@ -24,6 +26,7 @@
+     const session = yield* SessionV2.Service
+     const clients = yield* EventClients.Service
+     const goals = yield* SessionGoal.Service
++    const database = yield* Database.Service
+ 
+     return handlers
+       .handle(
+@@ -401,5 +404,6 @@
+           })
+         }),
+       )
++      .handle("session.preview", ctx => SessionPreview.load(database.db, ctx.payload))
+   }),
+ )
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -29,9 +29,12 @@
+ import { Snapshot } from "@opencode-ai/core/snapshot"
+ import { Location } from "@opencode-ai/core/location"
+ import { SessionHistory } from "@opencode-ai/core/session/history"
++import { SessionPreview } from "@opencode-ai/core/session/preview"
+ import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
+ 
+ const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
++const previewIt = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node]),
++  [[Database.node, Database.layerFromPath(":memory:")]]))
+ const sessionsLayer = AppNodeBuilder.build(SessionV2.node, [[SessionExecution.node, SessionExecution.noopLayer]])
+ const sessionID = SessionV2.ID.make("ses_projector_test")
+ const created = DateTime.makeUnsafe(0)
+@@ -52,6 +55,83 @@
+ }
+ 
+ describe("SessionProjector", () => {
++  previewIt.effect("batches previews from each real message store without compaction or inbox leakage", () =>
++    Effect.gen(function* () {
++      const db = (yield* Database.Service).db
++      const events = yield* EventV2.Service
++      const a = SessionV2.ID.make("ses_preview_a")
++      const b = SessionV2.ID.make("ses_preview_b")
++      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
++      yield* db.insert(SessionTable).values([a, b].map(id => ({ id, project_id: Project.ID.global,
++        slug: id, directory: "/project", title: id, version: "test" }))).run()
++      const promote = (sessionID: SessionV2.ID, id: string, text: string) => Effect.gen(function* () {
++        const input = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make(id), sessionID,
++          prompt: Prompt.make({ text }), delivery: "steer" })
++        yield* SessionInput.promoteSteers(db, events, sessionID, input.admittedSeq)
++        return input.id
++      })
++      yield* promote(a, "msg_preview_old", "old before compaction")
++      const hidden = yield* promote(a, "msg_preview_hidden", "hidden")
++      yield* events.publish(SessionEvent.MessagesHidden, { sessionID: a, timestamp: created, messageIDs: [hidden],
++        hidden: SessionMessage.Hidden.make({ time: 0, reason: "permission-reviewer-protocol-retry" }) })
++      const visible = yield* promote(a, "msg_preview_false", "false marker")
++      const row = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, visible)).get()
++      if (!row) return yield* Effect.die("Missing projected preview user")
++      // 非法隐藏值保留可见性，防止把metadata键存在误当作协议隐藏。
++      yield* db.update(SessionMessageTable).set({ data: { ...row.data, metadata: { hidden: false } } })
++        .where(eq(SessionMessageTable.id, visible)).run()
++      yield* promote(a, "msg_preview_middle", "middle")
++      yield* events.publish(SessionEvent.Synthetic, { sessionID: a, messageID: SessionMessage.ID.make("msg_preview_synthetic"),
++        timestamp: created, text: "internal synthetic" })
++      const compactionID = SessionMessage.ID.make("msg_preview_compaction")
++      yield* events.publish(SessionEvent.Compaction.Started, { sessionID: a, messageID: compactionID, timestamp: created, reason: "manual" })
++      yield* events.publish(SessionEvent.Compaction.Ended, { sessionID: a, messageID: compactionID,
++        timestamp: DateTime.makeUnsafe(1), reason: "manual", text: "summary", recent: "recent" })
++      yield* promote(a, "msg_preview_latest", " latest\n  user ")
++      const pending = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_preview_pending"), sessionID: a,
++        prompt: Prompt.make({ text: "pending inbox" }), delivery: "queue" })
++      yield* promote(b, "msg_preview_b_first", "b first")
++      yield* promote(b, "msg_preview_b_latest", "b latest")
++      expect((yield* SessionInput.find(db, pending.id))?.promotedSeq).toBeUndefined()
++      expect(yield* SessionPreview.load(db, { sessionIDs: [] })).toEqual({})
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] })).toEqual({
++        [a]: ["latest user", "middle"], [b]: ["b latest", "b first"],
++      })
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 })).toEqual({ [a]: ["latest user"] })
++      // 全量窗口证明压缩前正文仍可取，hidden/synthetic/inbox都不能占名额。
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 10 })).toEqual({
++        [a]: ["latest user", "middle", "false marker", "old before compaction"],
++      })
++      const v1 = (text: string | undefined, options: { hidden?: boolean; synthetic?: boolean; ignored?: boolean; partHidden?: boolean } = {}) => Effect.gen(function* () {
++        const id = SessionV1.MessageID.ascending()
++        yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID: a, info: { id, sessionID: a, role: "user",
++          time: { created: 10 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
++          ...(options.hidden ? { hidden: { time: 0, reason: "undo" as const } } : {}) } })
++        if (text !== undefined) yield* events.publish(SessionV1.Event.PartUpdated, { sessionID: a, time: 10, part: {
++          id: SessionV1.PartID.ascending(), sessionID: a, messageID: id, type: "text", text,
++          synthetic: options.synthetic, ignored: options.ignored,
++          ...(options.partHidden ? { hidden: { time: 0, reason: "undo" as const } } : {}),
++        } })
++        return id
++      })
++      const first = yield* v1(" part1\n")
++      yield* events.publish(SessionV1.Event.PartUpdated, { sessionID: a, time: 10, part: {
++        id: SessionV1.PartID.ascending(), sessionID: a, messageID: first, type: "text", text: " part2 ",
++      } })
++      yield* v1("second")
++      yield* v1("hidden", { hidden: true })
++      yield* v1("synthetic", { synthetic: true })
++      yield* v1("ignored", { ignored: true })
++      yield* v1("part hidden", { partHidden: true })
++      yield* v1(undefined)
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] }, "v1")).toEqual({ [a]: ["second", "part1 part2"] })
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 }, "v1")).toEqual({ [a]: ["second"] })
++      // 同一Session内的两代表不能互相补查，Native结果不受V1新行影响。
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["latest user", "middle"] })
++      expect(yield* SessionPreview.load(db, { sessionIDs: [] }, "v1")).toEqual({})
++    }),
++  )
++
+   it.effect("persists request-owned tool diffs through the native completion event", () =>
+     Effect.gen(function* () {
+       const db = (yield* Database.Service).db
 diff --git a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts b/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
 index bba63df6b..eb92446d9 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/groups/session.ts
@@ -82,15 +439,12 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
 index 7a8b5695f..6d94bb660 100644
 --- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
 +++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -17,6 +17,11 @@
+@@ -17,6 +17,8 @@
  import { SessionSummary } from "@/session/summary"
  import { Todo } from "@/session/todo"
  import { MessageID, PartID, SessionID } from "@/session/schema"
-+// [local-smark] session preview: 直接查 DB 获取用户消息预览文本
-+// 表定义在 core（drizzle schema owner），此处跨包引用保持单一定义源
-+import { MessageTable, PartTable } from "@opencode-ai/core/session/sql"
++import { SessionPreview } from "@opencode-ai/core/session/preview"
 +import { Database } from "@opencode-ai/core/database/database"
-+import { sql } from "drizzle-orm"
  import { NamedError } from "@opencode-ai/core/util/error"
  import { Cause, Effect, Option, Schema, Scope } from "effect"
  import * as Stream from "effect/Stream"
@@ -102,109 +456,33 @@ index 7a8b5695f..6d94bb660 100644
    PromptPayload,
    RevertPayload,
    ShellPayload,
-@@ -63,6 +69,7 @@
+@@ -63,6 +66,7 @@
      const statusSvc = yield* SessionStatus.Service
      const todoSvc = yield* Todo.Service
      const goalSvc = yield* SessionGoal.Service
-+    const { db } = yield* Database.Service
++    const database = yield* Database.Service
      const summary = yield* SessionSummary.Service
      const events = yield* EventV2Bridge.Service
      const scope = yield* Scope.Scope
-@@ -534,6 +541,87 @@
+@@ -534,6 +538,13 @@
      return { cleared }
    })
  
-+  // [local-smark] session preview handler
-+  // 单条 SQL 窗口函数查询批量获取多个 session 的最近 N 条用户消息文本，
-+  // 替代 TUI 中每 session 独立分页调用 session.messages 的 N×M 模式。
-+  // 过滤条件与 MessageV2.page(includeHidden=false) + textFromUserMessage 完全对齐：
-+  // - role = 'user' 且 message 无 hidden 标记（json_type 判空而非值判断）
-+  // - part type = 'text' 且非 synthetic/ignored 且无 hidden 标记
-+  // - EXISTS 子查询确保只排名有可见 text part 的用户消息，与现有代码
-+  //   跳过无文本消息后继续扫描下一页的行为一致
++  // 两代端点共用批量查询入口；V1只读原有message/part，不与Native历史互补。
 +  const preview = Effect.fn("SessionHttpApi.preview")(function* (ctx: {
 +    payload: typeof PreviewPayload.Type
 +  }) {
-+    const { sessionIDs, limit: rawLimit } = ctx.payload
-+    // [local-smark] 空列表短路：IN () 是非法 SQL，且空请求语义上就是空结果
-+    if (sessionIDs.length === 0) return {} as Record<string, string[]>
-+    // [local-smark] 默认 2 行与 SESSION_LIST_PREVIEW_LINES 对齐——
-+    // 服务端不再重复校验上限（payload schema 已限 1-10）
-+    const limit = rawLimit ?? 2
-+
-+    // 参数化 IN 子句，防止 SQL 注入；SQLite 参数上限 32766，400 远在限内
-+    const idPlaceholders = sql.join(sessionIDs.map((id) => sql`${id}`), sql`, `)
-+
-+    const rows = yield* db
-+      .all(sql`
-+        WITH ranked_messages AS (
-+          SELECT ${MessageTable.id} as message_id, ${MessageTable.session_id}, ${MessageTable.time_created},
-+            ROW_NUMBER() OVER (
-+              PARTITION BY ${MessageTable.session_id}
-+              ORDER BY ${MessageTable.time_created} DESC, ${MessageTable.id} DESC
-+            ) as msg_rn
-+          FROM ${MessageTable}
-+          WHERE json_extract(${MessageTable.data}, '$.role') = 'user'
-+            AND json_type(${MessageTable.data}, '$.hidden') IS NULL
-+            AND ${MessageTable.session_id} IN (${idPlaceholders})
-+            AND EXISTS (
-+              SELECT 1 FROM ${PartTable}
-+              WHERE ${PartTable.message_id} = ${MessageTable.id}
-+                AND json_extract(${PartTable.data}, '$.type') = 'text'
-+                AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
-+                AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
-+                AND json_type(${PartTable.data}, '$.hidden') IS NULL
-+            )
-+        ),
-+        preview_parts AS (
-+          SELECT rm.session_id, rm.msg_rn, ${PartTable.id} as part_id,
-+            json_extract(${PartTable.data}, '$.text') as text
-+          FROM ranked_messages rm
-+          INNER JOIN ${PartTable} ON ${PartTable.message_id} = rm.message_id
-+            AND json_extract(${PartTable.data}, '$.type') = 'text'
-+            AND coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0
-+            AND coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0
-+            AND json_type(${PartTable.data}, '$.hidden') IS NULL
-+          WHERE rm.msg_rn <= ${limit}
-+        )
-+        SELECT session_id, msg_rn, group_concat(text, ' ') as joined_text
-+        -- 子查询 ORDER BY 保证同一消息内多 text part 按 part.id 顺序拼接；
-+        -- SQLite group_concat 不保证 GROUP BY 内顺序，需子查询喂入有序行
-+        FROM (SELECT * FROM preview_parts ORDER BY part_id)
-+        GROUP BY session_id, msg_rn
-+        ORDER BY session_id, msg_rn
-+      `).pipe(
-+        Effect.orDie,
-+        Effect.map(
-+          (result) =>
-+            result as { session_id: string; msg_rn: number; joined_text: string | null }[],
-+        ),
-+      )
-+
-+    // JS 侧完成空白归一化（与 textFromUserMessage 的
-+    // .replace(/\s+/g, " ").trim() 对齐）并按 session 分组
-+    const result: Record<string, string[]> = {}
-+    for (const row of rows) {
-+      // [local-smark] group_concat 对无匹配行返回 NULL；空文本跳过，
-+      // 与旧 TUI if (text) 过滤一致——空行不占用预览行数预算
-+      const text = (row.joined_text ?? "").replace(/\s+/g, " ").trim()
-+      if (!text) continue
-+      if (!result[row.session_id]) result[row.session_id] = []
-+      result[row.session_id].push(text)
-+    }
-+    return result
++    return yield* SessionPreview.load(database.db, ctx.payload, "v1")
 +  })
 +
    return handlers
        .handle("list", list)
        .handle("status", status)
-@@ -569,5 +653,8 @@
+@@ -569,5 +580,6 @@
      .handle("goal", goalGet)
      .handle("goalSet", goalSet)
      .handle("goalClear", goalClear)
-+    // [local-smark] session preview handler 注册：ctx 形状与 Effect.fn 声明
-+    // 存在差异（实际 ctx 含 query 字段），保持 as any 与 source 一致
-+    .handle("preview", preview as any)
++    .handle("preview", preview)
    }),
  )
 diff --git a/packages/opencode/src/server/shared/workspace-routing.ts b/packages/opencode/src/server/shared/workspace-routing.ts

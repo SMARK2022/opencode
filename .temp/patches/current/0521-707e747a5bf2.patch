@@ -1138,11 +1138,11 @@ index 586d91963..e41385a31 100644
 +  return { line, excerpt: truncateExcerpt(excerpt, 500), score }
  }
 
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
 index f004fdc4c..459818cd4 100644
---- a/packages/opencode/src/tool/edit-apply.ts
-+++ b/packages/opencode/src/tool/edit-apply.ts
-@@ -13,6 +13,14 @@ export type EditReplacement = {
+--- a/packages/core/src/tool/edit-apply.ts
++++ b/packages/core/src/tool/edit-apply.ts
+@@ -15,6 +15,14 @@ export type EditReplacement = {
    replaceAll?: boolean
  }
  
@@ -1157,7 +1157,7 @@ index f004fdc4c..459818cd4 100644
  export type ApplyEditsResult = {
    contentNew: string
    usedNormalized: boolean
-@@ -417,15 +425,19 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -419,15 +427,19 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
    const allRanges: TextReplacement[] = []
    const syncEdits: EditReplacement[] = []
  
@@ -1178,7 +1178,7 @@ index f004fdc4c..459818cd4 100644
        )
      }
  
-@@ -434,10 +446,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -436,10 +448,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        ? countOccurrences(replacementBase, edit.oldString)
        : exactLiteralCount(replacementBase, edit.oldString)
      if (occurrences > 1 && edit.replaceAll !== true) {
@@ -1192,7 +1192,7 @@ index f004fdc4c..459818cd4 100644
        )
      }
  
-@@ -446,10 +460,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -448,10 +462,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        : enumerateExactRanges(replacementBase, edit.oldString, edit.replaceAll === true)
  
      if (ranges.length === 0) {
@@ -1206,42 +1206,31 @@ index f004fdc4c..459818cd4 100644
        )
      }
  
-@@ -482,6 +498,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -484,6 +500,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
    }
  
    // exact：原文 reverse 切串（旧 replace 的推广）；normalized：preserve 触碰行
 +  // #521：closest 从未参与这里的 range 生成，任何相似文本都不能越过 exact/closed-normalization 成功域。
    const contentNew = usedNormalized
      ? applyReplacementsPreservingUnchangedLines(content, replacementBase, allRanges)
-     : applyReplacements(replacementBase, allRanges)
+     : applyReplacements(replacementBase, sorted)
 
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
 index 1cd72f9e9..3e77f7870 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -17,7 +17,7 @@ import * as Bom from "@/util/bom"
- import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
- import { closestWindow } from "@/patch/match"
- // #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
--import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
-+import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
- // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
- import * as Mutation from "./file-mutation-coordinator"
- // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
-@@ -260,7 +260,14 @@ export const EditTool = Tool.define(
+@@ -223,7 +223,12 @@ export const EditTool = Tool.define(
                } catch (error) {
                  const message = error instanceof Error ? error.message : String(error)
                  if (message.includes("Could not find") || message.includes("Could not find oldString")) {
--                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
-+                  // #521：owner 已确定失败 edit；非 EditApplyError 不能进入诊断猜测，必须原样抛出。
-+                  if (!(error instanceof EditApplyError)) throw error
+-                  const probe = editsLF.find((e) => !EditApply.findMatch(baseLF, e.oldString).found) ?? editsLF[0]
++                  // 失败索引来自共享替换owner，不能重新扫描成功条目猜测失败归属。
++                  if (!(error instanceof EditApply.EditApplyError)) throw error
 +                  const probe = editsLF[error.editIndex]
 +                  // 缺失内部索引时必须原样失败，不能用首条 edit 猜测。
 +                  if (!probe) throw error
-+                  // #521：closest 只解释这条失败 oldString，不参与 replacement success，也不启动第二 matcher。
-+                  // normalized batch 中前一条 edit 可能已经成功定位，但它不是本次失败的诊断证据。
-+                  // 保持既有 message 前缀不变，新增信息只来自同一主路径返回的 actual candidate。
-                   const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
++                  // 只展示同一DP返回的actual，归一化成功的前项不应出现在本次诊断。
+                   const closest = closestMatch(contentOld, convertToLineEnding(probe.oldString, ending))
                    throw new Error(
                      message +
 
@@ -1534,3 +1523,215 @@ index 7b2c5ec99..35c8d4c25 100644
      // sole domain：ASCII 连字符与 en-dash 在归一化后合并计数，无 replaceAll 必须歧义失败
      it.instance("rejects hybrid hyphen uniqueness without replaceAll", () =>
        Effect.gen(function* () {
+
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -224,9 +224,11 @@ const layer = Layer.effectDiscard(
+                   catch: (error) => {
+                     const message = error instanceof Error ? error.message : String(error)
+-                    if (!message.includes("Could not find")) return new ToolFailure({ message })
+-                    const probe = editsLF.find(edit => !EditApply.findMatch(baseLF, edit.oldString).found) ?? editsLF[0]
++                    if (!(error instanceof EditApply.EditApplyError) || !message.includes("Could not find")) return new ToolFailure({ message })
++                    // Native与V1消费同一失败索引，不能把前项归一化成功误判为本次失败。
++                    const probe = editsLF[error.editIndex]
++                    if (!probe) return new ToolFailure({ message })
+                     const closest = closestMatch(source.text, convertToLineEnding(probe.oldString, ending))
+                     return new ToolFailure({
+                       message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+                     })
+                   },
+diff --git a/packages/core/src/tool/edit-excerpt.ts b/packages/core/src/tool/edit-excerpt.ts
+--- a/packages/core/src/tool/edit-excerpt.ts
++++ b/packages/core/src/tool/edit-excerpt.ts
+@@ -1,116 +1,7 @@
+-import { diffLines, diffChars, type Change } from "diff"
+ import { closestWindow } from "../patch-match"
+ 
+ export function closestMatch(content: string, expected: string) {
+-  const closest = closestWindow(content, expected)
+-  if (!closest) return undefined
+-  const lines = content.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
+-  const count = expected.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n").length
+-  const fileExcerpt = lines.slice(closest.line - 1, closest.line - 1 + count).join("\n")
+-  // 短窗口保留source的实际原文；长窗口复用字符差异，避免截断真正的行末错误。
+-  return { line: closest.line, excerpt: fileExcerpt.length > 500 ? formatClosestMatchExcerpt(expected, fileExcerpt, closest.line) : closest.excerpt }
+-}
+-
+-// 两代共用唯一候选及字符差异；诊断不参与真正替换或审批。
+-export function formatClosestMatchExcerpt(oldString: string, fileExcerpt: string, fileStartLine: number) {
+-  const diffExcerpt = formatClosestMatchDiff(oldString, fileExcerpt, fileStartLine, 500)
+-  return diffExcerpt || (fileExcerpt.length <= 500 ? fileExcerpt : fileExcerpt.slice(0, 200) + `\n...[${fileExcerpt.length - 400} chars omitted]...\n` + fileExcerpt.slice(-200))
+-}
+-
+-// [local-smark] 字符级 diff：diffLines 定位差异行，diffChars 显示字符级差异。
+-// 解决长行场景下 .slice(0,500) 截断导致 ]; vs }; 不可见的问题。
+-// diffLines 的 change.value 可含多行，用 oneChangePerToken 确保每个 change 一行。
+-function formatClosestMatchDiff(
+-  oldString: string,
+-  fileExcerpt: string,
+-  fileStartLine: number,
+-  maxChars: number,
+-): string {
+-  // pendingRemoved 必须在函数内声明——跨调用持久化会导致配对错误
+-  const pendingRemoved: string[] = []
+-  const changes = diffLines(oldString, fileExcerpt, { oneChangePerToken: true })
+-  // 先统计差异行比例，决定是否回退
+-  let removedLines = 0
+-  let addedLines = 0
+-  let unchangedLines = 0
+-  for (const c of changes) {
+-    const lineCount = c.value.split("\n").filter((l) => l.length > 0).length
+-    if (c.removed) removedLines += lineCount
+-    else if (c.added) addedLines += lineCount
+-    else unchangedLines += lineCount
+-  }
+-  // [local-smark] 差异行比例：用 max(removed, added) 代表不匹配的行位置数，
+-  // 而非 removed+added（一个不匹配产生 1 removed + 1 added = 2，会膨胀比例）。
+-  // 总行数用 max(old, file) 行数，避免短 oldString 对长 fileExcerpt 时比例失真。
+-  const diffLineCount = Math.max(removedLines, addedLines)
+-  const totalLineCount = Math.max(removedLines, addedLines) + unchangedLines
+-  // 差异行 > 60% → 结构严重错位，回退 head+tail excerpt
+-  if (totalLineCount > 0 && diffLineCount / totalLineCount > 0.6) return ""
+-
+-  const parts: string[] = []
+-  let newIdx = 0
+-  let totalChars = 0
+-  let omitted = 0
+-  for (const change of changes) {
+-    const lines = change.value.split("\n").filter((l) => l.length > 0)
+-    if (change.added) {
+-      // 文件中的行——与上一个 removed 行做 diffChars
+-      for (const line of lines) {
+-        const oldLine = pendingRemoved.shift()
+-        if (oldLine !== undefined) {
+-          const formatted = formatCharDiffLine(fileStartLine + newIdx, oldLine, line)
+-          if (formatted && totalChars + formatted.length < maxChars) {
+-            parts.push(formatted)
+-            totalChars += formatted.length + 1
+-          } else if (formatted) {
+-            omitted++
+-          }
+-        }
+-        newIdx++
+-      }
+-    } else if (change.removed) {
+-      // oldString 中的行——暂存，等待下一个 added 配对
+-      for (const line of lines) pendingRemoved.push(line)
+-    } else {
+-      // 未变化行——跳过（不占用预算），只推进行号
+-      newIdx += lines.length
+-    }
+-  }
+-  if (parts.length === 0) return ""
+-  // [local-smark] 截断标记：预算耗尽时告知模型还有更多差异
+-  if (omitted > 0) parts.push(`...(+${omitted} more diff lines)`)
+-  return parts.join("\n")
+-}
+-
+-// [local-smark] 格式化单行字符级 diff：只输出变化点前后 30 字符的 context。
+-// 例：行末 }; vs ]; → line 41: "    };" → "    ];"
+-// 对 900 字符长行：只显示末尾 30 字符 + 差异，不显示公共前缀。
+-function formatCharDiffLine(lineNum: number, oldLine: string, newLine: string): string | undefined {
+-  const charDiff: Change[] = diffChars(oldLine, newLine)
+-  // 找到第一个变化位置
+-  let prefixLen = 0
+-  for (const c of charDiff) {
+-    if (c.added || c.removed) break
+-    prefixLen += c.value.length
+-  }
+-  // 无差异
+-  if (prefixLen >= oldLine.length && prefixLen >= newLine.length) return undefined
+-  // 提取变化部分
+-  let oldPart = ""
+-  let newPart = ""
+-  let suffix = ""
+-  let inChange = false
+-  for (const c of charDiff) {
+-    if (c.removed) { oldPart += c.value; inChange = true }
+-    else if (c.added) { newPart += c.value; inChange = true }
+-    else if (inChange) { suffix = c.value.slice(0, 20); break }
+-  }
+-  if (!oldPart && !newPart) return undefined
+-  // context：变化点前 30 字符 + 变化 + 变化后 20 字符
+-  const contextChars = 30
+-  const ctxStart = Math.max(0, prefixLen - contextChars)
+-  const ctx = oldLine.slice(ctxStart, prefixLen)
+-  // 截断过长的 context 和 suffix，控制总输出长度
+-  const truncate = (s: string, max: number) => s.length <= max ? s : s.slice(0, max) + "..."
+-  return `line ${lineNum}: "${truncate(ctx + oldPart + suffix, 80)}" → "${truncate(ctx + newPart + suffix, 80)}"`
++  // DP已完成候选选择和字符差异展示；重新截取等高窗口会丢失变长证据并重复输出requested。
++  // 直接透传同一raw span的预算化excerpt，长行真正变化点仍由共享renderer保留。
++  return closestWindow(content, expected)
+ }
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -164,6 +164,42 @@ describe("EditTool", () => {
+     ),
+   )
+ 
++  it.live("diagnoses the failed Native edit from the shared DP span", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      tmp => Effect.gen(function* () {
++        const target = path.join(tmp.path, "candidate.txt")
++        const candidate = "prefix target sequence alpha beta gamxa suffix"
++        // 场景均调用真实registry/leaf；formatter替身隔离进程，任何失败不得落盘。
++        for (const example of [
++          { before: `target sequence alpha beta deltta\n${candidate}\n`, edits: [{ oldString: "target sequence alpha beta gamma", newString: "replacement" }], shown: ["Closest match at line 2", candidate], absent: ["target sequence alpha beta deltta"] },
++          { before: "\u{1F600} prefix\r\nactual content\r\n", edits: [{ oldString: "actual contxnt", newString: "replacement" }], shown: ["Closest match at line 2", 'line 2 actual: "actual content"'], absent: [] },
++          { before: "alpha\n\nbeta\n", edits: [{ oldString: "alpha\nbeta", newString: "replacement" }], shown: ["Closest match at line 1", "alpha\n\nbeta"], absent: [] },
++          // 长上下文不能把已证明的变长actual裁掉，也不能重新按expected行数截窗。
++          { before: `${"p".repeat(400)}alpha\n\nbeta${"s".repeat(400)}\n`, edits: [{ oldString: "alpha\nbeta", newString: "replacement" }], shown: ["alpha\n\nbeta"], absent: [] },
++          { before: "ab", edits: [{ oldString: "abcd", newString: "replacement" }], shown: ['line 1 actual: "ab"'], absent: [] },
++          { before: "a", edits: [{ oldString: "abcd", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
++          // 内部子串和整段同距时也必须抑制，不能靠遍历顺序选择其中一条证据。
++          { before: "xb", edits: [{ oldString: "ab", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
++          { before: "actual contant\nactual contont", edits: [{ oldString: "actual content", newString: "replacement" }], shown: ["No reliable nearby candidate was found"], absent: ["Closest match"] },
++          { before: "say \u201Chello\u201D\nworld\n", edits: [{ oldString: '"hello"', newString: '"hi"' }, { oldString: "worxd", newString: "mars" }], shown: ["edits[1]", "Closest match at line 2", "world"], absent: ["say \u201Chello\u201D"] },
++        ]) {
++          reset()
++          yield* Effect.promise(() => fs.writeFile(target, example.before))
++          const result = yield* withTool(tmp.path,
++            registry => executeTool(registry, call({ path: "candidate.txt", edits: example.edits })), toolHistory("candidate.txt"))
++          expect(result.type).toBe("error")
++          if (result.type !== "error") throw new Error("Expected failed edit")
++          for (const shown of example.shown) expect(result.value).toContain(shown)
++          for (const absent of example.absent) expect(result.value).not.toContain(absent)
++          expect(writes).toEqual([])
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
++        }
++      }),
++      tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   it.live("registers and replaces relative exact text through FileMutation once", () =>
+     Effect.acquireUseRelease(
+       Effect.promise(() => tmpdir()),
+@@ -420,7 +456,9 @@ describe("EditTool", () => {
+                 yield* Effect.promise(() => fs.writeFile(target, `return value;\n${prefix} private int x = 0;`))
+                 const mismatch = yield* executeTool(registry, call({ path: "matches.txt", oldString: `return value;\n${prefix} private int x = 1;`, newString: "replacement" }))
+                 expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("x = 0") })
+-                expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("x = 1") })
++                // requested已在输入中；DP回执保留精确差异列及实际尾部，不重复请求正文。
++                expect(mismatch).toEqual({ type: "error", value: expect.stringContaining("difference: requested columns 918-918 differ from actual columns 918-918") })
++                expect(JSON.stringify(mismatch)).not.toContain("x = 1")
+                 expect(JSON.stringify(mismatch)).not.toContain("p".repeat(500))
+                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(`return value;\n${prefix} private int x = 0;`)
+                 expect(writes).toEqual([])
+diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
+--- a/packages/core/test/patch.test.ts
++++ b/packages/core/test/patch.test.ts
+@@ -61,6 +61,10 @@ describe("Patch", () => {
+     expect(derive("old\n", [{ oldLines: [], newLines: ["inserted"] }, { oldLines: ["old"], newLines: [] }])).toBe("inserted\n")
+     // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
+     expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow('Closest match at line 2:\nline 2 actual: "const after = good()"')
++    // CRLF原文在比较空间等价，cursor之前的原始块只能报位置，不能再次输出requested。
++    expect(() => derive("alpha\r\nbeta\r\nmiddle\r\nomega\r\n", [
++      { oldLines: ["middle"], newLines: ["MIDDLE"] }, { oldLines: ["alpha", "beta"], newLines: ["ALPHA", "BETA"] },
++    ])).toThrow("exists at this location in the original file")
+     expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
+   })
+ 

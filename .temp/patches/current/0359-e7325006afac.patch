@@ -82,40 +82,41 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -34,2 +34,3 @@
+@@ -35,1 +35,3 @@
    readonly command: string
-+  readonly args: ReadonlyArray<string>
-   readonly cwd?: string
-@@ -79,2 +80,2 @@
--        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell,
-+        runs.push({ command: command.command, args: command.args, cwd: command.options.cwd, shell: command.options.shell,
-           env: command.options.env, extendEnv: command.options.extendEnv, options })
-@@ -209,1 +210,6 @@
--            expect(runs).toMatchObject([{ command: "pwd", cwd: realpathSync(tmp.path) }])
-+            // 原脚本仍完整传入argv，spawn不再把脚本误当作可执行文件或再次包装shell。
-+            expect(runs).toMatchObject([{
-+              command: process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh", cwd: realpathSync(tmp.path), shell: false,
-+              args: process.platform === "win32" ? ["/d", "/s", "/c", '"pwd"'] : ["-c", "pwd"],
-+            }])
-+            expect(runs[0]?.command).not.toBe("pwd")
-@@ -225,1 +231,1 @@
--            expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
-+            expect(initialized.baseline).toContain(`Shell: ${runs[0]?.command}`)
-@@ -325,1 +331,4 @@
--                  expect(runs).toMatchObject([{ command: cmd ? command : shell, shell: cmd ? shell : false }])
-+                  expect(runs).toMatchObject([{ command: shell, shell: false }])
-+                  // 配置cmd与PowerShell都保留原脚本；编码传输不得丢失已通过审批的文本。
++  readonly executable: string
++  readonly spawnShell?: string | boolean
+@@ -85,3 +87,6 @@
+-        const original = script === undefined ? argument ?? command.command : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
+-        runs.push({ command: original, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
++        const original = script === undefined
++          ? command.options.shell === false && Shell.name(command.command) === "cmd" ? (argument ?? "").slice(1, -1) : argument ?? command.command
++          : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
++        runs.push({ command: original, executable: command.command, spawnShell: command.options.shell, cwd: command.options.cwd,
++          shell: command.options.shell === false ? command.command : command.options.shell,
+           args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
+@@ -238,1 +243,5 @@
+             expect(runs).toMatchObject([{ command: "pwd", cwd: realpathSync(tmp.path) }])
++            // 审批原文与实际spawn分开核对，默认PowerShell仍由下方独立字节期望验证。
++            expect(runs[0]?.executable).toBe(Shell.acceptable())
++            expect(runs[0]?.spawnShell).toBe(false)
++            if (!Shell.ps(Shell.acceptable())) expect(runs[0]?.args).toEqual(Shell.name(Shell.acceptable()) === "cmd" ? ["/d", "/s", "/c", '"pwd"'] : ["-c", "pwd"])
+@@ -379,1 +388,6 @@
+                   expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
++                  // cmd与PowerShell保留同一审批原文，但进程入口必须都是显式executable。
++                  expect(runs[0]?.executable).toBe(Shell.acceptable(shell))
++                  expect(runs[0]?.spawnShell).toBe(false)
 +                  if (cmd) expect(runs[0]?.args).toEqual(["/d", "/s", "/c", `"${command}"`])
-+                  if (!cmd) expect(Buffer.from(runs[0]?.args.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
-@@ -335,1 +344,1 @@
--              expect(runs).toMatchObject([{ command, shell: "C:\\Program Files\\Git\\bin\\bash.exe" }])
-+              expect(runs).toMatchObject([{ command: "C:\\Program Files\\Git\\bin\\bash.exe", args: ["-c", command], shell: false }])
-@@ -905,1 +914,4 @@
--            expect(runs[0]?.command).toBe(command)
-+            // 压缩分类依据原脚本；argv观察必须与实际进程入口分开核对。
-+            expect(runs[0]?.args).toEqual(process.platform === "win32" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command])
-+            expect(runs[0]?.command).not.toBe(command)
-+            expect(runs[0]?.shell).toBe(false)
++                  if (!cmd) expect(Buffer.from(runs[0]?.args?.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
+@@ -395,1 +409,2 @@
+               expect(runs).toMatchObject([{ command, shell: gitBash }])
++              expect(runs).toMatchObject([{ executable: gitBash, args: ["-c", command], spawnShell: false }])
+@@ -1024,1 +1039,5 @@
+             expect(runs[0]?.command).toBe(command)
++            // 压缩仍按原脚本分类，不能因测试观察raw argv而换掉分类输入。
++            expect(runs[0]?.spawnShell).toBe(false)
++            if (Shell.ps(Shell.acceptable())) expect(Buffer.from(runs[0]?.args?.at(-1) ?? "", "base64").toString("utf16le")).toContain(command)
++            else expect(runs[0]?.args).toEqual(Shell.name(Shell.acceptable()) === "cmd" ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command])
 diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
 --- a/packages/core/src/cross-spawn-spawner.ts
 +++ b/packages/core/src/cross-spawn-spawner.ts

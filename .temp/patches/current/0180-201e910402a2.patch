@@ -7,14 +7,15 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 index 26c16df..9386fcf 100644
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -10,7 +10,7 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
+@@ -11,8 +11,8 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
  // #174：单会话缺失降级为空，不中断整批
  import { NotFoundError } from "@/storage/storage"
  import { Database } from "@opencode-ai/core/database/database"
 -import { eq, sql } from "drizzle-orm"
 +import { eq, sql, gte } from "drizzle-orm"
  // #174：SessionTable 只用于枚举，不在此写用量
- import { SessionTable } from "@opencode-ai/core/session/sql"
+ import { SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
  import type { Project } from "@/project/project"
 @@ -409,9 +409,20 @@ const tokenPartSeries = (daily: DailyUsage[]): TokenPartSeries[] =>
  // #174：必须调用 Effect.fn 枚举会话

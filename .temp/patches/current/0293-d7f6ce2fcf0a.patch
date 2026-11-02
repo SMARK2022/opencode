@@ -283,19 +283,6 @@ diff --git a/packages/core/src/tool/bash-compress.ts b/packages/core/src/tool/ba
          return true
        }).slice(0, Math.max(0, config.maxDiagnosticContexts))
      : []
-diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
---- a/packages/core/src/tool/bash.ts
-+++ b/packages/core/src/tool/bash.ts
-@@ -268,7 +268,8 @@ const layer = Layer.effectDiscard(
-                   timeout: true,
-                   ...(warnings.length ? { warnings } : {}),
-                   durationMs,
--                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, visibleOutput: "", config: { enabled } }) ].filter(Boolean).join("\n\n"),
-+                  // 超时正文未展示原始流，诊断快照全部来自隐藏输出。
-+                  contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, config: { enabled } }) ].filter(Boolean).join("\n\n"),
-                   diagnosticErrorLikeLines: diagnostic.errorLikeLines,
-                   diagnosticWarningLikeLines: diagnostic.warningLikeLines,
-                   diagnosticDiscardedChars: diagnostic.discardedChars,
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
@@ -386,7 +373,7 @@ index 92f415f32..fa8c031bd 100644
                used -= item.size
                cut = true
              }
-@@ -867,12 +875,15 @@ export const ShellTool = Tool.define(
+@@ -867,14 +875,17 @@ export const ShellTool = Tool.define(
        // 压缩只改变模型窗口；已经流式写盘的 file 始终保持原始内容。
        // V1 与 Core 传同一种实际 command，适配器只作用于既有可见投影。
        const compressed = compressVisibleOutput(normalized, { enabled: input.compressOutput }, input.command)
@@ -401,11 +388,13 @@ index 92f415f32..fa8c031bd 100644
 +      hiddenDiag.end()
 +      const diagnostic = hiddenDiag.snapshot()
        // 诊断采样遗漏也必须能恢复，不能因压缩禁用而省掉原始日志。
-       if (!file && (end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+       // CLIXML解码可能净增长；呈现变化仍须生成并广告未经改写的原文。
+       const transformed = compressed.text !== raw
+       if (!file && (transformed || end.cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
          file = yield* trunc.write(raw)
        }
  
-@@ -902,8 +913,8 @@ export const ShellTool = Tool.define(
+@@ -902,6 +913,6 @@ export const ShellTool = Tool.define(
 -      // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
 +      // 附录只读取隐藏诊断；采样遗漏的恢复路径仍指向不可变原始归档。
 -      const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
@@ -414,18 +403,33 @@ index 92f415f32..fa8c031bd 100644
 -      // #289：metadata.exit 不进入模型回放，空输出或缺少诊断的失败需补退出码 notice。
 +      // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
        // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
-       const exitNotice =
-         code === null
-           ? undefined
-@@ -913,7 +924,7 @@ export const ShellTool = Tool.define(
-                 reason: "exit",
-                 exit_code: code,
-               })
--            : code !== 0 && !appendix
-+            : code !== 0
-               ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
-               : undefined
-       if (exitNotice) meta.push(exitNotice)
+-      const exitNotice = formatExitNotice(code, emptyOutput, appendix)
++      const exitNotice = formatExitNotice(code, emptyOutput)
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
+@@ -57,3 +57,3 @@
+-// 采样遗漏只说明观察边界，不能替代真实错误摘录或吞掉失败退出码。
+-export function formatExitNotice(code: number | null, emptyOutput: boolean, appendix = "") {
+-  if (code === null || (!emptyOutput && (code === 0 || appendix.includes("<bash_high_signal_excerpt>")))) return
++// 退出状态与隐藏诊断互相独立，非零退出始终交付，取消仍不冒充进程退出。
++export function formatExitNotice(code: number | null, emptyOutput: boolean) {
++  if (code === null || (!emptyOutput && code === 0)) return
+diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
+--- a/packages/opencode/test/tool/bash-compress.test.ts
++++ b/packages/opencode/test/tool/bash-compress.test.ts
+@@ -18,5 +18,5 @@
+-    expect(formatExitNotice(7, false, appendix)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
++    expect(formatExitNotice(7, false)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
+     expect(formatExitNotice(0, true)).toContain('severity="info" reason="exit" exit_code="0"')
+     expect(formatExitNotice(42, true)).toContain('severity="error" reason="exit" exit_code="42"')
+-    expect(formatExitNotice(null, false, appendix)).toBeUndefined()
+-    expect(formatExitNotice(0, false, appendix)).toBeUndefined()
++    expect(formatExitNotice(null, false)).toBeUndefined()
++    expect(formatExitNotice(0, false)).toBeUndefined()
+@@ -28,1 +28,1 @@
+-    expect(formatExitNotice(9, false, diagnosed)).toBeUndefined()
++    expect(formatExitNotice(9, false)).toContain('reason="exit" exit_code="9"')
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 index 6eb026c71..884a95f14 100644
 --- a/packages/opencode/test/tool/shell.test.ts

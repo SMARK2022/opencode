@@ -72,6 +72,38 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
        // #158：root 自身 type 不含 string，向上遍历到 null 自然终止
        cur = cur.parent
      }
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -201,6 +201,13 @@
+                       .descendantsOfType("command")
+                       .flatMap((node) => {
+                         if (!node) return []
++                        // 引号与内部 ERROR 恢复出的远程脚本片段不是本地 PowerShell 命令。
++                        let parent = node.parent
++                        while (parent && parent.id !== tree.rootNode.id) {
++                          if (parent.type === "ERROR" || parent.type.includes("string")) return []
++                          parent = parent.parent
++                        }
++                        // 根 ERROR 仍承载真实主机命令，不能因此绕过本地管道的拒绝检查。
+                         // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
+                         const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
+                         return escaped && escaped.length % 2 ? [] : [...Shell.commandHeads(node.text, Shell.name(shell))]
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -319,3 +319,4 @@
+                   cmd ? "echo ok&head missing" : "Write-Output ok;head missing",
++                  "Write-Output ok | grep ok",
+                   // cmd 命令组与 PowerShell 条件块都应在授权前拒绝内部 Unix 命令。
+                   ...(cmd ? ["(head)", "(head -n 1 missing)", "echo ok && (head -n 1 missing)"] : ["Write-Output ok; if ($?) { head -n 1 missing }"]),
+@@ -341,3 +342,6 @@
+                   "& ' head' missing",
++                  // 复用 source 载荷；只有 AST、权限和既有进程替身参与，绝不执行远程命令。
++                  "Write-Host before; wsl.exe -d Ubuntu-22.04 -- bash -lc 'set -euo pipefail; echo \"WSL $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2-)\"'",
++                  "ssh example.com 'cat /etc/os-release | grep PRETTY_NAME'",
+                 ]
+                 if (cmd) allowed.push(
 diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/test/cli/tui/thread.test.ts
 --- a/packages/opencode/test/cli/tui/thread.test.ts
 +++ b/packages/opencode/test/cli/tui/thread.test.ts

@@ -12,4 +12,3 @@ diff --git a/packages/opencode/package.json b/packages/opencode/package.json
    "//284-release-note": "source bump 1.15.5→1.15.6 已被目标版本线 1.18.40-smark 超越；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
    "//346-release-note": "source bump 1.15.7→1.15.8 已被目标版本线 1.18.40-smark 超越；版本展示语义由本文件与 README 共同承载",
    "#253-release-note": "source bump 1.15.3→1.15.4 映射到目标版本线 1.18.39→1.18.40-smark；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",
-   "//284-release-note": "source bump 1.15.5→1.15.6 已被目标版本线 1.17.28-smark 超越；README SMARK 段在目标为纯上游未移植，版本展示语义由本文件与 workflow 承载",

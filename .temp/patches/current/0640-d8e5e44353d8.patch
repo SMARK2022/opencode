@@ -832,9 +832,9 @@ index 0000000000000000000000000000000000000000..16f99d591b403252e2ffaa5f02518b81
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/session/prompt/gpt-astra.txt b/packages/opencode/src/session/prompt/gpt-astra.txt
---- a/packages/opencode/src/session/prompt/gpt-astra.txt
-+++ b/packages/opencode/src/session/prompt/gpt-astra.txt
+diff --git a/packages/core/src/system-context/prompt/gpt-astra.txt b/packages/core/src/system-context/prompt/gpt-astra.txt
+--- a/packages/core/src/system-context/prompt/gpt-astra.txt
++++ b/packages/core/src/system-context/prompt/gpt-astra.txt
 @@ -3,20 +3,24 @@ You are an AI agent powered by OpenCode, a coding agent harness. Help the user a
  You build context by examining the codebase first without making assumptions or jumping to conclusions. Keep changes consistent with the structure, naming, style, and patterns of the surrounding code.
  

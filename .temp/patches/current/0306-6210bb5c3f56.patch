@@ -1,3 +1,340 @@
+diff --git a/packages/client/src/generated-effect/client.ts b/packages/client/src/generated-effect/client.ts
+index 024c97828..0fa9d564d 100644
+--- a/packages/client/src/generated-effect/client.ts
++++ b/packages/client/src/generated-effect/client.ts
+@@ -37,6 +37,7 @@ type Endpoint3_0Input = {
+   readonly workspace?: Endpoint3_0Request["query"]["workspace"]
+   readonly limit?: Endpoint3_0Request["query"]["limit"]
+   readonly order?: Endpoint3_0Request["query"]["order"]
++  readonly start?: Endpoint3_0Request["query"]["start"]
+   readonly search?: Endpoint3_0Request["query"]["search"]
+   readonly directory?: Endpoint3_0Request["query"]["directory"]
+   readonly project?: Endpoint3_0Request["query"]["project"]
+@@ -49,6 +50,7 @@ const Endpoint3_0 = (raw: RawClient["server.session"]) => (input?: Endpoint3_0In
+       workspace: input?.["workspace"],
+       limit: input?.["limit"],
+       order: input?.["order"],
++      start: input?.["start"],
+       search: input?.["search"],
+       directory: input?.["directory"],
+       project: input?.["project"],
+diff --git a/packages/client/src/generated/client.ts b/packages/client/src/generated/client.ts
+index 27ec3d81b..02049eafd 100644
+--- a/packages/client/src/generated/client.ts
++++ b/packages/client/src/generated/client.ts
+@@ -292,6 +292,7 @@ export function make(options: ClientOptions) {
+               workspace: input?.["workspace"],
+               limit: input?.["limit"],
+               order: input?.["order"],
++              start: input?.["start"],
+               search: input?.["search"],
+               directory: input?.["directory"],
+               project: input?.["project"],
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+index 0f8f6c50b..bf2a789b8 100644
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -153,6 +153,7 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+@@ -163,6 +164,7 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+@@ -173,16 +175,29 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+     readonly subpath?: string | undefined
+     readonly cursor?: string | undefined
+   }["order"]
++  readonly start?: {
++    readonly workspace?: string | undefined
++    readonly limit?: number | undefined
++    readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
++    readonly search?: string | undefined
++    readonly directory?: string | undefined
++    readonly project?: string | undefined
++    readonly subpath?: string | undefined
++    readonly cursor?: string | undefined
++  }["start"]
+   readonly search?: {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+@@ -193,6 +208,7 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+@@ -203,6 +219,7 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+@@ -213,6 +230,7 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+@@ -223,6 +241,7 @@ export type SessionsListInput = {
+     readonly workspace?: string | undefined
+     readonly limit?: number | undefined
+     readonly order?: "asc" | "desc" | undefined
++    readonly start?: number | undefined
+     readonly search?: string | undefined
+     readonly directory?: string | undefined
+     readonly project?: string | undefined
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -30,5 +30,7 @@
+   order: Schema.optional(Schema.Union([Schema.Literal("asc"), Schema.Literal("desc")])).annotate({
+     description: "Session order for the first page. Use desc for newest first or asc for oldest first.",
+   }),
++  // 更新时间下界独立于创建时间分页；cursor沿既有字段派生保留同一搜索窗口。
++  start: Schema.NumberFromString.pipe(Schema.decodeTo(NonNegativeInt), Schema.optional),
+   search: Schema.optional(Schema.String),
+ }
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -6,1 +6,1 @@
+-import { and, asc, desc, eq, gt, like, lt, or, type SQL } from "drizzle-orm"
++import { and, asc, desc, eq, gt, gte, like, lt, or, type SQL } from "drizzle-orm"
+@@ -20,1 +20,1 @@
+-import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
++import { AbsolutePath, NonNegativeInt, PositiveInt, RelativePath } from "./schema"
+@@ -59,4 +59,5 @@
+ const ListInputBase = {
+   workspaceID: WorkspaceV2.ID.pipe(Schema.optional),
+   search: Schema.String.pipe(Schema.optional),
++  start: NonNegativeInt.pipe(Schema.optional),
+   limit: PositiveInt.pipe(Schema.optional),
+@@ -298,3 +299,5 @@
+         const conditions: SQL[] = []
++        // 先限制最近更新窗口再取LIMIT，避免较新的旧会话挤掉近期仍活跃的历史会话。
++        if (input.start !== undefined) conditions.push(gte(SessionTable.time_updated, input.start))
+         if ("directory" in input) conditions.push(eq(SessionTable.directory, input.directory))
+         if (input.workspaceID) conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
+diff --git a/packages/app/src/utils/server.ts b/packages/app/src/utils/server.ts
+--- a/packages/app/src/utils/server.ts
++++ b/packages/app/src/utils/server.ts
+@@ -44,19 +44,34 @@
+ export function createApiForServer(input: {
+   server: ServerConnection.HttpBase
+   fetch?: typeof globalThis.fetch
+-}): OpenCodeClient {
+-  return OpenCode.make({
++}) {
++  const options = {
+     baseUrl: input.server.url,
+     fetch: input.fetch,
+     headers: input.server.password
+       ? {
+           Authorization: `Basic ${authTokenFromCredentials({
+             username: input.server.username,
+             password: input.server.password,
+           })}`,
+         }
+       : undefined,
+-  })
++  }
++  const client = OpenCode.make(options)
++  const fetcher = input.fetch ?? globalThis.fetch
++  return {
++    ...client,
++    session: {
++      ...client.session,
++      // 已发布的客户端只挑选旧查询字段；在唯一请求边界补start，保留原序列化和错误处理。
++      list: (query?: Parameters<OpenCodeClient["session"]["list"]>[0] & { start?: number }, requestOptions?: Parameters<OpenCodeClient["session"]["list"]>[1]) =>
++        OpenCode.make({ ...options, fetch: Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
++          const target = new URL(url instanceof Request ? url.url : url)
++          if (query?.start !== undefined) target.searchParams.set("start", String(query.start))
++          return fetcher(target, init)
++        }, { preconnect: fetcher.preconnect }) }).session.list(query, requestOptions),
++    },
++  }
+ }
+ 
+-export type ServerApi = OpenCodeClient
++export type ServerApi = ReturnType<typeof createApiForServer>
+diff --git a/packages/app/src/utils/server-compat.ts b/packages/app/src/utils/server-compat.ts
+--- a/packages/app/src/utils/server-compat.ts
++++ b/packages/app/src/utils/server-compat.ts
+@@ -21,3 +20,3 @@
+ type CompatibleSessionApi = Omit<
+-  SessionApi,
++  ServerApi["session"],
+   "prompt" | "command" | "shell" | "compact" | "rename" | "archive" | "remove"
+@@ -147,4 +146,5 @@
+               roots: value.parentID === null ? true : undefined,
+               search: value.search,
++              start: value.start,
+               limit: value.limit,
+             },
+@@ -156,5 +156,6 @@
+           directory: value?.directory,
+           roots: value?.parentID === null ? true : undefined,
+           search: value?.search,
++          start: value?.start,
+           limit: value?.limit,
+         })
+diff --git a/packages/app/src/components/command-palette.ts b/packages/app/src/components/command-palette.ts
+--- a/packages/app/src/components/command-palette.ts
++++ b/packages/app/src/components/command-palette.ts
+@@ -149,1 +149,1 @@
+-    load: (search, signal) => serverSDK.api.session.list({ parentID: null, search, limit: 50 }, { signal }),
++    load: (query, signal) => serverSDK.api.session.list(query, { signal }),
+@@ -223,1 +223,1 @@
+-  load: (search: string, signal: AbortSignal) => Promise<{ data: SessionInfo[] }>
++  load: (query: { parentID: null; search: string; limit: number; start: number }, signal: AbortSignal) => Promise<{ data: SessionInfo[] }>
+@@ -256,3 +256,4 @@
+     return props
+-      .load(search, current.signal)
++      // 两个Native入口共用实际查询预算，窗口进入服务端SQL而不是本地截掉一页。
++      .load({ parentID: null, search, limit: 100, start: Date.now() - 90 * 24 * 60 * 60 * 1000 }, current.signal)
+       .then((result) =>
+diff --git a/packages/app/src/components/dialog-command-palette-v2.tsx b/packages/app/src/components/dialog-command-palette-v2.tsx
+--- a/packages/app/src/components/dialog-command-palette-v2.tsx
++++ b/packages/app/src/components/dialog-command-palette-v2.tsx
+@@ -82,1 +82,1 @@
+-    load: (search, signal) => serverCtx.sdk.api.session.list({ parentID: null, search, limit: 50 }, { signal }),
++    load: (query, signal) => serverCtx.sdk.api.session.list(query, { signal }),
+diff --git a/packages/protocol/test/session-cursor.test.ts b/packages/protocol/test/session-cursor.test.ts
+--- a/packages/protocol/test/session-cursor.test.ts
++++ b/packages/protocol/test/session-cursor.test.ts
+@@ -3,1 +3,1 @@
+-import { SessionHistoryQuery, SessionsCursor } from "../src/groups/session"
++import { SessionHistoryQuery, SessionsCursor, SessionsQuery } from "../src/groups/session"
+@@ -9,2 +9,3 @@
+       workspace: undefined,
++      start: 1000,
+       search: "protocol",
+@@ -16,2 +17,7 @@
+     expect(await Effect.runPromise(SessionsCursor.parse(cursor))).toEqual(input)
++    // 新窗口随cursor往返，旧cursor缺省仍合法；公开负数输入保持标准Query失败。
++    const { start, ...previous } = input
++    expect(await Effect.runPromise(SessionsCursor.parse(SessionsCursor.make(previous)))).toEqual(previous)
++    expect(Schema.decodeUnknownSync(SessionsQuery)({ start: "1000" }).start).toBe(start)
++    expect(Schema.decodeUnknownExit(SessionsQuery)({ start: "-1" })._tag).toBe("Failure")
+   })
+diff --git a/packages/core/test/session-create.test.ts b/packages/core/test/session-create.test.ts
+--- a/packages/core/test/session-create.test.ts
++++ b/packages/core/test/session-create.test.ts
+@@ -124,4 +124,29 @@
+       process.env.OPENCODE_TEST_HOME = child.replaceAll("\\", "/").toUpperCase() + "/"
+       expect((yield* session.list(query)).map(item => item.title)).toContain("unrelated")
+     }
++    // 创建更晚但早已不活跃的行排在前面，证明更新时间过滤必须发生在LIMIT之前。
++    const timedDirectory = AbsolutePath.make(path.join(child, "timed"))
++    const timed = [
++      { title: "inactive", time_created: 3000, time_updated: 999 },
++      { title: "edge", time_created: 2000, time_updated: 1000 },
++      { title: "active-old", time_created: 1000, time_updated: 1001 },
++      { title: "other-workspace", time_created: 4000, time_updated: 2000 },
++    ]
++    yield* db.insert(SessionTable).values(timed.map((row, index) => ({ ...row,
++      id: SessionV2.ID.make(`ses_timed_${index}`), slug: row.title, version: "test", project_id: projectID,
++      directory: timedDirectory, path: "packages/a/timed", workspace_id: index === 3 ? otherWorkspace : workspaceID,
++    }))).run().pipe(Effect.orDie)
++    const window = { directory: timedDirectory, workspaceID, start: 1000, limit: 1 }
++    expect((yield* session.list({ directory: timedDirectory, workspaceID, limit: 1 })).map(row => row.title)).toEqual(["inactive"])
++    const head = yield* session.list(window)
++    expect(head.map(row => row.title)).toEqual(["edge"])
++    expect((yield* session.list({ ...window, start: 1001 })).map(row => row.title)).toEqual(["active-old"])
++    expect(yield* session.list({ ...window, start: 1002 })).toEqual([])
++    const timeEdge = head[0]
++    if (!timeEdge) return yield* Effect.die("Missing time-filtered first page")
++    const tail = yield* session.list({ ...window, anchor: { id: timeEdge.id, time: DateTime.toEpochMillis(timeEdge.time.created), direction: "next" } })
++    expect(tail.map(row => row.title)).toEqual(["active-old"])
++    const end = tail[0]
++    if (!end) return yield* Effect.die("Missing time-filtered next page")
++    expect((yield* session.list({ ...window, anchor: { id: end.id, time: DateTime.toEpochMillis(end.time.created), direction: "previous" } })).map(row => row.id)).toEqual(head.map(row => row.id))
+   }))
+diff --git a/packages/app/src/utils/server-compat.test.ts b/packages/app/src/utils/server-compat.test.ts
+--- a/packages/app/src/utils/server-compat.test.ts
++++ b/packages/app/src/utils/server-compat.test.ts
+@@ -160,6 +160,16 @@
+-  test("uses the global V1 session search endpoint", async () => {
+-    const { api, requests } = setup("v1")
+-    await api.session.list({ parentID: null, search: "session", limit: 50 })
+-
+-    expect(new URL(requests[0]!.url).pathname).toBe("/experimental/session")
++  test.each(["v1", "v2"] as const)("serializes the real %s session search window", async (protocol) => {
++    const { api, requests } = setup(protocol)
++    const abort = new AbortController()
++    await api.session.list({ parentID: null, search: "session", limit: 100, start: 1000 }, { signal: abort.signal })
++    const url = new URL(requests[0]!.url)
++    expect(url.pathname).toBe(protocol === "v1" ? "/experimental/session" : "/api/session")
++    expect(url.searchParams.get("search")).toBe("session")
++    expect(url.searchParams.get("limit")).toBe("100")
++    expect(url.searchParams.get("start")).toBe("1000")
++    expect(requests[0]!.signal.aborted).toBe(false)
++    // 默认/续页请求不继承前一次窗口；生成客户端的认证与取消通道仍照常使用。
++    await api.session.list({ directory: "/repo", search: "scoped", limit: 100, start: 2000 })
++    expect(new URL(requests[1]!.url).searchParams.get("start")).toBe("2000")
++    await api.session.list()
++    expect(new URL(requests[2]!.url).searchParams.has("start")).toBe(false)
+   })
+diff --git a/packages/app/test-browser/command-palette.test.ts b/packages/app/test-browser/command-palette.test.ts
+--- a/packages/app/test-browser/command-palette.test.ts
++++ b/packages/app/test-browser/command-palette.test.ts
+@@ -38,1 +38,2 @@
+-    const searches: string[] = []
++    const searches: { search: string; limit: number; start: number; parentID: null }[] = []
++    const startedAt = Date.now()
+@@ -46,7 +47,12 @@
+-            load: async (text) => {
+-              searches.push(text)
++            load: async (query, signal) => {
++              searches.push(query)
++              expect(signal.aborted).toBe(false)
+               return {
+-                data: [session, { ...session, id: "archived-session", time: { ...session.time, archived: 3 } }],
++                data: [
++                  // 超过旧50条预算的真实结果仍经条目映射，归档行保持原有过滤。
++                  ...Array.from({ length: Math.min(query.limit, 60) }, (_, index) => ({ ...session, id: index ? `session-${index + 1}` : session.id })),
++                  { ...session, id: "archived-session", time: { ...session.time, archived: 3 } },
++                ],
+               }
+             },
+             untitled: () => "Untitled",
+@@ -68,2 +74,5 @@
+-    expect(searches).toEqual(["palette session"])
+-    expect(result).toHaveLength(1)
++    expect(searches.map(query => query.search)).toEqual(["palette session"])
++    expect(searches[0]).toMatchObject({ parentID: null, limit: 100 })
++    expect(searches[0]?.start).toBeGreaterThanOrEqual(startedAt - 90 * 24 * 60 * 60 * 1000)
++    expect(searches[0]?.start).toBeLessThanOrEqual(Date.now() - 90 * 24 * 60 * 60 * 1000)
++    expect(result).toHaveLength(60)
 diff --git a/packages/tui/src/component/dialog-session-list.tsx b/packages/tui/src/component/dialog-session-list.tsx
 --- a/packages/tui/src/component/dialog-session-list.tsx
 +++ b/packages/tui/src/component/dialog-session-list.tsx

@@ -1,6 +1,8 @@
-diff --git a/packages/opencode/src/session/prompt/anthropic.txt b/packages/opencode/src/session/prompt/anthropic.txt
+diff --git a/packages/opencode/src/session/prompt/anthropic.txt b/packages/core/src/system-context/prompt/anthropic.txt
+rename from packages/opencode/src/session/prompt/anthropic.txt
+rename to packages/core/src/system-context/prompt/anthropic.txt
 --- a/packages/opencode/src/session/prompt/anthropic.txt
-+++ b/packages/opencode/src/session/prompt/anthropic.txt
++++ b/packages/core/src/system-context/prompt/anthropic.txt
 @@ -1,4 +1,5 @@
 -You are OpenCode, the best coding agent on the planet.
 +<!-- 身份描述说明任务领域，不用无法验证的最高级能力承诺。 -->
@@ -132,9 +134,11 @@ diff --git a/packages/opencode/src/session/prompt/copilot-gpt-5.txt b/packages/o
  </toolUseInstructions>
 
 
-diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencode/src/session/prompt/default.txt
+diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/core/src/system-context/prompt/default.txt
+rename from packages/opencode/src/session/prompt/default.txt
+rename to packages/core/src/system-context/prompt/default.txt
 --- a/packages/opencode/src/session/prompt/default.txt
-+++ b/packages/opencode/src/session/prompt/default.txt
++++ b/packages/core/src/system-context/prompt/default.txt
 @@ -6,7 +6,8 @@
  - /help: Get help with using opencode
  - To give feedback, users should report the issue at https://github.com/anomalyco/opencode/issues
@@ -182,9 +186,11 @@ diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencod
  
 
 
-diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode/src/session/prompt/gemini.txt
+diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/core/src/system-context/prompt/gemini.txt
+rename from packages/opencode/src/session/prompt/gemini.txt
+rename to packages/core/src/system-context/prompt/gemini.txt
 --- a/packages/opencode/src/session/prompt/gemini.txt
-+++ b/packages/opencode/src/session/prompt/gemini.txt
++++ b/packages/core/src/system-context/prompt/gemini.txt
 @@ -51,7 +51,8 @@
  
  ## Tool Usage
@@ -215,9 +221,11 @@ diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode
  - /path/to/moduleB/app.config
 
 
-diff --git a/packages/opencode/src/session/prompt/gpt.txt b/packages/opencode/src/session/prompt/gpt.txt
+diff --git a/packages/opencode/src/session/prompt/gpt.txt b/packages/core/src/system-context/prompt/gpt.txt
+rename from packages/opencode/src/session/prompt/gpt.txt
+rename to packages/core/src/system-context/prompt/gpt.txt
 --- a/packages/opencode/src/session/prompt/gpt.txt
-+++ b/packages/opencode/src/session/prompt/gpt.txt
++++ b/packages/core/src/system-context/prompt/gpt.txt
 @@ -1,9 +1,11 @@
 -You are OpenCode, You and the user share the same workspace and collaborate to achieve the user's goals.
 +<!-- 同一工作区的协作关系保留。 -->
@@ -235,9 +243,11 @@ diff --git a/packages/opencode/src/session/prompt/gpt.txt b/packages/opencode/sr
  
 
 
-diff --git a/packages/opencode/src/session/prompt/kimi.txt b/packages/opencode/src/session/prompt/kimi.txt
+diff --git a/packages/opencode/src/session/prompt/kimi.txt b/packages/core/src/system-context/prompt/kimi.txt
+rename from packages/opencode/src/session/prompt/kimi.txt
+rename to packages/core/src/system-context/prompt/kimi.txt
 --- a/packages/opencode/src/session/prompt/kimi.txt
-+++ b/packages/opencode/src/session/prompt/kimi.txt
++++ b/packages/core/src/system-context/prompt/kimi.txt
 @@ -10,7 +10,8 @@
  
  If the `task` tool is available, you can use it to delegate a focused subtask to a subagent instance. When delegating, provide a complete prompt with all necessary context because a newly created subagent does not automatically see your current context.
@@ -298,9 +308,11 @@ diff --git a/packages/opencode/src/session/prompt/plan-reminder-anthropic.txt b/
  
 
 
-diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencode/src/session/prompt/trinity.txt
+diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/core/src/system-context/prompt/trinity.txt
+rename from packages/opencode/src/session/prompt/trinity.txt
+rename to packages/core/src/system-context/prompt/trinity.txt
 --- a/packages/opencode/src/session/prompt/trinity.txt
-+++ b/packages/opencode/src/session/prompt/trinity.txt
++++ b/packages/core/src/system-context/prompt/trinity.txt
 @@ -31,7 +31,8 @@
  
  <example>
@@ -353,6 +365,49 @@ diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencod
 diff --git a/packages/opencode/src/session/system.ts b/packages/opencode/src/session/system.ts
 --- a/packages/opencode/src/session/system.ts
 +++ b/packages/opencode/src/session/system.ts
+@@ -6,14 +6,4 @@
+-import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
+-import PROMPT_DEFAULT from "./prompt/default.txt"
+-import PROMPT_BEAST from "./prompt/beast.txt"
+-import PROMPT_GEMINI from "./prompt/gemini.txt"
+-import PROMPT_GPT from "./prompt/gpt.txt"
+-import PROMPT_ASTRA from "./prompt/gpt-astra.txt"
+-import PROMPT_KIMI from "./prompt/kimi.txt"
+-import PROMPT_META from "./prompt/meta.txt"
+-
+-import PROMPT_CODEX from "./prompt/codex.txt"
+-import PROMPT_TRINITY from "./prompt/trinity.txt"
++import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
+ import type { Provider } from "@/provider/provider"
+ import type { Agent } from "@/agent/agent"
+ import { Permission } from "@/permission"
+@@ -37,24 +24,4 @@
+ export function provider(model: Provider.Model) {
+-  if (model.api.id.includes("muse")) {
+-    const name = model.api.id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
+-    return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]
+-  }
+-  if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
+-    return [PROMPT_BEAST]
+-  if (model.api.id.includes("gpt")) {
+-    if (model.api.id.includes("gpt-6")) return [PROMPT_ASTRA]
+-    if (model.api.id.includes("codex")) {
+-      return [PROMPT_CODEX]
+-    }
+-    return [PROMPT_GPT]
+-  }
+-  if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
+-  if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
+-  if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
+-  if (
+-    model.api.id.toLowerCase().includes("kimi") ||
+-    ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)
+-  )
+-    return [PROMPT_KIMI]
+-  return [PROMPT_DEFAULT]
++  // 两代按同一实际模型选择完整正文，后续族补丁不再维护两套文本。
++  return [SessionPrompts.provider(model.api.id, model.providerID)]
+ }
 @@ -144,7 +144,8 @@
        const truncatedStatus =
          status.length > MAX_STATUS_CHARS
@@ -387,7 +442,19 @@ diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/sy
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -116,7 +116,14 @@
+@@ -61,3 +61,7 @@
+-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
++import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+ import { asc, eq } from "drizzle-orm"
+ import { testEffect } from "./lib/effect"
++import PROMPT_DEFAULT from "../src/system-context/prompt/default.txt"
++import { Global } from "@opencode-ai/core/global"
++import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
++import path from "path"
+@@ -65,1 +69,2 @@
++const environment = { ...process.env, OPENCODE_EXPERIMENTAL_PLAN_MODE: "false" }
+ const requests: LLMRequest[] = []
+@@ -116,7 +121,14 @@
  Do NOT use the bash tool when a dedicated tool is available.
  Using dedicated tools lets the user review and track your work:
   - Reserve bash for system commands and terminal operations requiring shell execution
@@ -403,17 +470,154 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
  // 身份固定到 fixture 的真实 provider/id；未知型号没有 cutoff，不能从持久 baseline 或显示名拼造。
  const expectedModelIdentity = "You are powered by the model named fake-model. The exact model ID is fake/fake-model"
  const expectedReplacementIdentity = "You are powered by the model named replacement. The exact model ID is fake/replacement"
+@@ -305,2 +317,2 @@
+-  ),
++  ).pipe(Layer.provide(Layer.succeed(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment)))),
+ )
+@@ -330,1 +342,2 @@
+   response = []
++  environment.OPENCODE_EXPERIMENTAL_PLAN_MODE = "false"
+@@ -868,6 +881,6 @@
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+       ])
+       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
+       expect(requests[1]?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Changed context" }])
+@@ -889,1 +900,1 @@
+-  it.effect("includes the effective default agent system before durable context", () =>
++  it.live("includes the effective default agent system before durable context", () =>
+@@ -906,1 +917,49 @@
+       expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
++      const db = (yield* Database.Service).db
++      const row = yield* db.select({ created: SessionTable.time_created, slug: SessionTable.slug }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++      if (!row) throw new Error("expected persisted Session")
++      const file = path.join(Global.Path.data, "plans", `${row.created}-${row.slug}.md`)
++      environment.OPENCODE_EXPERIMENTAL_PLAN_MODE = "true"
++      const resume = () => session.resume(sessionID)
++      yield* agent.transform(editor => editor.update(AgentV2.ID.make("plan"), item => { item.mode = "primary" }))
++      yield* session.switchAgent({ sessionID, agent: "plan" })
++      yield* session.prompt({ sessionID, prompt: { text: "Plan the requested change" }, resume: false })
++      requests.length = 0
++      response = fragmentFixture("text", "text-plan", ["Planned"]).completeEvents
++      yield* resume()
++      const planning = SessionPrompts.planMode.replace("${planInfo}", () => `No plan file exists yet. You should create your plan at ${file} using the write tool.`)
++      expect(requests.map(userTexts).at(-1)).toContain(planning)
++      const synthetic = () => session.context(sessionID).pipe(Effect.map(history => history.filter(message => message.type === "synthetic")))
++      expect((yield* synthetic()).map(message => message.text)).toEqual([planning])
++      // 续轮读取持久synthetic，不产生额外用户输入或每轮重复记录同一提醒。
++      yield* resume()
++      expect(requests.map(userTexts).at(-1)?.filter(text => text === planning)).toHaveLength(1)
++      expect(yield* synthetic()).toHaveLength(1)
++      yield* Effect.promise(() => Bun.write(file, "# Accepted plan"))
++      yield* session.switchAgent({ sessionID, agent: "build" })
++      yield* session.prompt({ sessionID, prompt: { text: "Implement the plan" }, resume: false })
++      response = fragmentFixture("text", "text-build-plan", ["Built"]).completeEvents
++      yield* resume()
++      const building = `${SessionPrompts.buildSwitch}\n\nA plan file exists at ${file}. You should execute on the plan defined within it`
++      expect(requests.map(userTexts).at(-1)).toContain(building)
++      expect((yield* synthetic()).map(message => message.text)).toEqual([planning, building])
++      yield* resume()
++      expect(requests.map(userTexts).at(-1)?.filter(text => text === building)).toHaveLength(1)
++      expect(yield* synthetic()).toHaveLength(2)
++      expect(requests).toHaveLength(4)
++      const admitted = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
++      expect(admitted).toHaveLength(3)
++      // 旧阶段相同正文不能压住当前模式；不仅检查出现过，还检查本轮模型与durable尾部。
++      const existingPlan = SessionPrompts.planMode.replace("${planInfo}", () => `A plan file already exists at ${file}. You can read it and make incremental edits using the edit tool.`)
++      for (const mode of ["plan", "build", "plan", "build"]) {
++        yield* session.switchAgent({ sessionID, agent: mode })
++        yield* session.prompt({ sessionID, prompt: { text: `Switch to ${mode} again` }, resume: false })
++        yield* resume()
++        const expected = mode === "plan" ? existingPlan : building
++        expect(requests.map(userTexts).at(-1)?.at(-1)).toBe(expected)
++        expect((yield* synthetic()).at(-1)?.text).toBe(expected)
++      }
++      expect(yield* synthetic()).toHaveLength(6)
++      expect(requests).toHaveLength(8)
++      const repeated = yield* db.select({ id: SessionInputTable.id }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
++      expect(repeated).toHaveLength(7)
+@@ -987,6 +995,6 @@
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+       ])
+       expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
+     }),
+@@ -1021,5 +1029,5 @@
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+       ])
+     }),
+   )
+@@ -1138,4 +1146,4 @@
+       expect(requests.map((request) => request.model)).toEqual([model])
+       // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
+-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context", expectedToolGuidance, expectedModelIdentity]])
++      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity]])
+     }),
+@@ -1188,7 +1196,7 @@
+       // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+       ])
+       expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
+@@ -1235,6 +1243,6 @@
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+       ])
+     }),
+@@ -1272,6 +1280,6 @@
+       // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Replacement context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Replacement context", expectedToolGuidance, expectedModelIdentity],
+       ])
+       yield* replaySessionProjection(sessionID)
+@@ -1687,4 +1695,4 @@
+       yield* session.resume(sessionID)
+ 
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context", expectedToolGuidance, expectedModelIdentity])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity])
+       expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
+@@ -1886,6 +1894,6 @@
+       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
+       expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
+-        ["Initial context", expectedToolGuidance, expectedModelIdentity],
+-        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+       ])
+       expect(systemTexts(requests[1]!)).toContain("Replacement context")
 
 diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
 --- a/packages/core/test/system-context/builtins.test.ts
 +++ b/packages/core/test/system-context/builtins.test.ts
-@@ -1,4 +1,4 @@
+@@ -1,4 +1,5 @@
 -import { describe, expect } from "bun:test"
 +import { describe, expect, test } from "bun:test"
  import os from "node:os"
  import { ConfigProvider, Effect, Layer, Schema } from "effect"
  import { AppProcess } from "@opencode-ai/core/process"
-@@ -288,3 +288,22 @@
++import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
+@@ -288,3 +289,31 @@
      }),
    )
  })
@@ -435,5 +639,289 @@ diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/
 +  expect(guidance).toContain("target files or edit ranges cannot conflict")
 +  expect(guidance).toContain("one edit/patch containing all non-overlapping changes")
 +  expect(SystemContextBuiltIns.toolUsage(["read"])).not.toContain("todowrite")
++  // 共享的是完整正文，而非摘要；V2族选择与V1的实际模型ID规则相同。
++  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("# Task Management")
++  expect(SessionPrompts.provider("claude-sonnet-4", "anthropic")).toContain("Parallel writes are only appropriate")
++  expect(SessionPrompts.provider("unknown", "kimi-for-coding")).toContain("newly created subagent")
++  expect(SessionPrompts.provider("muse-glimmer", "meta")).toContain("Muse Glimmer")
++  expect(SessionPrompts.reminders("plan", false)).toEqual([SessionPrompts.plan])
++  expect(SessionPrompts.reminders("build", true)).toEqual([SessionPrompts.buildSwitch])
++  expect(SessionPrompts.reminders("build", false)).toEqual([])
++  expect(SessionPrompts.reminders("reviewer", true)).toEqual([])
 +})
+
+diff --git a/packages/opencode/src/session/prompt/beast.txt b/packages/core/src/system-context/prompt/beast.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/beast.txt
+rename to packages/core/src/system-context/prompt/beast.txt
+diff --git a/packages/opencode/src/session/prompt/codex.txt b/packages/core/src/system-context/prompt/codex.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/codex.txt
+rename to packages/core/src/system-context/prompt/codex.txt
+diff --git a/packages/opencode/src/session/prompt/gpt-astra.txt b/packages/core/src/system-context/prompt/gpt-astra.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/gpt-astra.txt
+rename to packages/core/src/system-context/prompt/gpt-astra.txt
+diff --git a/packages/opencode/src/session/prompt/meta.txt b/packages/core/src/system-context/prompt/meta.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/meta.txt
+rename to packages/core/src/system-context/prompt/meta.txt
+diff --git a/packages/opencode/src/session/prompt/plan.txt b/packages/core/src/system-context/prompt/plan.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/plan.txt
+rename to packages/core/src/system-context/prompt/plan.txt
+diff --git a/packages/opencode/src/session/prompt/build-switch.txt b/packages/core/src/system-context/prompt/build-switch.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/build-switch.txt
+rename to packages/core/src/system-context/prompt/build-switch.txt
+diff --git a/packages/opencode/src/session/prompt/plan-mode.txt b/packages/core/src/system-context/prompt/plan-mode.txt
+similarity index 100%
+rename from packages/opencode/src/session/prompt/plan-mode.txt
+rename to packages/core/src/system-context/prompt/plan-mode.txt
+diff --git a/packages/core/src/system-context/prompts.ts b/packages/core/src/system-context/prompts.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/system-context/prompts.ts
+@@ -0,0 +1,49 @@
++export * as SessionPrompts from "./prompts"
++
++import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
++import PROMPT_DEFAULT from "./prompt/default.txt"
++import PROMPT_BEAST from "./prompt/beast.txt"
++import PROMPT_GEMINI from "./prompt/gemini.txt"
++import PROMPT_GPT from "./prompt/gpt.txt"
++import PROMPT_ASTRA from "./prompt/gpt-astra.txt"
++import PROMPT_KIMI from "./prompt/kimi.txt"
++import PROMPT_META from "./prompt/meta.txt"
++import PROMPT_CODEX from "./prompt/codex.txt"
++import PROMPT_TRINITY from "./prompt/trinity.txt"
++import PROMPT_PLAN from "./prompt/plan.txt"
++import BUILD_SWITCH from "./prompt/build-switch.txt"
++import PLAN_MODE from "./prompt/plan-mode.txt"
++
++// 文本只归Core所有；V1与V2共享正文，避免新增族时某条执行链仍收到旧摘要。
++export function provider(id: string, providerID: string) {
++  if (id.includes("muse")) {
++    const name = id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
++    return PROMPT_META.replaceAll("{{MODEL_NAME}}", name)
++  }
++  // 保留上游选择优先级，不能先匹配宽泛GPT分支改变已有模型的模板。
++  if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
++  if (id.includes("gpt")) {
++    if (id.includes("gpt-6")) return PROMPT_ASTRA
++    if (id.includes("codex")) return PROMPT_CODEX
++    return PROMPT_GPT
++  }
++  if (id.includes("gemini-")) return PROMPT_GEMINI
++  if (id.includes("claude")) return PROMPT_ANTHROPIC
++  if (id.toLowerCase().includes("trinity")) return PROMPT_TRINITY
++  // 部分兼容端点使用别名，Kimi沿原provider身份规则选模板。
++  if (id.toLowerCase().includes("kimi") || ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(providerID))
++    return PROMPT_KIMI
++  return PROMPT_DEFAULT
++}
++
++export const plan = PROMPT_PLAN
++export const buildSwitch = BUILD_SWITCH
++export const planMode = PLAN_MODE
++
++export function reminders(agent: string, wasPlan: boolean) {
++  // 只根据已提升输入对应的本轮agent提醒；排队但尚未提升的切换不能放开写权限。
++  if (agent === "plan") return [plan]
++  // 与V1普通模式一致：有plan历史的build请求重新明确当前可执行状态。
++  if (agent === "build" && wasPlan) return [buildSwitch]
++  return []
++}
+diff --git a/packages/core/src/markdown.d.ts b/packages/core/src/markdown.d.ts
+--- a/packages/core/src/markdown.d.ts
++++ b/packages/core/src/markdown.d.ts
+@@ -1,4 +1,9 @@
+ declare module "*.md" {
+   const content: string
+   export default content
+ }
++
++declare module "*.txt" {
++  const content: string
++  export default content
++}
+diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
+--- a/packages/core/src/plugin/agent.ts
++++ b/packages/core/src/plugin/agent.ts
+@@ -11,7 +11,5 @@
+ const TRUNCATION_GLOB = path.join(Global.Path.data, "tool-output", "*")
+-const BUILD_SYSTEM =
+-  "You are an AI coding agent. Help the user accomplish software engineering tasks by inspecting the workspace, making targeted changes, and using tools according to the configured permissions."
+ 
+ const PROMPT_EXPLORE = `You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
+ 
+ Your strengths:
+@@ -120,6 +118,6 @@
+     yield* ctx.agent.transform((draft) => {
+       draft.update(AgentV2.defaultID, (item) => {
+         item.description = "The default agent. Executes tools based on configured permissions."
+-        item.system ??= BUILD_SYSTEM
++        // 默认族提示随每轮模型解析，不能用通用文案遮蔽；用户自定义system仍由runner优先采用。
+         item.mode = "primary"
+         item.permissions.push(
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -22,5 +22,7 @@
+ import { SystemContext } from "../../system-context/index"
+ import { SystemContextRegistry } from "../../system-context/registry"
+ import { SystemContextBuiltIns } from "../../system-context/builtins"
++import { SessionPrompts } from "../../system-context/prompts"
++import { SessionReminders } from "../reminders"
+ import { SkillGuidance } from "../../skill/guidance"
+ import { ReferenceGuidance } from "../../reference/guidance"
+@@ -45,3 +47,5 @@
+ import { Snapshot } from "../../snapshot"
+ import { makeLocationNode } from "../../effect/app-node"
+ import { llmClient } from "../../effect/app-node-platform"
++import { FSUtil } from "../../fs-util"
++import { Global } from "../../global"
+@@ -114,1 +118,2 @@
+     const db = (yield* Database.Service).db
++    const buildReminders = yield* SessionReminders.make
+@@ -255,6 +260,8 @@
+       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
+       // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
+       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
++      // 普通提醒逐轮生成，实验计划沿既有synthetic持久化；两者都不新增用户admission或放宽权限。
++      const reminders = yield* buildReminders(agent.id, session.id, context)
+       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
+       const request = LLM.request({
+         model,
+@@ -269,8 +275,9 @@
+-        system: [agent.info?.system, system.baseline, toolGuidance,
++        // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
++        system: [agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline, toolGuidance,
+           `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
+           .filter((part): part is string => part !== undefined && part.length > 0)
+           .map(SystemPart.make),
+-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
++        messages: [...toLLMMessages(context, model), ...reminders.map(text => Message.user(text)), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+         tools: toolMaterialization?.definitions ?? [],
+         toolChoice: isLastStep ? "none" : undefined,
+       })
+@@ -516,1 +523,3 @@
+     Database.node,
++    FSUtil.node,
++    Global.node,
+diff --git a/packages/core/src/session/reminders.ts b/packages/core/src/session/reminders.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/reminders.ts
+@@ -0,0 +1,49 @@
++export * as SessionReminders from "./reminders"
++
++import path from "path"
++import { eq } from "drizzle-orm"
++import { ConfigProvider, DateTime, Effect } from "effect"
++import { Database } from "../database/database"
++import { EventV2 } from "../event"
++import { FSUtil } from "../fs-util"
++import { Global } from "../global"
++import { Location } from "../location"
++import { SessionPrompts } from "../system-context/prompts"
++import { SessionEvent } from "./event"
++import { SessionMessage } from "./message"
++import { SessionSchema } from "./schema"
++import { SessionTable } from "./sql"
++
++export const make = Effect.gen(function* () {
++  const fs = yield* FSUtil.Service
++  const global = yield* Global.Service
++  const location = yield* Location.Service
++  const events = yield* EventV2.Service
++  const database = yield* Database.Service
++  return Effect.fn("SessionReminders.prepare")(function* (agent: string, sessionID: SessionSchema.ID, history: readonly SessionMessage.Message[]) {
++    const environment = yield* ConfigProvider.ConfigProvider
++    const enabled = yield* environment.load(["OPENCODE_EXPERIMENTAL_PLAN_MODE"]).pipe(
++      Effect.flatMap(value => value === undefined ? environment.load(["OPENCODE_EXPERIMENTAL"]) : Effect.succeed(value)),
++      Effect.map(value => value?._tag === "Value" && ["1", "true"].includes(value.value.toLowerCase())), Effect.orDie,
++    )
++    if (!enabled) return SessionPrompts.reminders(agent, history.some(message => message.type === "assistant" && message.agent === "plan"))
++    const previous = history.findLast(message => message.type === "assistant")
++    if (agent !== "plan" && previous?.agent !== "plan") return []
++    const row = yield* database.db.select({ slug: SessionTable.slug, created: SessionTable.time_created }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++    if (!row) return yield* Effect.die(`Session not found: ${sessionID}`)
++    // 沿V1持久slug/创建时间公式定位唯一计划文件，不搜索目录或增加另一份计划状态。
++    const base = location.vcs ? path.join(location.project.directory, ".opencode", "plans") : path.join(global.data, "plans")
++    const file = path.join(base, `${row.created}-${row.slug}.md`)
++    const exists = yield* fs.existsSafe(file)
++    const text = agent === "plan" ? SessionPrompts.planMode.replace("${planInfo}", () => exists
++      ? `A plan file already exists at ${file}. You can read it and make incremental edits using the edit tool.`
++      : `No plan file exists yet. You should create your plan at ${file} using the write tool.`)
++      : exists ? `${SessionPrompts.buildSwitch}\n\nA plan file exists at ${file}. You should execute on the plan defined within it` : SessionPrompts.buildSwitch
++    // 同阶段重试复用synthetic；再次切换必须重新提醒，不能让更早的相反模式成为最后约束。
++    const boundary = history.findLastIndex(message => message.type === "agent-switched" || (message.type === "assistant" && message.agent !== agent))
++    if (history.slice(boundary + 1).some(message => message.type === "synthetic" && message.text === text)) return []
++    if (agent === "plan" && !exists) yield* fs.ensureDir(path.dirname(file)).pipe(Effect.orDie)
++    yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text })
++    return [text]
++  })
++})
+diff --git a/packages/opencode/src/session/reminders.ts b/packages/opencode/src/session/reminders.ts
+--- a/packages/opencode/src/session/reminders.ts
++++ b/packages/opencode/src/session/reminders.ts
+@@ -8,9 +8,7 @@
+ import { PartID } from "./schema"
+ import { MessageV2 } from "./message-v2"
+ import { Session } from "./session"
+-import PROMPT_PLAN from "./prompt/plan.txt"
+-import BUILD_SWITCH from "./prompt/build-switch.txt"
+-import PLAN_MODE from "./prompt/plan-mode.txt"
++import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
+ 
+ export const apply = Effect.fn("SessionReminders.apply")(function* (input: {
+   messages: SessionV1.WithParts[]
+@@ -24,24 +22,15 @@
+   if (!userMessage) return input.messages
+ 
+   if (!flags.experimentalPlanMode) {
+-    if (input.agent.name === "plan") {
+-      userMessage.parts.push({
+-        id: PartID.ascending(),
+-        messageID: userMessage.info.id,
+-        sessionID: userMessage.info.sessionID,
+-        type: "text",
+-        text: PROMPT_PLAN,
+-        synthetic: true,
+-      })
+-    }
+     const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
+-    if (wasPlan && input.agent.name === "build") {
++    // 正文和普通模式的选择规则共用，实验计划文件分支仍沿用原来的持久化责任。
++    for (const text of SessionPrompts.reminders(input.agent.name, wasPlan)) {
+       userMessage.parts.push({
+         id: PartID.ascending(),
+         messageID: userMessage.info.id,
+         sessionID: userMessage.info.sessionID,
+         type: "text",
+-        text: BUILD_SWITCH,
++        text,
+         synthetic: true,
+       })
+     }
+@@ -60,7 +47,7 @@
+       type: "text",
+       text: exists
+-        ? `${BUILD_SWITCH}\n\nA plan file exists at ${plan}. You should execute on the plan defined within it`
+-        : BUILD_SWITCH,
++        ? `${SessionPrompts.buildSwitch}\n\nA plan file exists at ${plan}. You should execute on the plan defined within it`
++        : SessionPrompts.buildSwitch,
+       synthetic: true,
+     })
+     userMessage.parts.push(part)
+@@ -79,7 +66,7 @@
+     sessionID: userMessage.info.sessionID,
+     type: "text",
+-    text: PLAN_MODE.replace("${planInfo}", () =>
++    text: SessionPrompts.planMode.replace("${planInfo}", () =>
+       exists
+         ? `A plan file already exists at ${plan}. You can read it and make incremental edits using the edit tool.`
+         : `No plan file exists yet. You should create your plan at ${plan} using the write tool.`,
+     ),
 

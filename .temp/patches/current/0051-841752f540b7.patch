@@ -219,13 +219,10 @@ diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/sr
 diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
 --- a/packages/core/src/session/runner/llm.ts
 +++ b/packages/core/src/session/runner/llm.ts
-@@ -272,7 +272,7 @@
-         // 自定义 agent system 替代模型族默认提示；公共 Context 与工具指引继续存在。
-         // 每轮按实际模型及权限过滤后的工具广告生成，不污染稳定 Context Epoch。
--        system: [agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
--          toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline, toolGuidance,
-+        system: [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
-+          toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
+@@ -282,5 +282,5 @@
+         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
+-        system: [agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline, toolGuidance,
++        system: [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
            `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
            .filter((part): part is string => part !== undefined && part.length > 0)
            .map(SystemPart.make),
@@ -372,47 +369,36 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -872,10 +872,11 @@
+@@ -889,10 +889,11 @@
        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
        yield* session.resume(sessionID)
  
 +      // 工具指引前置不改变持久 baseline；生产者变化仍只追加到 chronological messages。
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
        ])
        // echo/defect 的真实请求不广告 bash，完整 system 不能从宿主默认 shell 泄漏 Git 政策。
        expect(requests[0]?.system.map((part) => part.text).join("\n")).not.toContain("# Git repository state changes")
        expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
-@@ -914,8 +915,8 @@
-       response = fragmentFixture("text", "text-build", ["Done"]).completeEvents
-       yield* session.resume(sessionID)
- 
+@@ -1062,3 +1063,3 @@
 -      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Build agent instructions", "Initial context", expectedToolGuidance, expectedModelIdentity])
 -      // false 必须进入实际 provider turn；自定义 system 仍是第一块且没有族提示重复。
 +      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Build agent instructions", "Initial context", expectedModelIdentity])
 +      // false 仍进入实际 turn；自定义 agent 紧随工具指引，不被默认族提示重复或替换。
        expect(requests.at(-1)?.providerOptions?.openai?.parallelToolCalls).toBe(false)
-     }),
-   )
-@@ -944,7 +945,13 @@
-         // 稳定 baseline 仍仅出现一次；族提示与真实模型身份都不进入持久 source。
-         expect(parts.filter((part) => part === "Initial context")).toHaveLength(1)
-         expect(parts).toHaveLength(marker === undefined ? 3 : 4)
--        if (marker !== undefined) expect(parts[0]).toContain(marker)
-+        // 完整数组同时约束能力前缀、族提示位置、唯一 baseline 与当前模型尾块。
-+        expect(parts).toEqual([
-+          expectedToolGuidance,
-+          ...(marker === undefined ? [] : [expect.stringContaining(marker)]),
-+          "Initial context",
-+          `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`,
-+        ])
-         // 当前 fixture 只注册 echo/defect，不能从源模板发明文档、计划或子任务工具。
-         expect(parts.join("\n")).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
-       }))
-@@ -973,7 +980,7 @@
+@@ -1140,6 +1141,6 @@
+         // 正文逐字比较独立资产，不能用生产selector同时生成期望来隐藏选错族。
+-        expect(parts).toEqual([prompt, "Initial context", expectedToolGuidance,
++        expect(parts).toEqual([expectedToolGuidance, prompt, "Initial context",
+           `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
+         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
+-        expect(parts[2]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
++        expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
+         expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+@@ -1169,7 +1170,7 @@
        response = fragmentFixture("text", "text-reviewer", ["Done"]).completeEvents
        yield* session.resume(sessionID)
  
@@ -421,7 +407,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
        expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
      }),
    )
-@@ -1002,7 +1009,7 @@
+@@ -1198,7 +1199,7 @@
        response = fragmentFixture("text", "text-selected", ["Done"]).completeEvents
        yield* session.resume(sessionID)
  
@@ -430,93 +416,93 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
        expect((yield* session.messages({ sessionID }))[0]).toMatchObject({ type: "assistant", agent: "reviewer" })
      }),
    )
-@@ -1029,9 +1036,9 @@
+@@ -1225,9 +1226,9 @@
        yield* session.resume(sessionID)
  
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
--        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context\n\nBuild skills", expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context\n\nBuild skills", expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedModelIdentity],
        ])
        expect(systemTexts(requests[1]!)).toContainEqual(expect.stringContaining("Reviewer skills"))
      }),
    )
-@@ -1063,7 +1070,7 @@
+@@ -1259,7 +1260,7 @@
        yield* session.resume(sessionID)
  
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context\n\nBuild skills", expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context\n\nBuild skills", expectedModelIdentity],
        ])
      }),
    )
-@@ -1181,7 +1188,7 @@
+@@ -1377,7 +1378,7 @@
        yield* session.resume(sessionID)
        expect(requests.map((request) => request.model)).toEqual([model])
        // resolve 期间切换只影响后续 turn；当前身份必须与已采样 model 一致，而非重读选择。
--      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([["Initial context", expectedToolGuidance, expectedModelIdentity]])
-+      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[expectedToolGuidance, "Initial context", expectedModelIdentity]])
+-      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity]])
++      expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([[expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity]])
      }),
    )
  
-@@ -1231,10 +1238,10 @@
+@@ -1427,10 +1428,10 @@
  
        // 持久 baseline 不随模型替换，但第三轮身份必须更新；chronological updates 仍由 messages 断言。
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
--        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
        ])
        expect(requests[1]?.messages.map((message) => message.role)).toEqual(["user", "user", "system"])
        expect(requests[2]?.messages.filter((message) => message.role === "system")).toHaveLength(2)
        expect((yield* session.context(sessionID)).map((message) => message.type)).toEqual([
-@@ -1277,9 +1284,9 @@
+@@ -1473,9 +1474,9 @@
        yield* session.resume(sessionID)
  
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
--        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
--        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
-+        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
        ])
      }),
    )
-@@ -1315,10 +1322,10 @@
+@@ -1511,10 +1512,10 @@
  
        // 压缩重建的是上下文，不是模型切换；Replacement context 仍配原 fake-model 身份。
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
--        ["Replacement context", expectedToolGuidance, expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
-+        [expectedToolGuidance, "Replacement context", expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Replacement context", expectedToolGuidance, expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Replacement context", expectedModelIdentity],
        ])
        yield* replaySessionProjection(sessionID)
        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
        yield* session.resume(sessionID)
      }),
-@@ -1718,7 +1725,7 @@
+@@ -1926,7 +1927,7 @@
        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Third" }), resume: false })
        yield* session.resume(sessionID)
  
--      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual(["Initial context", expectedToolGuidance, expectedModelIdentity])
-+      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, "Initial context", expectedModelIdentity])
+-      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity])
++      expect(requests.at(-1)?.system.map((part) => part.text)).toEqual([expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity])
        expect(systemTexts(requests.at(-1)!)).toContain("Changed context")
      }),
    )
-@@ -1917,10 +1924,10 @@
+@@ -2125,10 +2126,10 @@
  
        expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
--        ["Initial context", expectedToolGuidance, expectedModelIdentity],
--        ["Initial context", expectedToolGuidance, expectedReplacementIdentity],
-+        [expectedToolGuidance, "Initial context", expectedModelIdentity],
-+        [expectedToolGuidance, "Initial context", expectedReplacementIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+-        [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedReplacementIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedModelIdentity],
++        [expectedToolGuidance, PROMPT_DEFAULT, "Initial context", expectedReplacementIdentity],
        ])
        expect(systemTexts(requests[1]!)).toContain("Replacement context")
      }),

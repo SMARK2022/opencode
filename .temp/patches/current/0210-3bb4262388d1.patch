@@ -167,7 +167,7 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 +    const pathOnly = yield* service.ask({ ...external, metadata: { action_kind: "tool" } })
 +    expect(pathOnly.effect).toBe("ask")
 +    yield* service.reply({ requestID: pathOnly.id, reply: "reject" })
-     // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
+     // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
      reviewGate = yield* Deferred.make<void>()
      reviewStarted = yield* Deferred.make<void>()
 diff --git a/packages/opencode/test/permission/next.test.ts b/packages/opencode/test/permission/next.test.ts

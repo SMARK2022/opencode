@@ -5,10 +5,10 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0=E6=A1=A5?=
  =?UTF-8?q?=E6=8E=A5=E5=8A=9F=E8=83=BD=EF=BC=8C=E7=A7=BB=E9=99=A4=E7=8E=AF?=
  =?UTF-8?q?=E5=A2=83=E5=8F=98=E9=87=8F=E6=94=AF=E6=8C=81=EF=BC=8C=E5=A2=9E?=
 
-diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
+diff --git a/packages/core/src/ide/vscode-bridge.ts b/packages/core/src/ide/vscode-bridge.ts
 index 76508e1915..4fd2720357 100644
---- a/packages/opencode/src/ide/vscode-bridge.ts
-+++ b/packages/opencode/src/ide/vscode-bridge.ts
+--- a/packages/core/src/ide/vscode-bridge.ts
++++ b/packages/core/src/ide/vscode-bridge.ts
 @@ -149,12 +149,8 @@ export async function discoverBridges(input: ResolveInput): Promise<BridgeEntry[
  
  // 解析桥接：通过路径匹配选择最佳桥接，优先选择工作区路径最匹配的

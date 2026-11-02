@@ -118,7 +118,7 @@ index 1120443e20c7793075c4575b7a472536b8d80469..553c243f6a7102e983ea43abc154c55a
 @@ -2432,1 +2474,2 @@
 -          preview={diffOverflow() && !expanded() ? <text fg={theme.text}>{previewText(diff() ?? "", 10, maxChars())}</text> : undefined}
 +          // 短 diff 独立挂载，折叠滚动不污染展开后的完整 diff。
-+          preview={diffOverflow() && !expanded() ? <DiffPreview diff={previewDiff(diff() ?? "", 10)} filePath={stringValue(props.input.filePath)} view={diffView()} maxLines={10} /> : undefined}
++          preview={diffOverflow() && !expanded() ? <DiffPreview diff={previewDiff(diff() ?? "", 10)} filePath={filepath()} view={diffView()} maxLines={10} /> : undefined}
 @@ -2437,23 +2480,1 @@
 -          {/* 超过 20 行才限高为 10 行，短 diff 与展开态保留完整内容。 */}
 -          <box paddingLeft={1} maxHeight={!expanded() && diffOverflow() ? 10 : undefined}>
@@ -126,7 +126,7 @@ index 1120443e20c7793075c4575b7a472536b8d80469..553c243f6a7102e983ea43abc154c55a
 -              diff={diff()!}
 -              syncScroll={true}
 -              view={diffView()}
--              filetype={filetype(stringValue(props.input.filePath))}
+-              filetype={filetype(filepath())}
 -              syntaxStyle={syntax()}
 -              showLineNumbers={true}
 -              width="100%"
@@ -143,7 +143,7 @@ index 1120443e20c7793075c4575b7a472536b8d80469..553c243f6a7102e983ea43abc154c55a
 -              removedLineNumberBg={theme.diffRemovedLineNumberBg}
 -            />
 -          </box>
-+          <DiffView diff={diff()!} filePath={stringValue(props.input.filePath)} view={diffView()} />
++          <DiffView diff={diff()!} filePath={filepath()} view={diffView()} />
 @@ -2766,2 +2784,0 @@
 -  const ft = createMemo(() => filetype(stringValue(props.input.filePath)))
 -

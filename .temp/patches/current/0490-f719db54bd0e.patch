@@ -743,7 +743,15 @@ diff --git a/packages/opencode/test/token/accounting.test.ts b/packages/opencode
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -129,7 +129,8 @@ import { ContextUsagePanel } from "./context-usage"
+@@ -3,6 +3,7 @@
+   createContext,
+   createEffect,
+   createMemo,
++  createResource,
+   createSignal,
+   For,
+   Match,
+@@ -129,7 +130,8 @@ import { ContextUsagePanel } from "./context-usage"
  import { DialogExportOptions } from "../../ui/dialog-export-options"
  import * as Model from "../../util/model"
  import { formatTranscript } from "../../util/transcript"
@@ -753,7 +761,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  import { layoutGroups, setPreLayoutSiblingMargin } from "../../util/layout"
  import { useTuiConfig } from "../../config"
  import { useClipboard } from "../../context/clipboard"
-@@ -262,11 +263,7 @@ export function Session() {
+@@ -262,11 +264,7 @@ export function Session() {
      return current ? { directory: current.directory, workspaceID: current.workspaceID } : undefined
    })
  
@@ -766,7 +774,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const children = createMemo(() => {
      const parentID = session()?.parentID ?? session()?.id
      return sync.data.session
-@@ -274,12 +271,29 @@ export function Session() {
+@@ -274,12 +272,29 @@ export function Session() {
        .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
    })
    const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
@@ -796,20 +804,32 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const messagesBeforeRevert = () => {
      const messageID = session()?.revert?.messageID
      if (!messageID) return messages()
-@@ -1776,6 +1790,12 @@ const footerVisible = createMemo(() => {
+@@ -1776,6 +1791,24 @@ const footerVisible = createMemo(() => {
      // final() 已保证 completed 存在；此处仅做口径统一，不重算起点
      return assistantTurnDuration(messages(), props.message)
    })
-+  // 完成 footer 按自己的 parent 取纯 input；不可见时不扫描，不能借全局活跃 turn 的统计。
++  // 完成记录读精确parent账本；分页窗口不能冒充完整turn，也不借用活跃请求投影。
++  const usageSDK = useSDK()
++  const [turnRequest] = createResource(
++    () => footerVisible()
++      ? `${props.message.sessionID}:${props.message.parentID}:${messages().flatMap(message => message.role === "assistant" && message.parentID === props.message.parentID ? [`${message.id}@${message.time.completed ?? "running"}`] : []).join(",")}`
++      : undefined,
++    async () => (await usageSDK.client.session.requestUsage.get({ sessionID: props.message.sessionID, requestID: props.message.parentID })).data,
++  )
 +  const turnUsage = createMemo(() => {
 +    if (!footerVisible()) return ""
-+    const usage = tokenAccounting(messages(), (id) => sync.data.part[id] ?? [], undefined, undefined, props.message.parentID).request
-+    return formatUsageStats({ input: usage.totalInputPure, output: usage.totalOutput, cost: usage.cost })
++    // 失败不退回不完整窗口；状态文本保留可见性，避免把缺证据伪装成零费用。
++    if (turnRequest.error) return "usage unavailable"
++    const usage = turnRequest()
++    if (!usage) return turnRequest.loading ? "usage pending" : "usage unavailable"
++    // SDK允许特殊数值的wire字符串，不能把它们当成已确认的数字相加。
++    if (typeof usage.tokens.input !== "number" || typeof usage.tokens.output !== "number" || typeof usage.tokens.reasoning !== "number" || typeof usage.cost !== "number") return "usage unavailable"
++    return formatUsageStats({ input: usage.tokens.input, output: usage.tokens.output + usage.tokens.reasoning, cost: usage.cost })
 +  })
  
    const childShortcut = useCommandShortcut("session.child.first")
    const backgroundShortcut = useCommandShortcut("session.background")
-@@ -1856,6 +1878,7 @@ const footerVisible = createMemo(() => {
+@@ -1856,6 +1889,7 @@ const footerVisible = createMemo(() => {
                  <span style={{ fg: theme.textMuted }}> · {Locale.durationClock(duration())}</span>
                  {/* #243：durationClock 入参毫秒，与运行中 footer 同一口径 */}
                </Show>
@@ -1088,3 +1108,203 @@ diff --git a/packages/tui/test/util/token-accounting.test.ts b/packages/tui/test
 +    expect(acc.request).toEqual({ input: 777, output: 20, totalInput: 4777, totalInputPure: 0, totalOutput: 320, cost: 2 })
      expect(acc.session).toEqual({ input: 9000, output: 700, reasoning: 30, cacheRead: 100, cacheWrite: 20, cost: 3 })
 
+diff --git a/packages/core/src/session/request-usage.ts b/packages/core/src/session/request-usage.ts
+--- a/packages/core/src/session/request-usage.ts
++++ b/packages/core/src/session/request-usage.ts
+@@ -3,7 +3,7 @@
+ import { Context, Effect, Layer, Schema } from "effect"
+ import { optional } from "../schema"
+ import { SessionV1, MessageID } from "../v1/session"
+-import { and, desc, eq, lt } from "drizzle-orm"
++import { and, desc, eq, lt, sql } from "drizzle-orm"
+ import { RequestUsageTable, RequestUsageAssistantTable } from "./request-usage.sql"
+-import { PartTable } from "./sql"
++import { MessageTable, PartTable } from "./sql"
+ import type { SessionSchema } from "./schema"
+@@ -119,6 +119,27 @@
+   total: 0,
+ })
+ 
+-// 读取请求只映射存储字段，不在查询时偷偷重算账本或改变请求状态。
++// 已有账本只映射存储字段；旧历史只读归约，不补写账本或改变请求状态。
++function stepUsage(parts: ReadonlyArray<Schema.Schema.Type<typeof SessionV1.Part>>, fallback?: SessionV1.Assistant) {
++  const steps = parts.filter(part => part.type === "step-finish")
++  // 没有finish的已完成旧消息仍保留原tokens/cost；不能覆盖真实多step确认值。
++  if (steps.length === 0 && fallback?.time.completed !== undefined) {
++    const tokens = fallback.tokens
++    return { count: 1, costMicros: toMicros(fallback.cost), tokens: { ...tokens, total: tokens.total ?? (tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write) } }
++  }
++  return steps.reduce((acc, part) => ({
++    count: acc.count + 1,
++    tokens: {
++      input: acc.tokens.input + part.tokens.input,
++      output: acc.tokens.output + part.tokens.output,
++      reasoning: acc.tokens.reasoning + part.tokens.reasoning,
++      cache: { read: acc.tokens.cache.read + part.tokens.cache.read, write: acc.tokens.cache.write + part.tokens.cache.write },
++      total: acc.tokens.total + (part.tokens.total ?? (part.tokens.input + part.tokens.output + part.tokens.reasoning + part.tokens.cache.read + part.tokens.cache.write)),
++    },
++    // 每个step分别舍入为微美元，不能按当前模型重新定价历史费用。
++    costMicros: acc.costMicros + toMicros(part.cost ?? 0),
++  }), { count: 0, tokens: emptyTotals(), costMicros: 0 })
++}
++
+ const rowToRequest = (row: typeof RequestUsageTable.$inferSelect): Request => ({
+   sessionID: row.session_id,
+@@ -258,24 +279,4 @@
+       // V1 多个 step-finish 属于同一助手，不能只取末尾一条结算。
+       // 不读取 text/reasoning 字符估算，账本只接受 provider 已确认用量。
+-      const stepTotals = input.usage ?? parts.reduce(
+-        (acc, part) => {
+-          if (part.type !== "step-finish") return acc
+-          return {
+-            count: acc.count + 1,
+-            tokens: {
+-              input: acc.tokens.input + part.tokens.input,
+-              output: acc.tokens.output + part.tokens.output,
+-              reasoning: acc.tokens.reasoning + part.tokens.reasoning,
+-              cache: {
+-                read: acc.tokens.cache.read + part.tokens.cache.read,
+-                write: acc.tokens.cache.write + part.tokens.cache.write,
+-              },
+-              total: acc.tokens.total + (part.tokens.total ?? (part.tokens.input + part.tokens.output + part.tokens.reasoning + part.tokens.cache.read + part.tokens.cache.write)),
+-            },
+-            // 舍入作用于单个已确认 step，不能先叠加浮点美元再统一舍入而改变 source 成本。
+-            costMicros: acc.costMicros + toMicros(part.cost ?? 0),
+-          }
+-        },
+-        { count: 0, tokens: emptyTotals(), costMicros: 0 },
+-      )
++      const stepTotals = input.usage ?? stepUsage(parts)
+       // 请求归属由调用者持久化身份给定，不能在此猜测最新用户消息。
+@@ -370,9 +371,52 @@
++    // source允许无账本旧历史；只在该具体存量边界读取完整parent桶，不写新请求行。
++    const historical = Effect.fn("RequestUsage.historical")(function* (input: { sessionID: SessionID; requestID: MessageID }) {
++      const rows = yield* db.select().from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID),
++        sql`json_extract(${MessageTable.data}, '$.role') = 'assistant'`,
++        sql`json_extract(${MessageTable.data}, '$.parentID') = ${input.requestID}`,
++      )).orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).all().pipe(Effect.orDie)
++      const assistants: Assistant[] = []
++      for (const row of rows) {
++        const info = Schema.decodeUnknownSync(SessionV1.Info)({ ...row.data, id: row.id, sessionID: row.session_id })
++        if (info.role !== "assistant") continue
++        const parts = (yield* db.select().from(PartTable).where(and(eq(PartTable.session_id, input.sessionID), eq(PartTable.message_id, info.id), sql`json_extract(${PartTable.data}, '$.type') = 'step-finish'`))
++          .all().pipe(Effect.orDie)).map(part => Schema.decodeUnknownSync(SessionV1.Part)({ ...part.data, id: part.id, messageID: part.message_id, sessionID: part.session_id }))
++        const totals = stepUsage(parts, info)
++        assistants.push({ sessionID: input.sessionID, requestID: input.requestID, rootRequestID: input.requestID,
++          assistantMessageID: info.id, model: { providerID: info.providerID, modelID: info.modelID, variant: info.variant },
++          status: assistantStatus(info), stepCount: totals.count, tokens: totals.tokens, cost: toCost(totals.costMicros),
++          time: { created: info.time.created, updated: row.time_updated, completed: info.time.completed }, error: errorMessage(info.error) })
++      }
++      const latest = rows[0]
++      if (!latest) return { request: undefined, assistants }
++      const info = Schema.decodeUnknownSync(SessionV1.Info)({ ...latest.data, id: latest.id, sessionID: latest.session_id })
++      if (info.role !== "assistant") return { request: undefined, assistants }
++      const parent = yield* db.select().from(MessageTable).where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.requestID))).get().pipe(Effect.orDie)
++      // 聚合各助手完整确认值，费用仍以整数微美元相加；不从窗口或当前price推导。
++      const totals = assistants.reduce((acc, value) => ({ count: acc.count + value.stepCount,
++        tokens: { input: acc.tokens.input + value.tokens.input, output: acc.tokens.output + value.tokens.output,
++          reasoning: acc.tokens.reasoning + value.tokens.reasoning,
++          cache: { read: acc.tokens.cache.read + value.tokens.cache.read, write: acc.tokens.cache.write + value.tokens.cache.write },
++          total: acc.tokens.total + value.tokens.total }, costMicros: acc.costMicros + toMicros(value.cost),
++      }), { count: 0, tokens: emptyTotals(), costMicros: 0 })
++      const status: Status = assistants.some(value => value.status === "running") ? "running"
++        : assistants.some(value => value.status === "error") ? "error" : assistants.some(value => value.status === "aborted") ? "aborted" : "completed"
++      const request: Request = { sessionID: input.sessionID, requestID: input.requestID, rootRequestID: input.requestID,
++        source: "unknown", status, agent: info.agent, model: { providerID: info.providerID, modelID: info.modelID, variant: info.variant },
++        assistantCount: assistants.length, stepCount: totals.count, tokens: totals.tokens, cost: toCost(totals.costMicros),
++        time: { created: parent?.time_created ?? Math.min(...rows.map(row => row.time_created)),
++          updated: Math.max(...rows.map(row => row.time_updated)),
++          completed: status === "running" ? undefined : Math.max(...assistants.map(value => value.time.completed ?? 0)) },
++        error: assistants.find(value => value.error !== undefined)?.error }
++      return { request, assistants }
++    })
++
+     const get: Interface["get"] = Effect.fn("RequestUsage.get")(function* (input) {
+       const row = yield* db
+         .select()
+         .from(RequestUsageTable)
+         .where(and(eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID)))
+         .get()
+         .pipe(Effect.orDie)
+-      return row ? rowToRequest(row) : undefined
++      if (row) return rowToRequest(row)
++      return (yield* historical(input)).request
+     })
+@@ -399,13 +443,17 @@
+     // 明细保留助手创建顺序和身份打破平局，不能按模型聚合后丢掉助手 ID。
+     const assistants: Interface["assistants"] = Effect.fn("RequestUsage.assistants")(function* (input) {
+       const rows = yield* db
+         .select()
+         .from(RequestUsageAssistantTable)
+         .where(and(eq(RequestUsageAssistantTable.session_id, input.sessionID), eq(RequestUsageAssistantTable.request_id, input.requestID)))
+         .orderBy(desc(RequestUsageAssistantTable.time_created), desc(RequestUsageAssistantTable.assistant_message_id))
+         .all()
+         .pipe(Effect.orDie)
++      // 已存在的零账本仍是权威，不能用旧消息把它反填成另一组用量。
++      const stored = rows.length > 0 ? undefined : yield* db.select().from(RequestUsageTable).where(and(
++        eq(RequestUsageTable.session_id, input.sessionID), eq(RequestUsageTable.request_id, input.requestID))).get().pipe(Effect.orDie)
++      if (rows.length === 0 && !stored) return (yield* historical(input)).assistants
+       return rows.map(rowToAssistant)
+     })
+ 
+     return { begin, recordAssistant, complete, get, list, assistants }
+
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -57,6 +57,55 @@
+ 
+ describe("SessionProjector", () => {
++  previewIt.effect("reads complete legacy turns without populating the request ledger", () =>
++    Effect.gen(function* () {
++      const db = (yield* Database.Service).db
++      const events = yield* EventV2.Service
++      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
++      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "legacy-usage", directory: "/project", title: "legacy", version: "test" }).run()
++      const requestID = SessionV1.MessageID.make("msg_legacy_request")
++      const other = SessionV1.MessageID.make("msg_legacy_stream")
++      for (const id of [requestID, other]) yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: {
++        id, sessionID, role: "user", time: { created: 0 }, agent: "build", model: { providerID: model.providerID, modelID: model.id },
++      } })
++      const first = SessionV1.MessageID.make("msg_legacy_first")
++      const last = SessionV1.MessageID.make("msg_legacy_last")
++      const streamed = SessionV1.MessageID.make("msg_legacy_streaming")
++      // 多助手、多step及另一个流式parent是真实持久化输入，不用分页窗口构造总量。
++      const assistant = (id: SessionV1.MessageID, parentID: SessionV1.MessageID, completed: number | undefined) => ({
++        id, sessionID, role: "assistant" as const, parentID, agent: "build", mode: "build", modelID: model.id, providerID: model.providerID,
++        path: { cwd: "/project", root: "/project" }, time: { created: id === first ? 1 : 2, completed }, cost: 0.03,
++        tokens: { input: 77, output: 11, reasoning: 3, cache: { read: 8, write: 2 } },
++      })
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: assistant(first, requestID, 3) })
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: assistant(last, requestID, 4) })
++      yield* events.publish(SessionV1.Event.MessageUpdated, { sessionID, info: assistant(streamed, other, undefined) })
++      for (const factor of [1, 2]) yield* events.publish(SessionV1.Event.PartUpdated, { sessionID, time: 3, part: {
++        id: SessionV1.PartID.make(`prt_legacy_${factor}`), sessionID, messageID: first, type: "step-finish", reason: "stop", cost: factor / 10,
++        tokens: { input: 100 * factor, output: 20 * factor, reasoning: 5 * factor, cache: { read: 30 * factor, write: 40 * factor } },
++      } })
++      const usage = SessionRequestUsage.make(db)
++      expect(yield* db.select().from(RequestUsageTable).all()).toEqual([])
++      const full = yield* usage.get({ sessionID, requestID })
++      expect(full).toMatchObject({ source: "unknown", status: "completed", assistantCount: 2, stepCount: 3, cost: 0.33,
++        tokens: { input: 377, output: 71, reasoning: 18, cache: { read: 98, write: 122 }, total: 686 }, time: { completed: 4 } })
++      const details = yield* usage.assistants({ sessionID, requestID })
++      expect(details.map(item => item.assistantMessageID).sort()).toEqual([first, last].sort())
++      expect(details.find(item => item.assistantMessageID === first)).toMatchObject({ stepCount: 2, cost: 0.3, tokens: { input: 300 } })
++      expect(details.find(item => item.assistantMessageID === last)).toMatchObject({ stepCount: 1, cost: 0.03, tokens: { input: 77 } })
++      // 查询不补写账本，重复调用不会修改Session费用或消息；真正缺失仍返回undefined。
++      expect(yield* usage.get({ sessionID, requestID })).toEqual(full)
++      expect(yield* db.select().from(RequestUsageTable).all()).toEqual([])
++      expect(yield* db.select().from(RequestUsageAssistantTable).all()).toEqual([])
++      expect(yield* usage.get({ sessionID, requestID: SessionV1.MessageID.make("msg_legacy_missing") })).toBeUndefined()
++      expect(yield* usage.get({ sessionID: SessionV2.ID.make("ses_other"), requestID })).toBeUndefined()
++      // 一旦有真实账本，零确认也是权威；不能被存量消息反填或另一个parent污染。
++      yield* usage.begin({ sessionID, requestID, source: "prompt", agent: "build", providerID: model.providerID, modelID: model.id })
++      expect(yield* usage.get({ sessionID, requestID })).toMatchObject({ source: "prompt", assistantCount: 0, stepCount: 0, cost: 0, tokens: { total: 0 } })
++      expect(yield* usage.assistants({ sessionID, requestID })).toEqual([])
++      yield* db.delete(SessionTable).where(eq(SessionTable.id, sessionID)).run()
++    }),
++  )
+   previewIt.effect("batches previews from each real message store without compaction or inbox leakage", () =>
+     Effect.gen(function* () {
+       const db = (yield* Database.Service).db
+       const events = yield* EventV2.Service

@@ -9,9 +9,8 @@ Content-Type: text/plain; charset=UTF-8
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -79,3 +79,5 @@
-         // 在既有 process 观察边界记录真正交给 spawner 的环境，不重复执行命令。
+@@ -82,2 +82,4 @@
+         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
 +        // 非Windows独立进程组是取消/超时隔离契约，不能为规避stdout竞态改成仅Linux。
 +        expect(command.options.detached).toBe(process.platform !== "win32")
-         runs.push({ command: command.command, args: command.args, cwd: command.options.cwd, shell: command.options.shell,
-           env: command.options.env, extendEnv: command.options.extendEnv, options })
+         // 仅在测试观察边界解码传输包装；完整argv仍保留，真实编码由另一个实进程用例验证。

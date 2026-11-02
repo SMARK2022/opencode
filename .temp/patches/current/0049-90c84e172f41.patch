@@ -122,7 +122,7 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
  import GIT_SAFETY from "../../../core/src/git-safety.txt"
  import SHELL_DESCRIPTION from "../../../opencode/src/tool/shell/shell.txt"
  // 提示词文本资产由 Bun 内嵌，估算无需加载服务或依赖打包后的源码目录。
- import PROMPT_META from "../../../opencode/src/session/prompt/meta.txt"
+ import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
 @@ -35,7 +37,7 @@
  // RuntimeFlags 从环境 ConfigProvider 取值，不读取 SDK config.experimental；专用 false 覆盖实验伞。
 -function enabledByExperimental(key: string) {
@@ -340,12 +340,13 @@ diff --git a/packages/tui/src/routes/session/context-usage.tsx b/packages/tui/sr
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -10,8 +10,8 @@
+@@ -10,9 +10,9 @@
 -import type { Agent, Message, Part, Provider, TextPart } from "@opencode-ai/sdk/v2"
 -import { computeContextData, filterCompactedMessages, resolveToolDescriptions } from "../src/util/context-usage"
 +import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
 +import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
  import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
+ import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
  import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
  
  // 窗口/输入/输出故意不相等，才能让测试区分模型预留与压缩缓冲而非只验证零差额。

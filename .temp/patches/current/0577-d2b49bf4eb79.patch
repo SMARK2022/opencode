@@ -9,7 +9,7 @@ Content-Transfer-Encoding: 8bit
 
 TUI viewer 通过私有 x-opencode-tui-message-projection 请求更浅的 Message/diff wire 投影：daemon 在 diff handler 过滤 legacy 项、计算完整 totals、截断 first-100 并移除 patch（总量进私有 response headers），messages handler 按同一 header 透传 messageProjection；MessageV2 hydrate 在 thaw 前决定投影（viewer 跳过 user cold summary 解压与持久预热）；TUI sync 将 diff 移出首屏 Promise.all 屏障（可见历史先发布），SSE session.diff 与原子 summary 写入同一 Solid transaction，session.updated 不再回写 raw summary 制造假省略号；Files 标题展示 authoritative totals 且仅真实截断时显示省略号。默认 SDK/Web App 完整合同不变。
 
-适配说明：目标 TUI 已迁移至 packages/tui（sync/files/测试三路径重映射）；Binary.search→目标本地 search；Snapshot.FileDiff→SDK SnapshotFileDiff（TUI 包不可引 server 模块）；sync() 对齐目标 task 去重结构（diff 从 5 项 Promise.all 移除后在 replay 循环后 await）；hydrate 沿目标 (db, sync, rows) 签名扩 messageProjection；测试按目标形态适配——sync.test 用 mount(handler, tmp.path)+kv.json（无 Global.Path.state），Files 渲染用 createBuiltinPlugins+最小 api stub（目标无 internalTuiPlugins/createTuiPluginApi.slots）；session-messages.test 用 requestInDirectory(path, dir, init)+SessionV1.User+core ColdStorage.freezeOwner(db, ...)（目标无 Server.Default/旧 Storage layer）。
+适配说明：保留共享TUI已有hydration/raw trace/实时合并/串行及清理，接viewer与历史先行；V1冷热恢复继续预约同连接。Native Data也经同名私有header接现有messages handler和Core读侧：summary-only冷User直接用热行，附件/Tool等必需内容仍沿原子批恢复，正式decode后省略optional summary；默认完整API、durable seq与pack格式不变，不复制legacy diff端点。原全部测试及plan保留，新增一个真实内存冷归档回归，不运行renderer。
 
 
 diff --git a/docs/plans/tui-session-load-redundant-read-repair.md b/docs/plans/tui-session-load-redundant-read-repair.md
@@ -681,9 +681,9 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
  import { Todo } from "@/session/todo"
  import { MessageID, PartID, SessionID } from "@/session/schema"
 +import type { Snapshot } from "@/snapshot"
- // [local-smark] session preview: 直接查 DB 获取用户消息预览文本
- // 表定义在 core（drizzle schema owner），此处跨包引用保持单一定义源
- import { MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+ import { SessionPreview } from "@opencode-ai/core/session/preview"
+ import { Database } from "@opencode-ai/core/database/database"
+ import { NamedError } from "@opencode-ai/core/util/error"
 @@ -51,6 +52,11 @@ import { PermissionNotFoundError } from "../errors"
  import { PermissionNotFoundError, notFound } from "../errors"
  import * as SessionError from "./session-errors"
@@ -1362,3 +1362,160 @@ diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/o
 +    { git: true },
 +  )
  })
+
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -1991,7 +1991,21 @@ export function thawSessionMessageRowsInTransaction(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
+ // 普通读取先选定范围，再预约原连接并原子回填；范围外消息和统计热查询不被预热。
+-export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[]) {
+-  if (!rows.some(row => row.cold_ref)) return Effect.sync(() => inspectSessionMessageRows(db.sync, rows))
+-  return Database.withSync({ db, sync: db.sync }, sync => sync.transaction(
+-    tx => thawSessionMessageRowsInTransaction(tx, rows), { behavior: "immediate" },
+-  ))
++export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[], messageProjection?: "viewer") {
++  // 归档白名单中，冷User除summary仅inline附件需要恢复；不能把Tool或附件占位当成完整消息。
++  const selected = messageProjection === "viewer" ? rows.filter(row => {
++    const data: unknown = row.data
++    return row.type !== "user" || !row.cold_ref || !isRecord(data) || Array.isArray(data.files) && data.files.some(file => isRecord(file) && file.uri === "")
++  }) : rows
++  // 必需内容仍在原同连接事务中整批恢复；summary-only不解压、不清指针、不扣引用。
++  const restored = !selected.some(row => row.cold_ref)
++    ? Effect.sync(() => inspectSessionMessageRows(db.sync, selected))
++    : Database.withSync({ db, sync: db.sync }, sync => sync.transaction(
++      tx => thawSessionMessageRowsInTransaction(tx, selected), { behavior: "immediate" },
++    ))
++  if (messageProjection !== "viewer") return restored
++  return restored.pipe(Effect.map(items => {
++    // DB选集的主键唯一；临时join保留原seq/page顺序，不建立第二份持久状态或恢复路径。
++    const byID = new Map(rows.map(row => [row.id, row]))
++    for (const row of items) byID.set(row.id, row)
++    return [...byID.values()]
++  }))
+ }
+
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -133,6 +133,8 @@ export interface Interface {
+     sessionID: SessionSchema.ID
+     limit?: number
+     order?: "asc" | "desc"
++    // 私有viewer只收窄本次读取深度，默认业务/SDK仍获得完整消息。
++    messageProjection?: "viewer"
+     cursor?: {
+       id: SessionMessage.ID
+       direction: "previous" | "next"
+@@ -407,4 +409,9 @@ const layer = Layer.effect(
+         // 只恢复实际返回页，cursor探针与范围外消息仍保持冷态。
+-        const restored = yield* ColdStorage.readSessionMessageRows(db, rows)
+-        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, decode)
++        const restored = yield* ColdStorage.readSessionMessageRows(db, rows, input.messageProjection)
++        // 先完整恢复必需正文再正式decode；仅省略合法optional summary，不改写持久行或默认完整API。
++        return yield* Effect.forEach(direction === "previous" ? restored.toReversed() : restored, row => decode(row).pipe(Effect.map(message => {
++          if (input.messageProjection !== "viewer" || message.type !== "user") return message
++          const { summary: _, ...info } = message
++          return info
++        })))
+       }),
+
+diff --git a/packages/server/src/handlers/message.ts b/packages/server/src/handlers/message.ts
+--- a/packages/server/src/handlers/message.ts
++++ b/packages/server/src/handlers/message.ts
+@@ -3,6 +3,7 @@
+ import { Effect, Schema } from "effect"
++import { HttpServerRequest } from "effect/unstable/http"
+ import { HttpApiBuilder } from "effect/unstable/httpapi"
+ import { Api } from "../api"
+ import { InvalidCursorError, SessionNotFoundError, UnknownError } from "@opencode-ai/protocol/errors"
+ 
+ const DefaultMessagesLimit = 50
+@@ -40,6 +41,9 @@ export const MessageHandler = HttpApiBuilder.group(Api, "server.message", (handlers) =>
+         const order = decoded?.order ?? ctx.query.order ?? "desc"
++        const request = yield* HttpServerRequest.HttpServerRequest
+         const messages = yield* session
+           .messages({
+             sessionID: ctx.params.sessionID,
+             limit: ctx.query.limit ?? DefaultMessagesLimit,
++            // 与兼容TUI使用同一私有信号，公开schema/cursor与默认完整响应保持不变。
++            messageProjection: request.headers["x-opencode-tui-message-projection"] === "viewer" ? "viewer" : undefined,
+             order,
+
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -456,7 +456,11 @@
+           async refresh(sessionID: string) {
+             // HTTP 替换前后都结清当前窗，不把旧 delta 追加到包含它的完整快照。
+             deltas.flush()
+-            const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
++            // Native同样请求无逐轮summary的viewer；正文/附件仍完整，默认客户端不受影响。
++            const result = await sdk.client.v2.session.messages(
++              { sessionID },
++              { throwOnError: true, headers: { "x-opencode-tui-message-projection": "viewer" } },
++            )
+             deltas.flush()
+             setStore("session", "message", sessionID, result.data.data)
+           },
+
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -419,3 +419,57 @@
+   )
+ 
++  listingIt.effect("keeps Native viewer summaries cold while restoring visible attachments and tools", () =>
++    Effect.gen(function* () {
++      const db = (yield* Database.Service).db
++      const sessions = yield* SessionV2.Service
++      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
++      yield* db.insert(SessionTable).values({ id: sessionID, project_id: Project.ID.global, slug: "viewer", directory: "/project", title: "viewer", version: "test", time_updated: 0 }).run()
++      const first = SessionMessage.ID.make("msg_viewer_summary")
++      const second = SessionMessage.ID.make("msg_viewer_attachment")
++      const assistant = SessionMessage.ID.make("msg_viewer_tool")
++      const summary = { diffs: [{ file: "large.ts", patch: "+summary\n".repeat(512), additions: 512, deletions: 0, status: "modified" as const }] }
++      const files = [{ uri: "data:text/plain;base64," + "YQ==".repeat(512), mime: "text/plain", name: "evidence.txt" }]
++      // 同一选集同时放summary-only、冷附件User及冷Tool，不能用统一跳解压换取假优化。
++      const users = [
++        SessionMessage.User.make({ id: first, type: "user", text: "summary-only body", summary, time: { created } }),
++        SessionMessage.User.make({ id: second, type: "user", text: "attachment body", summary, files, time: { created } }),
++      ]
++      yield* db.insert(SessionMessageTable).values(users.map((message, index) => {
++        const { id, type, ...data } = encodeMessage(message)
++        return { id: SessionMessage.ID.make(id), session_id: sessionID, seq: index + 1, time_created: 0, type, data }
++      })).run()
++      const content = [
++        { type: "reasoning", id: "reason", text: "visible reasoning ".repeat(300) },
++        { type: "tool", id: "edit", name: "edit", time: { created: 0, completed: 1 }, state: { status: "completed", input: { path: "large.ts" }, structured: { changed: true }, content: [{ type: "text", text: "visible tool ".repeat(300) }] } },
++      ] satisfies (typeof SessionMessage.Assistant)["Encoded"]["content"]
++      const message = { ...assistantRow(assistant, 3), data: { ...assistantRow(assistant, 3).data, content } }
++      yield* db.insert(SessionMessageTable).values(message).run()
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        for (const id of [first, second, assistant]) expect(ColdStorage.freezeOwner(sync, { type: "session_message", id, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
++      })
++      const before = yield* db.select().from(SessionMessageTable).orderBy(asc(SessionMessageTable.seq)).all()
++      expect(before.map(row => Boolean(row.cold_ref))).toEqual([true, true, true])
++      const view = yield* sessions.messages({ sessionID, order: "asc", messageProjection: "viewer" })
++      expect(view.map(message => message.id)).toEqual([first, second, assistant])
++      expect(view[0]).toMatchObject({ type: "user", text: "summary-only body" })
++      expect(view[0]).not.toHaveProperty("summary")
++      expect(view[1]).toMatchObject({ type: "user", text: "attachment body", files })
++      expect(view[1]).not.toHaveProperty("summary")
++      expect(view[2] && encodeMessage(view[2])).toMatchObject({ type: "assistant", content })
++      // 只读省略不能持久删除summary；附件和Tool则必须已真实恢复，而非返回骨架。
++      const after = yield* db.select().from(SessionMessageTable).orderBy(asc(SessionMessageTable.seq)).all()
++      expect(after.map(row => row.cold_ref)).toEqual([before[0]?.cold_ref, null, null])
++      expect(after[0]?.cold_key).toEqual(before[0]?.cold_key)
++      expect(after[1]?.data).toMatchObject({ summary })
++      expect((yield* db.select().from(ColdStorageTable).all()).map(row => row.ref_count)).toEqual([1])
++      // 默认API仍返回完整摘要并释放最后引用；不能让viewer污染SDK/模型历史的后续读取。
++      const complete = yield* sessions.messages({ sessionID, order: "asc" })
++      expect(complete[0]).toMatchObject({ summary })
++      expect(complete[1]).toMatchObject({ files, summary })
++      expect(complete[2] && encodeMessage(complete[2])).toMatchObject({ content })
++      expect((yield* db.select().from(SessionMessageTable).all()).every(row => row.cold_ref === null)).toBe(true)
++      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
++    }),
++  )
++
+   previewIt.effect("persists request-owned tool diffs through the native completion event", () =>

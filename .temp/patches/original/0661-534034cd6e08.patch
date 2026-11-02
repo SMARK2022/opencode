@@ -1,0 +1,116 @@
+From 534034cd6e08fbe453f2002cdc91ab623a838c7e Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 16 Oct 2026 09:28:33 +0800
+Subject: [PATCH] =?UTF-8?q?fix(prompt):=20=E9=81=BF=E5=85=8D=20Git=20?=
+ =?UTF-8?q?=E4=B8=8E=E5=87=AD=E6=8D=AE=E9=99=90=E5=88=B6=E8=A6=86=E7=9B=96?=
+ =?UTF-8?q?=E7=94=A8=E6=88=B7=E6=98=8E=E7=A1=AE=E6=8E=88=E6=9D=83?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+在原有 Git 章节标题和五份模型凭据规则内限定显式授权例外，要求明确操作及目标或内容去向，保留 Auto forbidden 的直接拒绝。每个文件的改动词数均不超过 20。
+
+同步 Git 标题新增 100 字节的渲染基线，保持 R6 的 600 字节预算；Shell 与 system prompt 两组测试共 56 项通过。
+
+diff --git a/packages/opencode/src/session/prompt/deepseek.txt b/packages/opencode/src/session/prompt/deepseek.txt
+index b8db2b6fc261037a284c4ff1ffc52f73d58ac195..1f857040008ba96ae196453d2f5cdf89e01db0e7 100644
+--- a/packages/opencode/src/session/prompt/deepseek.txt
++++ b/packages/opencode/src/session/prompt/deepseek.txt
+@@ -51,7 +51,7 @@ When making changes to files, first understand the file's code conventions. Mimi
+ - NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).
+ - When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.
+ - When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.
+-- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
++- Unless the user explicitly directs that prohibited action, specifying content and destination: Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
+ 
+ # Code style
+ - IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked
+diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencode/src/session/prompt/default.txt
+index 6f67b79332e89ed5cbc4616d231c127fe5eeeccf..811c1d8809f7eaabeebbebec606dc0b206446abb 100644
+--- a/packages/opencode/src/session/prompt/default.txt
++++ b/packages/opencode/src/session/prompt/default.txt
+@@ -62,7 +62,7 @@ When making changes to files, first understand the file's code conventions. Mimi
+ - NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).
+ - When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.
+ - When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.
+-- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
++- Unless the user explicitly directs that prohibited action, specifying content and destination: Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
+ 
+ # Code style
+ - IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked
+diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode/src/session/prompt/gemini.txt
+index 4a044172aa4cd3474fcafddd2a34f17fedf2f59a..ee54c8fb58b1642c5c6449f032ff532c6ea22a4c 100644
+--- a/packages/opencode/src/session/prompt/gemini.txt
++++ b/packages/opencode/src/session/prompt/gemini.txt
+@@ -47,7 +47,7 @@ When requested to perform tasks like fixing bugs, adding features, refactoring,
+ 
+ ## Security and Safety Rules
+ - **Explain Critical Commands:** Before executing commands with 'bash' that modify the file system, codebase, or system state, you *must* provide a brief explanation of the command's purpose and potential impact. Prioritize user understanding and safety. You should not ask permission to use the tool; the user will be presented with a confirmation dialogue upon use (you do not need to tell them this).
+-- **Security First:** Always apply security best practices. Never introduce code that exposes, logs, or commits secrets, API keys, or other sensitive information.
++- **Security First:** Unless the user explicitly directs that prohibited action, specifying content and destination: Never introduce code that exposes, logs, or commits secrets, API keys, or other sensitive information.
+ 
+ ## Tool Usage
+ - **File Paths:** Always use absolute paths when referring to files with tools like 'read' or 'write'. Relative paths are not supported. You must provide an absolute path.
+diff --git a/packages/opencode/src/session/prompt/minimax.txt b/packages/opencode/src/session/prompt/minimax.txt
+index bcc9b295de7b4506f5c359d000c8d87914e2995b..c88a9cd6306acc9d943d7fc9a17977bcb9728fea 100644
+--- a/packages/opencode/src/session/prompt/minimax.txt
++++ b/packages/opencode/src/session/prompt/minimax.txt
+@@ -44,7 +44,7 @@ When making changes to files, first understand the file's code conventions. Mimi
+ - NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).
+ - When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.
+ - When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.
+-- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
++- Unless the user explicitly directs that prohibited action, specifying content and destination: Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
+ 
+ # Code style
+ - IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked
+diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencode/src/session/prompt/trinity.txt
+index 71a746791bc55d58afb6609f010d9da74ab70d78..a5fc3cad8753faf624b84555ec5976124815dc34 100644
+--- a/packages/opencode/src/session/prompt/trinity.txt
++++ b/packages/opencode/src/session/prompt/trinity.txt
+@@ -64,7 +64,7 @@ When making changes to files, first understand the file's code conventions. Mimi
+ - NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).
+ - When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.
+ - When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.
+-- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
++- Unless the user explicitly directs that prohibited action, specifying content and destination: Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
+ 
+ # Code style
+ - IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked
+diff --git a/packages/opencode/src/tool/shell/shell.txt b/packages/opencode/src/tool/shell/shell.txt
+index f386b716525102e0c152f465760b555a17b77713..3db28b35d6e19c6834761b1369a6177b86360a3b 100644
+--- a/packages/opencode/src/tool/shell/shell.txt
++++ b/packages/opencode/src/tool/shell/shell.txt
+@@ -16,7 +16,7 @@ Read-only git inspection commands are allowed when needed, such as `git status`,
+ 
+ Do not run git commands that modify refs, history, the index, the working tree, stashes, or remotes unless a verbatim user message has requested that kind of operation for the current task; that authorization remains valid unless the last user message withdraws it. This includes `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git revert`, `git pull`, `git push`, `git checkout`, `git switch`, `git restore`, `git reset`, `git clean`, and `git stash push/pop/apply/drop/clear`. Debugging, fixing tests, syncing a branch, resolving a blocker, or "make it work" is not authorization for these commands. If such an operation seems necessary, explain why and ask first.
+ 
+-# Committing changes with git
++# Committing changes with git (risk safeguards yield only to explicit user directives identifying prohibited actions and targets)
+ 
+ Only create commits when requested by the user. If unclear, ask first.
+ 
+diff --git a/packages/opencode/test/tool/shell-prompt.test.ts b/packages/opencode/test/tool/shell-prompt.test.ts
+index c545dc47b8b31d9609785b62689858d66671ac5a..bac25976ce3e8717bfdda545717105d909b80829 100644
+--- a/packages/opencode/test/tool/shell-prompt.test.ts
++++ b/packages/opencode/test/tool/shell-prompt.test.ts
+@@ -112,13 +112,13 @@ for (const name of ["pwsh", "powershell", "cmd", "bash", "zsh", "sh", "dash", "k
+   }
+ }
+ 
+-// 数字来自修改前冻结的 render(1000,16384)，不从当前实现重新生成预期。
++// 冻结基线仅增加Git标题的100字节，R6预算不变。
+ for (const [name, lines, bytes] of [
+-  ["pwsh", 109, 8547],
+-  ["powershell", 109, 8421],
+-  ["cmd", 106, 7713],
+-  ["bash", 100, 7754],
+-  ["zsh", 100, 7753],
++  ["pwsh", 109, 8647],
++  ["powershell", 109, 8521],
++  ["cmd", 106, 7813],
++  ["bash", 100, 7854],
++  ["zsh", 100, 7853],
+ ] as const) {
+   for (const platform of ["win32", "linux"] as const) {
+     test(`render and command description stay within R6 budget: ${platform}/${name}`, () => {

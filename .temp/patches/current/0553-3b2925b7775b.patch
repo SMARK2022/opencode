@@ -1196,6 +1196,115 @@ index 0000000000000000000000000000000000000000..6914e04f384a6d9d1da0cffe71cb8610
 +- run tombstone 与 Compaction partial-hidden 测试未经完整 producer seam；对应生产行为已由其他用例覆盖。
 +- 中文注释统计口径差异（1 行）。
 
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -6,1 +6,1 @@
+-import { and, asc, desc, eq, gt, gte, like, lt, or, type SQL } from "drizzle-orm"
++import { and, asc, desc, eq, gt, gte, like, lt, or, sql, type SQL } from "drizzle-orm"
+@@ -209,2 +209,8 @@
+     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
+     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
++    // 与Native Hidden的reason/time合同一致；可见性在limit和冷恢复之前判定，不影响内部raw读取。
++    const visibleMessage = sql`not coalesce(
++      json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
++      and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
++      and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0, 0
++    )`
+@@ -391,4 +396,3 @@
+-        const where = boundary
+-          ? and(eq(SessionMessageTable.session_id, input.sessionID), boundary)
+-          : eq(SessionMessageTable.session_id, input.sessionID)
++        // 隐藏行不占公开页容量，cursor仍按原durable seq定位且不预热边界外记录。
++        const where = and(eq(SessionMessageTable.session_id, input.sessionID), boundary, visibleMessage)
+         const query = db
+@@ -406,4 +410,7 @@
+       message: Effect.fn("V2Session.message")(function* (input) {
+-        const stored = yield* store.message(input.messageID, input.sessionID)
+-        return stored?.sessionID === input.sessionID ? stored.message : undefined
++        // 定点公开读取沿原undefined/not-found合同；不能先调用raw Store把隐藏cold消息解包。
++        const row = yield* db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.session_id, input.sessionID), eq(SessionMessageTable.id, input.messageID), visibleMessage)).get().pipe(Effect.orDie)
++        if (!row) return undefined
++        const restored = (yield* ColdStorage.readSessionMessageRows(db, [row]))[0]!
++        return yield* decode(restored).pipe(Effect.orDie)
+       }),
+diff --git a/packages/core/test/session-history.test.ts b/packages/core/test/session-history.test.ts
+--- a/packages/core/test/session-history.test.ts
++++ b/packages/core/test/session-history.test.ts
+@@ -1,3 +1,4 @@
+ import { describe, expect } from "bun:test"
+-import { Effect, Layer, Schema } from "effect"
++import { DateTime, Effect, Layer, Schema } from "effect"
++import { asc, eq } from "drizzle-orm"
+ import { Database } from "@opencode-ai/core/database/database"
+@@ -14,3 +15,5 @@
+ import { SessionStore } from "@opencode-ai/core/session/store"
+-import { SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { SessionEvent } from "@opencode-ai/core/session/event"
++import { SessionMessage } from "@opencode-ai/core/session/message"
+ import { testEffect } from "./lib/effect"
+@@ -157,1 +160,32 @@
++  it.effect("keeps hidden Native messages out of public pages and point reads while retaining raw history", () =>
++    Effect.gen(function* () {
++      const db = (yield* Database.Service).db
++      const session = yield* SessionV2.Service
++      const store = yield* SessionStore.Service
++      const events = yield* EventV2.Service
++      const created = yield* session.create({ location })
++      const ids = Array.from({ length: 4 }, () => SessionMessage.ID.create())
++      for (const [index, id] of ids.entries())
++        yield* events.publish(SessionEvent.Synthetic, {
++          sessionID: created.id, messageID: id, timestamp: DateTime.makeUnsafe(index), text: `visible-${index}`,
++          ...(index === 2 ? { metadata: { hidden: { time: 0, reason: "unrelated" } } } : {}),
++        })
++      // 仅合法Native tombstone隐藏记录；其他metadata不误判，隐藏行不占正反向分页容量。
++      yield* events.publish(SessionEvent.MessagesHidden, {
++        sessionID: created.id, messageIDs: [ids[1], ids[3]], timestamp: DateTime.makeUnsafe(4),
++        hidden: { time: 4, reason: "permission-reviewer-protocol-retry" },
++      })
++      const before = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
++      expect((yield* session.messages({ sessionID: created.id, limit: 1 })).map(message => message.id)).toEqual([ids[2]])
++      expect((yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[2], direction: "next" } })).map(message => message.id)).toEqual([ids[0]])
++      expect((yield* session.messages({ sessionID: created.id, limit: 1, cursor: { id: ids[0], direction: "previous" } })).map(message => message.id)).toEqual([ids[2]])
++      expect((yield* session.messages({ sessionID: created.id, order: "asc", limit: 2 })).map(message => message.id)).toEqual([ids[0], ids[2]])
++      expect(yield* session.message({ sessionID: created.id, messageID: ids[3] })).toBeUndefined()
++      expect(yield* session.message({ sessionID: created.id, messageID: ids[2] })).toMatchObject({ id: ids[2] })
++      // raw Store仍服务审计/结构恢复；公开读取既不删除记录，也不重写元数据。
++      expect((yield* store.message(ids[3], created.id))?.message).toMatchObject({ id: ids[3], metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
++      expect(yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)).toEqual(before)
++    }),
++  )
++
+   it.effect("fails with NotFoundError for a missing Session", () =>
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -125,3 +125,12 @@
+     function handleEvent(event: V2Event) {
+       switch (event.type) {
++        case "session.next.messages.hidden": {
++          // 队列先提交前序delta；隐藏事件按ID删除当前缓存，后续delta找不到消息就不能复活它。
++          const hidden = new Set(event.data.messageIDs)
++          message.update(event.data.sessionID, (draft) => {
++            for (let index = draft.length - 1; index >= 0; index--)
++              if (hidden.has(draft[index].id)) draft.splice(index, 1)
++          })
++          break
++        }
+         case "catalog.updated":
+diff --git a/packages/tui/test/context/data-deltas.test.ts b/packages/tui/test/context/data-deltas.test.ts
+--- a/packages/tui/test/context/data-deltas.test.ts
++++ b/packages/tui/test/context/data-deltas.test.ts
+@@ -44,1 +44,8 @@
+     expect(received).toMatchObject([{ id: "fragment" }, { id: "end", data: { text: "a" } }])
++    const hidden = { id: "hidden", type: "session.next.messages.hidden", location: { directory: "/test" }, data: { sessionID: "session", timestamp: 0, messageIDs: ["message"], hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } } satisfies V2Event
++    scope.queue.push(delta("before-hide", "b"))
++    scope.queue.push(hidden)
++    // tombstone也是顺序屏障，隐藏前的缓存片段不能拖到删除之后才提交。
++    expect(received.map(event => event.id)).toEqual(["fragment", "end", "before-hide", "hidden"])
++    scope.queue.flush()
++    expect(received).toHaveLength(4)
 diff --git a/packages/opencode/src/cli/cmd/run.ts b/packages/opencode/src/cli/cmd/run.ts
 --- a/packages/opencode/src/cli/cmd/run.ts
 +++ b/packages/opencode/src/cli/cmd/run.ts

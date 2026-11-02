@@ -4,17 +4,19 @@ Date: Tue, 5 May 2026 16:04:10 +0800
 Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0VS=20Code?=
  =?UTF-8?q?=E6=A1=A5=E6=8E=A5=E5=8A=9F=E8=83=BD=EF=BC=8C=E6=94=AF=E6=8C=81?=
 
-diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
+diff --git a/packages/core/src/ide/vscode-bridge.ts b/packages/core/src/ide/vscode-bridge.ts
 new file mode 100644
 index 0000000000..76508e1915
 --- /dev/null
-+++ b/packages/opencode/src/ide/vscode-bridge.ts
-@@ -0,0 +1,495 @@
++++ b/packages/core/src/ide/vscode-bridge.ts
+@@ -0,0 +1,499 @@
++export * as VscodeBridge from "./vscode-bridge"
++
 +import fs from "fs/promises"
 +import os from "os"
 +import path from "path"
 +import { fileURLToPath } from "url"
-+import { Global } from "@opencode-ai/core/global"
++import { Global } from "../global"
 +
 +// 健康检查超时 2 秒（500ms→2000ms：兼容高延迟网络）：平衡响应速度和误判风险
 +// 健康检查超时：过短会在慢机上误杀存活桥接
@@ -389,6 +391,8 @@ index 0000000000..76508e1915
 +  timeoutMs = DEFAULT_HEALTH_TIMEOUT,
 +  signal?: AbortSignal,
 +) {
++  // 请求可能在排队时已取消，先检查再安装监听，避免迟到发送执行或编辑请求。
++  signal?.throwIfAborted()
 +  const controller = new AbortController()
 +  const timer = setTimeout(() => controller.abort(), timeoutMs)
 +  const abort = () => controller.abort()
@@ -505,6 +509,329 @@ index 0000000000..76508e1915
 +export function defaultRegistryDirForTests(home = os.homedir()) {
 +  return path.join(process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state"), "opencode", "ide")
 +}
+diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/ide/vscode-bridge.ts
+@@ -0,0 +1,2 @@
++// 两代共用发现、队列与取消状态，保留旧插件路径而不建立第二个客户端。
++export * from "@opencode-ai/core/ide/vscode-bridge"
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/notebook.ts
+@@ -0,0 +1,101 @@
++export * as NotebookTools from "./notebook"
++
++import { ToolFailure } from "@opencode-ai/llm"
++import { Effect, Layer, Schema } from "effect"
++import { makeLocationNode } from "../effect/app-node"
++import { VscodeBridge } from "../ide/vscode-bridge"
++import { Location } from "../location"
++import { PermissionV2 } from "../permission"
++import { PositiveInt } from "../schema"
++import { ToolRegistry } from "./registry"
++import { Tool } from "./tool"
++import { Tools } from "./tools"
++import { VscodeNotebookDescriptions } from "./notebook-descriptions"
++
++const filePath = Schema.String.annotate({
++  description: "Absolute notebook path or file URI. Required; the bridge never infers a notebook from VS Code focus or open documents.",
++})
++const cellId = Schema.String.annotate({
++  description: "Stable notebook cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Prefer this over display indexes.",
++})
++
++export const SummaryInput = Schema.Struct({ filePath })
++export const SourceInput = Schema.Struct({
++  filePath,
++  cellId: cellId.pipe(Schema.optional),
++  // 不给可选分页填值，单格起点与默认400行仍由原生source owner解释。
++  offset: PositiveInt.annotate({ description: "1-based global virtual source line offset. With cellId, omit this to start at that cell's first global line." }).pipe(Schema.optional),
++  limit: PositiveInt.check(Schema.isLessThanOrEqualTo(1000)).annotate({ description: "Maximum rendered source lines to return, capped at 1000." }).pipe(Schema.optional),
++})
++export const RunInput = Schema.Struct({
++  filePath,
++  // endCellId才决定范围，不能在CLI把可选type改成另一套目标选择逻辑。
++  type: Schema.Literals(["cell", "range"]).annotate({ description: "Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell." }).pipe(Schema.optional),
++  cellId: cellId.annotate({ description: "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx." }),
++  endCellId: cellId.annotate({ description: "Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive." }).pipe(Schema.optional),
++  timeoutMs: PositiveInt.check(Schema.isLessThanOrEqualTo(600_000)).annotate({ description: "Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000." }).pipe(Schema.optional),
++})
++export const OutputInput = Schema.Struct({ filePath, cellId: cellId.pipe(Schema.optional) })
++export const EditInput = Schema.Struct({
++  filePath,
++  cellId: cellId.annotate({ description: "Target cell ID. Use #VSC-xxxxxxxx from vscode_notebook_summary. For editType=insert, use TOP, BOTTOM, or a #VSC cell ID to insert after that cell." }),
++  editType: Schema.Literals(["insert", "edit", "delete"]).annotate({ description: "Notebook edit kind: insert a new cell, edit an existing cell, or delete the target cell." }),
++  // 缺省源码与显式空串不同；语言变更不能被CLI悄悄转换成清空单元格。
++  oldCode: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({ description: "Existing source fragment to replace inside the target cell. It must identify one unique match; include enough surrounding lines from vscode_notebook_source." }).pipe(Schema.optional),
++  newCode: Schema.Union([Schema.String, Schema.Array(Schema.String)]).annotate({ description: "New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content." }).pipe(Schema.optional),
++  language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source." }).pipe(Schema.optional),
++})
++export const EnvInput = SummaryInput
++
++// 原生data中的格、运行时、MIME与artifact保留未知嵌套字段，不让较窄投影丢掉模型结果。
++export const Output = Schema.Struct({
++  ran: Schema.Boolean,
++  summary: Schema.String,
++  data: Schema.Record(Schema.String, Schema.Unknown),
++  note: Schema.String.pipe(Schema.optional),
++})
++
++const layer = Layer.effectDiscard(Effect.gen(function* () {
++  const tools = yield* Tools.Service
++  const permission = yield* PermissionV2.Service
++  const location = yield* Location.Service
++  // 只转发同一客户端；不加载SDK模块、创建宿主或自行解释执行结果。
++  const call = (endpoint: string, args: Record<string, unknown> & { readonly filePath: string }, context: Tool.Context, timeoutMs: number) =>
++    Effect.tryPromise({
++      try: signal => VscodeBridge.callBridge({ cwd: location.directory, path: endpoint, body: args, filePath: args.filePath, signal, timeoutMs }),
++      catch: error => new ToolFailure({ message: error instanceof Error ? error.message : "VS Code bridge request failed", error }),
++    }).pipe(Effect.flatMap(value => Schema.decodeUnknownEffect(Output)(value).pipe(
++      Effect.mapError(error => new ToolFailure({ message: `Invalid VS Code bridge response: ${error.message}`, error })),
++    )))
++  // 审批仍在RPC之前，来源只取canonical调用身份，不借用活动编辑器或旧会话身份。
++  const ask = (action: string, args: { readonly filePath: string }, context: Tool.Context) => permission.assert({
++    action, resources: [args.filePath], save: [args.filePath], metadata: { args },
++    sessionID: context.sessionID, agent: context.agent,
++    source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
++  }).pipe(Effect.mapError(error => new ToolFailure({ message: `Permission denied: ${action}`, error })))
++  // 模型继续接收原生summary正文，完整响应同时经统一settlement保存在structured。
++  const common = { output: Output, toModelOutput: ({ output }: { output: typeof Output.Encoded }) => [{ type: "text" as const, text: output.summary }] }
++  yield* tools.register({
++    vscode_notebook_summary: Tool.make({ ...common, description: VscodeNotebookDescriptions.summary, input: SummaryInput,
++      execute: (args, context) => call("/notebook/summary", args, context, 10_000) }),
++    vscode_notebook_source: Tool.make({ ...common, description: VscodeNotebookDescriptions.source, input: SourceInput,
++      execute: (args, context) => call("/notebook/source", args, context, 10_000) }),
++    vscode_notebook_run: Tool.make({ ...common, description: VscodeNotebookDescriptions.run, input: RunInput,
++      execute: (args, context) => ask("vscode_notebook_run", args, context).pipe(
++        // 只补source规定的run默认，HTTP窗口保留每格期限外的五秒传输余量。
++        Effect.andThen(call("/notebook/run", { ...args, timeoutMs: args.timeoutMs ?? 300_000 }, context, (args.timeoutMs ?? 300_000) + 5_000)),
++      ) }),
++    vscode_notebook_output: Tool.make({ ...common, description: VscodeNotebookDescriptions.output, input: OutputInput,
++      execute: (args, context) => call("/notebook/output", args, context, 30_000) }),
++    vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common, description: VscodeNotebookDescriptions.edit, input: EditInput,
++      execute: (args, context) => ask("edit", args, context).pipe(Effect.andThen(call("/notebook/edit", args, context, 30_000))) }), "edit"),
++    vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
++      execute: (args, context) => call("/notebook/env", args, context, 10_000) }),
++  }).pipe(Effect.orDie)
++}))
++
++export const node = makeLocationNode({
++  name: "tool/notebook",
++  layer,
++  deps: [ToolRegistry.node, PermissionV2.node, Location.node],
++})
+diff --git a/packages/core/src/tool/builtins.ts b/packages/core/src/tool/builtins.ts
+--- a/packages/core/src/tool/builtins.ts
++++ b/packages/core/src/tool/builtins.ts
+@@ -8,7 +8,8 @@
+ import { GlobTool } from "./glob"
+ import { GrepTool } from "./grep"
++import { NotebookTools } from "./notebook"
+ import { QuestionTool } from "./question"
+ import { ReadTool } from "./read"
+ import { SkillTool } from "./skill"
+ import { TodoWriteTool } from "./todowrite"
+ import { TaskTool } from "./task"
+@@ -38,7 +39,8 @@
+     EditTool.node,
+     GlobTool.node,
+     GrepTool.node,
++    NotebookTools.node,
+     QuestionTool.node,
+     ReadTool.node,
+     SkillTool.node,
+     TodoWriteTool.node,
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -0,0 +1,153 @@
++import fs from "fs/promises"
++import path from "path"
++import { pathToFileURL } from "url"
++import { expect } from "bun:test"
++import { Effect, Fiber, Layer } from "effect"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { Location } from "@opencode-ai/core/location"
++import { PermissionV2 } from "@opencode-ai/core/permission"
++import { AbsolutePath } from "@opencode-ai/core/schema"
++import { SessionV2 } from "@opencode-ai/core/session"
++import { NotebookTools } from "@opencode-ai/core/tool/notebook"
++import { ToolRegistry } from "@opencode-ai/core/tool/registry"
++import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
++import { tmpdir } from "./fixture/tmpdir"
++import { location } from "./fixture/location"
++import { testEffect } from "./lib/effect"
++import { settleTool, toolDefinitions, toolIdentity } from "./lib/tool"
++
++const it = testEffect(Layer.empty)
++
++it.live("registers six Notebook tools through the real bridge and preserves native results", () => Effect.gen(function* () {
++  const tmp = yield* Effect.acquireRelease(
++    Effect.promise(() => tmpdir()),
++    tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++  )
++  // 真实文件只参与客户端stat与workspace选择，不导入原生处理器或启动内核。
++  const filePath = path.join(tmp.path, "fixture.ipynb")
++  yield* Effect.promise(() => fs.writeFile(filePath, '{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}'))
++  const names = ["OPENCODE_IDE_REGISTRY_DIR", "OPENCODE_VSCODE_BRIDGE_PORT", "OPENCODE_VSCODE_BRIDGE_TOKEN", "OPENCODE_VSCODE_BRIDGE_HOST"] as const
++  const before = Object.fromEntries(names.map(name => [name, process.env[name]] as const))
++  // 只切换本测试进程的发现输入，退出恢复，不能让别的用例继承假编辑器端口。
++  yield* Effect.addFinalizer(() => Effect.sync(() => names.forEach(name => {
++    const value = before[name]
++    if (value === undefined) delete process.env[name]
++    else process.env[name] = value
++  })))
++  // 强制走临时registry，父进程已有的VS Code凭证不能成为测试的第二数据源。
++  names.forEach(name => { delete process.env[name] })
++  const directory = path.join(tmp.path, "registry")
++  yield* Effect.promise(() => fs.mkdir(directory))
++  process.env.OPENCODE_IDE_REGISTRY_DIR = directory
++  const received: Array<{ path: string; method: string; auth: string | null; body: unknown }> = []
++  const permissions: PermissionV2.AssertInput[] = []
++  const started = Promise.withResolvers<void>()
++  const release = Promise.withResolvers<void>()
++  const queued = Promise.withResolvers<void>()
++  // 原生响应保留nested数据，不能只断言被summaryOnly压平后的短文本。
++  const responses: Record<string, typeof NotebookTools.Output.Type> = {
++    "/notebook/summary": { ran: false, summary: "summary", data: { path: filePath, dirty: false, cells: [{ i: 1, id: "#VSC-a", kind: "code" }], runtime: null } },
++    "/notebook/source": { ran: false, summary: "source", data: { path: filePath, target: "cell", cellId: "#VSC-a", globalStart: 3, limit: 20, returned: 2, totalLines: 12, truncated: false } },
++    // completed、原生状态和artifact各自保留，不能从summary推断执行成功。
++    "/notebook/run": { ran: true, summary: "run", data: { completed: true, cells: [{ id: "#VSC-a", execution: { status: "succeeded", provenance: "current" }, artifacts: [{ mime: "image/png", bytes: 12, artifactURI: "vscode-remote://fixture/plot.png" }] }] } },
++    "/notebook/output": { ran: false, summary: "output", data: { artifacts: [{ mime: "application/json", bytes: 7, text: '{"x":1}', artifactPath: path.join(tmp.path, "output.json") }] } },
++    "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0 } },
++    "/notebook/env": { ran: false, summary: "env", data: { runtime: { path: "fixture-python", version: "3" }, saved_metadata: { language_info: { name: "python" } } }, note: "saved metadata kept separate" },
++  }
++  // 唯一监听只绑定回环随机端口；release也进入最终清理，失败断言不会留下等待请求。
++  const server = yield* Effect.acquireRelease(
++    Effect.sync(() => Bun.serve({
++      hostname: "127.0.0.1", port: 0,
++      async fetch(request) {
++        const endpoint = new URL(request.url).pathname
++        if (endpoint === "/health") return Response.json({ ok: true })
++        if (!responses[endpoint]) return new Response("Not found", { status: 404 })
++        // 保存真正收到的body/header，期望不从Schema或当前返回值反算。
++        received.push({ path: endpoint, method: request.method, auth: request.headers.get("authorization"), body: await request.json() })
++        if (endpoint === "/notebook/run") { started.resolve(); await release.promise }
++        return Response.json(responses[endpoint])
++      },
++    })),
++    server => Effect.promise(async () => { release.resolve(); await server.stop(true) }),
++  )
++  yield* Effect.promise(() => fs.writeFile(path.join(directory, "fixture.json"), JSON.stringify({
++    schema: 1, id: "fixture", pid: process.pid, host: "127.0.0.1", port: server.port, token: "fixture-token",
++    transport: "http", ideKind: "vscode", ideName: "fixture", createdAt: Date.now(), updatedAt: Date.now(),
++    workspaceFolders: [{ name: "fixture", fsPath: tmp.path, uri: pathToFileURL(tmp.path).href }],
++  })))
++  // 真实canonical registry与fetch均执行，只替换审批交互和Location输入。
++  yield* Effect.gen(function* () {
++    const registry = yield* ToolRegistry.Service
++    let calls = 0
++    const invoke = (name: string, input: Record<string, unknown>) => settleTool(registry, {
++      sessionID: SessionV2.ID.make("ses_notebook_fixture"), ...toolIdentity,
++      call: { type: "tool-call", id: `call-${++calls}`, name, input },
++    })
++    // 必须实际注册六个名字，通用edit禁令还要过滤Notebook别名。
++    const definitions = yield* toolDefinitions(registry)
++    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
++    expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("endCellId is the actual range signal")
++    expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")
++    // 参数解码发生在RPC/审批之前，不用后端接收坏分页后再伪造错误。
++    expect((yield* invoke("vscode_notebook_source", { filePath, limit: 1001 })).result.type).toBe("error")
++    expect(received).toEqual([])
++    expect(permissions).toEqual([])
++    // 文本和structured分别比较，避免仅名称可用却遗失原生格或artifact信息。
++    for (const [name, input, endpoint] of [
++      ["vscode_notebook_summary", { filePath }, "/notebook/summary"],
++      ["vscode_notebook_source", { filePath, cellId: "#VSC-a", offset: 3, limit: 20 }, "/notebook/source"],
++    ] as const) {
++      const result = yield* invoke(name, input)
++      expect(result.result.type).toBe("text")
++      expect(result.output?.structured).toEqual(responses[endpoint])
++      expect(result.output?.content).toEqual([{ type: "text", text: responses[endpoint]?.summary }])
++    }
++    let completed = false
++    // 运行必须等待真实HTTP结果，不能提前返回队列接收即当执行完成。
++    const running = yield* invoke("vscode_notebook_run", { filePath, cellId: "#VSC-a", endCellId: "#VSC-b" }).pipe(
++      Effect.tap(() => Effect.sync(() => { completed = true })), Effect.forkChild,
++    )
++    yield* Effect.promise(() => started.promise)
++    expect(completed).toBe(false)
++    // 排队的编辑取消后不能在前一个run释放时迟到写入。
++    const cancelled = yield* invoke("vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: "never" }).pipe(Effect.forkChild)
++    yield* Effect.promise(() => queued.promise)
++    yield* Fiber.interrupt(cancelled)
++    release.resolve()
++    const run = yield* Fiber.join(running)
++    expect(completed).toBe(true)
++    expect(run.output?.structured).toEqual(responses["/notebook/run"])
++    expect(run.output?.content).toEqual([{ type: "text", text: "run" }])
++    // 后续env推进同一队列，迟到的取消编辑不能躲过最终六次RPC的完整比较。
++    for (const [name, input, endpoint] of [
++      ["vscode_notebook_output", { filePath, cellId: "#VSC-a" }, "/notebook/output"],
++      ["vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, "/notebook/edit"],
++      ["vscode_notebook_env", { filePath }, "/notebook/env"],
++    ] as const) {
++      const result = yield* invoke(name, input)
++      expect(result.result.type).toBe("text")
++      expect(result.output?.structured).toEqual(responses[endpoint])
++      expect(result.output?.content).toEqual([{ type: "text", text: responses[endpoint]?.summary }])
++    }
++    // 鉴权、方法和端点均检查实际请求，不能用mock客户端绕过发现与序列化。
++    expect(received.map(item => ({ path: item.path, method: item.method, auth: item.auth }))).toEqual(
++      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
++    )
++    // 仅run补source规定的期限；未传oldCode/language等字段不能变为空值。
++    expect(received.map(item => item.body)).toEqual([
++      { filePath }, { filePath, cellId: "#VSC-a", offset: 3, limit: 20 }, { filePath, cellId: "#VSC-a", endCellId: "#VSC-b", timeoutMs: 300_000 },
++      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath },
++    ])
++    // 审批来自各自真实调用ID；被取消编辑不丢失已发生的审批事实。
++    expect(permissions).toMatchObject([
++      { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-4" } },
++      { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
++      { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
++    ])
++  }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
++    [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
++    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }) })],
++    [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
++  ])))
++}))
+diff --git a/packages/core/test/location-layer.test.ts b/packages/core/test/location-layer.test.ts
+--- a/packages/core/test/location-layer.test.ts
++++ b/packages/core/test/location-layer.test.ts
+@@ -115,7 +115,13 @@
+             "skill",
+             "task",
+             "todowrite",
++            "vscode_notebook_edit",
++            "vscode_notebook_env",
++            "vscode_notebook_output",
++            "vscode_notebook_run",
++            "vscode_notebook_source",
++            "vscode_notebook_summary",
+             "webfetch",
+             "websearch",
+             "write",
+           ])
+@@ -133,7 +139,13 @@
+             "skill",
+             "task",
+             "todowrite",
++            "vscode_notebook_edit",
++            "vscode_notebook_env",
++            "vscode_notebook_output",
++            "vscode_notebook_run",
++            "vscode_notebook_source",
++            "vscode_notebook_summary",
+             "webfetch",
+             "websearch",
+             "write",
+           ])
 diff --git a/packages/opencode/src/plugin/index.ts b/packages/opencode/src/plugin/index.ts
 index 8eec73edab..aefe54a4f1 100644
 --- a/packages/opencode/src/plugin/index.ts
@@ -528,11 +855,11 @@ index 8eec73edab..aefe54a4f1 100644
      SnowflakeCortexAuthPlugin,
      XaiAuthPlugin,
      CerebrasPlugin,
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
 new file mode 100644
 index 0000000000..62df37ba73
 --- /dev/null
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
 @@ -0,0 +1,49 @@
 +// 工具描述与参数 schema：对齐 VS Code notebook 桥接端点契约
 +// 工具描述常量：6 个 notebook 工具的用户可见描述，用于 opencode 的工具注册和 UI 展示
@@ -583,6 +910,13 @@ index 0000000000..62df37ba73
 +    "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
 +  ].join("\n"),
 +}
+diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+@@ -0,0 +1,2 @@
++// 描述与Core默认工具共享，旧插件接口不维护第二份模型正文。
++export { VscodeNotebookDescriptions } from "@opencode-ai/core/tool/notebook-descriptions"
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
 new file mode 100644
 index 0000000000..78f07dbf56

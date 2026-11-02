@@ -382,13 +382,19 @@ new file mode 100644
 diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
 --- a/packages/core/src/permission/reviewer/prompt.ts
 +++ b/packages/core/src/permission/reviewer/prompt.ts
-@@ -28,6 +28,7 @@
--// 流式审查提供决策工具；原生generateObject仍接收JSON契约，两者共享同一决策结构。
-+// 两种原生协议共用judge职责，证据不足也要给结构化裁决，不能漂移为执行承诺或向人追问。
-+// 保留JSON/tool分流，原生generate_object不能被提示调用仅V1提供的决策工具。
+@@ -24,11 +24,12 @@
+ // #198：默认租户策略从 policy.md 导入——可在 config 中用 policy_path 或 policy 字段覆盖或追加
+ export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
+-export const PROTOCOL_RETRY_TEXT = "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown."
++// 两代重试共用source原话；裸JSON仍经过同一裁决Schema及策略校验。
++export const PROTOCOL_RETRY_TEXT = "Protocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {\"risk_level\",\"user_authorization\",\"outcome\",\"rationale\"} as your entire message."
+ 
+ // #206：输出合约增加 transcript 用途限定——仅用于推断用户意图、范围、授权和本地证据，不作为策略指令
+-// 两代均声明相同裁决工具；严格JSON仅为运行时兼容接受路径，提示仍坚持工具协议。
++// 两代共用judge职责，证据不足也须结构化裁决；保留上游JSON/tool契约入口。
  const OUTPUT_CONTRACT_PROMPT = (protocol: "json" | "tool") => `\
 -Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. ${protocol === "tool" ? "Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message." : "Your final message must be strict JSON."}
-+Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. You are the judge, not the executor: you are not being asked to run the action, hold a conversation, or answer questions; no human will reply. If you believe the evidence is insufficient, encode that in the decision itself (deny, or user_authorization "unknown", with rationale) instead of asking for clarification. ${protocol === "tool" ? "Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message." : "Your final message must be strict JSON."}
++Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. You are the judge, not the executor: you are not being asked to run the action, hold a conversation, or answer questions — no human will reply. If you believe the evidence is insufficient, encode that in the decision itself (deny, or user_authorization "unknown", with rationale) instead of asking for clarification. ${protocol === "tool" ? "Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message." : "Your final message must be strict JSON."}
  
  Use this ${protocol === "tool" ? "tool input" : "JSON"} schema for every decision, including low-risk allows:
  {
@@ -407,7 +413,7 @@ diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src
 +    // 尾指令紧跟planned action，重申裁判角色但不改变证据或扩张授权；JSON路径保留自己的协议。
 +    {
 +      type: "text",
-+      text: `Decide now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need; no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
++      text: `Decide now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
 +    },
    ]
  }
@@ -416,16 +422,15 @@ diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
-@@ -102,10 +102,8 @@ const MAX_REVIEWER_ATTEMPTS = 3
+@@ -103,10 +103,8 @@ const MAX_REVIEWER_ATTEMPTS = 3
  const PROTOCOL_RETRY_USER_ITEM = {
  // #227：协议 nudge 仅追加到 user items——重试时保持证据与请求上下文不变，只修复提交格式
    type: "text" as const,
 -  // The retry prompt deliberately asks only for the tool/function-call protocol.
 -  // JSON text fallback is a runtime compatibility layer, not behavior we should
 -  // advertise to the model after it already missed the preferred contract.
--  text: "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.",
 +  // 重试仍重建同一证据，nudge明确排除反问/执行承诺，保留source允许的严格JSON兼容入口。
-+  text: "Protocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {\"risk_level\",\"user_authorization\",\"outcome\",\"rationale\"} as your entire message.",
+   text: PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT,
  }
  const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
    mergeDeep(target, source ?? {}) as Record<string, any>
@@ -496,7 +501,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +    ) {
 +      const forced = !toolChoiceRejectedProviders.has(model.providerID)
 +      return runReviewerStream(messages, model, persist, forced).pipe(
-+        Effect.catchIf(isToolChoiceRejection, () => {
++        Effect.catchIf((error) => forced && isToolChoiceRejection(error), () => {
 +          toolChoiceRejectedProviders.add(model.providerID)
 +          return runReviewerStream(messages, model, persist, false)
 +        }),
@@ -804,94 +809,109 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
 --- a/packages/core/src/permission/reviewer.ts
 +++ b/packages/core/src/permission/reviewer.ts
-@@ -29,6 +29,8 @@
-   const client = yield* LLMClient.Service
-   const fs = yield* FileSystem.FileSystem
-   const location = yield* Location.Service
-+  // 原生路径保持named强制；明确参数拒绝才在同一层记忆provider，不引入V1子会话生命周期。
+@@ -4,1 +4,1 @@
+-import { LLM, LLMClient, LLMEvent, Tool } from "@opencode-ai/llm"
++import { LLM, LLMClient, LLMEvent, Tool, ToolChoice } from "@opencode-ai/llm"
+@@ -43,6 +43,8 @@
+   const db = (yield* Database.Service).db
+   const events = yield* EventV2.Service
+   const reviewerLocks = new Map<SessionSchema.ID, Semaphore.Semaphore>()
++  // 与V1相同的provider层内记忆；协商不另建请求身份或持久化能力探测结果。
 +  const toolChoiceRejectedProviders = new Set<string>()
    const review = Effect.fn("PermissionReviewer.review")(function* (input: PermissionAuto.ReviewInput) {
      const entries = yield* config.entries()
      const sessionID = input.sessionID
-@@ -75,12 +77,20 @@
--      }, request, input.precheck.reason)
-+      }, request, input.precheck.reason, "json")
-       const schema = Schema.toJsonSchemaDocument(PermissionReviewerSchema.Assessment)
-       // 只在reviewer解码边界接受source允许的文本裁决，通用generateObject契约保持严格。
-       const attempt = (index: number, nudged = false): Effect.Effect<PermissionReviewerSchema.Assessment, Failed | LLMError> => Effect.gen(function* () {
--        const response = yield* client.generate(LLM.request({
+@@ -118,6 +120,8 @@
+         let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
+         let textOutput = ""
+-        return yield* client.stream(LLM.request({
 +        const forced = !toolChoiceRejectedProviders.has(selected.model.provider)
 +        const request = LLM.request({
-           model: selected.model, system: PermissionReviewerPrompt.buildSystemPrompt(tenant),
++          toolChoice: forced ? ToolChoice.make("required") : undefined,
+           model: selected.model, prompt: attemptPrompt,
            // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
            ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
--          prompt: items.map((item) => item.text).join("\n\n") + (nudged ? "\n\nSubmit a valid decision using the generate_object tool. Keep the supplied evidence and requested action unchanged." : ""),
-+          prompt: items.map((item) => item.text).join("\n\n") + (nudged ? "\n\nSubmit a valid decision using the generate_object tool. Avoid prose, questions, explanations of inability, and offers to execute the action. Keep the supplied evidence and requested action unchanged. If tool calls are unavailable, reply with ONLY the JSON decision object." : ""),
-           tools: [{ name: "generate_object", description: "Return the structured result by calling this tool.", inputSchema: { ...schema.schema, $defs: schema.definitions } }],
--          toolChoice: ToolChoice.named("generate_object"),
--        }))
-+          toolChoice: forced ? ToolChoice.named("generate_object") : undefined,
+@@ -127,7 +131,8 @@
+             description: "Submit the structured allow/deny decision for this permission review.",
+             parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
+           }) }),
+-        }), (body) => Effect.sync(() => {
 +        })
-+        // 使用原生typed HTTP上下文，只对400且正文明确提及tool_choice去参；不吞其他失败或中断。
-+        const response = yield* client.generate(request).pipe(
-+          Effect.catchIf((error) => forced && "http" in error.reason && error.reason.http?.response?.status === 400 && /tool[_ ]?choice/i.test(error.reason.http.body ?? ""), () => {
++        const onPrepared = (body: unknown) => Effect.sync(() => {
+           // 同一次compile的最终正文包含真正发出的工具；OAuth策略只归instructions，不重复归system正文。
+           inputEstimate = {
+             ...Token.estimateRequest(body, samples, selected.openaiOAuth ? [{ kind: "instructions", text: system }] : []),
+@@ -134,8 +139,15 @@
+             contextLimit: selected.model.defaults?.limits?.context ?? selected.model.route.defaults.limits?.context ?? 0,
+           }
+           // Started读取本尝试的估算；原有Ended仍独立确认真实用量与费用。
+-        })).pipe(
++        })
++        return yield* client.stream(request, onPrepared).pipe(
++          // typed400发生于事件交付之前；只在同次timeout和publisher内去参重发一次。
++          Stream.catch((error) => {
++            if (!forced || !("http" in error.reason) || error.reason.http?.response?.status !== 400 || !/tool[_ ]?choice/i.test(error.reason.http.body ?? "")) return Stream.fail(error)
 +            toolChoiceRejectedProviders.add(selected.model.provider)
-+            return client.generate(LLM.updateRequest(request, { toolChoice: undefined }))
++            return client.stream(LLM.updateRequest(request, { toolChoice: undefined }), onPrepared)
 +          }),
-+        )
+           Stream.runForEach((event) => Effect.gen(function* () {
+             if (event.type === "tool-error") return yield* protocolError
+             yield* publisher.publish(event)
+             if (event.type === "provider-error") return yield* new Failed({ reason: event.message })
 
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -18,3 +18,3 @@
--import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
-+import { HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMClient, LLMError, LLMEvent, LLMRequest, LLMResponse, Message, Model, ToolChoice } from "@opencode-ai/llm"
+@@ -17,3 +17,3 @@
+-import { LLMClient, LLMEvent, LLMRequest, Model } from "@opencode-ai/llm"
++import { HttpContext, HttpRequestDetails, HttpResponseDetails, InvalidRequestReason, LLMClient, LLMError, LLMEvent, LLMRequest, Model, ToolChoice } from "@opencode-ai/llm"
  import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
- import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
-@@ -42,7 +42,8 @@
- let reviewText: string | undefined
+ import { OpenAIResponses } from "@opencode-ai/llm/protocols/openai-responses"
+@@ -43,6 +43,7 @@
+ let reviewGate: Deferred.Deferred<void> | undefined
+ let reviewStarted: Deferred.Deferred<void> | undefined
  let malformed = false
 +let rejectedToolChoiceBody: string | undefined
- const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
-   prepare: () => Effect.die("unused"),
-   stream: () => { throw new Error("review must not start a Session stream") },
-   generate: (request) => Effect.gen(function* () {
-     reviewRequests.push(request)
-@@ -49,6 +50,13 @@
-     if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
-+    // 只在强制选择时产生typed400，不连真实provider；去参请求仍走同一个fake运输边界。
+ let reviewBeforeStream: Deferred.Deferred<void> | undefined
+ let reviewArrivals: Deferred.Deferred<void> | undefined
+ let reviewScript: Stream.Stream<LLMEvent>[] | undefined
+@@ -60,6 +61,13 @@
+     const prepared = yield* LLMClient.prepare(request)
+     reviewBodies.push(prepared.body)
+     if (onPrepared) yield* onPrepared(prepared.body)
++    // 只在强制选择时产生typed400；真实lowering和publisher继续执行，不连接provider。
 +    if (rejectedToolChoiceBody && request.toolChoice) return yield* new LLMError({
-+      module: "permission-reviewer-test", method: "generate", reason: new InvalidRequestReason({ message: "parameter rejected", http: new HttpContext({
++      module: "permission-reviewer-test", method: "stream", reason: new InvalidRequestReason({ message: "parameter rejected", http: new HttpContext({
 +        request: new HttpRequestDetails({ method: "POST", url: "https://review.test", headers: {} }),
 +        response: new HttpResponseDetails({ status: 400, headers: {} }), body: rejectedToolChoiceBody,
 +      }) }),
 +    })
-     if (reviewHangs > 0) {
-       reviewHangs--
-       yield* Effect.never.pipe(Effect.onInterrupt(() => Effect.sync(() => { reviewInterrupted++ })))
-     }
-     if (reviewGate) yield* Deferred.await(reviewGate)
-@@ -410,6 +418,9 @@
+     // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
+     if (reviewScript) {
+       const next = reviewScript.shift()
+@@ -548,6 +556,9 @@
+     const automatic = assertion({ agent: AgentV2.ID.make("auto"), action: "bash", resources: ["git add ."], metadata: { command: "git add ." } })
+     expect(yield* service.ask(automatic)).toMatchObject({ effect: "allow" })
      expect(reviewRequests).toHaveLength(1)
-+    expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.named("generate_object"))
++    expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.make("required"))
 +    expect(JSON.stringify(reviewRequests[0]?.system)).toContain("You are the judge")
-+    expect(JSON.stringify(reviewRequests[0]?.messages)).not.toContain("permission_review_decision")
++    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide now and submit exactly one permission_review_decision call.")
      expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
      expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
      expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
-     expect(progress[0]?.reviewID).toBeDefined()
-     expect(progress[0]?.reviewID).toBe(progress[1]?.reviewID)
-@@ -436,6 +447,25 @@
+@@ -688,7 +699,26 @@
+     reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer" }) })
      expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/openai"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
      expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
      expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
+     expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
 +    yield* Effect.addFinalizer(() => Effect.sync(() => { rejectedToolChoiceBody = undefined }))
 +    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-choice/reviewer" }) })
 +    rejectedToolChoiceBody = "Unsupported parameter: tool_choice"
 +    const negotiated = reviewRequests.length
 +    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/negotiated"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
 +    expect(reviewRequests).toHaveLength(negotiated + 2)
-+    expect(reviewRequests[negotiated]?.toolChoice).toEqual(ToolChoice.named("generate_object"))
++    expect(reviewRequests[negotiated]?.toolChoice).toEqual(ToolChoice.make("required"))
 +    expect(reviewRequests[negotiated + 1]?.toolChoice).toBeUndefined()
 +    expect(reviewRequests[negotiated + 1]?.messages).toEqual(reviewRequests[negotiated]?.messages)
 +    // 同provider后续直接去参；换provider后的无关400必须失败而不能学成兼容能力。
@@ -902,11 +922,17 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 +    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny", model: "reject-other/reviewer" }) })
 +    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/unrelated"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "deny" })
 +    expect(reviewRequests).toHaveLength(negotiated + 4)
-+    expect(reviewRequests.at(-1)?.toolChoice).toEqual(ToolChoice.named("generate_object"))
++    expect(reviewRequests.at(-1)?.toolChoice).toEqual(ToolChoice.make("required"))
 +    rejectedToolChoiceBody = undefined
-     reviewSettings = new Config.Info({ approvals_reviewer: "user" })
-     const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
-     expect(user.effect).toBe("ask")
+     reviewSettings = new Config.Info({})
+   }))
+@@ -951,5 +982,5 @@
+     expect(reviewRequests).toHaveLength(2)
+     const prompts = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"))
+-    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.`)
++    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {"risk_level","user_authorization","outcome","rationale"} as your entire message.`)
+     expect(hiddenIDs).toHaveLength(2)
+     const hidden = yield* Effect.forEach(hiddenIDs, (id) => sessions.message(id))
 
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts

@@ -16,6 +16,23 @@ dialog-goal.tsx 的 Resume 选项仅对 paused/blocked 显示，complete 状态
 累计用量（tokens_used/time_used_seconds）跨 resume 边界保留，budget
 持续追踪不重置。补充 complete → active 转换的回归测试。
 
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -773,7 +773,12 @@
+     expect(requests).toHaveLength(2)
+     expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("complete")
+ 
+-    yield* goals.set(sessionID, { status: "active" })
++    // 用户恢复同一已完成目标，停用期间的用量不计入，既有预算和账目不能重置。
++    const completed = Option.getOrThrow(yield* goals.get(sessionID))
++    yield* goals.accountUsage(sessionID, 999, 99)
++    expect(yield* goals.set(sessionID, { status: "active" })).toMatchObject({ id: completed.id,
++      tokensUsed: completed.tokensUsed, timeUsedSeconds: completed.timeUsedSeconds,
++      tokenBudget: completed.tokenBudget, time: { created: completed.time.created } })
+     responses = undefined
+     response = []
+     requests.length = 0
 diff --git a/packages/tui/src/component/dialog-goal.tsx b/packages/tui/src/component/dialog-goal.tsx
 index f310e02ce27cf90be4244fbd7e27b8cbfdf1c709..da92fd216ccec0669c76b22ad2bffaa9bba0be10 100644
 --- a/packages/tui/src/component/dialog-goal.tsx

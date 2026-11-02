@@ -29,8 +29,8 @@ diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src
 @@ -73,4 +77,4 @@
      {
        type: "text",
--      text: `Decide now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need; no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
-+      text: `Decide efficiently now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need; no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
+-      text: `Decide now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
++      text: `Decide efficiently now and submit exactly one ${protocol === "tool" ? "permission_review_decision call" : "JSON decision"}. You are the judge, not the executor: do not run the action, do not ask questions, and do not explain what you would need — no human will reply. Treat insufficient evidence as itself a decision: deny, or set user_authorization to "unknown", with rationale.`,
      },
 diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
 --- a/packages/opencode/test/permission/reviewer-prompt.test.ts
@@ -52,3 +52,12 @@ diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/package
 +    expect(last).toContain("Decide efficiently now")
      expect(last).toContain("insufficient evidence")
      expect(last).toContain("do not ask questions")
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -559,4 +559,4 @@
+     expect(reviewRequests[0]?.toolChoice).toEqual(ToolChoice.make("required"))
+     expect(JSON.stringify(reviewRequests[0]?.system)).toContain("You are the judge")
+-    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide now and submit exactly one permission_review_decision call.")
++    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("Decide efficiently now and submit exactly one permission_review_decision call.")
+     expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })

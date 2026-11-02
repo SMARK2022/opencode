@@ -224,7 +224,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +          Effect.andThen(() => Effect.forEach([
 +            { command: "ssh example.com cat /etc/os-release", warning: false },
 +            { command: "wsl --exec cat /mnt/rescue/data.txt", warning: false },
-+            { command: `wsl --exec cat /mnt/rescue/data.txt & type "${target}"`, warning: true },
++            { command: `wsl --exec cat /mnt/rescue/data.txt & type "${outside.path}"`, warning: true },
 +          ], (item) => Effect.gen(function* () {
 +            reset()
 +            // 原始命令仍完整授权；仅路径提示排除客体片段。

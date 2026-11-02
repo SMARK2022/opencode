@@ -83,9 +83,10 @@ diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.
 diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
 --- a/packages/core/test/agent.test.ts
 +++ b/packages/core/test/agent.test.ts
-@@ -146,8 +146,8 @@
+@@ -146,9 +146,9 @@
          expect(item).toMatchObject({ id, mode: "primary", hidden: false })
          expect(item.system).toBe((yield* agent.resolve("build"))?.system)
+         expect(item.system).toBeUndefined()
          expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
 -        // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
 -        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe("allow")
@@ -94,6 +95,30 @@ diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
          expect(PermissionV2.evaluate("question", "*", item.permissions).effect).toBe("allow")
          expect(PermissionV2.evaluate("plan_enter", "*", item.permissions).effect).toBe("allow")
          // 默认敏感文件和外部目录规则必须随两个新代理一起继承。
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -127,3 +127,5 @@
+                   action: "edit",
++                  // 审批前仅传解析计划；不读取目标来填充diff或伪造删除行数。
++                  metadata: { files: targets.map(item => ({ type: item.hunk.type, relativePath: item.target.resource })), patchText: input.patchText },
+                   resources: [...new Set(targets.map(({ target }) => target.resource))],
+                   save: ["*"],
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -11,1 +11,2 @@
+ import { PermissionV2 } from "@opencode-ai/core/permission"
++import { PermissionPrecheck } from "@opencode-ai/core/permission/precheck"
+@@ -157,3 +158,8 @@
+           expect(readsBeforeEditApproval).toBe(0)
+           expect(assertions).toMatchObject([{ action: "edit", resources: ["update.txt", "remove.txt"] }])
++          // 分类器必须消费真实工具请求，不能只用手造metadata证明删除已送审。
++          const request = assertions[0]
++          if (!request?.metadata) return yield* Effect.die("Missing edit precheck metadata")
++          expect(request.metadata.files).toEqual([{ type: "update", relativePath: "update.txt" }, { type: "delete", relativePath: "remove.txt" }])
++          expect(PermissionPrecheck.evaluate({ permission: request.action, patterns: request.resources, metadata: request.metadata })).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+         }
 diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 --- a/packages/core/src/permission/precheck.ts
 +++ b/packages/core/src/permission/precheck.ts

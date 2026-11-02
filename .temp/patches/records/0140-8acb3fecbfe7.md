@@ -1,5 +1,9 @@
 # Record 0140-8acb3fecbfe7
 
+## 2026-10-24 当前批次闭合
+- 匹配报告 `typecheck-0140-2026-10-23T16-45-18-526Z.md`：140/140、135 前缀、五项应用、安装复用、30 types 通过。Core session/compaction/coordinator/search 四文件 117/0；V1 processor/prompt 的压缩/overflow 五项 5/0，纯 TUI 23/0，输出见 `D:/Temp/opencode/v2-parity-0136-0140-neutral-handoff.md`。
+- 原批次新完整正反审计 `ses_e965030b4ffedXWniO7IqLUjm9`、`ses_e9650306affeboH2f5YNupOm2D` 均五项 PASS，无未关闭 B/G；保留已接受的 N，不外推最终 662 项完成。
+
 ## 2026-10-17 扩大回归修订
 - 395 终态的 processor-effect 回归发现：0072 为既有 overflow 用例加入800字符指令后，原20-token窗口必在0140新增的 prepared 预检中终止，因而从未调用 provider；旧断言却仍要求响应文本和确认用量。
 - 保留预检生产路径，将本用例窗口设为20000、provider确认输入设为30000，使准备估算可发送、真实用量随后超限；文本、step-finish、800字符归属、确认标记、密度和一次provider调用等断言全部保留，并同步确认账本的精确输入断言。

@@ -36,6 +36,125 @@ diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/sessi
      return { goal }
    })
  
+diff --git a/packages/client/src/generated-effect/client.ts b/packages/client/src/generated-effect/client.ts
+--- a/packages/client/src/generated-effect/client.ts
++++ b/packages/client/src/generated-effect/client.ts
+@@ -100,6 +100,7 @@ type Endpoint3_5Input = {
+   readonly status?: Endpoint3_5Request["payload"]["status"]
+   readonly tokenBudget?: Endpoint3_5Request["payload"]["tokenBudget"]
+   readonly continueOnError?: Endpoint3_5Request["payload"]["continueOnError"]
++  readonly reason?: Endpoint3_5Request["payload"]["reason"]
+ }
+ const Endpoint3_5 = (raw: RawClient["server.session"]) => (input: Endpoint3_5Input) =>
+   raw["session.goal.set"]({
+@@ -109,6 +110,7 @@ const Endpoint3_5 = (raw: RawClient["server.session"]) => (input: Endpoint3_5Input) =>
+       status: input["status"],
+       tokenBudget: input["tokenBudget"],
+       continueOnError: input["continueOnError"],
++      reason: input["reason"],
+     },
+   }).pipe(Effect.mapError(mapClientError))
+ 
+diff --git a/packages/client/src/generated/client.ts b/packages/client/src/generated/client.ts
+--- a/packages/client/src/generated/client.ts
++++ b/packages/client/src/generated/client.ts
+@@ -373,6 +373,7 @@ export function make(options: ClientOptions) {
+               status: input["status"],
+               tokenBudget: input["tokenBudget"],
+               continueOnError: input["continueOnError"],
++              reason: input["reason"],
+             },
+             successStatus: 200,
+             declaredStatuses: [400, 404, 401],
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -528,6 +528,8 @@ export type SessionsGoalOutput = {
+     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
+     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
+     readonly continueOnError: boolean
++    readonly generation: number | "Infinity" | "-Infinity" | "NaN"
++    readonly reason: string | null
+     readonly time: {
+       readonly created: number | "Infinity" | "-Infinity" | "NaN"
+       readonly updated: number | "Infinity" | "-Infinity" | "NaN"
+@@ -542,25 +544,36 @@ export type SessionsGoalSetInput = {
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
+     readonly continueOnError?: boolean | undefined
++    readonly reason?: string | undefined
+   }["objective"]
+   readonly status?: {
+     readonly objective?: string | undefined
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
+     readonly continueOnError?: boolean | undefined
++    readonly reason?: string | undefined
+   }["status"]
+   readonly tokenBudget?: {
+     readonly objective?: string | undefined
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
+     readonly continueOnError?: boolean | undefined
++    readonly reason?: string | undefined
+   }["tokenBudget"]
+   readonly continueOnError?: {
+     readonly objective?: string | undefined
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
+     readonly continueOnError?: boolean | undefined
++    readonly reason?: string | undefined
+   }["continueOnError"]
++  readonly reason?: {
++    readonly objective?: string | undefined
++    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
++    readonly tokenBudget?: number | null | undefined
++    readonly continueOnError?: boolean | undefined
++    readonly reason?: string | undefined
++  }["reason"]
+ }
+ 
+ export type SessionsGoalSetOutput = {
+@@ -573,6 +586,8 @@ export type SessionsGoalSetOutput = {
+     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
+     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
+     readonly continueOnError: boolean
++    readonly generation: number | "Infinity" | "-Infinity" | "NaN"
++    readonly reason: string | null
+     readonly time: {
+       readonly created: number | "Infinity" | "-Infinity" | "NaN"
+       readonly updated: number | "Infinity" | "-Infinity" | "NaN"
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -187,6 +187,8 @@
+           // 缺省保留预算，null清除，数值由唯一存储owner校验。
+           tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
+           // 用户策略由共享Goal持久化；省略不改，显式false可关闭错误续跑。
+           continueOnError: Schema.optional(Schema.Boolean),
++          // 两代terminal写入共用reason校验；省略不能被解码器静默丢弃成空理由。
++          reason: Schema.optional(Schema.String),
+         }),
+         success: Schema.Struct({ goal: SessionGoal.Goal }),
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -27,3 +27,4 @@
+     const clients = yield* EventClients.Service
+     const goals = yield* SessionGoal.Service
+     const database = yield* Database.Service
++    const scope = yield* Effect.scope
+@@ -126,5 +127,10 @@
+           const goal = yield* goals.set(ctx.params.sessionID, ctx.payload).pipe(
+             Effect.mapError(error => new InvalidRequestError({ message: error.message })),
+           )
++          // 用户恢复沿现有全局Session所有权执行；失败留日志，不另建runner或伪造执行结果。
++          if (goal.status === "active") yield* session.resume(ctx.params.sessionID).pipe(
++            Effect.catchCause(cause => Effect.logError("goal resume failed", { cause })),
++            Effect.forkIn(scope),
++          )
+           return { goal }
+         }),
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 index 1f9f7225dbdc108adb1394597e110896a6fb42ee..e468a4d9319522e6cb1f6a9373d9708f321c307c 100644
 --- a/packages/opencode/src/session/compaction.ts
@@ -1779,20 +1898,49 @@ diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registr
 diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 --- a/packages/core/src/tool/goal.ts
 +++ b/packages/core/src/tool/goal.ts
-@@ -13,37 +13,57 @@
+@@ -13,51 +13,74 @@
    const goals = yield* SessionGoal.Service
    yield* tools.register({
      goal: Tool.make({
--      description: "Get the current goal with no arguments, including objective, status, token usage, budget, remaining tokens and elapsed time, or update its status. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user. When marking a budgeted goal achieved, report the final token usage from the tool result to the user.",
-+      description: "Read the current goal with no arguments before marking any status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Mark complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Mark blocked with a reason only at a genuine impasse after three consecutive goal turns with the same blocker; the tool tracks the attempts and keeps earlier attempts active. Do not block merely because work is hard, slow, uncertain or incomplete. Mark active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
+-      description: [
+-        "Get the current goal, or update its status.",
+-        "",
+-        "Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, and remaining token budget.",
+-        "",
+-        "Call with `status` to mark the goal achieved or genuinely blocked:",
+-        "- Set status to `complete` only when the objective has actually been achieved and no required work remains.",
+-        "- Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.",
+-        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.",
+-        "- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.",
+-        "- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+-        "- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
+-        "- You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.",
+-        "- When marking a budgeted goal achieved with status `complete`, report the final token usage from the tool result to the user.",
+-      ].join("\n"),
++      description: [
++        "Get the current goal, or mark its status.",
++        "",
++        "Call with no arguments to get the current goal for this session, including status, objective, token and elapsed-time usage, remaining token budget, and objective generation. You MUST call get before marking any status — the tool will reject status changes without a prior get in the same goal turn.",
++        "",
++        "Call with `mark` and `reason` to mark the goal as achieved, blocked, or resumed:",
++        "- Mark as `complete` with a `reason` only when the objective has actually been achieved and no required work remains.",
++        "- Mark as `blocked` with a `reason` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. The tool tracks consecutive attempts automatically — call blocked once per goal turn, and the status will only change to blocked on the third consecutive attempt with the same reason.",
++        "- Mark as `active` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.",
++        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, mark as `blocked` again.",
++        "- Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; mark as `blocked`.",
++        "- Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
++        "- Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
++        "- You cannot use this tool to pause, resume (from paused), or clear a goal; those status changes are controlled by the user.",
++        "- When marking a budgeted goal achieved with `complete`, report the final token usage from the tool result to the user.",
++      ].join("\n"),
        input: Schema.Struct({
 -        status: Schema.Literals(["complete", "blocked"]).pipe(Schema.optional).annotate({
--          description: "Set to complete when achieved or blocked when genuinely stuck after three consecutive failed attempts. Omit to get the current goal.",
+-          description: "Set to `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Omit to get the current goal status.",
 +        mark: Schema.Literals(["complete", "blocked", "active"]).pipe(Schema.optional).annotate({
-+          description: "Omit to read. Mark complete/blocked with reason, or active to resume in a later user turn. Requires a prior read in this goal turn.",
++          description: "Mark the goal as `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
 +        }),
 +        reason: Schema.String.pipe(Schema.optional).annotate({
-+          description: "Required non-empty explanation for complete/blocked; ignored for active.",
++          description: "Required when marking `complete` or `blocked`. A concise explanation of why the goal is being marked. Ignored for `active`.",
          }),
        }),
 -      // 无目标用null表示，仍由现有工具输出编码器验证完整Goal快照。
@@ -1845,10 +1993,12 @@ diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 -              ? "Goal marked as complete. The session loop will end after this turn."
 -              : "Goal marked as blocked. The session loop will end after this turn. The user can resume the goal later.",
 +            : output.blockedAttempt
-+              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. The goal remains active. Continue working, or call blocked in the next goal turn with the same reason if the blocker persists.`
++              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. The goal remains active. Continue working, or call blocked again in the next goal turn with the same reason if the blocker persists.`
 +              : output.status === "active"
 +                ? "Goal resumed to active. Continue working toward the objective."
-+                : `Goal marked as ${output.status}: ${output.reason}. The session loop will end after this turn.`,
++                : output.status === "blocked"
++                  ? `Goal marked as blocked: ${output.reason}. The session loop will end after this turn. The user can resume the goal later.`
++                  : `Goal marked as complete: ${output.reason}. The session loop will end after this turn.`,
        }],
      }),
    }).pipe(Effect.orDie)
@@ -1856,10 +2006,7 @@ diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
 --- a/packages/core/src/session/history.ts
 +++ b/packages/core/src/session/history.ts
-@@ -98,4 +98,20 @@
-   )
- })
- 
+@@ -164,1 +164,17 @@
 +// eligible lineage读取未被compaction裁掉的原生投影；admission尚未提升时不会出现在这里。
 +export const goalTurn = Effect.fn("SessionHistory.goalTurn")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
 +  const rows = yield* db.select({ id: SessionMessageTable.id, type: SessionMessageTable.type })
@@ -1902,8 +2049,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
        const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
        const decide = agent.id === "decide"
        // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
-@@ -351,6 +358,9 @@
-       const startedAt = DateTime.toEpochMillis(yield* DateTime.now)
+@@ -419,5 +426,8 @@
        let overflowFailure: ProviderErrorEvent | undefined
        // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
        let terminalError = false
@@ -1912,21 +2058,19 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 +      const expectedUsage = Option.isSome(dispatchedGoal) && dispatchedGoal.value.status === "active" ? { goalID: dispatchedGoal.value.id, generation: dispatchedGoal.value.generation } : undefined
        const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
          // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
-@@ -394,6 +404,7 @@
-                 toolMaterialization.settle({
+@@ -484,4 +494,5 @@
                    sessionID: session.id,
                    agent: agent.id,
                    assistantMessageID,
                    call: event,
 +                  goalTurn: continuation.goalTurn,
-                 }),
 @@ -498,4 +509,12 @@
                }, { finalizer }),
              )
 +            // 沿确认Step结算一次，先于错误/中断传播；不能因当前Goal已终态而退款。
 +            if (expectedUsage) {
 +              const tokens = stepSettlement.tokens
-+              const seconds = Math.max(0, Math.floor((DateTime.toEpochMillis(yield* DateTime.now) - startedAt) / 1000))
++              const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
 +              yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds, expectedUsage).pipe(
 +                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
 +              )
@@ -1939,7 +2083,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 -          if (stepSettlement && !publisher.hasProviderError()) {
 -            // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
 -            const tokens = stepSettlement.tokens
--            const seconds = Math.max(0, Math.floor((DateTime.toEpochMillis(yield* DateTime.now) - startedAt) / 1000))
+-            const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
 -            // 与V1相同：记录计费defect，不能静默丢失或让诊断变成第二个结算路径。
 -            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(
 -              Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
@@ -1996,7 +2140,7 @@ diff --git a/packages/core/src/database/migration/20260901100000_session_goal_in
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/database/migration/20260901100000_session_goal_integrity.ts
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,25 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +// [local-smark] GOAL 生命周期完整性：generation 代际 CAS、terminal reason、
@@ -2004,6 +2148,8 @@ new file mode 100644
 +// 旧行默认 generation=1、streak=0，保证升级后旧 GOAL 行为不变
 +export default {
 +  id: "20260901100000_session_goal_integrity",
++  // 已完成的source完整性迁移保留真实terminal reason，不再次回填旧标记。
++  legacy: ["20260714083829_session-goal-integrity"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      yield* tx.run(`ALTER TABLE \`session_goal\` ADD \`generation\` integer DEFAULT 1 NOT NULL;`)
@@ -2692,14 +2838,37 @@ diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/tes
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -703,5 +703,5 @@
+@@ -709,3 +709,3 @@
+     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+-    yield* goals.accountUsage(sessionID, 500, 10)
++    yield* goals.accountUsage(sessionID, 500, 10, { goalID: "missing", generation: 1 })
+     expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
+@@ -723,3 +723,3 @@
+     expect(original).toMatchObject({ status: "active", objective: "original", tokensUsed: 0, timeUsedSeconds: 0 })
+     expect(original.id).toBeTruthy()
+-    yield* goals.accountUsage(sessionID, 1000, 30)
++    yield* goals.accountUsage(sessionID, 1000, 30, { goalID: original.id, generation: original.generation })
+@@ -728,8 +728,8 @@
+-    // 用户停止态均不计费，恢复后仍沿原目标ID和账目继续，而非另建目标。
++    // 改目标后的旧代请求不能污染新代账目；恢复后同代消耗仍沿原目标ID累计。
+     for (const status of ["paused", "complete", "blocked"] as const) {
+-      expect(yield* goals.set(sessionID, { status })).toMatchObject({ objective: "revised", status })
+-      yield* goals.accountUsage(sessionID, 999, 99)
++      expect(yield* goals.set(sessionID, { status, reason: "User transition" })).toMatchObject({ objective: "revised", status })
++      yield* goals.accountUsage(sessionID, 999, 99, { goalID: original.id, generation: original.generation })
+       expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ tokensUsed: 1000, timeUsedSeconds: 30 })
+     }
+     yield* goals.set(sessionID, { status: "active" })
+-    yield* goals.accountUsage(sessionID, 234, 26)
++    yield* goals.accountUsage(sessionID, 234, 26, { goalID: revised.id, generation: revised.generation })
+@@ -781,5 +781,5 @@
      expect(read.output?.content).toEqual([{
        type: "text",
        text: JSON.stringify({
 -        goal: { objective: "Finish the native task", status: "paused" },
 +        goal: { objective: "Finish the native task", status: "paused", generation: 1, reason: null },
          tokensUsed: 12,
-@@ -716,6 +716,12 @@
+@@ -794,6 +794,12 @@
      responses = [[
        LLMEvent.stepStart({ index: 0 }),
 -      LLMEvent.toolCall({ id: "goal-done", name: "goal", input: { status: "complete" } }),
@@ -2714,7 +2883,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      LLMEvent.stepFinish({ index: 0, reason: "tool-calls", usage: { inputTokens: 2, nonCachedInputTokens: 2, outputTokens: 1 } }),
        LLMEvent.finish({ reason: "tool-calls" }),
      ], normal]
-@@ -724,5 +730,7 @@
+@@ -802,3 +808,5 @@
      // 走真实工具注册与执行；目标完成后仅结清工具结果，不再注入 Goal 消息。
 -    expect(requests).toHaveLength(2)
 -    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("complete")
@@ -2722,8 +2891,22 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({
 +      status: "complete", generation: 1, reason: "Verified requested end state", tokensUsed: 15,
 +    })
- 
-     yield* goals.set(sessionID, { status: "active" })
+@@ -806,6 +814,6 @@
+-    // 用户恢复同一已完成目标，停用期间的用量不计入，既有预算和账目不能重置。
++    // 用户恢复仍保留同一目标和预算；同代请求的最终用量在终态后也不能丢失。
+     const completed = Option.getOrThrow(yield* goals.get(sessionID))
+-    yield* goals.accountUsage(sessionID, 999, 99)
++    yield* goals.accountUsage(sessionID, 999, 99, { goalID: completed.id, generation: completed.generation })
+     expect(yield* goals.set(sessionID, { status: "active" })).toMatchObject({ id: completed.id,
+-      tokensUsed: completed.tokensUsed, timeUsedSeconds: completed.timeUsedSeconds,
++      tokensUsed: completed.tokensUsed + 999, timeUsedSeconds: completed.timeUsedSeconds + 99,
+       tokenBudget: completed.tokenBudget, time: { created: completed.time.created } })
+@@ -840,4 +848,4 @@
+     expect(original.continueOnError).toBe(false)
+     expect(yield* goals.set(sessionID, { continueOnError: true })).toMatchObject({ id: original.id, objective: "policy", tokenBudget: 50000, continueOnError: true })
+-    yield* goals.accountUsage(sessionID, 10, 1)
++    yield* goals.accountUsage(sessionID, 10, 1, { goalID: original.id, generation: original.generation })
+     for (const input of [{ objective: "updated" }, { status: "paused" as const }, { status: "active" as const }]) {
 @@ -920,6 +928,8 @@
            sessionID,
            agent: AgentV2.ID.make("build"),
@@ -3118,7 +3301,22 @@ index 48b5c8b98..a52728d4a 100644
            ],
          },
        ],
-
+@@ -5449,6 +5451,7 @@
+       status?: "active" | "paused" | "complete" | "blocked"
+       tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+       continueOnError?: boolean
++      reason?: string
+     },
+     options?: Options<never, ThrowOnError>,
+   ) {
+@@ -5462,6 +5465,7 @@
+             { in: "body", key: "status" },
+             { in: "body", key: "tokenBudget" },
+             { in: "body", key: "continueOnError" },
++            { in: "body", key: "reason" },
+           ],
+         },
+       ],
 diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
 index ad740b4a6..d1df19e85 100644
 --- a/packages/sdk/js/src/v2/gen/types.gen.ts
@@ -3166,7 +3364,14 @@ index ad740b4a6..d1df19e85 100644
    }
    path: {
      sessionID: string
-
+@@ -12944,6 +12952,7 @@
+     status?: "active" | "paused" | "complete" | "blocked"
+     tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+     continueOnError?: boolean
++    reason?: string
+   }
+   path: {
+     sessionID: string
 diff --git a/packages/sdk/openapi.json b/packages/sdk/openapi.json
 index 660523c36..28f7432c1 100644
 --- a/packages/sdk/openapi.json
@@ -11450,3 +11655,1050 @@ index 660523c36..28f7432c1 100644
            }
          },
          "required": ["id", "type", "properties"],
+diff --git a/packages/sdk/openapi.json b/packages/sdk/openapi.json
+--- a/packages/sdk/openapi.json
++++ b/packages/sdk/openapi.json
+@@ -11936,6 +11936,14 @@
+             "required": false
+           },
+           {
++            "name": "start",
++            "in": "query",
++            "schema": {
++              "type": "number"
++            },
++            "required": false
++          },
++          {
+             "name": "search",
+             "in": "query",
+             "schema": {
+@@ -12251,6 +12259,301 @@
+         ]
+       }
+     },
++    "/api/session/{sessionID}/goal": {
++      "get": {
++        "tags": ["sessions"],
++        "operationId": "v2.session.goal",
++        "parameters": [
++          {
++            "name": "sessionID",
++            "in": "path",
++            "schema": {
++              "type": "string",
++              "pattern": "^ses"
++            },
++            "required": true
++          }
++        ],
++        "security": [],
++        "responses": {
++          "200": {
++            "description": "Success",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "type": "object",
++                  "properties": {
++                    "goal": {
++                      "$ref": "#/components/schemas/SessionGoal"
++                    }
++                  },
++                  "required": ["goal"],
++                  "additionalProperties": false
++                }
++              }
++            }
++          },
++          "400": {
++            "description": "InvalidRequestError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/InvalidRequestError"
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "UnauthorizedError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/UnauthorizedError"
++                }
++              }
++            }
++          },
++          "404": {
++            "description": "SessionNotFoundError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "anyOf": [
++                    {
++                      "$ref": "#/components/schemas/SessionNotFoundError"
++                    },
++                    {
++                      "$ref": "#/components/schemas/SessionNotFoundError"
++                    }
++                  ]
++                }
++              }
++            }
++          }
++        },
++        "summary": "Get session goal",
++        "x-codeSamples": [
++          {
++            "lang": "js",
++            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.v2.session.goal({\n  ...\n})"
++          }
++        ]
++      },
++      "post": {
++        "tags": ["sessions"],
++        "operationId": "v2.session.goal.set",
++        "parameters": [
++          {
++            "name": "sessionID",
++            "in": "path",
++            "schema": {
++              "type": "string",
++              "pattern": "^ses"
++            },
++            "required": true
++          }
++        ],
++        "security": [],
++        "responses": {
++          "200": {
++            "description": "Success",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "type": "object",
++                  "properties": {
++                    "goal": {
++                      "$ref": "#/components/schemas/SessionGoal"
++                    }
++                  },
++                  "required": ["goal"],
++                  "additionalProperties": false
++                }
++              }
++            }
++          },
++          "400": {
++            "description": "InvalidRequestError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "anyOf": [
++                    {
++                      "$ref": "#/components/schemas/InvalidRequestError"
++                    },
++                    {
++                      "$ref": "#/components/schemas/InvalidRequestError"
++                    }
++                  ]
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "UnauthorizedError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/UnauthorizedError"
++                }
++              }
++            }
++          },
++          "404": {
++            "description": "SessionNotFoundError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "anyOf": [
++                    {
++                      "$ref": "#/components/schemas/SessionNotFoundError"
++                    },
++                    {
++                      "$ref": "#/components/schemas/SessionNotFoundError"
++                    }
++                  ]
++                }
++              }
++            }
++          }
++        },
++        "summary": "Set session goal",
++        "requestBody": {
++          "content": {
++            "application/json": {
++              "schema": {
++                "type": "object",
++                "properties": {
++                  "objective": {
++                    "type": "string"
++                  },
++                  "status": {
++                    "type": "string",
++                    "enum": ["active", "paused", "complete", "blocked"]
++                  },
++                  "tokenBudget": {
++                    "anyOf": [
++                      {
++                        "type": "number"
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["NaN"]
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["Infinity"]
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["-Infinity"]
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["Infinity", "-Infinity", "NaN"]
++                      }
++                    ]
++                  },
++                  "continueOnError": {
++                    "type": "boolean"
++                  },
++                  "reason": {
++                    "type": "string"
++                  }
++                },
++                "additionalProperties": false
++              }
++            }
++          },
++          "required": true
++        },
++        "x-codeSamples": [
++          {
++            "lang": "js",
++            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.v2.session.goal.set({\n  ...\n})"
++          }
++        ]
++      },
++      "delete": {
++        "tags": ["sessions"],
++        "operationId": "v2.session.goal.clear",
++        "parameters": [
++          {
++            "name": "sessionID",
++            "in": "path",
++            "schema": {
++              "type": "string",
++              "pattern": "^ses"
++            },
++            "required": true
++          }
++        ],
++        "security": [],
++        "responses": {
++          "200": {
++            "description": "Success",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "type": "object",
++                  "properties": {
++                    "cleared": {
++                      "type": "boolean"
++                    }
++                  },
++                  "required": ["cleared"],
++                  "additionalProperties": false
++                }
++              }
++            }
++          },
++          "400": {
++            "description": "InvalidRequestError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/InvalidRequestError"
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "UnauthorizedError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/UnauthorizedError"
++                }
++              }
++            }
++          },
++          "404": {
++            "description": "SessionNotFoundError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "anyOf": [
++                    {
++                      "$ref": "#/components/schemas/SessionNotFoundError"
++                    },
++                    {
++                      "$ref": "#/components/schemas/SessionNotFoundError"
++                    }
++                  ]
++                }
++              }
++            }
++          }
++        },
++        "summary": "Clear session goal",
++        "x-codeSamples": [
++          {
++            "lang": "js",
++            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.v2.session.goal.clear({\n  ...\n})"
++          }
++        ]
++      }
++    },
+     "/api/session/{sessionID}/agent": {
+       "post": {
+         "tags": ["sessions"],
+@@ -12598,6 +12901,16 @@
+               }
+             }
+           },
++          "409": {
++            "description": "ConflictError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ConflictError"
++                }
++              }
++            }
++          },
+           "503": {
+             "description": "ServiceUnavailableError",
+             "content": {
+@@ -12771,6 +13084,16 @@
+               }
+             }
+           },
++          "409": {
++            "description": "ConflictError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ConflictError"
++                }
++              }
++            }
++          },
+           "500": {
+             "description": "UnknownError",
+             "content": {
+@@ -12870,6 +13193,16 @@
+               }
+             }
+           },
++          "409": {
++            "description": "ConflictError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ConflictError"
++                }
++              }
++            }
++          },
+           "500": {
+             "description": "UnknownError",
+             "content": {
+@@ -12946,6 +13279,16 @@
+                 }
+               }
+             }
++          },
++          "409": {
++            "description": "ConflictError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/ConflictError"
++                }
++              }
++            }
+           }
+         },
+         "summary": "Commit staged revert",
+@@ -13462,6 +13805,103 @@
+         ]
+       }
+     },
++    "/api/session/preview": {
++      "post": {
++        "tags": ["sessions"],
++        "operationId": "v2.session.preview",
++        "parameters": [],
++        "security": [],
++        "responses": {
++          "200": {
++            "description": "Success",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "type": "object",
++                  "additionalProperties": {
++                    "type": "array",
++                    "items": {
++                      "type": "string"
++                    }
++                  }
++                }
++              }
++            }
++          },
++          "400": {
++            "description": "InvalidRequestError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/InvalidRequestError"
++                }
++              }
++            }
++          },
++          "401": {
++            "description": "UnauthorizedError",
++            "content": {
++              "application/json": {
++                "schema": {
++                  "$ref": "#/components/schemas/UnauthorizedError"
++                }
++              }
++            }
++          }
++        },
++        "description": "Retrieve the most recent user message text for multiple sessions in a single request.",
++        "summary": "Batch session preview",
++        "requestBody": {
++          "content": {
++            "application/json": {
++              "schema": {
++                "type": "object",
++                "properties": {
++                  "sessionIDs": {
++                    "type": "array",
++                    "items": {
++                      "type": "string"
++                    }
++                  },
++                  "limit": {
++                    "anyOf": [
++                      {
++                        "type": "number"
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["NaN"]
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["Infinity"]
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["-Infinity"]
++                      },
++                      {
++                        "type": "string",
++                        "enum": ["Infinity", "-Infinity", "NaN"]
++                      }
++                    ]
++                  }
++                },
++                "required": ["sessionIDs"],
++                "additionalProperties": false
++              }
++            }
++          },
++          "required": true
++        },
++        "x-codeSamples": [
++          {
++            "lang": "js",
++            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.v2.session.preview({\n  ...\n})"
++          }
++        ]
++      }
++    },
+     "/api/session/{sessionID}/message": {
+       "get": {
+         "tags": ["messages"],
+@@ -17245,6 +17685,9 @@
+             "$ref": "#/components/schemas/EventSessionNextSynthetic"
+           },
+           {
++            "$ref": "#/components/schemas/EventSessionNextMessagesHidden"
++          },
++          {
+             "$ref": "#/components/schemas/EventSessionNextShellStarted"
+           },
+           {
+@@ -20563,6 +21006,45 @@
+                   },
+                   "type": {
+                     "type": "string",
++                    "enum": ["session.next.messages.hidden"]
++                  },
++                  "properties": {
++                    "type": "object",
++                    "properties": {
++                      "timestamp": {
++                        "type": "number"
++                      },
++                      "sessionID": {
++                        "type": "string",
++                        "pattern": "^ses"
++                      },
++                      "messageIDs": {
++                        "type": "array",
++                        "items": {
++                          "type": "string",
++                          "pattern": "^msg_"
++                        }
++                      },
++                      "hidden": {
++                        "$ref": "#/components/schemas/SessionMessageHidden"
++                      }
++                    },
++                    "required": ["timestamp", "sessionID", "messageIDs", "hidden"],
++                    "additionalProperties": false
++                  }
++                },
++                "required": ["id", "type", "properties"],
++                "additionalProperties": false
++              },
++              {
++                "type": "object",
++                "properties": {
++                  "id": {
++                    "type": "string",
++                    "pattern": "^evt_"
++                  },
++                  "type": {
++                    "type": "string",
+                     "enum": ["session.next.shell.started"]
+                   },
+                   "properties": {
+@@ -20741,6 +21223,23 @@
+                         "items": {
+                           "type": "string"
+                         }
++                      },
++                      "summary": {
++                        "type": "object",
++                        "properties": {
++                          "messageID": {
++                            "type": "string",
++                            "pattern": "^msg_"
++                          },
++                          "diffs": {
++                            "type": "array",
++                            "items": {
++                              "$ref": "#/components/schemas/SnapshotFileDiff"
++                            }
++                          }
++                        },
++                        "required": ["messageID", "diffs"],
++                        "additionalProperties": false
+                       }
+                     },
+                     "required": ["timestamp", "sessionID", "assistantMessageID", "finish", "cost", "tokens"],
+@@ -21512,6 +22011,29 @@
+                       "recent": {
+                         "type": "string"
+                       },
++                      "recent_user_messages": {
++                        "type": "array",
++                        "items": {
++                          "type": "object",
++                          "properties": {
++                            "id": {
++                              "type": "string",
++                              "pattern": "^msg_"
++                            },
++                            "text": {
++                              "type": "string"
++                            },
++                            "truncated": {
++                              "type": "boolean"
++                            }
++                          },
++                          "required": ["id", "text"],
++                          "additionalProperties": false
++                        }
++                      },
++                      "file_evidence": {
++                        "type": "string"
++                      },
+                       "usage": {
+                         "type": "object",
+                         "properties": {
+@@ -23444,6 +23966,9 @@
+                 "$ref": "#/components/schemas/SyncEventSessionNextSynthetic"
+               },
+               {
++                "$ref": "#/components/schemas/SyncEventSessionNextMessagesHidden"
++              },
++              {
+                 "$ref": "#/components/schemas/SyncEventSessionNextShellStarted"
+               },
+               {
+@@ -26872,6 +27397,9 @@
+             "$ref": "#/components/schemas/SessionNextSynthetic"
+           },
+           {
++            "$ref": "#/components/schemas/SessionNextMessagesHidden"
++          },
++          {
+             "$ref": "#/components/schemas/SessionNextShellStarted"
+           },
+           {
+@@ -27423,6 +27951,9 @@
+             "$ref": "#/components/schemas/SessionNextSynthetic"
+           },
+           {
++            "$ref": "#/components/schemas/SessionNextMessagesHidden"
++          },
++          {
+             "$ref": "#/components/schemas/SessionNextShellStarted"
+           },
+           {
+@@ -28343,6 +28874,21 @@
+         "required": ["type", "message"],
+         "additionalProperties": false
+       },
++      "SessionMessageHidden": {
++        "type": "object",
++        "properties": {
++          "time": {
++            "type": "integer",
++            "minimum": 0
++          },
++          "reason": {
++            "type": "string",
++            "enum": ["permission-reviewer-protocol-retry"]
++          }
++        },
++        "required": ["time", "reason"],
++        "additionalProperties": false
++      },
+       "LLMProviderMetadata": {
+         "type": "object",
+         "additionalProperties": {
+@@ -29583,6 +30129,66 @@
+         "required": ["type", "id", "syncEvent"],
+         "additionalProperties": false
+       },
++      "SyncEventSessionNextMessagesHidden": {
++        "type": "object",
++        "properties": {
++          "type": {
++            "type": "string",
++            "enum": ["sync"]
++          },
++          "id": {
++            "type": "string",
++            "pattern": "^evt_"
++          },
++          "syncEvent": {
++            "type": "object",
++            "properties": {
++              "type": {
++                "type": "string",
++                "enum": ["session.next.messages.hidden.1"]
++              },
++              "id": {
++                "type": "string",
++                "pattern": "^evt_"
++              },
++              "seq": {
++                "type": "number"
++              },
++              "aggregateID": {
++                "type": "string"
++              },
++              "data": {
++                "type": "object",
++                "properties": {
++                  "timestamp": {
++                    "type": "number"
++                  },
++                  "sessionID": {
++                    "type": "string",
++                    "pattern": "^ses"
++                  },
++                  "messageIDs": {
++                    "type": "array",
++                    "items": {
++                      "type": "string",
++                      "pattern": "^msg_"
++                    }
++                  },
++                  "hidden": {
++                    "$ref": "#/components/schemas/SessionMessageHidden"
++                  }
++                },
++                "required": ["timestamp", "sessionID", "messageIDs", "hidden"],
++                "additionalProperties": false
++              }
++            },
++            "required": ["type", "id", "seq", "aggregateID", "data"],
++            "additionalProperties": false
++          }
++        },
++        "required": ["type", "id", "syncEvent"],
++        "additionalProperties": false
++      },
+       "SyncEventSessionNextShellStarted": {
+         "type": "object",
+         "properties": {
+@@ -29850,6 +30456,23 @@
+                     "items": {
+                       "type": "string"
+                     }
++                  },
++                  "summary": {
++                    "type": "object",
++                    "properties": {
++                      "messageID": {
++                        "type": "string",
++                        "pattern": "^msg_"
++                      },
++                      "diffs": {
++                        "type": "array",
++                        "items": {
++                          "$ref": "#/components/schemas/SnapshotFileDiff"
++                        }
++                      }
++                    },
++                    "required": ["messageID", "diffs"],
++                    "additionalProperties": false
+                   }
+                 },
+                 "required": ["timestamp", "sessionID", "assistantMessageID", "finish", "cost", "tokens"],
+@@ -30762,6 +31385,29 @@
+                   "recent": {
+                     "type": "string"
+                   },
++                  "recent_user_messages": {
++                    "type": "array",
++                    "items": {
++                      "type": "object",
++                      "properties": {
++                        "id": {
++                          "type": "string",
++                          "pattern": "^msg_"
++                        },
++                        "text": {
++                          "type": "string"
++                        },
++                        "truncated": {
++                          "type": "boolean"
++                        }
++                      },
++                      "required": ["id", "text"],
++                      "additionalProperties": false
++                    }
++                  },
++                  "file_evidence": {
++                    "type": "string"
++                  },
+                   "usage": {
+                     "type": "object",
+                     "properties": {
+@@ -31534,6 +32180,19 @@
+               "$ref": "#/components/schemas/PromptAgentAttachment"
+             }
+           },
++          "summary": {
++            "type": "object",
++            "properties": {
++              "diffs": {
++                "type": "array",
++                "items": {
++                  "$ref": "#/components/schemas/SnapshotFileDiff"
++                }
++              }
++            },
++            "required": ["diffs"],
++            "additionalProperties": false
++          },
+           "type": {
+             "type": "string",
+             "enum": ["user"]
+@@ -31995,6 +32654,29 @@
+           "recent": {
+             "type": "string"
+           },
++          "recent_user_messages": {
++            "type": "array",
++            "items": {
++              "type": "object",
++              "properties": {
++                "id": {
++                  "type": "string",
++                  "pattern": "^msg_"
++                },
++                "text": {
++                  "type": "string"
++                },
++                "truncated": {
++                  "type": "boolean"
++                }
++              },
++              "required": ["id", "text"],
++              "additionalProperties": false
++            }
++          },
++          "file_evidence": {
++            "type": "string"
++          },
+           "id": {
+             "type": "string",
+             "pattern": "^msg_"
+@@ -32648,6 +33330,67 @@
+         "required": ["id", "type", "data"],
+         "additionalProperties": false
+       },
++      "SessionNextMessagesHidden": {
++        "type": "object",
++        "properties": {
++          "id": {
++            "type": "string",
++            "pattern": "^evt_"
++          },
++          "metadata": {
++            "type": "object"
++          },
++          "type": {
++            "type": "string",
++            "enum": ["session.next.messages.hidden"]
++          },
++          "durable": {
++            "type": "object",
++            "properties": {
++              "aggregateID": {
++                "type": "string"
++              },
++              "seq": {
++                "type": "integer"
++              },
++              "version": {
++                "type": "integer"
++              }
++            },
++            "required": ["aggregateID", "seq", "version"],
++            "additionalProperties": false
++          },
++          "location": {
++            "$ref": "#/components/schemas/LocationRef"
++          },
++          "data": {
++            "type": "object",
++            "properties": {
++              "timestamp": {
++                "type": "number"
++              },
++              "sessionID": {
++                "type": "string",
++                "pattern": "^ses"
++              },
++              "messageIDs": {
++                "type": "array",
++                "items": {
++                  "type": "string",
++                  "pattern": "^msg_"
++                }
++              },
++              "hidden": {
++                "$ref": "#/components/schemas/SessionMessageHidden"
++              }
++            },
++            "required": ["timestamp", "sessionID", "messageIDs", "hidden"],
++            "additionalProperties": false
++          }
++        },
++        "required": ["id", "type", "data"],
++        "additionalProperties": false
++      },
+       "SessionNextShellStarted": {
+         "type": "object",
+         "properties": {
+@@ -32923,6 +33666,23 @@
+                 "items": {
+                   "type": "string"
+                 }
++              },
++              "summary": {
++                "type": "object",
++                "properties": {
++                  "messageID": {
++                    "type": "string",
++                    "pattern": "^msg_"
++                  },
++                  "diffs": {
++                    "type": "array",
++                    "items": {
++                      "$ref": "#/components/schemas/SnapshotFileDiff"
++                    }
++                  }
++                },
++                "required": ["messageID", "diffs"],
++                "additionalProperties": false
+               }
+             },
+             "required": ["timestamp", "sessionID", "assistantMessageID", "finish", "cost", "tokens"],
+@@ -33841,6 +34601,29 @@
+               "recent": {
+                 "type": "string"
+               },
++              "recent_user_messages": {
++                "type": "array",
++                "items": {
++                  "type": "object",
++                  "properties": {
++                    "id": {
++                      "type": "string",
++                      "pattern": "^msg_"
++                    },
++                    "text": {
++                      "type": "string"
++                    },
++                    "truncated": {
++                      "type": "boolean"
++                    }
++                  },
++                  "required": ["id", "text"],
++                  "additionalProperties": false
++                }
++              },
++              "file_evidence": {
++                "type": "string"
++              },
+               "usage": {
+                 "type": "object",
+                 "properties": {
+@@ -39299,6 +40082,45 @@
+         "required": ["id", "type", "properties"],
+         "additionalProperties": false
+       },
++      "EventSessionNextMessagesHidden": {
++        "type": "object",
++        "properties": {
++          "id": {
++            "type": "string",
++            "pattern": "^evt_"
++          },
++          "type": {
++            "type": "string",
++            "enum": ["session.next.messages.hidden"]
++          },
++          "properties": {
++            "type": "object",
++            "properties": {
++              "timestamp": {
++                "type": "number"
++              },
++              "sessionID": {
++                "type": "string",
++                "pattern": "^ses"
++              },
++              "messageIDs": {
++                "type": "array",
++                "items": {
++                  "type": "string",
++                  "pattern": "^msg_"
++                }
++              },
++              "hidden": {
++                "$ref": "#/components/schemas/SessionMessageHidden"
++              }
++            },
++            "required": ["timestamp", "sessionID", "messageIDs", "hidden"],
++            "additionalProperties": false
++          }
++        },
++        "required": ["id", "type", "properties"],
++        "additionalProperties": false
++      },
+       "EventSessionNextShellStarted": {
+         "type": "object",
+         "properties": {
+@@ -39486,6 +40308,23 @@
+                 "items": {
+                   "type": "string"
+                 }
++              },
++              "summary": {
++                "type": "object",
++                "properties": {
++                  "messageID": {
++                    "type": "string",
++                    "pattern": "^msg_"
++                  },
++                  "diffs": {
++                    "type": "array",
++                    "items": {
++                      "$ref": "#/components/schemas/SnapshotFileDiff"
++                    }
++                  }
++                },
++                "required": ["messageID", "diffs"],
++                "additionalProperties": false
+               }
+             },
+             "required": ["timestamp", "sessionID", "assistantMessageID", "finish", "cost", "tokens"],
+@@ -40249,6 +41088,29 @@
+               "recent": {
+                 "type": "string"
+               },
++              "recent_user_messages": {
++                "type": "array",
++                "items": {
++                  "type": "object",
++                  "properties": {
++                    "id": {
++                      "type": "string",
++                      "pattern": "^msg_"
++                    },
++                    "text": {
++                      "type": "string"
++                    },
++                    "truncated": {
++                      "type": "boolean"
++                    }
++                  },
++                  "required": ["id", "text"],
++                  "additionalProperties": false
++                }
++              },
++              "file_evidence": {
++                "type": "string"
++              },
+               "usage": {
+                 "type": "object",
+                 "properties": {

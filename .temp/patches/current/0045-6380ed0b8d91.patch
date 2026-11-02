@@ -16,6 +16,49 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
          return {
            title,
 
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -180,9 +180,11 @@
+       const output = item.state.structured
+       if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
+           (output.encoding !== "utf8" && output.type !== "text-page")) return item
+-      // 分页截断与行内截断都丢失正文，两个相同前缀不能证明完整版本。
+-      if (output.type === "text-page" && (output.truncated !== false || output.next !== undefined ||
++      // 下一页到达请求末界说明本页完整；字节提前截断与长行裁剪仍不能作为版本证明。
++      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? 2000)
++      if (output.type === "text-page" &&
++          ((output.next === undefined ? output.truncated !== false : output.next !== pageEnd) ||
+           output.content.includes("... (line truncated to 2000 chars)"))) return item
+       if (item.state.outputPaths?.length || item.state.attachments?.length ||
+           item.state.content.some((part) => part.type !== "text")) return item
+       // generic 限幅后的模型正文可能少于 structured；只接受实际可见的完整编码结果。
+
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -48,7 +48,19 @@
+     expect(results(first, checkpoint, second)[1]).toEqual({ type: "json", value: output })
+-    // 部分页、行内截断与媒体即使两个结果完全一样，也不能用纯文本 stub 取代。
++    const page = { type: "text-page", content: "first line", mime: "text/plain", offset: 1, truncated: true, next: 2 }
++    const range = { path: "note.txt", offset: 1, limit: 1 }
++    // 文件有后续页不等于本次请求被截断；相同完整页保留首份并只压缩重复模型结果。
++    expect(JSON.stringify(results(read("page1", page, range), read("page2", page, range))[1]))
++      .toContain("File unchanged since last read")
++    // 版本与请求范围仍独立参与证明，不能用相同前缀冒充新版或更大页面。
++    expect(results(read("page3", page, range), read("page4", { ...page, content: "changed" }, range))[1])
++      .toMatchObject({ type: "json", value: { ...page, content: "changed" } })
++    expect(results(read("page5", page, range), read("page6", page, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
++    // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
++    expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
++
++    // 不足请求范围的页面、行内截断与媒体仍不具备完整正文证明。
+     for (const partial of [
+       { type: "text-page", content: "prefix", offset: 1, truncated: true, next: 2 },
+       { type: "text-page", content: "prefix... (line truncated to 2000 chars)", offset: 1, truncated: false },
+       { ...output, encoding: "base64", mime: "image/png" },
+     ]) expect(results(read("p1", partial), read("p2", partial))[1]).toMatchObject({ type: "json" })
+
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts

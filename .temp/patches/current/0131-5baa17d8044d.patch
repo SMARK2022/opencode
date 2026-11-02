@@ -5,11 +5,11 @@ Subject: [PATCH] =?UTF-8?q?feat(line-ending):=20=E6=B7=BB=E5=8A=A0?=
  =?UTF-8?q?=E8=A1=8C=E7=BB=93=E6=9D=9F=E7=AC=A6=E5=A4=84=E7=90=86=E5=8A=9F?=
  =?UTF-8?q?=E8=83=BD=EF=BC=8C=E7=A1=AE=E4=BF=9D=E8=A1=A5=E4=B8=81=E5=BA=94?=
 
-diff --git a/packages/opencode/src/util/line-ending.ts b/packages/opencode/src/util/line-ending.ts
+diff --git a/packages/core/src/util/line-ending.ts b/packages/core/src/util/line-ending.ts
 new file mode 100644
 index 0000000000..5b8ea2fbb0
 --- /dev/null
-+++ b/packages/opencode/src/util/line-ending.ts
++++ b/packages/core/src/util/line-ending.ts
 @@ -0,0 +1,24 @@
 +export type LineEnding = "\n" | "\r\n" | "\r"
 +
@@ -35,6 +35,14 @@ index 0000000000..5b8ea2fbb0
 +  if (ending === "\n") return text
 +  return splitLines(text).join(ending)
 +}
+diff --git a/packages/opencode/src/util/line-ending.ts b/packages/opencode/src/util/line-ending.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/util/line-ending.ts
+@@ -0,0 +1,3 @@
++// 两代工具共用纯行尾算法，原有调用路径保持不变。
++export { normalizeLineEndings, detectLineEnding, splitLines, convertToLineEnding } from "@opencode-ai/core/util/line-ending"
++export type { LineEnding } from "@opencode-ai/core/util/line-ending"
 diff --git a/packages/opencode/src/patch/index.ts b/packages/opencode/src/patch/index.ts
 index 66797d4f89..2800aaab46 100644
 --- a/packages/opencode/src/patch/index.ts
@@ -307,7 +315,7 @@ index 46155a5091..39727b2653 100644
 +        })
 +        const raw = yield* loadRaw(filepath)
 +        expect(raw).toContain("\r\n")
-+        expect(raw.replaceAll("\r\n", "\n")).toBe("Line 1\nLine X\n")
++        expect(raw).toBe("Line 1\r\nLine X\r\n")
 +        expect(result.metadata.diff).toContain("-Line 2")
 +        expect(result.metadata.diff).toContain("+Line X")
 +      }),
@@ -327,7 +335,7 @@ index 46155a5091..39727b2653 100644
 +        const raw = yield* loadRaw(filepath)
 +        expect(raw.includes("\r")).toBe(true)
 +        expect(raw.includes("\r\n")).toBe(false)
-+        expect(raw.replaceAll("\r", "\n")).toBe("Line 1\nLine Y\n")
++        expect(raw).toBe("Line 1\rLine Y\r")
 +      }),
 +    )
 +  })
@@ -337,7 +345,7 @@ diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/
 index 4f897dc875..d5d4f025aa 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
-@@ -276,4 +276,34 @@ describe("tool.write", () => {
+@@ -276,4 +276,42 @@ describe("tool.write", () => {
        }),
      )
    })
@@ -353,6 +361,10 @@ index 4f897dc875..d5d4f025aa 100644
 +        const diff = result.metadata?.diff ?? ""
 +        expect(diff).not.toContain("-Line 1")
 +        expect(diff).not.toContain("+Line 1")
++        expect(diff).toContain("Index:")
++        expect(diff).not.toContain("-Line 2")
++        expect(diff).not.toContain("+Line 2")
++        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical)
 +      }),
 +    )
 +
@@ -367,6 +379,10 @@ index 4f897dc875..d5d4f025aa 100644
 +        const diff = result.metadata?.diff ?? ""
 +        expect(diff).not.toContain("-Line 1")
 +        expect(diff).not.toContain("+Line 1")
++        expect(diff).toContain("Index:")
++        expect(diff).not.toContain("-Line 2")
++        expect(diff).not.toContain("+Line 2")
++        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical)
 +      }),
 +    )
 +  })
@@ -376,7 +392,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 index e394d8084f..072f95b18a 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -526,4 +526,40 @@ EOF`
+@@ -526,4 +526,48 @@ EOF`
        expect(yield* readText(target)).toBe(`He said "hi"\nsome${emDash}dash\nend\n`)
      }),
    )
@@ -391,13 +407,19 @@ index e394d8084f..072f95b18a 100644
 +        "*** Begin Patch\n*** Update File: patch-crlf.txt\n@@\n-line2\n+changed\n*** End Patch"
 +      yield* execute({ patchText }, ctx)
 +      const raw = yield* readText(target)
-+      expect(raw.replaceAll("\r\n", "\n").replaceAll("\r", "\n")).toContain("changed")
-+      // #131：permission ask 的 diff 不应因行尾风格膨胀成整文件替换
-+      const asked = calls.find((c) => c.permission === "edit")
-+      const diff = String((asked as any)?.metadata?.diff ?? "")
-+      if (diff) {
-+        expect(diff).not.toMatch(/^-line1$/m)
-+      }
++      expect(raw).toBe("line1\r\nchanged\r\n")
++      const file = calls[0]?.metadata.files[0]
++      expect(calls).toHaveLength(1)
++      expect(file).toMatchObject({ additions: 1, deletions: 1 })
++      const diff = file?.patch ?? ""
++      expect(diff).toContain("-line2")
++      expect(diff).toContain("+changed")
++      expect(diff).not.toContain("-line1")
++      expect(diff).not.toContain("+line1")
++      yield* writeText(target, "\uFEFFline1\r\nline2\r\n")
++      yield* execute({ patchText }, ctx)
++      expect(yield* readText(target)).toBe("\uFEFFline1\r\nchanged\r\n")
++      expect(calls[1]?.metadata.files[0]?.patch).not.toContain("\uFEFF")
 +    }),
 +  )
 +
@@ -405,15 +427,827 @@ index e394d8084f..072f95b18a 100644
 +  it.instance("applies patches to CR-only files", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
-+      const { ctx } = makeCtx()
++      const { ctx, calls } = makeCtx()
 +      const target = path.join(test.directory, "patch-cr.txt")
 +      yield* writeText(target, "line1\rline2\r")
 +      const patchText =
 +        "*** Begin Patch\n*** Update File: patch-cr.txt\n@@\n-line2\n+changed\n*** End Patch"
 +      yield* execute({ patchText }, ctx)
 +      const raw = yield* readText(target)
-+      expect(raw.replaceAll("\r\n", "\n").replaceAll("\r", "\n")).toContain("changed")
++      expect(raw).toBe("line1\rchanged\r")
++      expect(calls).toHaveLength(1)
++      expect(calls[0]?.metadata.files[0]).toMatchObject({ additions: 1, deletions: 1, patch: expect.stringContaining("-line2\n+changed") })
 +    }),
 +  )
 +
  })
+diff --git a/packages/core/src/patch.ts b/packages/core/src/patch.ts
+--- a/packages/core/src/patch.ts
++++ b/packages/core/src/patch.ts
+@@ -1,1 +1,3 @@
+ export * as Patch from "./patch"
++
++import { convertToLineEnding, detectLineEnding, splitLines } from "./util/line-ending"
+@@ -25,2 +27,2 @@
+ export function parse(patchText: string): ReadonlyArray<Hunk> {
+-  const lines = stripHeredoc(patchText.trim()).split("\n")
++  const lines = splitLines(stripHeredoc(patchText.trim()))
+@@ -71,3 +73,4 @@
+ export function derive(path: string, chunks: ReadonlyArray<UpdateFileChunk>, original: string): FileUpdate {
+   const source = splitBom(original)
+-  const lines = source.text.split("\n")
++  // 匹配使用逻辑行，BOM 独立保留；重建后恢复文件级行尾。
++  const lines = splitLines(source.text)
+@@ -79,1 +82,1 @@
+-  const next = splitBom(updated.join("\n"))
++  const next = splitBom(convertToLineEnding(updated.join("\n"), detectLineEnding(source.text)))
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -20,1 +20,2 @@
+ import { Tools } from "./tools"
++import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "../util/line-ending"
+@@ -40,8 +41,3 @@
+ export type Output = typeof Output.Type
+ 
+-const normalizeLineEndings = (text: string) => text.replaceAll("\r\n", "\n")
+-const detectLineEnding = (text: string): "\n" | "\r\n" => (text.includes("\r\n") ? "\r\n" : "\n")
+-const convertToLineEnding = (text: string, ending: "\n" | "\r\n") =>
+-  ending === "\n" ? normalizeLineEndings(text) : normalizeLineEndings(text).replaceAll("\n", "\r\n")
+-
+ const splitBom = (text: string) =>
+@@ -163,2 +159,3 @@
+-                const oldString = convertToLineEnding(input.oldString, ending)
+-                const newString = convertToLineEnding(input.newString, ending)
++                // LF 目标也先归一请求，保留原有 CRLF 请求编辑 LF 文件的匹配能力。
++                const oldString = convertToLineEnding(normalizeLineEndings(input.oldString), ending)
++                const newString = convertToLineEnding(normalizeLineEndings(input.newString), ending)
+@@ -183,1 +180,4 @@
+-                const counts = diffLines(source.text, replaced).reduce(
++                const diffOld = normalizeLineEndings(source.text)
++                const diffNew = normalizeLineEndings(replaced)
++                // 统计和展示共用逻辑文本，CR-only 不得被误计成整行替换。
++                const counts = diffLines(diffOld, diffNew).reduce(
+@@ -202,1 +202,1 @@
+-                      patch: createTwoFilesPatch(result.resource, result.resource, source.text, replaced),
++                      patch: createTwoFilesPatch(result.resource, result.resource, diffOld, diffNew),
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -4,1 +4,1 @@
+-import { Context, Effect, Layer, Schema } from "effect"
++import { Context, Effect, Exit, Layer, Schema } from "effect"
+@@ -8,1 +8,2 @@
+ import { FSUtil } from "./fs-util"
++import { normalizeLineEndings } from "./util/line-ending"
+@@ -17,2 +18,3 @@
+   readonly content: string | Uint8Array
++  readonly format?: (filepath: string) => Effect.Effect<boolean>
+ }
+@@ -22,2 +24,3 @@
+   readonly content: string
++  readonly format?: (filepath: string) => Effect.Effect<boolean>
+ }
+@@ -47,2 +50,5 @@
+   readonly diff?: string
++  readonly text?: string
++  readonly formattedDiff?: string
++  readonly formattedContent?: string
+ }
+@@ -92,1 +98,37 @@
+     })
++
++    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean) {
++      // 外部格式化可中断；最终回读与 BOM 修复始终受目标锁和退出收尾保护。
++      const readFinal = Effect.gen(function* () {
++        const final = yield* fs.readFile(input.target.canonical)
++        let offset = 0
++        while (hasUtf8Bom(final.subarray(offset))) offset += 3
++        // 以原字节修复前缀；字符串读取会隐藏 BOM，取消时也不能重编码 formatter 的半写入内容。
++        if (offset !== (bom ? 3 : 0)) {
++          const next = new Uint8Array(final.length - offset + (bom ? 3 : 0))
++          if (bom) next.set([0xef, 0xbb, 0xbf])
++          next.set(final.subarray(offset), bom ? 3 : 0)
++          yield* fs.writeFile(input.target.canonical, next)
++        }
++        return new TextDecoder().decode(final.subarray(offset))
++      })
++      const formatted = input.format ? yield* input.format(input.target.canonical).pipe(
++        Effect.interruptible,
++        Effect.onExit((exit) => Exit.isFailure(exit) ? readFinal.pipe(Effect.asVoid) : Effect.void),
++      ) : false
++      const text = yield* readFinal
++      const before = normalizeLineEndings(previous)
++      const after = normalizeLineEndings(text)
++      const submitted = normalizeLineEndings(splitBom(input.content).text)
++      return {
++        ...writeResult(input.target, existed),
++        diff: createTwoFilesPatch(input.target.resource, input.target.resource, before, after),
++        ...(formatted ? { text } : {}),
++        ...(formatted && submitted !== after ? {
++          // 回传请求与最终落盘之间的实际变化，不能用请求片段伪造 formatter 结果。
++          formattedDiff: createTwoFilesPatch(input.target.resource, input.target.resource, submitted, after),
++          formattedContent: text,
++        } : {}),
++      }
++    })
++
+@@ -122,16 +150,6 @@
+-          if (current === undefined) return writeResult(input.target, false)
+-          // 前像与最终回读位于同一目标锁，不能把后继写入混进本次覆写diff。
+-          const final = yield* fs.readFileString(input.target.canonical)
+-          return {
+-            ...writeResult(input.target, true),
+-            diff: createTwoFilesPatch(
+-              input.target.resource,
+-              input.target.resource,
+-              splitBom(new TextDecoder().decode(current)).text,
+-              splitBom(final).text,
+-            ),
+-          }
+-        }),
+-      ),
+-    )
+-
++          if (current === undefined && !input.format) return writeResult(input.target, false)
++          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined)
++        }),
++      ),
++    )
++
+@@ -153,1 +170,4 @@
+-          return writeResult(input.target, false)
++          if (input.format && typeof input.content === "string")
++            return yield* finishText({ ...input, content: input.content }, "", splitBom(input.content).bom, false)
++          return writeResult(input.target, false)
++
+@@ -168,1 +188,3 @@
+-          return writeResult(input.target, true)
++          if (input.format && typeof input.content === "string")
++            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true)
++          return writeResult(input.target, true)
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -15,1 +15,2 @@
+ import { Tools } from "./tools"
++import { normalizeLineEndings } from "../util/line-ending"
+@@ -205,2 +206,5 @@
+ function patchFile(change: Prepared): typeof FileDiff.Info.Type {
+-  const counts = diffLines(change.before, change.after).reduce(
++  const before = normalizeLineEndings(change.before)
++  const after = normalizeLineEndings(change.after)
++  // 增删统计与展示共用同一逻辑行视图，写入仍使用 prepared 原始内容。
++  const counts = diffLines(before, after).reduce(
+@@ -215,1 +219,1 @@
+-    patch: createTwoFilesPatch(change.target.resource, change.target.resource, change.before, change.after),
++    patch: createTwoFilesPatch(change.target.resource, change.target.resource, before, after),
+diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
+--- a/packages/core/test/patch.test.ts
++++ b/packages/core/test/patch.test.ts
+@@ -31,2 +31,15 @@
+     expect(Patch.joinBom(update.content, update.bom)).toBe("\uFEFFnew\n")
++    // 同时验证补丁解析、上下文匹配、BOM 与精确行尾，不能只归一后比较正文。
++    for (const ending of ["\n", "\r\n", "\r"]) {
++      const hunk = Patch.parse(["*** Begin Patch", "*** Update File: update.txt", "@@", " one", "-two", "+changed", " three", "*** End Patch"].join(ending))[0]
++      if (hunk?.type !== "update") throw new Error("Expected update hunk")
++      const derived = Patch.derive(hunk.path, hunk.chunks, `\uFEFF${["one", "two", "three", ""].join(ending)}`)
++      expect(derived).toEqual({ content: ["one", "changed", "three", ""].join(ending), bom: true })
++      expect(Patch.joinBom(derived.content, derived.bom)).toBe(`\uFEFF${["one", "changed", "three", ""].join(ending)}`)
++    }
++    // 文件级检测沿用 CRLF 优先级；混合输入不承诺逐分隔符保留。
++    expect(Patch.derive("mixed.txt", [{ oldLines: ["two"], newLines: ["changed"] }], "one\r\ntwo\rthree\n").content).toBe("one\r\nchanged\r\nthree\r\n")
++    expect(Patch.derive("no-eol.txt", [{ oldLines: ["one"], newLines: ["two"] }], "one").content).toBe("two\n")
++    expect(Patch.parse("*** Begin Patch\r*** Add File: add.txt\r+one\r+two\r*** End Patch")).toEqual([{ type: "add", path: "add.txt", contents: "one\ntwo" }])
++    expect(Patch.derive("empty.txt", [{ oldLines: [], newLines: ["one"] }], "").content).toBe("one\n")
+   })
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -5,1 +5,1 @@
+-import { Effect, Layer } from "effect"
++import { Effect, Layer, Schema } from "effect"
+@@ -364,19 +364,25 @@
+-  it.live("preserves BOM and CRLF line endings", () =>
++  it.live("preserves BOM and file line endings in edits and diffs", () =>
+     Effect.acquireUseRelease(
+       Effect.promise(() => tmpdir()),
+-      (tmp) => {
+-        reset()
+-        const target = path.join(tmp.path, "windows.txt")
+-        return Effect.promise(() => fs.writeFile(target, "\uFEFFbefore\r\nrest\r\n")).pipe(
+-          Effect.andThen(
+-            withTool(tmp.path, (registry) =>
+-              executeTool(registry, call({ path: "windows.txt", oldString: "before\nrest", newString: "after\nrest" })),
+-            ),
+-          ),
+-          Effect.andThen(() => Effect.promise(() => fs.readFile(target, "utf8"))),
+-          Effect.tap((content) => Effect.sync(() => expect(content).toBe("\uFEFFafter\r\nrest\r\n"))),
+-        )
+-      },
++      (tmp) => Effect.gen(function* () {
++        const target = path.join(tmp.path, "windows.txt")
++        for (const ending of ["\n", "\r\n", "\r"]) {
++          reset()
++          yield* Effect.promise(() => fs.writeFile(target, `\uFEFFbefore${ending}rest${ending}`))
++          // 真实 registry 结算还要校验逻辑 diff，不能只看到写盘正文正确。
++          const settled = yield* withTool(tmp.path, (registry) =>
++            settleTool(registry, call({ path: "windows.txt", oldString: "before\r\nrest", newString: "after\nrest" })),
++          )
++          const output = Schema.decodeUnknownSync(EditTool.Output)(settled.output?.structured)
++          expect(output.replacements).toBe(1)
++          expect(output.files[0]).toMatchObject({ additions: 1, deletions: 1 })
++          expect(output.files[0]?.patch).toContain("-before\n+after\n")
++          expect(output.files[0]?.patch).not.toContain("\r")
++          expect(output.files[0]?.patch).not.toContain("\uFEFF")
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(`\uFEFFafter${ending}rest${ending}`)
++          expect(writes).toHaveLength(1)
++        }
++      }),
+       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+     ),
+   )
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -182,1 +182,14 @@
+                 expect(yield* Effect.promise(() => fs.readFile(deduplicated, "utf8"))).toBe("\uFEFFafter")
++                // 本补丁只归一 Write 展示；实际请求仍可把 CRLF/CR 覆写为 LF。
++                for (const ending of ["\n", "\r\n", "\r"]) {
++                  yield* Effect.promise(() => fs.writeFile(preserved, `\uFEFFone${ending}two${ending}`))
++                  const settled = yield* settleTool(registry, call({ path: "preserved.txt", content: "one\ntwo\n" }, `call-eol-${ending.charCodeAt(0)}-${ending.length}`))
++                  const output = Schema.decodeUnknownSync(WriteTool.Output)(settled.output?.structured)
++                  expect(output.diff).toContain("Index:")
++                  expect(output.diff).not.toContain("-one")
++                  expect(output.diff).not.toContain("+one")
++                  expect(output.diff).not.toContain("-two")
++                  expect(output.diff).not.toContain("+two")
++                  expect(output.diff).not.toContain("\uFEFF")
++                  expect(yield* Effect.promise(() => fs.readFile(preserved, "utf8"))).toBe("\uFEFFone\ntwo\n")
++                }
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -4,1 +4,1 @@
+-import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
++import { Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
+@@ -132,1 +132,33 @@
+ describe("ApplyPatchTool", () => {
++  it.live("preserves logical lines, BOM and precise diffs for each file ending", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => Effect.gen(function* () {
++        for (const [index, ending] of ["\n", "\r\n", "\r"].entries()) {
++          reset()
++          const update = path.join(tmp.path, "update.txt")
++          const remove = path.join(tmp.path, "remove.txt")
++          yield* Effect.promise(() => fs.writeFile(update, `\uFEFFone${ending}two${ending}three${ending}`))
++          yield* Effect.promise(() => fs.writeFile(remove, `first${ending}last${ending}`))
++          const patch = ["*** Begin Patch", "*** Update File: update.txt", "@@", " one", "-two", "+changed", " three", "*** Delete File: remove.txt", "*** End Patch"].join(ending)
++          // 通过正式工具解析、准备、条件写入及结算，确认原始字节和展示各守其责。
++          const settled = yield* withTool(tmp.path, (registry) => settleTool(registry, call(patch, `call-ending-${index}`)))
++          const output = Schema.decodeUnknownSync(ApplyPatchTool.Output)(settled.output?.structured)
++          expect(output.files).toHaveLength(2)
++          expect(output.files[0]).toMatchObject({ additions: 1, deletions: 1, status: "modified" })
++          expect(output.files[0]?.patch).toContain("-two\n+changed\n")
++          expect(output.files[0]?.patch).not.toContain("-one")
++          expect(output.files[0]?.patch).not.toContain("+one")
++          expect(output.files[0]?.patch).not.toContain("\r")
++          expect(output.files[0]?.patch).not.toContain("\uFEFF")
++          expect(output.files[1]).toMatchObject({ additions: 0, deletions: 2, status: "deleted" })
++          expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe(`\uFEFFone${ending}changed${ending}three${ending}`)
++          expect(yield* exists(remove)).toBe(false)
++          expect(readsBeforeEditApproval).toBe(0)
++          expect(assertions).toMatchObject([{ action: "edit", resources: ["update.txt", "remove.txt"] }])
++        }
++      }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -14,1 +14,2 @@
+ import { PermissionV2 } from "../permission"
++import { Format } from "../format"
+@@ -36,1 +37,3 @@
+   diff: Schema.optionalKey(Schema.String),
++  formattedDiff: Schema.optionalKey(Schema.String),
++  formattedContent: Schema.optionalKey(Schema.String),
+@@ -40,2 +43,8 @@
+ export const toModelOutput = (output: Output) =>
+-  `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`
++  [
++    `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`,
++    ...(output.formattedDiff ? ["", "Formatted changes (auto-format adjusted the file):", "```diff", output.formattedDiff, "```"] : []),
++  ].join("\n")
++
++// 最终内容反馈来自锁内实际回读；后续历史投影消费相同格式化结果。
++
+@@ -54,1 +63,2 @@
+     const permission = yield* PermissionV2.Service
++    const format = yield* Format.Service
+@@ -89,1 +99,1 @@
+-                return yield* files.writeTextPreservingBom({ target, content: input.content })
++                return yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
+@@ -102,1 +112,1 @@
+-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, PermissionV2.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, PermissionV2.node, Format.node],
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -20,1 +20,2 @@
+ import { Tools } from "./tools"
++import { Format } from "../format"
+@@ -66,16 +66,10 @@
+-const previewLines = (value: string, prefix: "+" | "-") => {
+-  const lines = normalizeLineEndings(value).split("\n")
+-  const shown = lines.slice(0, 6).map((line) => `${prefix}${line.length > 240 ? `${line.slice(0, 240)}...` : line}`)
+-  if (lines.length > shown.length) shown.push(`${prefix}...`)
+-  return shown
+-}
+-
+-export const toModelOutput = (output: Output, oldString: string, newString: string) =>
++export const toModelOutput = (output: Output) =>
+   [
+     `Edited file successfully: ${output.files[0]?.file}`,
+     `Replacements: ${output.replacements}`,
++    "Changed:",
+     "```diff",
+-    ...previewLines(oldString, "-"),
+-    ...previewLines(newString, "+"),
++    // 展示真实文件 diff，第七行以后的修改和 formatter 变化同样可见。
++    ...output.files.map((file) => file.patch),
+     "```",
+   ].join("\n")
+@@ -96,1 +92,2 @@
+     const permission = yield* PermissionV2.Service
++    const format = yield* Format.Service
+@@ -106,2 +103,2 @@
+-            toModelOutput: ({ input, output }) => [
+-              { type: "text", text: toModelOutput(output, input.oldString, input.newString) },
++            toModelOutput: ({ output }) => [
++              { type: "text", text: toModelOutput(output) },
+@@ -181,2 +178,3 @@
+-                    ? source.text.replaceAll(oldString, newString)
+-                    : source.text.replace(oldString, newString)
++                    // newString 是字面文本，不能把 $&、$1 等误执行为替换表达式。
++                    ? source.text.replaceAll(oldString, () => newString)
++                    : source.text.replace(oldString, () => newString)
+@@ -195,1 +193,2 @@
+                     content: joinBom(next.text, source.bom || next.bom),
++                    format: format.file,
+@@ -202,1 +201,1 @@
+-                      patch: createTwoFilesPatch(result.resource, result.resource, diffOld, diffNew),
++                      patch: result.diff ?? createTwoFilesPatch(result.resource, result.resource, diffOld, diffNew),
+@@ -204,1 +203,7 @@
+-                      ...counts,
++                      ...(result.text === undefined ? counts : diffLines(diffOld, normalizeLineEndings(result.text)).reduce(
++                        (total, change) => ({
++                          additions: total.additions + (change.added ? change.count ?? 0 : 0),
++                          deletions: total.deletions + (change.removed ? change.count ?? 0 : 0),
++                        }),
++                        { additions: 0, deletions: 0 },
++                      )),
+@@ -222,1 +227,1 @@
+-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -15,1 +15,2 @@
+ import { Tools } from "./tools"
++import { Format } from "../format"
+@@ -42,1 +43,6 @@
+     ),
++    "",
++    "Changed:",
++    "```diff",
++    ...output.files.map((file) => file.patch),
++    "```",
+@@ -65,1 +71,2 @@
+     const permission = yield* PermissionV2.Service
++    const format = yield* Format.Service
+@@ -158,1 +165,1 @@
+-                const patchFiles = prepared.map(patchFile)
++                const patchFiles: Array<typeof FileDiff.Info.Type> = []
+@@ -169,3 +176,5 @@
+                               : `${change.contents}\n`,
++                          format: format.file,
+                         })
+                         applied.push({ type: change.type, resource: result.resource, target: result.target })
++                        patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
+@@ -176,1 +185,2 @@
+                         applied.push({ type: change.type, resource: result.resource, target: result.target })
++                        patchFiles.push(patchFile(change))
+@@ -182,3 +192,5 @@
+                         content: change.content,
++                        format: format.file,
+                       })
+                       applied.push({ type: change.type, resource: result.resource, target: result.target })
++                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
+@@ -202,1 +214,1 @@
+-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
+diff --git a/packages/opencode/src/format/formatter.ts b/packages/core/src/format/catalog.ts
+similarity index 90%
+rename from packages/opencode/src/format/formatter.ts
+rename to packages/core/src/format/catalog.ts
+--- a/packages/opencode/src/format/formatter.ts
++++ b/packages/core/src/format/catalog.ts
+@@ -2,3 +2,1 @@
+-import type { InstanceContext } from "../project/instance-context"
+-import { Filesystem } from "@/util/filesystem"
+-import { Process } from "@/util/process"
++import { dirname, join } from "node:path"
+@@ -7,3 +5,6 @@
+-export interface Context extends Pick<InstanceContext, "directory" | "worktree"> {
++export interface Context {
++  readonly directory: string
++  readonly worktree: string
+   experimentalOxfmt: boolean
++  readonly probe: (command: readonly string[]) => Promise<{ code: number; text: string }>
+ }
+@@ -16,1 +17,19 @@
+ }
++
++// 发现逻辑供两代复用；这里只读取配置文件，命令探测由各自已持有的 AppProcess 承担。
++const Filesystem = {
++  readText: (filepath: string) => Bun.file(filepath).text(),
++  readJson: <T>(filepath: string): Promise<T> => Bun.file(filepath).json(),
++  async findUp(target: string, start: string, stop?: string) {
++    const result: string[] = []
++    for (let current = start; ; ) {
++      if (await Bun.file(join(current, target)).exists()) result.push(join(current, target))
++      if (current === stop) break
++      const parent = dirname(current)
++      if (parent === current) break
++      current = parent
++    }
++    return result
++  },
++}
++
+@@ -218,5 +237,5 @@
+ export const rlang: Info = {
+   name: "air",
+   extensions: [".R"],
+-  async enabled() {
++  async enabled(context) {
+     const air = which("air")
+@@ -225,1 +244,1 @@
+-    const output = await Process.text([air, "--help"], { nothrow: true })
++    const output = await context.probe([air, "--help"])
+@@ -243,1 +262,1 @@
+-    const output = await Process.run([uv, "format", "--help"], { nothrow: true })
++    const output = await context.probe([uv, "format", "--help"])
+@@ -404,1 +423,4 @@
+ }
++
++export const definitions: Record<string, Info> = { gofmt, mix, prettier, oxfmt, biome, zig, clang, ktlint, ruff, rlang, uvformat, rubocop, standardrb, htmlbeautifier, dart, ocamlformat, terraform, latexindent, gleam, shfmt, nixfmt, rustfmt, pint, ormolu, cljfmt, dfmt }
++export const builtins = Object.values(definitions)
+diff --git a/packages/opencode/src/format/formatter.ts b/packages/opencode/src/format/formatter.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/format/formatter.ts
+@@ -0,0 +1,3 @@
++// 兼容既有 V1 发现入口，内置规则由 Core 唯一维护。
++export type { Context, Info } from "@opencode-ai/core/format/catalog"
++export { gofmt, mix, prettier, oxfmt, biome, zig, clang, ktlint, ruff, rlang, uvformat, rubocop, standardrb, htmlbeautifier, dart, ocamlformat, terraform, latexindent, gleam, shfmt, nixfmt, rustfmt, pint, ormolu, cljfmt, dfmt } from "@opencode-ai/core/format/catalog"
+diff --git a/packages/opencode/src/format/index.ts b/packages/opencode/src/format/index.ts
+--- a/packages/opencode/src/format/index.ts
++++ b/packages/opencode/src/format/index.ts
+@@ -46,1 +46,1 @@
+-            cmd = await item.enabled({ ...ctx, experimentalOxfmt: flags.experimentalOxfmt })
++            cmd = await item.enabled({ ...ctx, experimentalOxfmt: flags.experimentalOxfmt, probe: (command) => Effect.runPromise(appProcess.run(ChildProcess.make(command[0]!, command.slice(1), { cwd: ctx.directory, stdin: "ignore", stdout: "pipe", stderr: "pipe" })).pipe(Effect.match({ onFailure: () => ({ code: 1, text: "" }), onSuccess: (result) => ({ code: result.exitCode, text: result.stdout.toString("utf8") }) }))) })
+diff --git a/packages/core/src/format.ts b/packages/core/src/format.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/format.ts
+@@ -0,0 +1,94 @@
++export * as Format from "./format"
++
++import { Context, Effect, Layer } from "effect"
++import { ChildProcess } from "effect/unstable/process"
++import path from "path"
++import { mergeDeep } from "remeda"
++import { Config } from "./config"
++import { Location } from "./location"
++import { AppProcess } from "./process"
++import { makeLocationNode } from "./effect/app-node"
++import { builtins, definitions, type Info } from "./format/catalog"
++
++export interface Interface {
++  readonly file: (filepath: string) => Effect.Effect<boolean>
++}
++
++export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Format") {}
++
++const layer = Layer.effect(
++  Service,
++  Effect.gen(function* () {
++    const config = yield* Config.Service
++    const appProcess = yield* AppProcess.Service
++    const location = yield* Location.Service
++    const documents = (yield* config.entries()).flatMap((entry) => entry.type === "document" && entry.info.formatter !== undefined ? [entry.info.formatter] : [])
++    const configured = documents.reduce<Config.Info["formatter"]>((previous, current) => typeof previous === "object" && typeof current === "object" ? mergeDeep(previous, current) : current, undefined)
++    const formatters: Record<string, Info> = {}
++    const commands = new Map<string, string[] | false>()
++    if (configured) {
++      for (const item of builtins) formatters[item.name] = item
++      if (typeof configured === "object") {
++        for (const [name, item] of Object.entries(configured)) {
++          if (["ruff", "uv"].includes(name) && (configured.ruff?.disabled || configured.uv?.disabled)) {
++            delete formatters.ruff
++            delete formatters.uv
++            continue
++          }
++          if (item.disabled) {
++            delete formatters[name]
++            continue
++          }
++          const base = definitions[name]
++          const info = mergeDeep(base ?? { extensions: [] }, item)
++          formatters[name] = {
++            ...info,
++            name,
++            extensions: [...(info.extensions ?? [])],
++            enabled: base && !info.command ? base.enabled : async () => info.command ? [...info.command] : false,
++          }
++        }
++      }
++    }
++    // 显式 Oxfmt 开关优先于总实验开关，保持 V1 的启用次序。
++    const experimentalOxfmt = /^(?:true|1|yes|on)$/i.test(process.env.OPENCODE_EXPERIMENTAL_OXFMT ?? process.env.OPENCODE_EXPERIMENTAL ?? "false")
++    return Service.of({
++      file: Effect.fn("Format.file")(function* (filepath: string) {
++        const matches = Object.values(formatters).filter((item) => item.extensions.includes(path.extname(filepath)))
++        const ran = yield* Effect.forEach(matches, Effect.fnUntraced(function* (item) {
++          const cached = commands.get(item.name)
++          const command = cached === undefined || cached === false ? yield* Effect.promise((signal) =>
++            item.enabled({
++              directory: location.directory,
++              worktree: location.project.directory,
++              experimentalOxfmt,
++              // 探测与正式执行复用现有进程 owner，取消时不留下脱离作用域的进程。
++              probe: (cmd) => Effect.runPromise(appProcess.run(
++                ChildProcess.make(cmd[0]!, cmd.slice(1), { cwd: location.directory, stdin: "ignore", stdout: "pipe", stderr: "pipe" }),
++              ).pipe(Effect.match({ onFailure: () => ({ code: 1, text: "" }), onSuccess: (result) => ({ code: result.exitCode, text: result.stdout.toString("utf8") }) })), { signal }),
++            }),
++          ) : cached
++          commands.set(item.name, command)
++          if (command === false) return false
++          const args = command.map((part) => part.replace("$FILE", filepath))
++          // formatter 失败沿用 V1 的记录语义，不能虚构成功修改或引入第二执行入口。
++          yield* appProcess.run(
++            ChildProcess.make(
++              args[0]!, args.slice(1), {
++                cwd: location.directory,
++                env: item.environment,
++                extendEnv: true,
++                stdin: "ignore",
++                stdout: "ignore",
++                stderr: "ignore",
++              }),
++          ).pipe(Effect.tap((result) => result.exitCode === 0 ? Effect.void : Effect.logError("formatter exited unsuccessfully", { file: filepath, exitCode: result.exitCode })), Effect.catch((error) => Effect.logError("failed to format file", { file: filepath, error })))
++          return true
++        }))
++        return ran.some(Boolean)
++      }),
++    })
++  }),
++)
++
++export const node = makeLocationNode({ service: Service, layer, deps: [Config.node, Location.node, AppProcess.node] })
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -316,6 +316,11 @@
+             match.time.completed = event.data.timestamp
++            // 只有本地 Write 的格式化真值改写历史输入；空文件同样是有效最终内容。
++            const formattedContent = match.name === "write" && !event.data.provider.executed && typeof event.data.structured.formattedContent === "string"
++              ? event.data.structured.formattedContent
++              : undefined
+             match.state = castDraft(
+               SessionMessage.ToolStateCompleted.make({
+                 status: "completed",
+-                input: match.state.input,
+-                structured: event.data.structured,
++                input: formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent },
++                // 完成投影后去掉临时整文，避免在 input 与 structured 重复保存。
++                structured: formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent")),
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -5,1 +5,4 @@
+-import { Effect, Layer, Schema } from "effect"
++import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
++import { Config } from "@opencode-ai/core/config"
++import { EditTool } from "@opencode-ai/core/tool/edit"
++import { ApplyPatchTool } from "@opencode-ai/core/tool/apply-patch"
+@@ -63,1 +65,1 @@
+-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>) => {
++const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, formatting?: { formatter: Config.Info["formatter"]; tool?: "edit" | "apply_patch" }) => {
+@@ -78,1 +82,1 @@
+-          WriteTool.node,
++          formatting?.tool === "edit" ? EditTool.node : formatting?.tool === "apply_patch" ? ApplyPatchTool.node : WriteTool.node,
+@@ -84,1 +86,4 @@
+           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
++          ...(formatting ? [
++            [Config.node, Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: Schema.decodeUnknownSync(Config.Info)({ formatter: formatting.formatter }) })]) }))] as const,
++          ] : []),
+@@ -116,1 +122,2 @@
+                   existed: false,
++                  diff: expect.stringContaining("+created"),
+@@ -162,1 +173,49 @@
++  it.live("formats created and overwritten files using the configured native formatter", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => Effect.gen(function* () {
++        for (const mode of ["off", "disabled", "enabled"] as const) {
++          reset()
++          const resource = `${mode}.fmt`
++          const target = path.join(tmp.path, resource)
++          const counter = path.join(tmp.path, `${mode}-runs.txt`)
++          // 实际执行独立临时文件上的 formatter，不 mock 进程、文件服务、结算或回读。
++          const program = String.raw`const file = process.argv.at(-2); const counter = process.argv.at(-1); const text = await Bun.file(file).text(); await Bun.write(file, text.replace(/const n=(\d+);?/g, "const n = $1;").replace(/\n*$/, "\n")); await Bun.write(counter, (await Bun.file(counter).exists() ? await Bun.file(counter).text() : "") + "1\n")`
++          const formatter: Config.Info["formatter"] = mode === "off" ? false : { fixture: { command: [process.execPath, "-e", program, "$FILE", counter], extensions: [".fmt"], disabled: mode === "disabled" } }
++          yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++            for (const index of [0, 1]) {
++              const settled = yield* settleTool(registry, call({ path: resource, content: "\uFEFFconst n=2" }, `call-format-${mode}-${index}`))
++              const output = Schema.decodeUnknownSync(WriteTool.Output)(settled.output?.structured)
++              const shown = settled.result.type === "text" ? settled.result.value : ""
++              expect(output.existed).toBe(index === 1)
++              expect(output.diff).not.toContain("\uFEFF")
++              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(mode === "enabled" ? "\uFEFFconst n = 2;\n" : "\uFEFFconst n=2")
++              if (mode === "enabled") {
++                expect(output.formattedContent).toBe("const n = 2;\n")
++                expect(output.formattedDiff).toContain("+const n = 2;")
++                expect(shown).toContain("Formatted changes (auto-format adjusted the file):")
++                expect(shown).toContain("+const n = 2;")
++              } else {
++                expect(output.formattedContent).toBeUndefined()
++                expect(output.formattedDiff).toBeUndefined()
++              }
++            }
++          }), { formatter })
++          if (mode === "enabled") {
++            const identity = { sessionID, ...toolIdentity }
++            const edit = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-edit", name: "edit", input: { path: resource, oldString: "const n = 2;", newString: "const n=3" } } }), { formatter, tool: "edit" })
++            expect(edit.result.type === "text" ? edit.result.value : "").toContain("-const n = 2;\n+const n = 3;")
++            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFconst n = 3;\n")
++            const patch = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-patch", name: "apply_patch", input: { patchText: `*** Begin Patch\n*** Update File: ${resource}\n@@\n-const n = 3;\n+const n=4\n*** End Patch` } } }), { formatter, tool: "apply_patch" })
++            expect(patch.result.type === "text" ? patch.result.value : "").toContain("-const n = 3;\n+const n = 4;")
++            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFconst n = 4;\n")
++          }
++          const ran = yield* Effect.promise(() => Bun.file(counter).exists())
++          expect(ran ? (yield* Effect.promise(() => Bun.file(counter).text())).trim().split("\n").length : 0).toBe(mode === "enabled" ? 4 : 0)
++        }
++      }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   it.live("preserves exactly one BOM when overwriting existing files", () =>
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -134,1 +134,2 @@
++                const shown = settled.result.type === "text" ? settled.result.value : ""
+                 expect(settled.result).toEqual({
+@@ -136,1 +136,1 @@
+-                  value: "Edited file successfully: hello.txt\nReplacements: 1\n```diff\n-before\n+after\n```",
++                  value: expect.stringContaining("Edited file successfully: hello.txt\nReplacements: 1\nChanged:\n```diff\n"),
+@@ -150,1 +150,2 @@
+                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\nrest\n")
++                expect(shown).toContain("-before\n+after\n rest")
+@@ -355,1 +356,12 @@
+               expect(writes).toHaveLength(1)
++              const literal = "$&! $1 $` $' $$"
++              const replaced = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: "after", newString: literal, replaceAll: true })))
++              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe([literal, literal, literal].join(" "))
++              expect(replaced.result).toMatchObject({ type: "text", value: expect.stringContaining(literal) })
++              // 唯一变化在第七行，模型必须看到真实 diff，而非前六行输入片段。
++              const original = "a\nb\nc\nd\ne\nf\ng\n"
++              const final = "a\nb\nc\nd\ne\nf\nG\n"
++              yield* Effect.promise(() => fs.writeFile(target, original))
++              const lastLine = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: original, newString: final })))
++              expect(lastLine.result).toMatchObject({ value: expect.stringContaining("-g\n+G") })
++              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(final)
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -153,1 +153,2 @@
++                const shown = settled.result.type === "text" ? settled.result.value : ""
+                 expect(settled.result).toEqual({
+@@ -155,1 +155,1 @@
+-                  value: "Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt",
++                  value: expect.stringContaining("Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt\n\nChanged:\n```diff"),
+@@ -194,1 +194,4 @@
+                 expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("after\n")
++                expect(shown).toContain("+created")
++                expect(shown).toContain("-before\n+after")
++                expect(shown).toContain("-remove")
+diff --git a/packages/core/test/session-tool-progress.test.ts b/packages/core/test/session-tool-progress.test.ts
+--- a/packages/core/test/session-tool-progress.test.ts
++++ b/packages/core/test/session-tool-progress.test.ts
+@@ -68,1 +68,1 @@
+-      const start = (callID: string) =>
++      const start = (callID: string, name = "bash", input: Record<string, unknown> = { command: "pwd" }) =>
+@@ -75,1 +75,1 @@
+-            name: "bash",
++            name,
+@@ -82,2 +82,2 @@
+-            tool: "bash",
+-            input: { command: "pwd" },
++            tool: name,
++            input,
+@@ -144,1 +144,16 @@
+       expect(Schema.is(SessionEvent.Durable)(failed)).toBe(true)
++      // 从真实 durable success 投影到数据库，下一轮工具调用记忆必须采用 formatter 的落盘真值。
++      yield* start("call-formatted", "write", { path: "x.ts", content: "const n=2" })
++      yield* service.publish(SessionEvent.Tool.Success, {
++        sessionID, timestamp, assistantMessageID, callID: "call-formatted",
++        structured: { formattedContent: "const n = 2;\n", formattedDiff: "-const n=2\n+const n = 2;\n" },
++        content: content("Wrote file successfully.\nFormatted changes"), provider: { executed: false },
++      })
++      expect((yield* readAssistant).content[2]).toMatchObject({
++        name: "write",
++        state: { status: "completed", input: { path: "x.ts", content: "const n = 2;\n" }, structured: { formattedDiff: "-const n=2\n+const n = 2;\n" } },
++      })
++      const formattedTool = (yield* readAssistant).content[2]
++      expect(formattedTool?.type).toBe("tool")
++      if (formattedTool?.type === "tool" && formattedTool.state.status === "completed")
++        expect(formattedTool.state.structured).not.toHaveProperty("formattedContent")
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -44,2 +44,1 @@
+-// TODO: Add formatter integration after V2 formatter runtime exists.
+ // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -85,2 +85,1 @@
+-// TODO: Add formatter integration after V2 formatter runtime exists.
+ // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -215,2 +215,1 @@
+-// TODO: Add formatter integration after V2 formatter runtime exists.
+ // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -301,3 +301,2 @@
+     "Revisit whether model-facing mutation schemas should prefer absolute `filePath` naming for trained-in compatibility after evaluating model behavior.",
+-    "Add formatter integration after V2 formatter runtime exists.",
+     "Publish watcher/file-edit events after V2 watcher integration exists.",
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -427,2 +427,1 @@
+-    "Add formatter integration after V2 formatter runtime exists.",
+     "Publish watcher/file-edit events after V2 watcher integration exists.",
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -162,1 +162,36 @@
++  it.live("cancels a running formatter, restores BOM and releases the same target lock", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => Effect.gen(function* () {
++        reset()
++        const resource = "cancel.fmt"
++        const target = path.join(tmp.path, resource)
++        const ready = path.join(tmp.path, "formatter-ready")
++        // 子进程只操作本用例文件；自然退出标记令旧的不可取消实现稳定失败并自行收尾。
++        const program = String.raw`const file = process.argv.at(-2); const ready = process.argv.at(-1); await Bun.write(file, "formatted before cancel\n"); setTimeout(async () => { await Bun.write(ready + ".natural", "done"); process.exit(0) }, 10000); await Bun.write(ready, "ready")`
++        const formatter: Config.Info["formatter"] = { fixture: { command: [process.execPath, "-e", program, "$FILE", ready], extensions: [".fmt"] } }
++        yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++          const files = yield* FileMutation.Service
++          const running = yield* settleTool(registry, call({ path: resource, content: "\uFEFFbefore" }, "call-cancel-format")).pipe(Effect.forkChild)
++          yield* Effect.promise(async () => {
++            const deadline = Date.now() + 5000
++            while (!(await Bun.file(ready).exists())) {
++              if (Date.now() > deadline) throw new Error("Formatter did not publish readiness")
++              await Bun.sleep(10)
++            }
++          })
++          yield* Fiber.interrupt(running)
++          const exit = yield* Fiber.await(running)
++          expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
++          expect(yield* Effect.promise(() => Bun.file(`${ready}.natural`).exists())).toBe(false)
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFformatted before cancel\n")
++          // 同一个 FileMutation 实例再次写入，证明不是换一个 mutex 绕过泄漏的锁。
++          yield* files.writeTextPreservingBom({ target: { canonical: yield* Effect.promise(() => fs.realpath(target)), resource }, content: "after cancellation" })
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("\uFEFFafter cancellation")
++        }), { formatter })
++      }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   it.live("preserves exactly one BOM when overwriting existing files", () =>

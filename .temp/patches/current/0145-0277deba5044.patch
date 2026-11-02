@@ -5,12 +5,12 @@ Subject: [PATCH] =?UTF-8?q?feat(read):=20=E4=BF=9D=E7=95=99XML=E6=95=8F?=
  =?UTF-8?q?=E6=84=9F=E5=86=85=E5=AE=B9=EF=BC=8C=E4=BC=98=E5=8C=96=E8=BE=93?=
  =?UTF-8?q?=E5=87=BA=E7=BB=93=E6=9E=84=EF=BC=8C=E7=A1=AE=E4=BF=9D=E5=86=85?=
 
-diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+diff --git a/packages/core/src/tool/read-presentation.ts b/packages/core/src/tool/read-presentation.ts
 index b70f7bce5b..307442b517 100644
---- a/packages/opencode/src/tool/read.ts
-+++ b/packages/opencode/src/tool/read.ts
+--- a/packages/core/src/tool/read-presentation.ts
++++ b/packages/core/src/tool/read-presentation.ts
 @@ -300,9 +300,9 @@ function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta)
- function renderContentLines(raw: string[], offset: number) {
+ function renderContentLines(raw: readonly string[], offset: number) {
    return raw
      .map((line, i) => {
 -      // #142：结构化包装字段转义；内容行 escape 防破坏 XML 结构（#145 改为原文）
@@ -31,7 +31,10 @@ index b70f7bce5b..307442b517 100644
 +    output.push(input.outline.items.join("\n"))
      output.push("</outline>")
    }
-   // #142：部分重叠仍返回内容，附加 note
+   if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}" />`)
+diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
+--- a/packages/opencode/src/tool/read.ts
++++ b/packages/opencode/src/tool/read.ts
 @@ -680,7 +681,8 @@ export const ReadTool = Tool.define<
            `<directory entries="${items.length}" />`,
            `<content>`,
@@ -42,6 +45,31 @@ index b70f7bce5b..307442b517 100644
            `</content>`,
            // #142：目录超限用 entry_limit
            truncated ? `<more offset="${offset + sliced.length}" reason="entry_limit" />` : undefined,
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -267,1 +267,21 @@
++      const rawRead = (file: string) => settleTool(registry, { sessionID, ...toolIdentity,
++        call: { type: "tool-call", id: "raw-channel", name: "read", input: { path: file } } })
++      const xmlFile = path.join(nested, "raw.txt")
++      yield* fs.writeFileString(xmlFile, '<tag attr="x">&</tag>\n')
++      const rawFile = yield* rawRead(xmlFile)
++      const fileText = rawFile.result.type === "text" ? rawFile.result.value : ""
++      expect(fileText).toContain('1: <tag attr="x">&</tag>')
++      expect(fileText).not.toContain("&lt;tag")
++      const rawDirectory = path.join(nested, "raw-directory")
++      yield* fs.makeDirectory(rawDirectory)
++      yield* fs.writeFileString(path.join(rawDirectory, "a&b.txt"), "content")
++      const directoryResult = yield* rawRead(rawDirectory)
++      expect(directoryResult.result).toMatchObject({ type: "json", value: { entries: [{ path: "a&b.txt" }], total: 1, truncated: false } })
++      const rustFile = path.join(nested, "generic.rs")
++      yield* fs.writeFileString(rustFile, ["impl<T> Parser<T> where T: Clone {", ...Array.from({ length: 650 }, () => "// filler")].join("\n"))
++      const rustResult = yield* rawRead(rustFile)
++      const rustText = rustResult.result.type === "text" ? rustResult.result.value : ""
++      expect(rustText).toContain("1 impl Parser<T>")
++      expect(rustText).not.toContain("Parser&lt;T&gt;")
++      // 三通道经过实际 reader、schema 和统一结算，不能只用纯渲染器自证原文。
+       const before = lookups
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 index a3365ab67e..4a4c9c96f3 100644
 --- a/packages/opencode/test/tool/read.test.ts

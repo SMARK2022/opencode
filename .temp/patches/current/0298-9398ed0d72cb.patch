@@ -1,14 +1,13 @@
-diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
+diff --git a/packages/core/src/session/file-evidence.ts b/packages/core/src/session/file-evidence.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/session/file-evidence.ts
-@@ -0,0 +1,92 @@
-+export * as CompactionFileEvidence from "./file-evidence"
++++ b/packages/core/src/session/file-evidence.ts
+@@ -0,0 +1,89 @@
++export * as FileEvidence from "./file-evidence"
 +
 +import path from "path"
 +import { Effect, Option, Schema } from "effect"
-+import { FSUtil } from "@opencode-ai/core/fs-util"
-+import type { SessionV1 } from "@opencode-ai/core/v1/session"
++import { FSUtil } from "../fs-util"
 +
 +const Receipt = Schema.Struct({
 +  path: Schema.String,
@@ -24,31 +23,29 @@ new file mode 100644
 +
 +export const kind = "compaction_evidence_handoff"
 +
-+export const render = Effect.fn("CompactionFileEvidence.render")(function* (
-+  messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string,
++export const render = Effect.fn("FileEvidence.render")(function* (
++  receipts: readonly unknown[], fs: FSUtil.Interface, worktree: string,
 +) {
 +  const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
-+  for (const message of messages) {
-+    for (const part of message.parts) {
-+      if (part.type !== "tool" || part.tool !== "read" || part.state.status !== "completed") continue
-+      const parsed = Schema.decodeUnknownOption(Receipt)(part.state.metadata.read)
-+      if (Option.isNone(parsed) || parsed.value.stub) continue
-+      const read = parsed.value
-+      // 按真实路径合并多次读取；Windows的大小写和分隔符不构成不同文件版本。
-+      const absolute = path.resolve(worktree, read.canonicalPath)
-+      const key = process.platform === "win32" ? absolute.toLowerCase() : absolute
-+      const ranges = [...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }]
-+        .sort((a, b) => a.start - b.start || a.end - b.end)
-+        .reduce<{ start: number; end: number }[]>((result, range) => {
-+          const last = result.at(-1)
-+          if (!last || range.start > last.end + 1) result.push({ ...range })
-+          else last.end = Math.max(last.end, range.end)
-+          return result
-+        }, [])
-+      // 删除再插入让Map顺序代表最近读取，避免文件修改时间影响证据优先级。
-+      files.delete(key)
-+      files.set(key, { ...read, canonicalPath: absolute, ranges })
-+    }
++  // 两代只转换真实已完成Read凭证，合并/预算/stat仍只有一个owner。
++  for (const receipt of receipts) {
++    const parsed = Schema.decodeUnknownOption(Receipt)(receipt)
++    if (Option.isNone(parsed) || parsed.value.stub) continue
++    const read = parsed.value
++    // 按真实路径合并多次读取；Windows的大小写和分隔符不构成不同文件版本。
++    const absolute = path.resolve(worktree, read.canonicalPath)
++    const key = process.platform === "win32" ? absolute.toLowerCase() : absolute
++    const ranges = [...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }]
++      .sort((a, b) => a.start - b.start || a.end - b.end)
++      .reduce<{ start: number; end: number }[]>((result, range) => {
++        const last = result.at(-1)
++        if (!last || range.start > last.end + 1) result.push({ ...range })
++        else last.end = Math.max(last.end, range.end)
++        return result
++      }, [])
++    // 删除再插入让Map顺序代表最近读取，避免文件修改时间影响证据优先级。
++    files.delete(key)
++    files.set(key, { ...read, canonicalPath: absolute, ranges })
 +  }
 +  if (files.size === 0) return undefined
 +  // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
@@ -95,6 +92,25 @@ new file mode 100644
 +  const pad = (n: number) => String(n).padStart(2, "0")
 +  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 +}
+diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/session/file-evidence.ts
+@@ -0,0 +1,14 @@
++export * as CompactionFileEvidence from "./file-evidence"
++
++import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
++import type { FSUtil } from "@opencode-ai/core/fs-util"
++import type { SessionV1 } from "@opencode-ai/core/v1/session"
++
++export const kind = FileEvidence.kind
++
++export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string) =>
++  FileEvidence.render(messages.flatMap((message) => message.parts.flatMap((part) =>
++    part.type === "tool" && part.tool === "read" && part.state.status === "completed"
++      ? [part.state.metadata.read] : [],
++  )), fs, worktree)
++
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
@@ -128,10 +144,11 @@ diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1,3 +1,4 @@
+@@ -1,4 +1,5 @@
  import { SessionID, MessageID } from "./schema"
 +import { CompactionFileEvidence } from "./file-evidence"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
  import { ProviderV2 } from "@opencode-ai/core/provider"
 @@ -338,7 +339,8 @@
            assistantMessage.parts.push({
@@ -222,6 +239,256 @@ diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/openco
 +}, { git: true }, 20_000)
 +
  describe("session.compaction.isOverflow", () => {
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -117,1 +117,18 @@
++// 连续压缩仍从真实助手行读取凭证，旧表格不参与，边界之后的消息不纳入本次交接。
++export const readReceipts = Effect.fn("SessionHistory.readReceipts")(function* (
++  db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number,
++) {
++  const rows = yield* db.select().from(SessionMessageTable).where(and(
++    eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), lte(SessionMessageTable.seq, throughSeq),
++  )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
++  const messages = yield* Effect.forEach(rows, decodeMessageRow)
++  return messages.flatMap((message) => message.type === "assistant" && !hidden(message.metadata?.hidden)
++    ? message.content.flatMap((part) =>
++        part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.state.status === "completed"
++          ? [part.state.structured.read] : [],
++      )
++    : [],
++  )
++})
++
+ export * as SessionHistory from "./history"
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -256,1 +256,3 @@
++  // 只保存成功压缩时生成的确定性文件交接；旧消息缺失时保持原有回放。
++  file_evidence: Schema.String.pipe(optional),
+   ...Base,
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -466,1 +466,2 @@
+       recent_user_messages: SessionMessage.Compaction.fields.recent_user_messages,
++      file_evidence: SessionMessage.Compaction.fields.file_evidence,
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -436,1 +436,2 @@
+             recent_user_messages: event.data.recent_user_messages,
++            file_evidence: event.data.file_evidence,
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -20,1 +20,3 @@
+ import { truncateForCompaction } from "../util/output-notice"
++import { FileEvidence } from "./file-evidence"
++import type { FSUtil } from "../fs-util"
+@@ -98,1 +100,3 @@
+   readonly config: readonly Config.Entry[]
++  readonly fs: FSUtil.Interface
++  readonly worktree: string
+@@ -236,1 +240,3 @@
+-    const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0))
++    const throughSeq = input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0)
++    const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, throughSeq)
++    const receipts = yield* SessionHistory.readReceipts(dependencies.db, input.sessionID, throughSeq)
+@@ -321,1 +327,3 @@
++    // 只有可用摘要才stat当前磁盘；失败和取消不生成或替换旧交接快照。
++    const fileEvidence = yield* FileEvidence.render(receipts, dependencies.fs, dependencies.worktree)
+     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
+@@ -329,1 +337,2 @@
+       recent_user_messages: recentUserMessages.length ? recentUserMessages : undefined,
++      file_evidence: fileEvidence,
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -127,1 +127,2 @@
+-    const compaction = SessionCompaction.make({ events, llm, db, config: configuration })
++    const fileSystem = yield* FSUtil.Service
++    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.directory })
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -166,2 +166,2 @@
+-</recent-context>
++</recent-context>${message.file_evidence ? `\n\n${message.file_evidence}` : ""}
+ </conversation-checkpoint>`].filter(Boolean).join("\n\n"),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -16,1 +16,2 @@
+ import { Database } from "@opencode-ai/core/database/database"
++import { FSUtil } from "@opencode-ai/core/fs-util"
+@@ -329,1 +330,2 @@
+       Snapshot.node,
++      FSUtil.node,
+@@ -2068,1 +2068,2 @@
+       const info = yield* store.get(sessionID)
++      const fileSystem = yield* FSUtil.Service
+@@ -2105,1 +2107,1 @@
+-          db: database.db, events,
++          db: database.db, events, fs: fileSystem, worktree: "/project",
+@@ -2157,1 +2159,1 @@
+-        const compaction = SessionCompaction.make({ db: database.db, events,
++        const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project",
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -179,1 +179,2 @@
+           recent_user_messages: [{ id: id("user"), text: '请保留 "原话"', truncated: true }],
++          file_evidence: "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |",
+@@ -221,2 +222,5 @@
+ </recent-context>
++
++## Evidence Handoff
++| file.ts | 1-2 | 2 | local time | stale |
+ </conversation-checkpoint>`,
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -30,1 +30,2 @@
+ import { Location } from "@opencode-ai/core/location"
++import { SessionHistory } from "@opencode-ai/core/session/history"
+@@ -663,1 +663,2 @@
+         recent_user_messages: [{ id: SessionMessage.ID.make("msg_instruction"), text: "Exact instruction", truncated: true }],
++        file_evidence: "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |",
+@@ -691,1 +692,2 @@
+         recent_user_messages: [{ id: "msg_instruction", text: "Exact instruction", truncated: true }],
++        file_evidence: "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |",
+@@ -694,1 +696,2 @@
++      expect(rows.find(row => row.type === "compaction")?.data).toHaveProperty("file_evidence", "## Evidence Handoff\n| file.ts | 1-2 | 2 | local time | stale |")
+       expect(
+@@ -700,2 +703,29 @@
+       })
++      // 第二轮压缩仍能取到旧边界前真实Read；未来行不属于本次快照。
++      const receipt = { path: "/project/file.ts", canonicalPath: "/project/file.ts", type: "file", size: 1,
++        modified: "2026-05-18 01:00:00", modifiedMs: 0, start: 1, end: 1, total: 1,
++        totalExact: true, returned: 1, stub: false }
++      const tool = Schema.encodeSync(SessionMessage.AssistantTool)(SessionMessage.AssistantTool.make({
++        type: "tool", id: "read-evidence", name: "read", time: { created, completed: created },
++        state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, content: [{ type: "text", text: "x" }], structured: { read: receipt } }),
++      }))
++      const boundary = rows.find(row => row.type === "compaction")
++      if (!boundary) return yield* Effect.die("Missing persisted compaction boundary")
++      const earlier = assistantRow(SessionMessage.ID.make("msg_receipt_before"), boundary.seq - 1)
++      const later = assistantRow(SessionMessage.ID.make("msg_receipt_after"), boundary.seq + 1)
++      const earlierData = { ...earlier.data, content: [tool] }
++      const laterData = { ...later.data, content: [{ ...tool, id: "future-read", state: { ...tool.state, structured: { read: { ...receipt, path: "future.ts" } } } }] }
++      yield* db.insert(SessionMessageTable).values([
++        { ...earlier, data: earlierData },
++        { ...later, data: laterData },
++      ]).run().pipe(Effect.orDie)
++      expect(yield* SessionHistory.readReceipts(db, sessionID, boundary.seq)).toEqual([receipt])
++      expect((yield* SessionHistory.load(db, sessionID)).some(message => message.id === earlier.id)).toBe(false)
++      // 旧消息缺少optional证据字段仍能解码，已保存表格则保持逐字回放而不重新stat。
++      const compacted = messages.find(message => message.type === "compaction")
++      if (!compacted || compacted.type !== "compaction") return yield* Effect.die("Missing compaction projection")
++      const encoded = Schema.encodeSync(SessionMessage.Compaction)(compacted)
++      expect(Schema.decodeUnknownSync(SessionMessage.Compaction)(encoded).file_evidence).toBe(compacted.file_evidence)
++      const { file_evidence: _fileEvidence, ...legacy } = encoded
++      expect(Schema.decodeUnknownSync(SessionMessage.Compaction)(legacy).file_evidence).toBeUndefined()
+     }),
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -8,1 +8,6 @@
+-import { DateTime } from "effect"
++import { DateTime, Effect } from "effect"
++import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import path from "path"
++import { tmpdir } from "./fixture/tmpdir"
+@@ -83,1 +88,41 @@
++test("file handoff compares real disk versions before applying its bounded evidence budget", async () => {
++  await using tmp = await tmpdir()
++  await Effect.runPromise(Effect.gen(function* () {
++    const fs = yield* FSUtil.Service
++    const receipts: { path: string; canonicalPath: string; start: number; end: number; total: number; modified: string; size: number; modifiedMs?: number }[] = []
++    for (const [index, name] of ["unchanged file.ts", "changed.ts", "deleted.ts", "missing-metadata.ts"].entries()) {
++      const file = path.join(tmp.path, name)
++      const time = new Date(2026, 4, 18, index + 1)
++      yield* fs.writeFileString(file, "x".repeat(20))
++      yield* fs.utimes(file, time, time)
++      receipts.push({ path: file, canonicalPath: file, start: 1, end: 10, total: 20, modified: "previous read", size: 20,
++        ...(index === 3 ? {} : { modifiedMs: time.getTime() }) })
++    }
++    // 同一路径两次读取合并范围；纯写事件从来不是文件失效的事实来源。
++    receipts.push({ ...receipts[0], start: 11, end: 20 })
++    const changed = new Date(2026, 4, 18, 5)
++    yield* fs.writeFileString(receipts[1].path, "changed on disk")
++    yield* fs.utimes(receipts[1].path, changed, changed)
++    yield* fs.remove(receipts[2].path)
++    const text = yield* FileEvidence.render(receipts, fs, tmp.path)
++    expect(text).toContain("| unchanged file.ts | 1-20 | 20 | 2026-05-18 01:00:00 | current |")
++    expect(text).toContain("| changed.ts | 1-10 | 20 | 2026-05-18 05:00:00 | stale |")
++    expect(text).toContain("| deleted.ts | 1-10 | 20 | - | deleted |")
++    expect(text).toContain("| missing-metadata.ts | 1-10 | 20 | 2026-05-18 04:00:00 | stale |")
++    expect(text).toContain("Treat stale evidence as advisory only.")
++    const inspected: string[] = []
++    const observed = { ...fs, stat: (file: string) => Effect.sync(() => inspected.push(file)).pipe(Effect.andThen(fs.stat(file))) }
++    // 裁剪发生在stat前，未展示的第二十一条记录不访问磁盘。
++    const many = Array.from({ length: 21 }, (_, index) => ({ ...receipts[0], path: path.join(tmp.path, `file-${index}.ts`), canonicalPath: path.join(tmp.path, `file-${index}.ts`) }))
++    const bounded = yield* FileEvidence.render(many, observed, tmp.path)
++    expect(inspected).toHaveLength(20)
++    expect(inspected).not.toContain(many[0].canonicalPath)
++    expect(bounded).toContain("Omitted: 1 inspected files due to evidence budget.")
++    expect(bounded).not.toContain("| file-0.ts |")
++    const untouched = inspected.length
++    expect(yield* FileEvidence.render([{ ...receipts[0], stub: true }, { malformed: true }], observed, tmp.path)).toBeUndefined()
++    expect(inspected).toHaveLength(untouched)
++  }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
++})
++
+ test("recent user memento budgets the full envelope and preserves newest literal instructions", () => {
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+index c3cd37afa..0f8f6c50b 100644
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -838,6 +838,7 @@ export type SessionsContextOutput = {
+           readonly text: string
+           readonly truncated?: boolean
+         }>
++        readonly file_evidence?: string
+         readonly id: string
+         readonly metadata?: { readonly [x: string]: JsonValue }
+         readonly time: { readonly created: number }
+@@ -1384,6 +1385,7 @@ export type SessionsHistoryOutput = {
+             readonly text: string
+             readonly truncated?: boolean
+           }>
++          readonly file_evidence?: string
+           readonly usage?: {
+             readonly tokens: {
+               readonly input: number
+@@ -2001,6 +2003,7 @@ export type SessionsEventsOutput =
+           readonly text: string
+           readonly truncated?: boolean
+         }>
++        readonly file_evidence?: string
+         readonly usage?: {
+           readonly tokens: {
+             readonly input: number
+@@ -2271,6 +2274,7 @@ export type SessionsMessageOutput = {
+           readonly text: string
+           readonly truncated?: boolean
+         }>
++        readonly file_evidence?: string
+         readonly id: string
+         readonly metadata?: { readonly [x: string]: JsonValue }
+         readonly time: { readonly created: number }
+@@ -2480,6 +2484,7 @@ export type MessagesListOutput = {
+           readonly text: string
+           readonly truncated?: boolean
+         }>
++        readonly file_evidence?: string
+         readonly id: string
+         readonly metadata?: { readonly [x: string]: JsonValue }
+         readonly time: { readonly created: number }
 diff --git a/docs/prompts.md b/docs/prompts.md
 index ce374c3..30187c6 100644
 --- a/docs/prompts.md

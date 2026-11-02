@@ -478,7 +478,7 @@ index e492c1a8e..f99519d9f 100644
  // 1 MiB 是普通 pack 的目标而非硬上限；单个超大 entry 必须独立保留完整信息而不能截断。
  const PACK_TARGET_BYTES = 1024 * 1024
  export const DEFAULT_BATCH_SIZE = 2000
-@@ -908,20 +910,40 @@ function restorePackedPart(data: (typeof PartTable.$inferSelect)["data"], fields
+@@ -985,23 +987,43 @@ function restorePackedPart(data: (typeof PartTable.$inferSelect)["data"], fields
    return restorePart(data, { version: 1, owner: "part", fields }, hash)
  }
  
@@ -493,14 +493,14 @@ index e492c1a8e..f99519d9f 100644
 +// boundary 结果可按 session 缓存，但写入改变时间后必须重算，避免冻住新 tail。
 +function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
 +  // 空会话 max 为 null：无法证明 last-message idle，subagent age 分支必须为 false。
-+  // 只投影 max(time_created) 一列；不读取消息 body，与 status 的 metadata-only 原则一致。
-+  return (
-+    db
-+      .select({ value: sql<number | null>`max(${MessageTable.time_created})` })
-+      .from(MessageTable)
-+      .where(eq(MessageTable.session_id, sessionID))
-+      .get()?.value ?? null
-+  )
++  // 两代消息只聚合metadata；外层max忽略空表null，时间0不能被当作未发生消息。
++  const messageTimes = db
++    .select({ value: sql<number | null>`max(${MessageTable.time_created})`.as("value") })
++    .from(MessageTable)
++    .where(eq(MessageTable.session_id, sessionID))
++    .unionAll(db.select({ value: sql<number | null>`max(${SessionMessageTable.time_created})` }).from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID)))
++    .as("message_times")
++  return db.select({ value: sql<number | null>`max(${messageTimes.value})` }).from(messageTimes).get()?.value ?? null
 +}
 +
 +function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderThanMs = SEVEN_DAYS_MS) {
@@ -511,6 +511,9 @@ index e492c1a8e..f99519d9f 100644
      .where(eq(SessionTable.id, sessionID))
      .get()
    if (!session) return
+   const nativeBoundarySeq = db.select({ seq: SessionMessageTable.seq }).from(SessionMessageTable)
+     .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "compaction")))
+     .orderBy(desc(SessionMessageTable.seq)).limit(1).get()?.seq
 +  // CompactionBoundary 保持目标 db-first 形态（#493），不回退 source 的无参调用。
    const boundary = CompactionBoundary.latest(db, sessionID)
 +  // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
@@ -526,7 +529,7 @@ index e492c1a8e..f99519d9f 100644
      boundary: boundary ? (boundary.tailStartID ?? boundary.markerID) : undefined,
      markerID: boundary?.markerID,
      summaryID: boundary?.summaryID,
-@@ -2268,11 +2290,11 @@ function freeze(
+@@ -2549,11 +2571,11 @@ function freeze(
  }
  
  // 公开 freezeOwner 是测试、精确 session 操作和未来内部调用的最小 seam，不暴露 codec 或 projection 细节。
@@ -540,16 +543,13 @@ index e492c1a8e..f99519d9f 100644
      behavior: "immediate",
    })
  }
-@@ -2594,7 +2616,7 @@ function partCandidate() {
+@@ -2890,4 +2912,4 @@ function partCandidate() {
  // 该函数只读且不压缩；true 仅表示此刻可冻，真正 freeze 会在 immediate transaction 内再次确认。
  export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; olderThanMs?: number }) {
    const now = input.now ?? Date.now()
 -  const olderThanMs = input.olderThanMs ?? THIRTY_DAYS_MS
 +  const olderThanMs = input.olderThanMs ?? SEVEN_DAYS_MS
-   if (input.type === "message") {
-     const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
-     // #0500：v2 判定只看 cold_key；v1 owner 经 messageV2Value 还原后重提，阈值已取消。
-@@ -2943,7 +2965,7 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
+@@ -3268,7 +3290,7 @@ export function parseMaintenanceRequest(input: unknown): MaintenanceRequest {
        return {
          operation: "compress",
          ...(sessionID ? { sessionID } : {}),
@@ -558,7 +558,7 @@ index e492c1a8e..f99519d9f 100644
          batchSize,
        }
      case "expand":
-@@ -3527,9 +3549,9 @@ export function status(db: TxOrDb): StatusReport {
+@@ -3881,9 +3903,9 @@ export function status(db: TxOrDb): StatusReport {
      activeBytes: Math.max(0, pages - freelistPages) * pageSize,
      // 物理门槛使用批准的 decimal 1.5 GB，避免与 GiB 换算混淆。
      targetBytes: 1_500_000_000,
@@ -572,6 +572,46 @@ index e492c1a8e..f99519d9f 100644
      summaryOwners,
      summaryPayloads: summaryPayloads.length,
 
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -88,1 +88,36 @@
++  previewIt.effect("checks Native root and child idle clocks at exact boundaries", () =>
++    Effect.gen(function* () {
++      const db = (yield* Database.Service).db
++      const day = 24 * 60 * 60 * 1000
++      const now = Date.now()
++      const parent = SessionV2.ID.make("ses_native_idle_parent")
++      // 相反的Session/消息时钟排除误用；边缘前后1ms与合法0不依赖调度等待。
++      const fixtures = [
++        { key: "root_old", child: false, updated: now - 7 * day - 1, last: now, eligible: true },
++        { key: "root_hot", child: false, updated: now - 7 * day + 1, last: 0, eligible: false },
++        { key: "child_old", child: true, updated: now, last: now - day - 1, eligible: true },
++        { key: "child_hot", child: true, updated: 0, last: now - day + 1, eligible: false },
++        { key: "child_zero", child: true, updated: now, last: 0, eligible: true },
++      ].map(entry => ({ ...entry, id: SessionV2.ID.make(`ses_idle_${entry.key}`), messageID: SessionMessage.ID.make(`msg_idle_${entry.key}`) }))
++      yield* db.insert(ProjectTable).values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] }).run()
++      yield* db.insert(SessionTable).values({ id: parent, project_id: Project.ID.global, slug: parent, directory: "/project", title: "idle parent", version: "test", time_updated: now }).run()
++      yield* db.insert(SessionTable).values(fixtures.map(entry => ({ id: entry.id, project_id: Project.ID.global,
++        slug: entry.id, directory: "/project", title: entry.key, version: "test", parent_id: entry.child ? parent : null, time_updated: entry.updated,
++      }))).run()
++      yield* db.insert(SessionMessageTable).values(fixtures.map(entry => {
++        const message = assistantRow(entry.messageID, 1, { created: DateTime.makeUnsafe(entry.last) })
++        return { ...message, session_id: entry.id, data: { ...message.data, content: [{ type: "reasoning", id: "reason", text: "Native idle field ".repeat(200) }] } }
++      })).run()
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        for (const entry of fixtures) {
++          const input = { type: "session_message" as const, id: entry.messageID, now }
++          expect(ColdStorage.isEligibleOwner(sync, input)).toBe(entry.eligible)
++          // 同一override只强制root年龄，不能把尚不足24h的child误冻。
++          expect(ColdStorage.isEligibleOwner(sync, { ...input, olderThanMs: 0 })).toBe(entry.child ? entry.eligible : true)
++        }
++        expect(ColdStorage.parseMaintenanceRequest({ operation: "compress" })).toMatchObject({ olderThanMs: 7 * day })
++      })
++    }),
++  )
++
+   previewIt.effect("maintains Native cold owners by seq and rolls back corrupted reads", () =>
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 index 013f666f3..a97aaccf2 100644
 --- a/packages/opencode/test/session/compaction.test.ts

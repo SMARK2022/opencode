@@ -1118,28 +1118,28 @@ index 0000000000000000000000000000000000000000..7e8cb2829a0b919198fab35a6d8da589
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2969,10 +2969,10 @@ function Write(props: ToolProps) {
+@@ -2974,10 +2974,10 @@ function Write(props: ToolProps) {
          >
-           <DiffView diff={diff()!} filePath={stringValue(props.input.filePath)} view={diffView()} />
+           <DiffView diff={diff()!} filePath={filepath()} view={diffView()} />
            <Show when={diffOverflow()}>
              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
            </Show>
            {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
--          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
-+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
+-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
          </BlockTool>
        </Match>
-       <Match when={props.metadata.diagnostics !== undefined}>
-@@ -3103,7 +3103,7 @@ function Write(props: ToolProps) {
+       <Match when={props.metadata.diagnostics !== undefined || props.metadata.operation === "write"}>
+@@ -3000,7 +3000,7 @@ function Write(props: ToolProps) {
            <Show when={writeCanCollapse()}>
              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
            </Show>
--          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
-+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
+-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
          </BlockTool>
        </Match>
        <Match when={true}>
-@@ -3360,9 +3360,9 @@ function Edit(props: ToolProps) {
+@@ -3365,9 +3365,9 @@ function Edit(props: ToolProps) {
          >
            <DiffView diff={diffContent()} filePath={stringValue(props.input.filePath)} view={view()} />
            <Show when={overflow()}>
@@ -1150,7 +1150,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
          </BlockTool>
        </Match>
        <Match when={true}>
-@@ -3474,7 +3474,7 @@ function ApplyPatch(props: ToolProps) {
+@@ -3479,7 +3479,7 @@ function ApplyPatch(props: ToolProps) {
                  <Show when={patchOverflow()}>
                    <text fg={theme.textMuted}>{patchExpanded() ? "Click to collapse" : "Click to expand"}</text>
                  </Show>
@@ -1159,7 +1159,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 +              <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} summary={props.metadata.diagnosticSummary as { newCount?: number; existingCount?: number } | undefined} />
              </BlockTool>
              )
-@@ -3685,7 +3685,14 @@ function Skill(props: ToolProps) {
+@@ -3560,7 +3560,14 @@ function Skill(props: ToolProps) {
    )
  }
  
@@ -1175,7 +1175,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
    const { theme } = useTheme()
    const terminalEnvironment = useTuiTerminalEnvironment()
    const errors = createMemo(() => {
-@@ -3695,19 +3702,53 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
+@@ -3570,19 +3577,53 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
      )
      return parseDiagnostics(props.diagnostics, normalized)
    })
@@ -1262,89 +1262,6 @@ diff --git a/packages/opencode/src/lsp/diagnostic.ts b/packages/opencode/src/lsp
 +}
 +
  export * as Diagnostic from "./diagnostic"
-diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
---- a/packages/opencode/src/lsp/lsp.ts
-+++ b/packages/opencode/src/lsp/lsp.ts
-@@ -117,6 +117,8 @@ interface State {
-   servers: Record<string, LSPServer.Info>
-   broken: Set<string>
-   spawning: Map<string, Promise<LSPClient.Info | undefined>>
-+  // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报
-+  bridgeDiagnostics?: "ok" | "failed"
- }
- 
- export interface Interface {
-@@ -200,6 +202,7 @@ const layer = Layer.effect(
-           servers,
-           broken: new Set(),
-           spawning: new Map(),
-+          bridgeDiagnostics: undefined,
-         }
- 
-         yield* Effect.addFinalizer(() =>
-@@ -378,9 +381,11 @@ const layer = Layer.effect(
-     })
- 
-     const status = Effect.fn("LSP.status")(function* () {
--      // [local-smark] 有 bridge 时返回 VSCode 连接状态
-+      const ctx = yield* InstanceState.context
-+      const s = yield* InstanceState.get(state)
-+      // [local-smark] 有 bridge 且 diagnostics 未失败时才返回 VSCode 连接状态
-       const bridge = yield* resolveLspBridge()
--      if (bridge) {
-+      if (bridge && s.bridgeDiagnostics !== "failed") {
-         return [{
-           id: "vscode",
-           name: "VSCode",
-@@ -388,8 +393,6 @@ const layer = Layer.effect(
-           status: "connected" as const,
-         }]
-       }
--      const ctx = yield* InstanceState.context
--      const s = yield* InstanceState.get(state)
-       const result: Status[] = []
-       for (const client of s.clients) {
-         result.push({
-@@ -422,13 +425,14 @@ const layer = Layer.effect(
-     })
- 
-     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
--      // [local-smark] 有 bridge 时走 bridge /lsp/touch（ensureOpen + awaitDiagnosticsRefresh）
-+      // [local-smark] bridge 下区分 light warm 与 strong diagnostics：read warm 不应打开 VSCode
-       const bridge = yield* resolveLspBridge(input)
-       if (bridge) {
-+        if (!diagnostics) return
-         const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
-         if (touched) return
-       }
-       yield* Effect.logInfo("touching file", { file: input })
-       const clients = yield* getClients(input)
-       yield* Effect.promise(() =>
-         Promise.all(
-@@ -449,14 +453,21 @@ const layer = Layer.effect(
- 
-     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
-       // [local-smark] 优先 bridge，回退内置
-+      const s = yield* InstanceState.get(state)
-       const bridge = yield* resolveLspBridge()
-       if (bridge) {
-+        // 成功解析 `{ diagnostics: [] }` 也算可用；undefined/坏结构才标记失败
-         const result = yield* callLspBridge("/lsp/diagnostics", {})
-         const mapped = bridgeDiagnosticsToMap(result)
--        if (mapped) return mapped
-+        if (mapped) {
-+          s.bridgeDiagnostics = "ok"
-+          return mapped
-+        }
-+        // bridge 可连接不等于 diagnostics 可用；失败后 status 不能再让工具输出 clean 误报
-+        s.bridgeDiagnostics = "failed"
-       }
-       const results: Record<string, LSPClient.Diagnostic[]> = {}
--      const all = yield* runAll(async (client) => client.diagnostics)
-+      const all = yield* Effect.promise(() => Promise.all(s.clients.map((client) => client.diagnostics)))
-       for (const result of all) {
-         for (const [p, diags] of result.entries()) {
-           const arr = results[p] || []
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
@@ -1383,9 +1300,9 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
  
 @@ -394,7 +402,8 @@ export const ApplyPatchTool = Tool.define(
            files,
-           // [local-smark] metadata.diagnostics 存新错误数组 + diagnosticSummary 聚合摘要
+           // 未连接不能报告clean；保留差分数据供历史显示，不将空结果当验证成功。
            diagnostics: diagMetadata,
--          diagnosticSummary: { newCount: totalNew, existingCount: totalExisting },
+-          diagnosticSummary: (yield* lsp.status()).length ? { newCount: totalNew, existingCount: totalExisting } : undefined,
 +          // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突
 +          ...(diagnosticSummary ? { diagnosticSummary } : {}),
          },
@@ -1430,9 +1347,9 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
  
 @@ -261,7 +265,8 @@ export const EditTool = Tool.define(
              metadata: {
-               // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
+               // 未连接时不提供clean摘要；差分数据与formatter后的真实diff各自保留。
                diagnostics: { [normalizedFilePath]: newErrorsArr },
--              diagnosticSummary: delta,
+-              diagnosticSummary: (yield* lsp.status()).length ? delta : undefined,
 +              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
 +              ...(diagnosticSummary ? { diagnosticSummary } : {}),
                diff,
@@ -1478,9 +1395,9 @@ diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/wr
  
 @@ -140,7 +143,8 @@ export const WriteTool = Tool.define(
                // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary
-               // 供 TUI 渲染紧凑状态行（✓ 0 new · N existing）
+               // 无活动client的空差分不证明检查成功，不能发出clean摘要。
                diagnostics: { [normalizedFilepath]: newErrorsArr },
--              diagnosticSummary: delta,
+-              diagnosticSummary: (yield* lsp.status()).length ? delta : undefined,
 +              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
 +              ...(diagnosticSummary ? { diagnosticSummary } : {}),
                filepath,
@@ -1493,10 +1410,10 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { LSP } from "@/lsp/lsp"
  import * as LSPServer from "@/lsp/server"
-+import * as VscodeBridge from "@/ide/vscode-bridge"
++import { VscodeBridge } from "@/ide/vscode-bridge"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { TestInstance } from "../fixture/fixture"
- import { awaitWithTimeout, testEffect } from "../lib/effect"
+ import { testEffect } from "../lib/effect"
 @@ -98,6 +99,93 @@ describe("lsp.spawn", () => {
        ),
    )
@@ -1533,7 +1450,7 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
 +  )
 +
 +  it.instance(
-+    "uses VSCode bridge touch for document diagnostics",
++    "keeps document diagnostics disabled despite an advertised bridge",
 +    () =>
 +      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
@@ -1550,8 +1467,8 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
 +
 +          try {
 +            yield* lsp.touchFile(file, "document")
-+            // edit/write/apply_patch 需要 strong touch 触发 VSCode/Pylance 诊断计算
-+            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file }))
++            // 用户已停用整个LSP能力，显式document也不能调用IDE后端。
++            expect(call).toHaveBeenCalledTimes(0)
 +          } finally {
 +            resolve.mockRestore()
 +            call.mockRestore()
@@ -1561,7 +1478,7 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
 +  )
 +
 +  it.instance(
-+    "does not report VSCode bridge as diagnostics-ready after diagnostics failure",
++    "does not report an advertised VSCode bridge as diagnostics-ready while disabled",
 +    () =>
 +      LSP.Service.use((lsp) =>
 +        Effect.gen(function* () {
@@ -1579,7 +1496,7 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
 +            yield* lsp.diagnostics()
 +            // bridge 存活不等于 diagnostics 成功；失败后 status 不能让工具输出 clean
 +            expect(yield* lsp.status()).toEqual([])
-+            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/diagnostics" }))
++            expect(call).toHaveBeenCalledTimes(0)
 +          } finally {
 +            resolve.mockRestore()
 +            call.mockRestore()
@@ -1589,7 +1506,7 @@ diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/l
 +  )
 +
    it.instance(
-     "would spawn builtin LSP for files inside instance when lsp is true",
+     "does not spawn builtin LSP inside the instance even when lsp is true",
      () =>
 diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
 --- a/packages/opencode/test/lsp/lifecycle.test.ts
@@ -1598,7 +1515,7 @@ diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/te
  import { Effect } from "effect"
  import { LSP } from "@/lsp/lsp"
  import * as LSPServer from "@/lsp/server"
-+import * as VscodeBridge from "@/ide/vscode-bridge"
++import { VscodeBridge } from "@/ide/vscode-bridge"
  import { TestInstance } from "../fixture/fixture"
  import { testEffect } from "../lib/effect"
  

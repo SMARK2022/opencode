@@ -1,3 +1,74 @@
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -85,1 +85,1 @@
+-  readonly tokens: number
++  readonly tokens?: number
+@@ -158,1 +158,1 @@
+-    { auto: true, tokens: DEFAULT_KEEP_TOKENS },
++    { auto: true },
+@@ -206,1 +206,12 @@
+   const config = settings(dependencies.config)
++  const inputBudget = (input: Input) => {
++    const context = input.model.route.defaults.limits?.context ?? 0
++    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
++    // 默认尾部扩大与触发压缩共用真实输入预算，不能越过input限制或重复扣输出。
++    const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
++    const inputLimit = input.model.route.defaults.limits?.input
++    const inputUsable = inputLimit
++      ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
++      : usable
++    return Math.min(usable, inputUsable)
++  }
+@@ -211,1 +222,3 @@
+-    const selected = select(input.entries, config.tokens, reason === "manual")
++    // 保留Native既有8K基线并承接source的16K长窗口收益；显式零仍关闭tail保留。
++    const keep = config.tokens ?? Math.max(DEFAULT_KEEP_TOKENS, Math.min(16_000, Math.floor(Math.max(0, inputBudget(input)) / 4)))
++    const selected = select(input.entries, keep, reason === "manual")
+@@ -312,11 +325,3 @@
+-    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+-    // 总窗口仍完整预留实际输出与 Core buffer，不能用较小 input 改写 context 后再次扣输出。
+-    const usable = context - Math.max(output, config.buffer ?? DEFAULT_BUFFER)
+-    const inputLimit = input.model.route.defaults.limits?.input
+-    // 输入增长只扣显式 buffer 或抵消 provider 差额后的缺省 floor，与总窗口预算取交集。
+-    const inputUsable = inputLimit
+-      ? Math.max(0, inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, context - inputLimit))))
+-      : usable
+     if (
+       // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
+       Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools },
+@@ -324,1 +327,1 @@
+-      Math.min(usable, inputUsable)
++      inputBudget(input)
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -2109,2 +2109,25 @@
+       }
++      // 实际summary上传与持久recent证明缺省扩大；显式8K/零不能被新缺省覆盖。
++      const expanded = Model.make({ id: "expanded", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 204_800, output: 4096 } }) })
++      const head = "OLD_HEAD " + "h".repeat(80_000)
++      const retained = "RECENT_FULL " + "r".repeat(40_000) + " RECENT_END"
++      const history = [head, retained, "Newest exact request"].map((text, index) => ({ seq: index + 1, message: SessionMessage.User.make({ type: "user", id: SessionMessage.ID.create(), text, time: { created: DateTime.makeUnsafe(index) } }) }))
++      for (const keep of [undefined, 8_000, 0]) {
++        let upload = ""
++        const compaction = SessionCompaction.make({ db: database.db, events,
++          config: keep === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({ compaction: new ConfigCompaction.Info({ keep: new ConfigCompaction.Keep({ tokens: keep }) }) }) })],
++          llm: { stream: request => {
++            upload = userTexts(request)[0] ?? ""
++            return Stream.fromIterable(fragmentFixture("text", "tail-budget", ["Budget summary"]).completeEvents)
++          } },
++        })
++        expect(yield* compaction.compact({ sessionID, entries: history, model: expanded, pricing: [], request: LLM.request({ model: expanded, prompt: "Summarize" }) })).toBe(true)
++        const latest = (yield* store.context(sessionID)).find(message => message.type === "compaction")
++        if (!latest || latest.type !== "compaction") return yield* Effect.die("Missing real compaction projection")
++        expect(upload).toContain("OLD_HEAD")
++        expect(upload.includes("RECENT_FULL")).toBe(keep !== undefined)
++        expect(latest.recent.includes(retained)).toBe(keep === undefined)
++        expect(latest.recent.includes("Newest exact request")).toBe(keep !== 0)
++        if (keep === 0) expect(latest.recent).toBe("")
++      }
+     }),
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts

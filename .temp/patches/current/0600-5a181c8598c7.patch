@@ -421,19 +421,26 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -207,5 +207,8 @@
+@@ -212,8 +212,11 @@
+                       (tree) => Effect.sync(() => tree.delete()),
+                     )
 +                    // 引号化--会移动节点；remote范围与转义检查必须跟同一解析文本对齐。
 +                    const parsed = tree.rootNode.text
 +                    const parsedRemote = ShellRemote.ranges(parsed, Shell.name(shell))
-                     return tree.rootNode
+                     const nodes = tree.rootNode
                        .descendantsOfType("command")
-                       .flatMap((node) => {
-                         if (!node) return []
--                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
-+                        if (parsedRemote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
-@@ -213,1 +216,1 @@
+                       .filter((node) => {
+                         if (!node) return false
+-                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
++                        if (parsedRemote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
+                         if (!Shell.ps(shell)) return true
+@@ -226,5 +229,5 @@
+                         // 根 ERROR 仍承载真实主机命令，不能因此绕过本地管道的拒绝检查。
+                         // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
 -                        const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
 +                        const escaped = parsed.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
+                         return !escaped || escaped.length % 2 === 0
+                       })
 
 diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
 --- a/packages/core/test/shell.test.ts

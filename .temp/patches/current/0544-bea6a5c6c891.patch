@@ -1156,14 +1156,30 @@ index d9161bb78..18538334f 100644
      const status = Effect.fn("SessionHttpApi.status")(function* () {
        return Object.fromEntries(yield* statusSvc.list())
      })
-@@ -737,5 +760,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-     // [local-smark] session preview handler 注册：ctx 形状与 Effect.fn 声明
-     // 存在差异（实际 ctx 含 query 字段），保持 as any 与 source 一致
-     .handle("preview", preview as any)
-+    .handle("searchScan", searchScan as any)
+@@ -638,4 +661,5 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
+     .handle("goalClear", goalClear)
+     .handle("preview", preview)
++    .handle("searchScan", searchScan)
    }),
  )
 
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -22,3 +22,4 @@
+ import { SessionExecution } from "@opencode-ai/core/session/execution"
+ import { SessionInput } from "@opencode-ai/core/session/input"
+ import { ColdStorageTable, SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { searchCondition } from "@opencode-ai/core/session/search"
+@@ -83,3 +84,8 @@ describe("SessionProjector", () => {
+       expect(yield* search("beta")).toEqual([ids[0], ids[2]].toSorted())
+       expect(yield* search("alpha absent")).toEqual([])
+       expect(yield* search(" \t ")).toEqual(ids.toSorted())
++      // 首屏仅标题是刻意子集；真实Native正文继续由同一all谓词完整召回，不构建第二搜索器。
++      const title = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha", { mode: "title" })).all().pipe(Effect.orDie)
++      expect(title.map(row => row.id).toSorted()).toEqual(ids.slice(0, 2).toSorted())
++      const cross = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha beta", { mode: "title" })).all().pipe(Effect.orDie)
++      expect(cross).toEqual([])
 diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
 index 976ca155b..93e13f965 100644
 --- a/packages/core/src/session/search.ts
@@ -1289,7 +1305,7 @@ index 25af18936..44d3296b8 100644
        listGlobal,
        create,
        fork,
-@@ -1046,6 +1076,126 @@ function listByProject(
+@@ -913,5 +943,125 @@ function listByProject(
      worktree: string
    },
  ) {
@@ -1413,10 +1429,9 @@ index 25af18936..44d3296b8 100644
 +    worktree: string
 +  },
 +): SQL[] {
-   // #143：path 过滤时不预置 project_id，以便 OR 全局父会话
    const conditions: ReturnType<typeof eq>[] = []
  
-@@ -1062,29 +1212,9 @@ function listByProject(
+@@ -932,28 +1082,9 @@ function listByProject(
    if (input.start) {
      conditions.push(gte(SessionTable.time_updated, input.start))
    }
@@ -1432,7 +1447,6 @@ index 25af18936..44d3296b8 100644
 -    // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
 -    .select(selection)
 -    .from(SessionTable)
--    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
 -    .where(conditions.length > 0 ? and(...conditions) : undefined)
 -    .orderBy(desc(SessionTable.time_updated))
 -    .limit(limit)

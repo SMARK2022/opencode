@@ -1,5 +1,33 @@
 # 0622-2cfe9feccaee Record
 
+## 当前两代覆写接续（2026-11-01）
+- 完整621–625新正审`ses_e69763852ffeEeCp1p0T3u0E4Z`、新逆审`ses_e69763803ffeRQwvAubGBuSVxT`十份patch至EOF，一致本项及全批PASS/B0/G0。canonical精确配对、审批无delete、旧内容基线、Native Move/CAS/锁内formatter及失败语义独立核对，独立闭合625；不为整批N扩写。
+- 正式`typecheck-0622-2026-11-01T08-41-55-587Z.md`：622/622、reused621/applied1、30workspace全passed、c5de1515…安装复用、两侧unchanged、保留五态。Native完整本文件12/0/137验证Move/CAS/审批前零读取、Add覆盖、canonical别名折叠、无remove、部分失败与中断；V1原两例及完整描述3/0/15。合计15/0/152，未将其与621重复用例相加；正式独立结论仍留621–625完整双审。
+- 两条调用cwd为唯一宿主`packages/core`，均使用0620本版完整私有环境模板并先清继承凭据/OPENCODE变量；内存DB与受控formatter，无Git/HTTP/产品或LSP启动。完整命令及stdout：
+```text
+bun test --timeout 10000 test/tool-apply-patch.test.ts
+Isolated scope: D:/Temp/opencode/622-native-da5d2719ff5a48e79cd5d99aa9890b04
+bun test v1.3.14 (0d9b296a)
+ 12 pass
+ 0 fail
+ 137 expect() calls
+Ran 12 tests across 1 file. [2.96s]
+
+bun test --timeout 10000 ../opencode/test/tool/apply_patch.test.ts -t 'collapses a Delete\+Add pair|still rejects Add\+Delete|description carries staleness and context-size guidance'
+Isolated scope: D:/Temp/opencode/622-legacy-beefc588dec54f9594fc656ba5787d8c
+bun test v1.3.14 (0d9b296a)
+ 3 pass
+ 73 filtered out
+ 0 fail
+ 15 expect() calls
+Ran 3 tests across 1 file. [4.64s]
+```
+
+- 已仅手改current完成Native实际owner接续：复用完整groups/destination检查后按原组首见顺序归一化，审批及准备均消费该计划；旧bytes/最终diff沿原snapshot与Mutation产物，不另读或分叉提交。原生新增case保remove不可调用、交错别名、批准前零正文读取及倒序/三项拒绝，既有Add覆写case保首段原断言、仅将配对结果改为单次Add和完整旧diff。原始V1八hunk及所有测试保持，尚待官方累计与必要验证。
+- 621本版已累计、30workspace与必要26/0/271通过。`materialize-0622-2026-11-01T08-34-32-101Z.md`完整67行确认本项未应用；source179行/current323行及真实621两代ApplyPatch、共享Mutation、Native既有覆写/Move/审批前零读取测试已核对，五项只读预研已完成。
+- 首次编辑前登记：旧Native适配基于create-only、缺Move且重复读取旧bytes，与实际目标不符。保留现有完整source/destination ownership、snapshot/CAS及锁内formatter路径，仅在授权前完整canonical组归一化恰好Delete→Add；批准面不见delete，真实成功后携rewrite事实和source原话提醒。独立Add仍覆盖已有文件，不恢复排他create，不改底层mutation或新建协调器。
+- V1现有折叠方向与source一致，保八hunk及受控测试；Native旧二次delete/add断言调整为单次add与真实旧diff，同时保standalone覆盖、竞争、Move、部分成功/defect及中断。未手改state或执行产品，累计/本项验证待修后实际结果。
+
 ## 本轮复查（2026-10-20）
 - 621已累计、30包类型与受控反馈/纯matcher/原性能断言通过。官方预应用622报告 `materialize-0622-2026-10-20T09-54-09-802Z.md` 停在测试中的旧it.instance前像，621/622；不是当前622已应用。
 - 完整original/current、记录、实际621的V1与Core原生apply_patch、FileMutation与既有原生测试已核对。恰好canonical同文件[Delete,Add]应在批准面前归一化，旧内容进diff，不执行remove；其他冲突组合继续拒绝，多个Update仍沿原始快照聚合。

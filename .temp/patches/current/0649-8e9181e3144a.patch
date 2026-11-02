@@ -1,0 +1,3699 @@
+From 8e9181e3144a918bf36acc2f3c834ac1c4a78ff6 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 2 Oct 2026 03:12:05 +0800
+Subject: [PATCH] =?UTF-8?q?feat(storage):=20=E5=86=B7=E5=AD=98=E5=82=A8=20?=
+ =?UTF-8?q?v3=20=E7=B4=A7=E5=87=91=E5=8C=85=E6=A0=BC=E5=BC=8F=E4=B8=8E?=
+ =?UTF-8?q?=E5=8F=AA=E8=AF=BB=E6=81=A2=E5=A4=8D=E8=AF=BB=E5=8F=96?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+包内 entry 改为隐式哈希与 4 字节 slot 定位，包哈希改为 base64url 全摘要，
+统计投影改为字段序单一来源的紧凑 tuple，显式维护可冷冻完成态 reviewer
+会话与子会话正文；完整快照主文件 2,799,042,560 字节，达到 2.8GB 目标。
+
+普通读取改为只读恢复（inspect），浏览不再持久解冻，执行窗口按需预热；
+根会话正文保持热存储，冷冻正文经存储层匹配集继续参与搜索。
+2,138,215 个业务对象逐项相等，完整性校验零错误，工具 schema 与迁移文件不变。
+
+diff --git a/docs/plans/manual-cold-storage-transparency.md b/docs/plans/manual-cold-storage-transparency.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4fe0a1e2a3196ee04fcd861d347248efcf89ca30
+--- /dev/null
++++ b/docs/plans/manual-cold-storage-transparency.md
+@@ -0,0 +1,668 @@
++# Canonical Implementation Plan: Manual Cold Storage Transparency
++
++> Status: verified
++>
++> Revision: R4
++>
++> Approved revision: R4
++>
++> Audit mode: implementation
++>
++> Requirement source: user requests and clarifications quoted in section 1; `docs/workflow.md`
++>
++> Implementation allowed: no further material changes without revision or rework
++>
++> Last updated: 2026-10-01
++
++This is the sole implementation specification for this task. The cache research
++report `D:/Temp/opencode/db-space-optimization-study-20260930.md` and the earlier
++R1/R2 experimental databases are capacity research, not implementation authority.
++R4 selects the existing-table v3 encoding route. Implementation remains gated on
++independent approval of this exact revision.
++
++## 1. Verbatim Requirement
++
++> 请你再次详细完整地过去检查一下，看一下这个相应的 OpenCode 我们目前的数据库，看一下它的这个可以去优化的一些点等等内容。因为当前我们看，我们的这个 OpenCode 的数据库能到四个G左右，但是本质上而言，我认为它仍然是具有很大一部分内容是可以被进行优化的压缩的，或者说这个数据本身就是冗余的等等内容。请你全面完整地去检查分析，并且给出按照优先级，P0到P几的，然后同时不会去丧失真正有效的这种，或者有用的这种数据，然后同时能获得较大的收益，比如说能最终将相应的这个数据库大小压到接近两G的一个水平。请你完整检查，全面检查，你给出相应的一些全面完整的一些内容。与此同时，如果你需要去测试，你当然可以在我们地盘的一个全局缓存工作区里面进行测试，但请注意，最好你的测试要保持高效，就是因为当前这个区域可能就几十个G，所以你不要去过度浪费空间。
++
++> 注意最终你的内容应该保持一个优秀高效且可实施的一个方法。比如说你到底应该在哪些内容上进行相应的一个调整啊，或者等等内容。就比如说你应该去对哪些，我们应该对哪些内容进行相应的一个压缩啊，然后与此同时它是压缩这个收益大概有多大的内容。然后与此同时又能够保证现有的这种搜索啊，这么的一些逻辑，就是让这些内容可以被搜索，仍然可以被索引等等内容。
++
++> 按理来说甚至reasoningpart都可以进行压缩，因为本身reasoning不需要进行索引
++
++> 换言之，所有的内容，我们只需要去让主会话的审计标签等等内容保持可审，就是保持重放的性能不会大幅度，或者说有这种比较奇怪的这种影响。那本身而言，这些什么子agent呀等等内容，那本身而言它都可以去进行一些冷冻。但是我记得好像有一个东西是这个token的技术。如果token的技术这一块的话，是能够正常就是进行计数的话，就是比如说它其实冷冻了也能正常计数的话，那这一块我认为其他的这种无关的任何内容都可以直接去纳入冷冻。
++
++> token计数
++
++> 那针对P1呢，有一个问题，就是理论上而言，我之前的模型就是所有的压缩等等机制，是不在前台能够看得到的。换言之，所有的压缩机制本质上都是有一个共同的一个处理器。那这个处理器呢，它本身呢，这个我们应该是已经有实现的，就是所有的这个前端或者说顶层应用层，它是看不到这个东西到底是被压缩了还是不压缩的。那唯一呢，正常进行冷冻解冻的都是后面存储端进行的，就是如果某些内容去请求一些所需要被解冻的内容，那这个相应的模块会自动进行解冻。所以请注意这种机制，本质上而言，比如说这个 reviewer 等等这种东西，那不得去让它直接触碰到这个冷冻解冻这种逻辑。然后与此同时呢，那关于你这个P2我有点不太懂，按你的意思，P2中首先什么历史记录成批批量保存，那有问题。那比如说成批批量保存，那现在不就是成批批量的吗？也就是说现在不就是本来就是一个 message 压缩一个东西，一个 message 压缩一个东西吗？那按你的理解，那你的意思是多个 message 去进行压缩吗？那多个 message 压缩之后，那如果它只要读一条 message，本质上这不就会带来很大的一个问题。然后与此同时，你说相应同的整条冷内容保存一份，之前就是这样的。那本质上而言，它不可能现在，或者说那本质上而言之前我就是这样的。那与此同时相应的是什么统计和查找小字段，检测保存，我不懂你这是什么意思。按理来说，按照我的理解，你这个 schema 等等内容，或者说这种字段等等内容，你也最好不要做过大调整。就是换言之，比如说它以前有什么字段等等内容，那理论上说可能每个字段都有不同的消费内容。如果你要改的话，那可能大批量内容都要改。所以按照我的理解，本身字段你可以去……我的当时的意思就是说，你看有哪些字段是冗余的啊，或者说什么，就比如说两个字段相应的内容是完全一致的，或者说历史中的某一些 part，本质上而言现在它是不再会进行一些消费啊或者什么这样的情况。那反正这个是我是这个意思。那我不懂你这是什么意思。然后与此同时请注意这一点。然后呢，同时按照逻辑呢，整体的这个相应的一个修改的一个生产代码的修改数量呢，不超过8个文件。那与此同时呢，相应生产代码的修改的这个行数呢，也不得超过1,600行。所以请注意这一点。那按理来说你请继续完整检查，并且按照相应的 workflow 去进行相应的一个构建并进入到相应的实施阶段。
++
++> 与此同时，其余相应的一些配置呢，整体要设计风格要符合现有的仓库的一些逻辑，或者说之前我们也有一个相应的一个 plane，去专门进行相应的这个冷冻的内容。按理来说，我们仍然是不纳入，就是说不考虑进行自动化的一个冷冻的，仍然是用户显示进行冷冻的指令之后才去进行冷冻的，同时要具备完整的冷冻解冻机制。那同时关于冷冻的内容呢，也不轻易地进行解冻，或者换言之，本质上而言，很多内容它其实是不需要被解冻的。然后有时候可能会有极个别的消费端，可能读取到了，或者说直接全量读取了一些本身它不需要那些内容，那本身这个东西可以去进行适当的一个调整。
++
++Capacity clarification: when asked whether the capacity goal could be deferred,
++the user selected **“本阶段达到约 2 GB”**. When asked for the numerical limit, the
++user selected **“2.5 GB”**, described in the question as **2,500,000,000 bytes**.
++The file and line ceilings remain in force simultaneously.
++
++> 你自己看，按理来说不得因为压缩而大幅度修改现有的调用schema导致后期与上游过大兼容性问题
++
++> 譬如 属于哪个 Session、哪条 Message 工具名称、完成状态、开始结束时间  这种我觉得就 本质上该热表啊
++
++The target end state is `verified-implementation`, with independent plan and
++implementation audits under `docs/workflow.md`. No commit or push is requested.
++
++Latest instructions supersede the earlier numerical capacity gate:
++
++> 所有的修改测试都由你来执行，不要让agent负责修改实验，可以审计；不然太慢了，我希望你能保持高效，
++
++> 譬如理论上你不应该每次都进行大批量的测试
++
++> 我希望整体在一个小时以内执行完
++
++> 当前的主要要求以及内容呢是完整全面检查OpenCode的数据库，也就是 OpenCode 的 .DB 数据库，将其冗余度等等进行检查，并最终要求限制最终的压缩大小，大概在 2.8 GB 以下，同时相应修改代码的文件数量不得超过8个文件，1600行生产代码。整体而言需要专注于任务本身与此无关的任何内容，包括但不限于，譬如需要用户进行授权的等等内容，都不得成为阻塞项。本质上，如果用户没授权，那他之后大概率也不会授权，请你按照相应既定流程进行。同时如果需要进行修改以及测试，请自行进行完成，不要每次都跑大批量的测试和压缩测试，本身这会导致大量的无效时间浪费。请确保最终内容不会发生任何红测,请保持任务的修改和测试是一点一点等完整进行之后再进行相应的测试，等等内容，避免最开始就全量测试，从而导致不必要的任务冗余度。请保持任务的conscious以及efficient，避免进行无关操作。或者理论上和最终收益优先度相关性较低的一些无关操作。同时用户要求尽量降低相应的 schema 调整的一个复杂度。譬如，同时也尽量避免降低相应的用户的实际体验，譬如不得让相应的主 agent 的回话的正文搜索能力丢失，token 技术能力发生不准确等等。也就是不得让已有的一些其他功能的表现啊等等内容发生相应的飘移。
++
++Final physical acceptance is **<2,800,000,000 bytes**. The primary agent owns all
++subsequent edits and experiments; delegation is restricted to independent audit.
++The time preference governs scope and test efficiency, not weakening final gates.
++
++> 同时请注意整体代码适当保持可读性，因为本身是用户来进行维护的，不要为了去进行压缩代码过度地简化，或者说内嵌内联部分本该准确展开或者等等的一些逻辑，请保持代码可编辑可检查可审计，不要过度地进行硬编码，而是让整体代码具有适当的逻辑可扩展性等等情况。
++
++## 2. Explicit Non-Goals
++
++- Production database writes, daemon shutdown, external attachment storage, and business-data deletion.
++- Automatic, periodic, task-completion, or reviewer-completion freeze hooks.
++- Hot streaming text interning, line splitting, or per-write database-wide duplicate scans.
++- Moving Session/Message identity, tool name/status/start/end time out of hot storage.
++- Broad public Message/Part/HTTP/SDK schema changes or replacing the owner tables with the earlier R2 schema.
++- Treating search, provider replay, token accounting, or data integrity as adjustable capacity tradeoffs.
++
++## 3. Repository Context
++
++| Source | Constraint |
++| --- | --- |
++| `CONTEXT.md` | Production implementation is `packages/opencode`; `parent_id` identifies subagents, while fork creates a root Session. |
++| Root and package `AGENTS.md` | Shared worktree safety, package-local tests/typecheck, generated migrations if eventually justified. |
++| `docs/workflow.md` and engineering policy | One canonical plan, primary-path repair, exact-revision independent approval, TDD, Chinese comments. |
++| `docs/adr/README.md` | Existing ADR index contains no cold-storage decision replacing the current shipped contract. |
++| `docs/plans/cold-eligibility-root-7d-subagent-24h.md` | Existing explicit-maintenance eligibility clocks and completed Compaction boundary. |
++| `docs/plans/opencode-db-cold-storage-pack-v2.md` | Existing same-DB packs, content identities, refcounts, statistics and restore compatibility. |
++
++## 4. Files and Evidence Read
++
++| Evidence | Relevance | Class |
++| --- | --- | --- |
++| `src/storage/cold.ts` | Extraction whitelist, eligibility, batching, inspect/thaw, fork, replacement, maintenance, integrity. | observed |
++| `src/session/session.sql.ts` | Existing persisted field types, IDs, indexes, references and statistics. | contracted |
++| `src/session/message-v2.ts` | Complete reads, viewer reads, hot predicates, execution-window selection and model conversion. | observed |
++| `src/session/search.ts`, `src/session/session.ts`, `src/v2/session.ts` | Search field whitelist and root scope before pagination. | reachable |
++| `src/permission/reviewer/service.ts` | Reused reviewer Session, request metadata, outer review completion and parent audit result. | observed |
++| `src/tool/task.ts`, `src/background/job.ts` | Parent replay result, child reuse, background-launch versus execution completion. | reachable |
++| `src/session/projectors.ts`, `src/storage/db.ts` | Atomic replacement, deletion, statistics and transaction boundary. | contracted |
++| `src/cli/cmd/stats/data.ts`, `src/token/accounting.ts` | Hot scalar statistics and detailed input breakdown consumers. | observed |
++| HTTP Session group/handler; TUI Session route, sync and subagent footer | Bounded viewer reads, audit navigation and shared permission/question aggregation. | reachable |
++| `test/storage/cold.test.ts`, `test/session/message-v2.test.ts` | Existing public persistence and replay test seams. | observed |
++| `D:/Temp/opencode/cold-storage-feedback.test.ts` | Real persistence red feedback, isolated from production. | observed |
++| `D:/Temp/opencode/manual-cold-same-table-20261002.mjs` and `.sqlite` | Same-schema capacity and reversible-data experiment. | observed |
++
++Paths in the source/test rows are relative to `packages/opencode`.
++
++## 5. Current Behavior
++
++`explicit db compress -> ColdStorage eligibility -> whitelisted fields -> v2
++pack -> owner hot JSON + cold_ref/cold_key/cold_stats`.
++
++The implementation already batches and shares identical complete packs. Entry
++deduplication inside one pack is existing behavior. Pack boundaries can retain
++duplicate entries and entries whose individual owners have disappeared.
++
++Ordinary Text is excluded from extraction, including large reviewer request
++Text. Complete ordinary reads can persistently thaw requested owners. Viewer
++Part reads use inspect; assistant viewer reads assume assistant data stays hot.
++Stats use hot scalars and `inspectPartStats` rather than decoding all tool output.
++
++## 6. Supported Input Domain and Reachability
++
++| Condition | Producer / guarantee | Owner | Class |
++| --- | --- | --- | --- |
++| Reused reviewer Session containing many requests | Reviewer persists `reviewID` on request Text; attempts and outer review completion differ. | Reviewer for business scope; storage for bytes. | observed |
++| Existing cold v1/v2 owners | Shipped ColdStorage format and refcount invariants. | ColdStorage | contracted |
++| Shared cold prefix and subsequent independent history edits | Fork and projector replacement paths. | ColdStorage/projectors | reachable |
++| Child copied into a root Session | Fork creates root identity; root Text must be searchable. | ColdStorage clone path | reachable |
++| Background task launch response | Completed parent tool can coexist with running child execution. | Background job lifecycle | observed |
++
++## 7. Required Invariants
++
++| ID | Invariant | Evidence / verification seam |
++| --- | --- | --- |
++| INV-01 | Explicit user command is the only freeze trigger. | CLI maintenance and command tests. |
++| INV-02 | Public business objects roundtrip exactly, including provider metadata. | Complete Message/Part reads and independent digests. |
++| INV-03 | Root Text search and active prompt reads retain hot access. | Search SQL and model conversion. |
++| INV-04 | Session/Message identity, tool name/status/start/end time remain hot. | Latest user clarification; raw row checks. |
++| INV-05 | Token/cost/character statistics are identical before and after maintenance. | Stats, request ledgers, context accounting. |
++| INV-06 | Viewer/metadata-only consumers preserve cold state as appropriate. | Real persistence feedback and API tests. |
++| INV-07 | Fork/edit/delete/expand preserve independent owners and valid references. | ColdStorage public seams. |
++| INV-08 | Reclaimed complete-schema main file <2,800,000,000 bytes. | Cache-copy physical size, integrity and full index accounting. |
++| INV-09 | Production diff <=8 files and <=1,600 gross added/deleted lines. | Actual scoped diff; no unrelated formatting. |
++| INV-10 | Storage complexity stays behind the existing handler; public schema remains compatible. | Producer/consumer map and package typecheck. |
++
++## 8. First Divergence and Root Cause
++
++| Invariant | First divergence | Owner | Evidence |
++| --- | --- | --- | --- |
++| INV-06 | Default complete hydration calls persistent thaw during ordinary reads. | MessageV2 hydration / ColdStorage | Reasoning body restored correctly, but cold_ref became null. |
++| INV-08 | Eligible child Text never enters extraction. | ColdStorage whitelist | Old reviewer Text freeze returned skipped. |
++| INV-08 | Existing v2 owners are skipped by the hot/v1 compression enumeration. | ColdStorage maintenance | Existing pack-level duplication and encoding are left intact. |
++
++Original feedback command, cwd `packages/opencode`, TEMP/TMP in the cache:
++
++```powershell
++bun test "D:\Temp\opencode\cold-storage-feedback.test.ts" --timeout 30000
++```
++
++Observed result: 0 pass, 2 fail, 4 assertions. The two failures are old reviewer
++Text skipped by explicit freeze and ordinary get clearing a previously cold
++reasoning reference. This detects real storage behavior, not source text.
++
++## 9. Responsibility and Seam
++
++ColdStorage owns encoding, extraction, reference accounting, transparent
++restoration and explicit maintenance. MessageV2 owns the business read scope.
++Reviewer/task/frontends keep their ordinary Message/Part contracts. Search and
++Stats keep directly usable fields. Cold Text search restoration belongs to the
++same storage decoder, never to a tool or frontend.
++
++## 10. Single Approved Primary-Path Design
++
++Explicit compress -> existing eligibility plus completed reviewer attempts ->
++existing field extraction -> bounded immutable v3 packs -> atomic owner pointer
++assignment -> explicit physical reclaim. Normal writes never freeze.
++
++### P0: Existing Pack Encoding And Shared Entries
++
++Use the existing tables and columns. Version 3 pack JSON stores a canonical
++array of complete field maps in full SHA-256 entry-key order. Entry hashes are
++recomputed from the fields rather than serialized a second time. Pack identity
++retains every SHA-256 bit, encoded as base64url instead of hexadecimal. Owner
++`cold_key` is a four-byte little-endian array slot. Version 1 and 2 remain explicit
++shipped decoder branches; a failed v3 decode never retries an older decoder.
++New pack writes use zstd level 12. Preserve current empty field placeholders.
++
++All decode, verify, inspect, thaw, direct freeze, clone, and repack paths select
++the locator by the actual pack version, validate range/order/canonical bytes and
++full digest, and preserve owner-count reference semantics. Repacking recalculates
++slots after final ordering. A slot belongs only to its immutable pack hash.
++
++Compact `cold_stats` inside its existing JSON column as versioned tuples:
++`[2,0,inputChars,outputChars]` or `[2,1,...tenComponents]`. The storage parser
++returns the existing named public statistics shape and checks exact length and
++safe integers. Keep legacy object decoding. Actual provider tokens/cost remain
++hot in their existing Message/Part JSON fields; no token formula changes.
++
++Explicit compress additionally processes existing packs, not only hot/v1 owners.
++Enumerate a finite ordered input-hash set, process bounded batches under existing
++immediate transactions and maintenance lease, preserve source timestamps, and
++checkpoint after commit. Newly produced hashes do not re-enter the same pass.
++Restore existing owner fields in memory, merge newly eligible fields through the
++same extractor, and globally reuse identical complete entry identities during
++this pass. The transient identity map stores keys/locators, not all raw payloads;
++validate that cached destinations still exist before reuse because ordinary
++owner removal can occur between batches. The map is rebuilt on resume from
++committed output packs; it is an optimization, not persistent authority.
++
++New payloads are retained before assigning owners, and old payloads released
++after all affected owners switch in the same transaction. Shared packs outside
++a requested Session scope keep their owners valid. Live fields alone enter the
++new pack; preserve every referenced logical object. Existing cleanup/verify
++contracts remain separate from encoding migration.
++
++### P1: Manual Cold Eligibility And Fields
++
++Retain root seven-day, child 24-hour and completed-Compaction eligibility. Add
++completed reviewer request/assistant attempts selected by same-Session linkage,
++reviewer identity, completed assistant timestamps and absence of pending/running
++tools across that request and its replies. The parent review result is not the
++trigger: the command is. Retry creates a fresh attempt; later hide/replacement
++of a completed attempt uses the existing complete-object replacement path.
++Compute admission inside the same immediate transaction as extraction.
++
++For eligible child Text, move only `text`; preserve metadata including reviewID,
++visibility flags and all mandatory identity/lifecycle fields. Root Text stays
++entirely hot. For eligible assistant Messages move `inputBreakdown`, `inputChars`,
++`inputTokens` and `path`; restore them in complete and viewer reads. Narrow the
++internal HotInfo type accordingly; its current consumers use lifecycle/model
++fields. Public Info/Part schemas and provider objects retain their exact fields.
++Existing Tool/Reasoning/Step/summary extraction remains authoritative.
++
++### P2: Transparent Reads And Search
++
++Ordinary get/page/stream reads inspect complete selected objects in memory while
++preserving references. Execution-window hydration explicitly performs persistent
++thaw internally, so repeated active prompt assembly reads hot JSON. Explicit
++expand remains persistent. Viewer user summary.diffs remains omitted under its
++existing contract; viewer assistant fields are fully restored. Single-row and
++batch paths share these choices.
++
++Preserve shipped child search as well as root search. Bun's actual SQLite
++connection has no JavaScript scalar-function registration API, confirmed by a
++focused in-memory execution (`TypeError: db.function is not a function`). R3 uses
++the existing application/SQL boundary instead of a new database capability.
++
++`searchCondition` receives the caller's existing Session universe condition and
++roots flag. For roots-only or title-only searches, retain today's pure SQL path.
++For searches including children, ColdStorage selects visible cold Text locators
++inside that same universe (join Message/Session, preserve hidden-field presence,
++synthetic/ignored filters), groups by pack, and decodes each selected pack once.
++Return per-token Session-ID match sets. Compare text using SQLite's ASCII-only
++lowercase semantics and literal substring matching; query token normalization
++stays in search.ts. Add each set as an OR term inside that token's existing
++title/hot-content expression, then AND the tokens as today. Final scope, ordering,
++limit and cursor remain in the existing SQL. Bound ID lists within SQLite's
++parameter limit. This is one complete search path, not a retry after SQL fails.
++No persistent cache/index, user function or new table.
++
++For progressive scan, pass only the already-selected candidate-page IDs into
++the cold match step, so its work stays bounded by the existing scan contract.
++`listByProject`, `listGlobal` and v2 list pass their already-built universe;
++session list title GET and scan POST both request the existing `roots:true` flag.
++Permission/question aggregation and child navigation remain unchanged. Public
++HTTP/SDK query and response schemas remain unchanged.
++
++Child-to-root fork materializes copied Text in the target while leaving the
++source cold. Existing mutation/refcount ownership remains in ColdStorage.
++
++### Capacity Evidence And Final Gate
++
++The completed cache artifact `manual-cold-v3-combined.sqlite` records stage A
++3,043,700,736 bytes and stage B 2,783,752,192 bytes, preserving original tables,
++indexes and mandatory hot fields. Stage A saves 410,521,600 bytes from the
++3,454,222,336-byte same-table baseline; stage B saves 259,948,544 more. The
++prototype's optional pack-local aliases saved only 978,634 compressed bytes and
++are excluded from production to reduce complexity. R4 includes level-12 encoding;
++placeholder removal stays excluded. The completed artifact is 2,734,632,960 bytes,
++but that final number is not claimed for this smaller selected route.
++
++The prototype used a stricter parent-result witness for reviewer eligibility;
++the production attempt rule requires behavioral tests of post-completion hiding
++and replacement. The final production implementation must independently meet
++the physical gate on the retained complete snapshot. Encoding-stage arithmetic
++and this experimental report do not replace that one final capacity run.
++
++R3's actual production-path run on the retained snapshot completed compression
++in 603 seconds and verified 1,910,259 owners / 5,718 payloads with zero corruption,
++missing payloads or refcount mismatches. After reclaim the file measured
++2,807,848,960 bytes. R4 changes only the codec level from 9 to 12, whose earlier
++same-snapshot incremental experiment saved 9,079,658 payload bytes. Reuse the
++already verified resulting copy and re-encode its immutable payloads with the
++same canonical bytes; compare every decompressed frame before/after, retain all
++hashes/locators/rows, reclaim once and measure. This isolates the necessary change
++without repeating the full owner transformation. Actual incremental physical
++size remains a gate, not an extrapolated acceptance claim.
++
++## 11. Secondary and Replacement Path Inventory
++
++| Path | Classification | Disposition |
++| --- | --- | --- |
++| Existing v1/v2 decode | Shipped compatibility | Preserve until an explicitly validated migration handles it. |
++| Inspect versus persistent thaw | Distinct read/write contracts in the same storage owner | Preserve and correctly select at the internal read seam. |
++| Explicit expand | Primary user-requested operation | Preserve. |
++| Automatic freeze worker or per-tool freeze hook | Outside requested behavior | Exclude. |
++| Alternate application schemas for cold messages | Responsibility leak | Exclude. |
++
++## 12. Workaround Deletion and Replacement
++
++Remove ordinary-read persistent-thaw selection in MessageV2's single-row and
++batch hydration, while retaining explicit expand and execution-window warming.
++Replace duplicate serialized entry hashes in new packs, retaining the legacy
++decoder solely for persisted compatibility. No new workaround or alternate
++failure-success path is introduced.
++
++## 13. Forward Traceability
++
++| Requirement | Candidate path | Behavioral evidence needed |
++| --- | --- | --- |
++| INV-01/02/07 | ColdStorage maintenance/restore/clone/replacement | Manual freeze, complete roundtrip, expand, fork, mutation, failure atomicity. |
++| INV-03/04/05 | Existing hot fields, search, model conversion and Stats | Root results, provider payload, raw identity/time fields and exact counts. |
++| INV-06/10 | MessageV2 internal hydration scope | Ordinary view stays cold; execution reads complete objects; same DTO schemas. |
++| INV-08 | Final approved route on a complete cache copy | Full main-file size after reclaim; per-priority non-overlapping gains. |
++| INV-09 | Final file plan and diff | <=8 production files, <=1,600 gross changed lines. |
++
++Exact source ownership: ColdStorage covers INV-01/02/04/05/07/08; MessageV2 covers
++INV-02/03/06/10; search.ts plus the Session-list caller cover INV-03/10; persisted
++TypeScript types in session.sql.ts cover INV-02/05/10. Tests below map these seams.
++
++## 14. Reverse Traceability
++
++| Candidate concept | Requirement | Why current behavior is insufficient |
++| --- | --- | --- |
++| Child Text extraction | INV-08 | Whitelist leaves large eligible reviewer request bodies inline. |
++| Inspect for ordinary complete reads | INV-06 | Current hydration can clear cold references. |
++| Existing-pack maintenance | INV-08 | Current compress enumeration leaves v2 packs unchanged. |
++| Additional historical diagnostic extraction | INV-02/05/08 | Optional detailed fields remain hot; actual consumers need transparent restore. |
++
++Implicit entry hashes, slots, lossless base64url identities and compact statistics
++map to INV-08, with measured stage-A savings; the existing verbose encoding cannot
++provide those savings. Completed-attempt eligibility maps to INV-08 and the
++reviewer producer's separate immutable attempt lifetime. Scoped cold match sets
++map to INV-03/10: SQL JSON text cannot read extracted bytes and
++one decode per owner would repeat the same pack work. These concepts stay inside
++the storage owner and preserve the public schemas.
++
++## 15. File-Level Change Plan
++
++| Production file (packages/opencode) | Responsibility | Gross line allowance |
++| --- | --- | --- |
++| `src/storage/cold.ts` | v3 codec/locators/stats, bounded maintenance, eligibility, extraction/restoration, scoped cold matches, fork | 1,180 |
++| `src/session/session.sql.ts` | Internal stored assistant/tuple types; no SQL DDL change | 45 |
++| `src/session/message-v2.ts` | Complete inspect versus execution warming, HotInfo/viewer typing | 170 |
++| `src/session/search.ts` | Merge per-token storage-owned match sets into existing SQL | 40 |
++| `src/session/session.ts` | Pass existing list universe / progressive candidate IDs and root scope | 25 |
++| `src/v2/session.ts` | Pass existing list universe and root scope | 10 |
++| `src/cli/cmd/tui/component/dialog-session-list.tsx` | Existing root scope before search pagination | 20 |
++
++Seven production files, estimated 1,490 gross changed lines with 110 lines reserve.
++No migration, generated SDK, new public endpoint, config or reviewer/tool hook.
++Tests: extend existing cold storage, message pagination and Session search seams;
++new tests may use a focused `test/storage/cold-v3.test.ts` fixture file. Tests and
++this plan do not consume the production-code line budget.
++
++## 16. TDD Behavior Slices
++
++1. Explicit maintenance includes an eligible reviewer request while preserving ordinary writes.
++2. Complete read restores content and retains cold storage; explicit expand restores hot storage.
++3. Statistics and parent provider replay remain equal before/after freezing children.
++4. Root search and child-to-root fork preserve hot searchable Text.
++5. Existing pack rewrite preserves all shared owners through edit/delete and restart.
++6. Full-copy maintenance reaches the physical gate with complete schema and indexes.
++
++Seams are `ColdStorage.freezeOwner/maintain/verify/thawOwner/inspectPartStats`,
++`Session.Service` replacement/fork/list and `MessageV2.get/page/filterCompacted`.
++Each slice starts with one failing behavior, then minimal implementation and the
++related regression set. Add explicit legacy-pack upgrade, corrupted slot/hash,
++interrupted/resumed maintenance, completed-attempt hide/update, child search and
++child-to-root fork cases. Expectations use complete independently seeded objects
++and exact numeric totals. Storage-state checks observe the requested persistence
++behavior; they do not assert private helper calls or source text.
++
++## 17. Chinese Comment Budget
++
++Planning estimate was E=1,150 including focused tests,
++requiring at least 173 qualifying Chinese explanatory comment lines. Actual E/C
++must satisfy `C >= max(1, ceil(E * 0.15))` for E>0. Explanations will be adjacent to
++the manual-trigger boundary, mandatory hot fields, exact statistics, immutable
++shared entries, restore fidelity, and transaction/checkpoint ownership.
++
++## 18. Verification
++
++| Command | Working directory | Evidence |
++| --- | --- | --- |
++| `bun test test/storage/cold.test.ts --test-name-pattern "Stats" --timeout 30000` | `packages/opencode` | Prior run: 2 pass, 14 assertions. |
++| `bun test test/session/message-v2.test.ts --test-name-pattern "task" --timeout 30000` | `packages/opencode` | Prior run: 6 pass, 18 assertions. |
++| Cache feedback command in section 8 | `packages/opencode` | Two real persistence failures. |
++| `bun run manual-cold-same-table-20261002.mjs --measure` | `D:/Temp/opencode` | Complete same-schema physical breakdown and integrity. |
++| `bun typecheck` | `packages/opencode` | Required after approved implementation. |
++
++Run slice-specific `bun test <test-file> --test-name-pattern <slice> --timeout
++30000` first. After all slices, run `bun test test/storage/cold.test.ts
++test/storage/cold-v3.test.ts test/session/messages-pagination.test.ts
++test/server/session-messages.test.ts --timeout 30000`, then package typecheck.
++Use the existing search test file discovered by symbol rather than inventing a
++new consumer seam. Run the original cache feedback again after fixing its paths.
++Finally execute one cache-copy production maintain/verify/reclaim run, compare
++complete owner and statistics hashes, check FK/integrity, and measure main file.
++No repeated full-database codec sweeps during individual implementation slices.
++
++The same-table experiment reports exact DDL for 20 tables and 21 explicit indexes;
++377,456 Messages and 1,760,759 Parts passed independent restored-JSON comparison.
++128,181 root Text rows stayed hot, totaling 126,967,199 JSON bytes. Source
++677,267 cold statistics and final 825,668 projections were checked; aggregate
++statistics matched. FK check and quick_check passed.
++
++## 19. Diff Budget
++
++| Metric | Current / ceiling |
++| --- | --- |
++| Production files changed | 7 actual / 8 ceiling |
++| Production gross changed lines | 819 actual / 1,600 ceiling |
++| Repository tests changed | 3 existing test files plus focused `cold-v3.test.ts` |
++| New canonical plan | This file only |
++| Experiment storage | One 3.454 GB same-table copy, plus retained earlier research artifacts; cache free space was checked before construction. |
++
++## 20. Real Risks and Open Decisions
++
++- Capacity: selected experimental stage B is 2,783,752,192 bytes against the updated 2.8 GB limit; production packing order, final metadata and scope require the final capacity run.
++- Preserving existing eligibility left 6,169 child Text rows hot with about
++  230.4 MB of text; eligibility changes require actual lifecycle evidence.
++- Ordinary API child search currently exists, even when the TUI shows roots;
++  extending child Text extraction requires an explicit supported search scope.
++- Assistant viewer/hot predicates currently assume all assistant fields are hot.
++- Background launch and reviewer attempt completion differ from completed work;
++  neither can be substituted for durable lifecycle evidence.
++- Single historical entries can be oversized: the experiment retained one
++  97,080,890-byte raw entry. Batching must preserve complete-entry semantics.
++
++### Open Decisions Requiring the User
++
++The user has fixed 2.8 GB, eight files, 1,600 production lines and mandatory hot
++identity/time fields. There is no pending user authorization for this route.
++Any implementation drift affecting interfaces, fields or file budget requires a
++new exact-revision audit rather than expanding scope during coding.
++
++### Rejected Speculation
++
++Per-write global string interning, automatic freezing, deleting valid payloads,
++and externally storing attachments are outside this task. Existing batch packing
++and identical-pack sharing are not new savings. Compression-body estimates do
++not count as physical database acceptance.
++
++## 21. Audit Contract
++
++Independent `adversarial-auditor` plan and implementation audits must cover the
++original requirements, complete affected paths, exact revision, code quality and
++Chinese-comment gate. Primary will provide only the prescribed handoff. Audit
++limits and blocker reconsideration follow `docs/workflow.md` and current policy.
++
++## 22. Plan Audit Record
++
++Round 1, R2, full scope, `ses_f09a21e29ffe0CkkMBuMM1m7PT`:
++
++> **BLOCK — `docs/plans/manual-cold-storage-transparency.md` R2。**
++>
++> 保留 B-01。修订 canonical plan 并递增 revision 后，需要重新进行全范围方案审计；本轮不授权实施。
++
++B-01 concerns the selected search interface and is in scope: the primary's
++in-memory Bun test independently reproduced the missing registration method.
++R3 replaces that design with scoped storage match sets at the current SQL seam.
++Search regressions are `test/server/session-list.test.ts` (multi-token and keyset
++cases); run this file after the focused cold-search slice.
++
++Round 2, R3, full scope, `ses_f09a21e29ffe0CkkMBuMM1m7PT`:
++
++> No blocking findings.
++>
++> **APPROVE — `docs/plans/manual-cold-storage-transparency.md` R3，完整范围方案审计通过。**
++>
++> R2 的 B-01 已解决。本批准仅适用于 R3；实际容量、行为回归、生产 diff 预算和中文注释比例仍须通过实现验证与独立实现审计。
++
++Round 3, R4, full scope, `ses_f09a21e29ffe0CkkMBuMM1m7PT`:
++
++> No blocking findings.
++>
++> **APPROVE — `docs/plans/manual-cold-storage-transparency.md` R4，完整范围方案审计通过。**
++>
++> 批准仅适用于 R4。统一 level 12 的实际物理尺寸、剩余恢复逻辑、相关回归、可读性、实际 E/C 和最终 diff 预算，仍须完成验证并通过独立实现审计。
++
++Non-blocking record: the earlier 9,079,658-byte estimate used smaller-frame
++selection. Final R4 measurement will use unconditional level 12, matching the
++approved production codec. Actual diff and E/C will replace the earlier zero
++placeholders at implementation-audit handoff.
++
++## 23. Implementation Evidence
++
++### Actual Files And Diff
++
++| Production file | Added | Deleted |
++| --- | ---: | ---: |
++| `src/storage/cold.ts` | 614 | 67 |
++| `src/session/message-v2.ts` | 57 | 24 |
++| `src/session/search.ts` | 16 | 3 |
++| `src/session/session.sql.ts` | 5 | 2 |
++| `src/session/session.ts` | 12 | 6 |
++| `src/v2/session.ts` | 5 | 4 |
++| `src/cli/cmd/tui/component/dialog-session-list.tsx` | 4 | 0 |
++
++Seven production files, 713 added + 106 deleted = **819 gross lines**.
++Tests: `test/storage/cold-v3.test.ts`, `test/storage/cold.test.ts`,
++`test/session/messages-pagination.test.ts`, `test/server/session-messages.test.ts`.
++No DDL migration, generated files, public SDK schema or dependency changes.
++
++### Red-Green And Verification
++
++All commands below use `packages/opencode` unless an absolute cache script is
++specified. TEMP/TMP for tests were `D:/Temp/opencode`.
++
++- `bun test test/storage/cold-v3.test.ts --timeout 30000`: original Text freeze
++  failed (skipped), compact locator failed (32 bytes), completed-attempt freeze
++  failed, assistant freeze failed, cold child search failed, and old pack upgrade
++  failed before their respective changes. Final focused result: **3 pass, 30
++  assertions**. Covers read-only restoration, root Text, exact stats, old-format
++  upgrade, payload checkpoint resume, open-tool exclusion, viewer and fork search.
++- `bun test test/storage/cold.test.ts test/storage/cold-v3.test.ts
++  test/session/messages-pagination.test.ts --timeout 30000`: **103 pass, 378
++  assertions**. Earlier failures were old persistent-thaw expectations; complete
++  values remain asserted, with explicit thaw tested separately. Two pack fixtures
++  now explicitly scope maintenance and retain their independent pure-pack checks.
++- `bun test test/server/session-messages.test.ts test/server/session-list.test.ts
++  --timeout 30000`: **31 pass, 159 assertions**.
++- After final resume/viewer adjustments, `bun test test/storage/cold-v3.test.ts
++  test/storage/cold.test.ts --timeout 30000`: **45 pass, 232 assertions**.
++- `bun test test/session/messages-pagination.test.ts test/server/session-messages.test.ts
++  --test-name-pattern "cold|compacted|window|HotInfo" --timeout 30000`: **2 pass,
++  18 assertions**, with 64 filtered tests; this supplements rather than replaces
++  the earlier complete related runs.
++- `bun test "D:/Temp/opencode/cold-storage-feedback.test.ts" --timeout 30000`:
++  original feedback now **2 pass, 5 assertions**.
++- `bun typecheck`: passed after implementation and again after final readability
++  changes. An intermediate `yield*` on a synchronous array and the broadened pack
++  metadata type were corrected at their owning functions.
++
++### Capacity And Complete-Data Evidence
++
++`D:/Temp/opencode/manual-cold-production-check.mjs` uses the real ColdStorage
++maintenance dispatcher on one isolated copy of the complete retained same-table
++snapshot. Source is `manual-cold-same-table-20261002.sqlite` (3,454,222,336 bytes).
++The initial harness import failed before any maintenance, and the same untouched
++copy was reused with dynamic imports and an explicit resolved-path guard.
++
++The R3 maintenance completed in **603 seconds**. Production verify checked
++**1,910,259 owners / 5,718 payloads**, with zero corrupt owners, corrupt payloads,
++missing payloads and reference mismatches. The shell timed out after verify;
++only physical reclaim was completed separately. The resulting 2,807,848,960-byte
++file supplied the measured reason for R4.
++
++`D:/Temp/opencode/manual-cold-level12-check.mjs` re-encoded all 5,718 immutable
++frames unconditionally at level 12, matching production. Every decompressed byte
++matched. Payload changed from 1,231,640,582 to 1,222,692,537 bytes. Combined raw
++identity digest before/after:
++`c25ad7568ee31e8f651f0962a1e9208ff707a352053810b5da32c582bf656dff`.
++After VACUUM and checkpoint: **2,799,042,560 bytes**, below 2,800,000,000; elapsed
++209 seconds. `quick_check=ok`, FK violations empty, WAL checkpoint `(0,0,0)`.
++
++`D:/Temp/opencode/manual-cold-business-compare.mjs` independently compared all
++**2,138,215 Message/Part owners** in the source and target. It restores field
++maps without calling the production restore functions, normalizes payload
++placement into field digests, and compares every logical business object plus
++IDs, relationships and timestamps. Result: **ALL_BUSINESS_OBJECTS_EQUAL**, zero
++unmatched owners, 227 seconds. Hot token/cost values are included in those
++objects; production verify separately checked every cold statistical projection.
++These are fixed-snapshot results; the running production database remains read-only.
++
++### Path And Comment Evidence
++
++Legacy v1/v2 are explicit persisted compatibility paths. V3 decode errors fail;
++there is no fallback codec or placeholder-success path. Scoped cold search and
++hot SQL are parts of the same query. Ordinary inspect, execution warming and
++explicit expand preserve their separate contracts. Removed behavior: ordinary
++reads automatically writing selected cold content back to hot tables.
++
++Conservative line counter: inspect added lines of the scoped diff, exclude blank,
++import-only and comment lines; include the new untracked test. This gives an
++**E upper bound of 1,004**, deliberately retaining any formatter-only additions
++rather than understating the denominator. Added/modified Chinese explanatory
++comment lines counted: **C=163**, against the stricter minimum **151** (16.24%).
++Implementation audit round 2 independently refined this to **E=992, qualifying
++C=161, C/E=16.23%**: 1,201 added lines less 19 imports, 15 blanks, 163 comments
++and 12 formatting/move/equivalent-renaming lines. Two flow-repetition comments
++were excluded from C. Required minimum for this audited E is 149.
++Representative explanations cover immutable slot identity, exact tuple numbers,
++completed-attempt/open-tool ordering, query scope before decode, and transactional
++retain/assign/release. No generated or pure-move files are included. Independent
++audit qualifies comments and may reduce the conservative code-line denominator.
++
++### Remaining Verification
++
++Independent full-scope implementation audit is complete. Snapshot size has
++957,440 bytes headroom to the requested bound; ongoing production writes will
++change future sizes. No production DB operation or daemon restart was performed.
++
++### Implementation Audit Rework
++
++Round-1 B-01 is within the changed maintenance owner. A deterministic legal
++fixture reproduced `Cold pack reference points to an invalid payload`: resumed
++deduplication selected a pack containing an unreferenced entry as a destination,
++then another group released its final old owner before the destination retain.
++The repair collects the complete batch assignment schedule, aggregates every
++destination retain before any assignment, performs all owner assignments, then
++releases old references. This implements the already-approved atomic ordering.
++The final regression obtains a real interrupted payload checkpoint, removes its
++prior owner through Session.Service, and resumes across the P/Q/R shared-entry
++layout. No new format, field, eligibility rule or packing policy was introduced.
++
++Round-1 B-02 is the approved lifecycle-test requirement. The reviewer regression
++now freezes an attempt, hides request/reply via complete `MessageV2.get` plus
++`Session.updateMessage`, checks all assistant diagnostic/token fields and default
++visibility, then replaces the cold Text and verifies content, reviewID and refs.
++Final related storage run: **46 pass, 244 assertions**; package typecheck passed.
++
++`D:/Temp/opencode/manual-cold-capacity-receipt.mjs` produced
++`D:/Temp/opencode/manual-cold-capacity-receipt.json` through read-only queries and
++filesystem stat, independently of the plan text. It records **2,799,042,560
++bytes**, 683,360 pages, zero free pages, 377,456 Messages, 1,760,759 Parts, 5,718
++packs and **128,181 root Text rows, zero cold root Text rows**. This lightweight
++receipt does not rerun compression. Content encoding is unchanged by B-01 rework;
++the new regression exercises its changed transaction ordering.
++
++## 24. Implementation Audit Record
++
++Round 1, approved R4, full scope, `ses_f094e3cc9ffeT9i1Ahm5Gf2PDS`:
++
++> **BLOCK — approved R4 对应的当前 implementation diff 不可发布。**
++>
++> 保留 B-01、B-02。修复后需要全范围重新审计，并完成实际 E/C 与执行证据核验。没有修改任何文件。
++
++Both findings were checked against the affected owner and approved requirements;
++rework evidence is recorded above.
++
++Round 2, approved R4, full scope, same invocation:
++
++> No blocking findings.
++>
++> **BLOCK — 发布验证仍待完成；B-01、B-02 均已关闭。**
++>
++> 这里保留的是执行证据门禁，没有新增代码返工项。请提供已完成测试、`bun typecheck`、完整对象比较和完整性检查的**原始工具输出或可读取的记录路径**，无需重跑全库压缩。核验这些证据后才能对 approved R4 的当前 diff 给出最终 APPROVE。
++
++The requested raw output excerpts are retained verbatim at
++`D:/Temp/opencode/manual-cold-raw-verification.log`, with exact commands and
++working directories. The log identifies the maintenance timeout separately from
++its completed verify and the later successful reclaim/level-12 run. No code or
++design change accompanies this evidence-only completion of round 2.
++
++Round 2 evidence completion, approved R4, full original scope, same invocation:
++
++> No blocking findings.
++>
++> **APPROVE — `docs/plans/manual-cold-storage-transparency.md` approved R4 对应的当前 implementation diff，完整范围实现审计通过。**
++>
++> 批准仅适用于本次审阅的七个生产文件及四个测试文件变更，不涵盖工作树中的其他修改，也不授权生产数据库操作、commit 或 push。
++
++The auditor checked the retained raw execution outputs against the reviewed
++scripts, tests and receipt. Independent E=992, qualifying C=161 (16.23%) and
++7 production files / 819 gross lines pass. Remaining non-blocking observations
++are the fixed-snapshot capacity margin and minor wording of group-level comments;
++neither changes the verified batch-wide retain/assign/release behavior.
+diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
+index c1e4f2e2c13b7978e54f53a6dfb9e5d3e8885444..726f02407fae2af37e47a85dbdd87e1e3e0229da 100644
+--- a/packages/opencode/src/session/message-v2.ts
++++ b/packages/opencode/src/session/message-v2.ts
+@@ -139,13 +139,15 @@
+-// #493：Message storage type 只放宽 summary.diffs；Array 检查足以跨越该静态差异，cold payload 项已在 restore 中逐项解码。
++// user diff 与 assistant path 必须先恢复，再跨越 storage 到完整 Info 的类型边界。
+ // 这里不能重跑完整 Info Schema：既有数据库允许 fractional time，新增冷存储不得收紧无关历史读取合同。
+ type StoredInfo = (typeof MessageTable.$inferSelect)["data"] & Pick<Info, "id" | "sessionID">
+ 
+ function isInfo(value: StoredInfo): value is Info {
+-  return value.role === "assistant" || value.summary === undefined || Array.isArray(value.summary.diffs)
++  return value.role === "assistant"
++    ? value.path !== undefined
++    : value.summary === undefined || Array.isArray(value.summary.diffs)
+ }
+ 
+-// #493：HotInfo 只用于 predicate 定位：assistant info 全热，user summary 明确排除唯一冷字段 diffs。
++// HotInfo 只用于定位，类型中排除 assistant 诊断字段及 user diff 正文。
+ // 返回完整 Message 的 consumer 仍必须在匹配后经过 hydrate，不能把该类型扩展成业务读取捷径。
+ export type HotInfo =
+-  | Assistant
++  | Omit<Assistant, "path">
+   | (Omit<User, "summary"> & { summary?: Omit<NonNullable<User["summary"]>, "diffs"> })
+@@ -181,7 +183,7 @@
+ const info = (db: ColdStorage.TxOrDb, row: typeof MessageTable.$inferSelect) => {
+-  // #493：thaw 在同步事务内完成；任何 corruption 都终止读取而不是返回 storage skeleton。
+-  const restored = ColdStorage.thawMessageRows(db, [row])[0]
++  // 单条读取与分页采用相同 inspect 合同，避免详情入口偷偷改变冷态。
++  const restored = ColdStorage.inspectMessageRows(db, [row])[0]
+   if (!restored) throw new Error(`Message row disappeared during thaw: ${row.id}`)
+   const value = {
+     ...restored.data,
+     id: restored.id,
+@@ -204,6 +206,7 @@
+ // #493：单 Part decoder 是所有 direct read 的共同 cold-aware seam；调用方不能直接 spread raw projection row。
+ const part = (db: ColdStorage.TxOrDb, row: typeof PartTable.$inferSelect) => {
+-  const restored = ColdStorage.thawPartRows(db, [row])[0]
++  // 普通业务读取只恢复返回值；执行窗口和显式 expand 才负责持久预热。
++  const restored = ColdStorage.inspectPartRows(db, [row])[0]
+   if (!restored) throw new Error(`Part row disappeared during thaw: ${row.id}`)
+   const value = {
+     ...restored.data,
+@@ -233,4 +236,4 @@
+   if (row.data.role === "assistant") {
+-    // #0500：Assistant projection 无冷业务字段，spread 保留同毫秒 chronology 所需的全部 hot fields。
++    // 生命周期字段保热，谓词查找无需为 path 或输入明细展开整页内容。
+     return { ...row.data, id: row.id, sessionID: row.session_id }
+   }
+@@ -251,10 +254,9 @@
+ function viewerInfo(row: typeof MessageTable.$inferSelect): Info {
+   const value = hotInfo(row)
+-  // HotInfo 的 user summary 只含 title/body；viewer 直接省略整个字段而非二次收窄。
+-  // Assistant 没有被归档的 summary.diffs，直接保留 lifecycle/model/error 字段，避免 viewer 另造 assistant shape。
+-  if (value.role === "assistant") return value
++  // assistant 已由 hydrate 按包恢复，viewer 不另造一个缺字段的公开对象。
++  if (value.role === "assistant") return infoFromRestored(row)
+   // TUI 没有 user summary 消费者；省略整个 optional 字段才能保持合法 Info，
+   // 同时阻止 cold diffs 在普通查看路径被解压、持久预热并进入 wire。
+   const { summary: _, ...info } = value
+   return info
+ }
+@@ -381,7 +383,7 @@
+   // #0500：hydrate 只恢复 page/get 已选定的 rows；显式 no-limit consumer 仍通过逐页调用保留完整历史合同。
+-  // refcount 与 row update 由 ColdStorage immediate transaction 承担，本层不复制生命周期。
+-  // #493：page 先批量 thaw Message，再只查询该 page 的 Parts；范围外历史不因一个 UI 请求被预热。
++  // 内存恢复由ColdStorage校验，此层不拥有引用生命周期。
++  // Message与Parts按选中范围批量inspect，查看不写热历史。
+   // 任一 Message corruption 让整个范围失败，不能返回半完整、半 skeleton 的 transcript。
+   return Effect.gen(function* () {
+-    // 可见性先决定owner集合，隐藏父消息及其子Part都不能被业务读取预热。
++    // 可见性先决定owner集合，隐藏父消息及其子Part都不能被业务读取恢复。
+     const admitted = includeHidden ? rows : rows.filter((row) => !row.data.hidden)
+@@ -388,7 +390,12 @@
+-    // viewer在任何冷Message解压前选热投影；默认完整读取仍预约Effect驱动的同一连接。
+-    const infos = messageProjection === "viewer"
+-      ? admitted.map(viewerInfo)
+-      : (yield* Database.withSync({ db, sync }, () => ColdStorage.thawMessageRows(sync, admitted))).map(infoFromRestored)
++    // viewer只省略user summary，assistant同包批量恢复而不逐条解压。
++    const selected = messageProjection === "viewer" ? admitted.filter((row) => row.data.role === "assistant") : admitted
++    const restored = new Map(
++      (yield* Database.withSync({ db, sync }, () => ColdStorage.inspectMessageRows(sync, selected))).map((row) => [row.id, row]),
++    )
++    const infos = admitted.map((row) => {
++      const complete = restored.get(row.id) ?? row
++      return messageProjection === "viewer" ? viewerInfo(complete) : infoFromRestored(complete)
++    })
+     const ids = admitted.map((row) => row.id)
+     const partByMessage = new Map<string, Part[]>()
+     if (ids.length > 0) {
+@@ -397,7 +404,7 @@
+         const partRows = tx.select().from(PartTable).where(inArray(PartTable.message_id, ids))
+           .orderBy(PartTable.message_id, PartTable.id).all()
+         const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
+-        // viewer仅inspect，不持久预热；完整SDK仍走原thaw与refcount owner。
+-        return messageProjection === "viewer" ? ColdStorage.inspectPartRows(tx, visible) : ColdStorage.thawPartRows(tx, visible)
++        // 普通SDK与viewer共享只读恢复，保留同连接查询快照和完整性检查。
++        return ColdStorage.inspectPartRows(tx, visible)
+       }, { behavior: "deferred" }))
+       for (const row of restoredParts) {
+@@ -413,5 +420,5 @@
+-    // 持久 thaw 在返回前完成并保留 page/child 顺序，不对范围外历史产生预热副作用。
++    // 只读恢复保留page与child顺序，不改变冷态或访问范围外历史。
+     return infos.map((info) => ({
+       info,
+       parts: partByMessage.get(info.id) ?? [],
+     }))
+@@ -1039,5 +1046,5 @@
+-    // #493：直接读也走 cold-aware decoder——thaw 后按业务 Schema 复核差异字段。
+-    return yield* Database.withSync({ db, sync }, () => ColdStorage.thawPartRows(sync, rows).map(partFromRestored))
++    // 直接读保持冷态，恢复后仍按业务Schema复核差异字段。
++    return yield* Database.withSync({ db, sync }, () => ColdStorage.inspectPartRows(sync, rows).map(partFromRestored))
+   })
+ }
+ 
+@@ -1286,6 +1293,30 @@
+   const database = yield* Database.Service
+   const boundary = yield* Database.withSync(database, (sync) => CompactionBoundary.latest(sync, sessionID))
+   const cutoff = boundary?.tailStartID ?? boundary?.markerID
+-  return filterCompacted(yield* stream(sessionID, { includeHidden: true, fromMessageID: cutoff }))
++  const messages = filterCompacted(yield* stream(sessionID, { includeHidden: true, fromMessageID: cutoff }))
++  // 可见性和压缩排序完成后才预热，不扩大模型实际保留的上下文。
++  yield* warmExecutionWindow(messages)
++  return messages
+ })
+ 
++export const warmExecutionWindow = Effect.fn("MessageV2.warmExecutionWindow")(function* (messages: WithParts[]) {
++  if (!messages.length) return
++  const database = yield* Database.Service
++  yield* Database.withSync(database, (sync) => {
++    const ids = messages.map((message) => message.info.id)
++    // 已热owner不重复搬运正文，仍由ColdStorage管理实际引用和清理。
++    ColdStorage.thawMessageRows(
++      sync,
++      sync.select().from(MessageTable)
++        .where(and(inArray(MessageTable.id, ids), sql`${MessageTable.cold_ref} is not null`)).all(),
++    )
++    const parts = messages.flatMap((message) => message.parts.map((part) => part.id))
++    // 最终窗口未选择的隐藏Part不随父Message预热。
++    if (parts.length) ColdStorage.thawPartRows(
++      sync,
++      sync.select().from(PartTable)
++        .where(and(inArray(PartTable.id, parts), sql`${PartTable.cold_ref} is not null`)).all(),
++    )
++  })
++})
++
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -1651,6 +1651,10 @@
+             : yield* MessageV2.filterCompactedEffect(sessionID).pipe(
+                 Effect.provideService(Database.Service, database),
+               )
++          // 缓存suffix命中也经最终窗口owner，不只在全量cache miss时预热。
++          if (cached) yield* MessageV2.warmExecutionWindow(canonical).pipe(
++            Effect.provideService(Database.Service, database),
++          )
+           let msgs = canonical
+ 
+           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
+diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
+index b82a07e64aff2245085df74d6a9290242ea20bbf..a65c27215626e194f1065e0aedc2b3797cd92599 100644
+--- a/packages/core/src/session/search.ts
++++ b/packages/core/src/session/search.ts
+@@ -1,5 +1,6 @@
+ import { sql, type SQL } from "drizzle-orm"
+ import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
++import { ColdStorage } from "../storage/cold-storage"
+ 
+ // #265：搜索是 session 列表/TUI quick switch 的“可定位内容”投影，不是持久化 JSON 的全文搜索。
+ // 只索引用户能用来识别会话的字段：标题、可见文本、文件/引用/子任务定位和 shell command 等。
+@@ -14,6 +15,10 @@
+ export type SearchMode = "title" | "all"
+ 
+-export function searchCondition(search: string, options?: { mode?: SearchMode }): SQL | undefined {
++export function searchCondition(
++  db: ColdStorage.TxOrDb,
++  search: string,
++  options?: { mode?: SearchMode; roots?: boolean; scope?: SQL },
++): SQL | undefined {
+   const tokens = search
+     .trim()
+     .toLowerCase()
+@@ -25,8 +30,12 @@
+   // #544：title 模式故意不扫 part/session_message，才能把首屏压到毫秒级；complete 仍走 all/scan
+   const mode = options?.mode ?? "all"
+   // #529：单 token 与历史语义逐字一致；多 token 逐个 AND，等价于「先 A 再 B 再 C」
+   // #529：每个 token 的三路 union 自带括号，AND 拼接不会漏进 union 内部的 or 链
+-  const parts = tokens.map((needle) => (mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle)))
++  // 根搜索保持纯 SQL；子正文匹配由存储层按当前候选范围一次恢复。
++  const cold = mode === "title" || options?.roots ? tokens.map(() => []) : ColdStorage.matchColdText(db, tokens, options?.scope)
++  const parts = tokens.map((needle, index) =>
++    mode === "title" ? titleTokenCondition(needle) : tokenCondition(needle, cold[index]),
++  )
+   if (parts.length === 1) return parts[0]
+   return sql`(${sql.join(parts, sql` and `)})`
+ }
+@@ -40,9 +49,12 @@
+-function tokenCondition(needle: string) {
++function tokenCondition(needle: string, cold: string[]) {
+   // #265：三路 union——标题、v1 part 白名单、v2 session_message 白名单；hidden 门仅存在于 v1 part 侧 exists，
+   // #265：v2 侧由 sessionMessageMatches 的类型等值判定承担同等排除（等值不命中即不可搜索）
++  // JSON 参数承载任意数量的 ID，避免命中集合增长触及 SQLite 变量上限。
++  // ID 仍是绑定值，正文或 Session 名称不会成为拼接 SQL 的一部分。
+   return sql`(
+     ${textMatches(sql`${SessionTable.title}`, needle)}
++    or ${SessionTable.id} in (select value from json_each(${JSON.stringify(cold)}))
+     or exists (
+       select 1
+       from ${PartTable}
+       inner join ${MessageTable}
+diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
+index 2a4d112c3d767be8c0e78451d0ee2831c9e5eddc..e19bf0d625d7800e785644af492a102a4029259f 100644
+--- a/packages/core/src/session/sql.ts
++++ b/packages/core/src/session/sql.ts
+@@ -71,7 +71,9 @@
+ type StoredInfoData<T extends SessionV1.Info = SessionV1.Info> = T extends SessionV1.User
+   ? Omit<T, "id" | "sessionID" | "summary"> & {
+       summary?: Omit<NonNullable<T["summary"]>, "diffs"> & { diffs: unknown[] }
+     }
+-  : Omit<T, "id" | "sessionID">
++  : T extends SessionV1.Assistant
++    ? Omit<T, "id" | "sessionID" | "path"> & { path?: T["path"] }
++    : Omit<T, "id" | "sessionID">
+ 
+ // #0500：v2 放宽面扩大——pending 之后的 tool state、metadata/title 与 step/compaction 冷字段都可外移。
+@@ -223,7 +225,8 @@
+     // #0500：cold_stats 是同一 Part owner 的精确只读投影；它只在 v2 Tool/StepFinish 冷态存在。
+     // Stats 可据此完成全量聚合而不解码 pack，thaw/update 必须与 ref/key 一起清空。
+     // hot row 始终为 NULL，完整 replacement/thaw 不允许保留过期派生统计。
+-    cold_stats: text({ mode: "json" }).$type<PartColdStats>(),
++    // tuple 是内部编码；ColdStorage 对消费端仍返回原有具名统计字段。
++    cold_stats: text({ mode: "json" }).$type<PartColdStats | number[]>(),
+   },
+   // #0500：cold_stats 故意不建索引；Stats 已按 Session/Part type 扫描同行小 JSON。
+   (table) => [
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+index 63355a01aabdda3ea65fd1fc5473550ff5c383ed..e1ace250dc05dbbddfb1edee769494772eea1214 100644
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -522,6 +522,6 @@
+     const list = Effect.fn("Session.list")(function* (input?: ListInput) {
+       const ctx = yield* InstanceState.context
+-      return yield* listByProject(db, {
++      return yield* listByProject(database, {
+         projectID: ctx.project.id,
+         experimentalWorkspaces: flags.experimentalWorkspaces,
+         // #143：worktree 供 directoryMatchesPath
+@@ -535,6 +535,6 @@
+     const searchScan = Effect.fn("Session.searchScan")(function* (input: SearchScanInput) {
+       const ctx = yield* InstanceState.context
+-      return yield* searchScanByProject(db, {
++      return yield* searchScanByProject(database, {
+         projectID: ctx.project.id,
+         experimentalWorkspaces: flags.experimentalWorkspaces,
+         worktree: ctx.worktree,
+@@ -550,8 +550,12 @@
+       if (input?.cursor) conditions.push(lt(SessionTable.time_updated, input.cursor))
++      if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
++      const search = input?.search
+       // #121：全局列表——标题或消息内容
+-      if (input?.search) {
+-        const condition = searchCondition(input.search)
++      if (search) {
++        // archived与cursor先限定本次宇宙，冷正文也预约同一连接。
++        const condition = yield* Database.withSync(database, (sync) =>
++          searchCondition(sync, search, { roots: input?.roots, scope: and(...conditions) }),
++        )
+         if (condition) conditions.push(condition)
+       }
+-      if (!input?.archived) conditions.push(isNull(SessionTable.time_archived))
+ 
+@@ -1022,7 +1026,7 @@
+-function listByProject(
++function* listByProject(
+-  db: Database.Interface["db"],
++  database: Database.Interface,
+   input: ListInput & {
+     projectID: ProjectV2.ID
+     experimentalWorkspaces: boolean
+     worktree: string
+   },
+@@ -1030,12 +1034,16 @@
+   // #544：scope/start 谓词与 searchScan 共用 listUniverseConditions，避免 path 语义分叉
+   // searchMode 只作用于 list——缺省 all 与历史行为逐字一致，旧客户端零感知。
+   const conditions = listUniverseConditions(input)
++  const search = input.search
+   // #121：项目列表——空白 search 不注入条件
+-  if (input.search) {
+-    const condition = searchCondition(input.search, { mode: input.searchMode ?? "all" })
++  if (search) {
++    // roots/title保持零解压，完整搜索只恢复当前候选范围的子正文。
++    const condition = yield* Database.withSync(database, (sync) =>
++      searchCondition(sync, search, { mode: input.searchMode ?? "all", roots: input.roots, scope: and(...conditions) }),
++    )
+     if (condition) conditions.push(condition)
+   }
+ 
+   const limit = input.limit ?? 100
+ 
+-  return db
++  return yield* database.db
+@@ -1064,7 +1072,7 @@
+ function* searchScanByProject(
+-  db: Database.Interface["db"],
++  database: Database.Interface,
+   input: SearchScanInput & {
+     projectID: ProjectV2.ID
+     experimentalWorkspaces: boolean
+     worktree: string
+   },
+@@ -1102,6 +1110,6 @@
+-  const page = yield* db
++  const page = yield* database.db
+     .select()
+     .from(SessionTable)
+     .where(universe.length > 0 ? and(...universe) : undefined)
+     .orderBy(desc(SessionTable.time_updated), desc(SessionTable.id))
+     .limit(batch)
+@@ -1113,11 +1121,14 @@
+   // 第二段 SQL：在候选 id 集合上施加完整 searchCondition（title∨content AND）
+   // 与「先 search 再 limit 50 命中」不同：这里保证每页固定推进 50 候选
+   // 固定 all：complete 召回不得被首屏 title 子集口径污染（INV-09 的服务端锚点）。
+-  const full = searchCondition(input.search, { mode: "all" })
+   const ids = page.map((row) => row.id)
++  // 冷匹配只检查固定候选页，未命中的满页仍按既有cursor推进。
++  const full = yield* Database.withSync(database, (sync) =>
++    searchCondition(sync, input.search, { mode: "all", roots: input.roots, scope: inArray(SessionTable.id, ids) }),
++  )
+   // 命中集合走第二段 SQL 而非在内存过滤——候选窗语义要求 SQL 只按 id 收窄。
+-  const matched = yield* db
++  const matched = yield* database.db
+     .select(selection)
+     .from(SessionTable)
+     .where(and(inArray(SessionTable.id, ids), full))
+     .all()
+diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
+index 8d0bd980e38093de5a830821958933a23ad70f3c..e213a96ac255288befc620a637c7c3aa40f83574 100644
+--- a/packages/core/src/storage/cold-storage.ts
++++ b/packages/core/src/storage/cold-storage.ts
+@@ -32,6 +32,10 @@
+ const SUBAGENT_IDLE_MS = 24 * 60 * 60 * 1000
+ // 1 MiB 是普通 pack 的目标而非硬上限；单个超大 entry 必须独立保留完整信息而不能截断。
+ const PACK_TARGET_BYTES = 1024 * 1024
++// 重写批次以解压工作量限流，单个超大 entry 仍沿用完整保存合同。
++const REPACK_BATCH_BYTES = 8 * PACK_TARGET_BYTES
++// 两个运行时共享编码策略，解码协议不依赖这个压缩级别。
++const COMPRESSION_LEVEL = 12
+ export const DEFAULT_BATCH_SIZE = 2000
+ const MAX_BATCH_SIZE = 5000
+ const isDiffsSchema = Schema.is(Schema.Array(FileDiff.Info))
+@@ -55,8 +59,9 @@
+ type Owner = { type: "message"; id: MessageID } | { type: "part"; id: PartID }
+   | { type: "session_message"; id: SessionMessage.ID }
+-// hot owner 以 NULL ref/key 表示，v1 owner 只有 ref，v2 owner 同时持有 ref 与 32-byte key。
++// hot owner 没有引用；v1 只有 ref，v2 使用完整 key，v3 使用包内 slot。
++// 存量版本由持久 envelope 决定，不能因一次解码失败而改猜另一种版本。
+ type OwnerKind = Owner["type"]
+ // #0500：pack 是 v2 的持久单元——同 owner kind 的多个 entry 共享一个 payload。
+ type PackKind = "message-pack" | "part-pack" | "session-message-pack"
+ // 三种持久状态唯一选择 decoder，读取失败后绝不尝试另一格式制造备用成功路径。
+ type StorageKind = OwnerKind | PackKind | "session-summary"
+@@ -63,8 +68,8 @@
+ type Envelope = { version: 1; owner: OwnerKind; fields: Record<string, Json> }
+ // #0500：pack entry 以内容 key 寻址——fork/去重只需 ref+key，不需要独立 payload。
+ type PackEntry = { key: Buffer; fields: Record<string, Json> }
+-type PackEnvelope = { version: 2; owner: OwnerKind; entries: PackEntry[] }
++type PackEnvelope = { version: 2 | 3; owner: OwnerKind; entries: PackEntry[] }
+ type MessageData<T extends SessionV1.Info = SessionV1.Info> = T extends unknown ? Omit<T, "id" | "sessionID"> : never
+ type PartData<T extends SessionV1.Part = SessionV1.Part> = T extends unknown
+   ? Omit<T, "id" | "sessionID" | "messageID">
+   : never
+@@ -272,6 +277,15 @@ function packKind(owner: OwnerKind): PackKind {
+   return owner === "message" ? "message-pack" : owner === "part" ? "part-pack" : "session-message-pack"
+ }
+ 
++function slotKey(index: number): Buffer {
++  // 四字节是包内序号，完整内容身份仍由包和 entry 的 SHA-256 校验。
++  // 固定小端编码避免宿主机器字节序进入持久协议。
++  // slot 只在所属不可变包内有意义，重打包后必须重新分配。
++  const key = Buffer.alloc(4)
++  key.writeUInt32LE(index)
++  return key
++}
++
+ // entry key 只覆盖 owner kind 与冷字段，pack hash 则覆盖整个排序后的 entries；两层地址分别服务去重和批量读取。
+ // binary key 固定 32 bytes，避免 SQLite text 编码/大小写差异改变同一 entry 的身份。
+ function entryKey(owner: OwnerKind, fields: Record<string, Json>) {
+@@ -283,6 +297,8 @@ function entryKey(owner: OwnerKind, fields: Record<string, Json>) {
+ // pack 内同 key 只保存一份 fields；多个 owner 仍各自持有 cold_ref/ref_count，展开时按 owner 数递减。
+ // entries 按 binary key 排序而非插入顺序，跨批次、Windows/Linux 和 fork 都能得到同一 pack hash。
+ function packEnvelope(owner: OwnerKind, entries: PackEntry[]) {
++  // 去重对象是完整字段集合，工具的内部 schema 和字段关系保持原样。
++  // 不把相同字段拆成跨包引用树，避免读取一个 owner 时递归追踪多个包。
+   const unique = new Map<string, PackEntry>()
+   for (const entry of entries) {
+     const key = entry.key.toString("hex")
+@@ -293,26 +309,47 @@ function packEnvelope(owner: OwnerKind, entries: PackEntry[]) {
+     unique.set(key, { key: Buffer.from(entry.key), fields: entry.fields })
+   }
+   const values = [...unique.values()].sort((a, b) => Buffer.compare(a.key, b.key))
++  // 排序按完整内容摘要固定，调用方传入顺序不会改变 slot 的含义。
++  // 行 ID 和时间不参与正文身份，因此 fork 可以继续共享不可变内容。
+   const value = {
+-    version: 2 as const,
++    version: 3 as const,
+     owner,
+-    entries: values.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
++    entries: values.map((entry) => entry.fields),
+   }
+   const raw = Buffer.from(canonical(value))
+-  return { value, raw, hash: digest(packKind(owner), raw), entries: values }
++  // base64url 保留全部 256 bit，缩短每个 owner 的引用而不截断摘要。
++  return {
++    value,
++    raw,
++    hash: Buffer.from(digest(packKind(owner), raw), "hex").toString("base64url"),
++    entries: values,
++    keys: new Map(values.map((entry, index) => [entry.key.toString("hex"), slotKey(index)])),
++  }
+ }
+ 
+ function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): PackEnvelope {
++  // 新格式省去可重算的 entry 摘要，包级完整摘要仍覆盖全部原始字节。
++  // 保留 canonical 校验，禁止只改 JSON 排版就绕过唯一内容身份。
+   let value: unknown
+   try {
+     value = JSON.parse(Buffer.from(raw).toString("utf8"))
+   } catch (cause) {
+     throw new CorruptionError({ message: `Cold pack is not JSON: ${String(cause)}`, hash })
+   }
+-  if (!isRecord(value) || value.version !== 2 || value.owner !== owner || !Array.isArray(value.entries)) {
++  if (
++    !isRecord(value) ||
++    (value.version !== 2 && value.version !== 3) ||
++    value.owner !== owner ||
++    !Array.isArray(value.entries)
++  ) {
+     throw new CorruptionError({ message: "Cold pack envelope does not match its owner", hash })
+   }
+   const entries = value.entries.map((item) => {
++    // v3 的字段本身就是 entry 身份来源；旧包的显式 key 继续逐项验证。
++    if (value.version === 3) {
++      const fields = jsonObject(item)
++      return { key: entryKey(owner, fields), fields }
++    }
+     if (!isRecord(item) || typeof item.key !== "string" || !/^[0-9a-f]{64}$/.test(item.key) || !isRecord(item.fields)) {
+       throw new CorruptionError({ message: "Cold pack entry is invalid", hash })
+     }
+@@ -330,11 +367,14 @@ function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Pac
+       throw new CorruptionError({ message: "Cold pack entries are not uniquely key-sorted", hash })
+     }
+   }
+-  const parsed: PackEnvelope = { version: 2, owner, entries }
++  const parsed: PackEnvelope = { version: value.version, owner, entries }
+   const canonicalValue = {
+-    version: 2 as const,
++    version: value.version,
+     owner,
+-    entries: entries.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
++    entries:
++      value.version === 3
++        ? entries.map((entry) => entry.fields)
++        : entries.map((entry) => ({ key: entry.key.toString("hex"), fields: entry.fields })),
+   }
+   if (!Buffer.from(canonical(canonicalValue)).equals(Buffer.from(raw))) {
+     throw new CorruptionError({ message: "Cold pack is not canonical JSON", hash })
+@@ -343,16 +383,16 @@ function parsePackEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Pac
+ }
+ 
+ // 压缩适配器固定产生标准 zstd frame，数据库不保存 Bun/Node 平台标记，保证跨平台可展开。
+-// level 3 是实测甜点：740 MB canonical payload 单进程约 16.7 秒，继续提高级别会让 CPU 反客为主。
++// level 12 的实际增量收益用于满足物理容量门槛；编码时间由显式维护承担。
+ // codec 不可用是环境错误，不能回退为 gzip；静默混用格式会让 codec 列失去完整性约束。
+ // 同步 API 只在维护批次或单 owner freeze 内调用，前端请求不会在每次上下文构建时重新压缩。
+ function compress(raw: Uint8Array) {
+   try {
+     // Bun 与 Node 使用同一 zstd frame 格式；codec 字段描述格式，而不是运行时实现。
+-    // 固定 level 3 保证相同 canonical bytes 的性能策略一致，hash 本身仍只依赖未压缩内容。
+-    if (typeof Bun !== "undefined") return Buffer.from(Bun.zstdCompressSync(raw, { level: 3 }))
++    // 显式维护使用 level 12；普通热读取不调用压缩器，内容身份独立于级别。
++    if (typeof Bun !== "undefined") return Buffer.from(Bun.zstdCompressSync(raw, { level: COMPRESSION_LEVEL }))
+     return nodeZstdCompressSync(raw, {
+-      params: { [zlibConstants.ZSTD_c_compressionLevel]: 3 },
++      params: { [zlibConstants.ZSTD_c_compressionLevel]: COMPRESSION_LEVEL },
+     })
+   } catch (cause) {
+     throw new CodecUnavailableError({ message: `zstd compression unavailable: ${String(cause)}` })
+@@ -395,7 +435,8 @@ function parseEnvelope(owner: OwnerKind, raw: Uint8Array, hash: string): Envelop
+ // Session summary 使用独立 version/owner，防止 aggregate FileDiff 被当成 Message 的 summary.diffs 字段恢复。
+ // 一个 Session ref 直接选择完整 aggregate，不需要 entry key；仍复用相同 canonical/hash/zstd integrity gate。
+ function summaryEnvelope(payload: SummaryPayload) {
+-  if (!isSummaryPayload(payload)) throw new CorruptionError({ message: "Session summary payload fails schema validation" })
++  if (!isSummaryPayload(payload))
++    throw new CorruptionError({ message: "Session summary payload fails schema validation" })
+   const fields = payload.seed
+     ? { seed: { cursor: payload.seed.cursor, diffs: payload.seed.diffs }, delta: payload.delta }
+     : { delta: payload.delta }
+@@ -436,7 +477,21 @@ function parseSummaryEnvelope(raw: Uint8Array, hash: string): SummaryPayload {
+ }
+ 
+ function extractMessage(data: (typeof MessageTable.$inferSelect)["data"]) {
+-  // ordinary Text 始终保持 hot 以支持精确搜索；Message 只允许归档 summary.diffs。
++  // 抽取只作用于经过资格判定的维护写入；流式生产者继续写完整业务对象。
++  // 原始 token/cost 数字留在同行，统计读取无需恢复诊断明细。
++  if (data.role === "assistant") {
++    // 生命周期和 provider token 保热；完整读取统一恢复历史诊断字段。
++    const projection = structuredClone(data)
++    const fields: Record<string, unknown> = {}
++    // inputEstimate供列表SQL直接读取，保持热态；已发布的旧平铺诊断仍可归档恢复。
++    for (const [key, value] of Object.entries(data)) {
++      if (!["path", "inputChars", "inputTokens", "inputBreakdown"].includes(key) || value === undefined) continue
++      fields[key] = value
++      Reflect.deleteProperty(projection, key)
++    }
++    return Object.keys(fields).length ? { projection, fields: jsonObject(fields) } : undefined
++  }
++  // user summary 的 title/body 继续支撑列表定位，只把大 diff 内容外移。
+   const summary = data.role === "user" ? data.summary : undefined
+   if (!summary) return
+   if (!isDiffs(summary.diffs)) throw new CorruptionError({ message: "Stored message diffs fail schema validation" })
+@@ -451,8 +508,8 @@ function extractMessage(data: (typeof MessageTable.$inferSelect)["data"]) {
+   return { projection, fields }
+ }
+ 
+-// v2 Message extraction 复用已验证的 projection/字段白名单，但取消 owner-level 4 KiB 门槛。
+-// entry key 只由 summary.diffs 生成；同一 diff 可在不同 Session 的 pack 中安全复用 entry 身份。
++// Message extraction 复用统一字段白名单，不以单 owner 大小排除批量压缩收益。
++// entry 身份只取抽取字段，热的生命周期变更不会改变共享正文。
+ function extractMessageV2(data: (typeof MessageTable.$inferSelect)["data"]) {
+   const value = extractMessage(data)
+   if (!value) return
+@@ -500,6 +557,14 @@ const emptyPartComponents = (): Extract<PartColdStats, { type: "step-finish" }>[
+   attachments: 0,
+ })
+ 
++// tuple 是已发布的持久编码：版本号、判别标签和字段位置发布后都不可变更。
++// 写入与解析共用同一份组件键序，任何一侧单独漂移都会被对侧按损坏数据拒绝。
++const STATS_TUPLE_VERSION = 2
++const STATS_TAG_TOOL = 0
++const STATS_TAG_STEP_FINISH = 1
++const TOOL_STATS_TUPLE_LENGTH = 4
++const STEP_COMPONENT_KEYS = Object.keys(emptyPartComponents()) as (keyof ReturnType<typeof emptyPartComponents>)[]
++
+ const finiteStat = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0)
+ 
+ // Step projection 复用 Stats 已发布的字符到 token 分摊公式；只有这个 owner 可以解释持久 inputBreakdown。
+@@ -513,7 +578,8 @@ function stepComponents(data: Extract<(typeof PartTable.$inferSelect)["data"], {
+   const breakdown = isRecord(data.inputBreakdown) ? data.inputBreakdown : {}
+   const messages = isRecord(breakdown.messages) ? breakdown.messages : undefined
+   const media = isRecord(breakdown.media) ? breakdown.media : undefined
+-  const inputTokens = finiteStat(data.tokens.input) + finiteStat(data.tokens.cache.read) + finiteStat(data.tokens.cache.write)
++  const inputTokens =
++    finiteStat(data.tokens.input) + finiteStat(data.tokens.cache.read) + finiteStat(data.tokens.cache.write)
+   const attachmentTokens = typeof media?.tokens === "number" && Number.isFinite(media.tokens) ? media.tokens : undefined
+   const textTokens = attachmentTokens === undefined ? inputTokens : Math.max(0, inputTokens - attachmentTokens)
+   const textChars = media
+@@ -540,19 +606,21 @@ export function projectPartStats(data: (typeof PartTable.$inferSelect)["data"]):
+   if (data.type === "tool") {
+     // 字符数必须在完整 Tool 字段被抽走前计算，不能从 skeleton 反推原始长度。
+     // inputChars 沿用公开 JSON.stringify 口径；字符数不是 UTF-8 bytes 或 provider token。
+-    const inputChars = data.state.status === "pending"
+-      ? data.state.raw.length
+-      : JSON.stringify(storedRecord(data.state.input, "Stored tool input is invalid")).length
++    const inputChars =
++      data.state.status === "pending"
++        ? data.state.raw.length
++        : JSON.stringify(storedRecord(data.state.input, "Stored tool input is invalid")).length
+     // completed output 包含 attachment URL；error 只计 error，未完成状态不猜测稳定输出。
+-    const outputChars = data.state.status === "completed"
+-      ? storedString(data.state.output, "Stored tool output is invalid").length +
+-        (data.state.attachments ?? []).reduce(
+-          (sum, item) => sum + storedString(item.url, "Stored tool attachment URL is invalid").length,
+-          0,
+-        )
+-      : data.state.status === "error"
+-        ? storedString(data.state.error, "Stored tool error is invalid").length
+-        : 0
++    const outputChars =
++      data.state.status === "completed"
++        ? storedString(data.state.output, "Stored tool output is invalid").length +
++          (data.state.attachments ?? []).reduce(
++            (sum, item) => sum + storedString(item.url, "Stored tool attachment URL is invalid").length,
++            0,
++          )
++        : data.state.status === "error"
++          ? storedString(data.state.error, "Stored tool error is invalid").length
++          : 0
+     // Tool name/status/time 保持在主表，投影禁止复制这些 hot 字段形成双权威。
+     // 固定字段顺序使投影 JSON 和跨平台 state hash 可复现。
+     return { version: 1, type: "tool", inputChars, outputChars }
+@@ -578,6 +646,24 @@ function statInteger(value: unknown, message: string, hash?: string) {
+ // v2 Stats 在投影损坏后不得解码 pack 兜底，必须独立验证 exact version/type/keys。
+ // 此 parser 同时服务 Stats 和 verify，维护命令不会采用更宽松的投影规则。
+ function parsePartStats(value: unknown, hash?: string): PartColdStats {
++  // 固定长度同时拒绝缺项和多余项，不能把版本标签当作业务计数。
++  // 兼容旧对象是为了读取已发布数据；新 tuple 出错仍按损坏上报。
++  // tuple 只压缩字段名；还原后继续通过原有整数和 exact-shape 校验。
++  if (Array.isArray(value) && value[0] === STATS_TUPLE_VERSION) {
++    if (value[1] === STATS_TAG_TOOL && value.length === TOOL_STATS_TUPLE_LENGTH)
++      return parsePartStats({ version: 1, type: "tool", inputChars: value[2], outputChars: value[3] }, hash)
++    // step 长度由键序派生而非硬编码，组件增减时两侧同步失效而不是静默错位。
++    if (value[1] === STATS_TAG_STEP_FINISH && value.length === STEP_COMPONENT_KEYS.length + 2)
++      return parsePartStats(
++        {
++          version: 1,
++          type: "step-finish",
++          components: Object.fromEntries(STEP_COMPONENT_KEYS.map((key, index) => [key, value[index + 2]])),
++        },
++        hash,
++      )
++    throw new CorruptionError({ message: "Cold Stats tuple has an invalid shape", hash })
++  }
+   // version 是格式演进边界，未知版本不能按相似字段结构猜测解释。
+   if (!isRecord(value) || value.version !== 1 || typeof value.type !== "string") {
+     throw new CorruptionError({ message: "Part cold Stats projection is invalid", hash })
+@@ -639,17 +725,35 @@ function requirePartStats(
+   expected: PartColdStats | null,
+ ) {
+   if (expected === null) {
+-    if (row.cold_stats !== null) throw new CorruptionError({ message: "Non-Stats Part has a cold Stats projection", hash: row.cold_ref ?? undefined })
++    if (row.cold_stats !== null)
++      throw new CorruptionError({
++        message: "Non-Stats Part has a cold Stats projection",
++        hash: row.cold_ref ?? undefined,
++      })
+     return null
+   }
+-  if (row.cold_stats === null) throw new CorruptionError({ message: "Stats Part is missing its cold projection", hash: row.cold_ref ?? undefined })
++  if (row.cold_stats === null)
++    throw new CorruptionError({ message: "Stats Part is missing its cold projection", hash: row.cold_ref ?? undefined })
+   const stored = parsePartStats(row.cold_stats, row.cold_ref ?? undefined)
+   if (canonical(stored) !== canonical(expected)) {
+-    throw new CorruptionError({ message: "Part cold Stats projection does not match its payload", hash: row.cold_ref ?? undefined })
++    throw new CorruptionError({
++      message: "Part cold Stats projection does not match its payload",
++      hash: row.cold_ref ?? undefined,
++    })
+   }
+   return stored
+ }
+ 
++function compactPartStats(value: PartColdStats | null) {
++  // 输入来自同一统计 projector 或已重建的 parser 对象，字段顺序具有单一来源。
++  // 精确数值直接搬运，不通过压缩后的空字符串重新估算字符或 token。
++  if (!value) return null
++  // 两种投影使用独立标签；写入同样按 STEP_COMPONENT_KEYS 取值，与解析共用唯一键序来源。
++  return value.type === "tool"
++    ? [STATS_TUPLE_VERSION, STATS_TAG_TOOL, value.inputChars, value.outputChars]
++    : [STATS_TUPLE_VERSION, STATS_TAG_STEP_FINISH, ...STEP_COMPONENT_KEYS.map((key) => value.components[key])]
++}
++
+ // extraction 先检查冷字段，再对真正候选 clone，避免扫描大型 Tool JSON 时无效深拷贝。
+ // fields 白名单是版本协议，新增路径必须同步 restore、tests 与 full audit。
+ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
+@@ -675,7 +779,8 @@ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
+   if (data.type === "tool" && data.state.status === "error") {
+     fields["state.input"] = storedJson(data.state.input, "Stored error tool input is invalid")
+     fields["state.error"] = storedString(data.state.error, "Stored error tool error is not a string")
+-    if (data.state.metadata !== undefined) fields["state.metadata"] = storedJson(data.state.metadata, "Stored error tool metadata is invalid")
++    if (data.state.metadata !== undefined)
++      fields["state.metadata"] = storedJson(data.state.metadata, "Stored error tool metadata is invalid")
+     if (data.metadata !== undefined) fields.metadata = storedJson(data.metadata, "Stored tool part metadata is invalid")
+   }
+   // reasoning 只抽 text；其余结构和可见身份仍留在主表。
+@@ -695,15 +800,22 @@ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
+   }
+   // Step snapshot/breakdown 是存档字段；tokens/cost/reason 保持 hot 服务 usage 与 Stats。
+   if (data.type === "step-start") {
+-    if (data.snapshot !== undefined) fields.snapshot = storedJson(data.snapshot, "Stored step-start snapshot is invalid")
+-    if (data.inputChars !== undefined) fields.inputChars = storedJson(data.inputChars, "Stored step-start inputChars is invalid")
+-    if (data.inputTokens !== undefined) fields.inputTokens = storedJson(data.inputTokens, "Stored step-start inputTokens is invalid")
+-    if (data.inputBreakdown !== undefined) fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-start breakdown is invalid")
++    if (data.snapshot !== undefined)
++      fields.snapshot = storedJson(data.snapshot, "Stored step-start snapshot is invalid")
++    if (data.inputChars !== undefined)
++      fields.inputChars = storedJson(data.inputChars, "Stored step-start inputChars is invalid")
++    if (data.inputTokens !== undefined)
++      fields.inputTokens = storedJson(data.inputTokens, "Stored step-start inputTokens is invalid")
++    if (data.inputBreakdown !== undefined)
++      fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-start breakdown is invalid")
+   }
+   if (data.type === "step-finish") {
+-    if (data.snapshot !== undefined) fields.snapshot = storedJson(data.snapshot, "Stored step-finish snapshot is invalid")
+-    if (data.inputChars !== undefined) fields.inputChars = storedJson(data.inputChars, "Stored step-finish inputChars is invalid")
+-    if (data.inputBreakdown !== undefined) fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-finish breakdown is invalid")
++    if (data.snapshot !== undefined)
++      fields.snapshot = storedJson(data.snapshot, "Stored step-finish snapshot is invalid")
++    if (data.inputChars !== undefined)
++      fields.inputChars = storedJson(data.inputChars, "Stored step-finish inputChars is invalid")
++    if (data.inputBreakdown !== undefined)
++      fields.inputBreakdown = storedJson(data.inputBreakdown, "Stored step-finish breakdown is invalid")
+   }
+   if (Object.keys(fields).length === 0) return
+   // hot row 的空字符串/对象仍是合法业务值，只有 cold_ref 才赋予 skeleton 语义。
+@@ -754,17 +866,53 @@ function extractPart(data: (typeof PartTable.$inferSelect)["data"]) {
+ 
+ // v2 Part extraction 先保持 R9 已上线字段白名单，后续 expanded-field slice 会只扩展此处和 restorePart 对称协议。
+ // 没有获准字段的结构 Part 仍保持 hot，避免把 marker/patch/usage 变成无意义 pack owner。
+-function extractPartV2(data: (typeof PartTable.$inferSelect)["data"]) {
++function extractPartV2(db: TxOrDb, data: (typeof PartTable.$inferSelect)["data"], sessionID?: SessionID) {
++  // parent_id 区分子任务与 fork；标题和 agent 显示名称不承担此分类。
++  // Text metadata 保热，reviewID 和可见性查询无需打开正文包。
++  // 根正文继续服务直接 SQL 搜索；只有子 Session 的完整正文进入冷包。
++  if (data.type === "text" && sessionID) {
++    const child = db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
++    if (!child?.parent) return
++    const fields = jsonObject({ text: data.text })
++    return { projection: { ...data, text: "" }, key: entryKey("part", fields), fields }
++  }
+   const value = extractPart(data)
+   if (!value) return
+   return { projection: value.projection, key: entryKey("part", value.fields), fields: value.fields }
+ }
+ 
+-// Message restore 只接受唯一 summary.diffs 路径，防止 part 字段或未来未知字段被错误合并进 user info。
+-// projection 必须仍是 user 且保留 summary；否则 cold_ref 与 owner skeleton 已失配，应中止整个读取事务。
++// Message restore 按角色接受明确白名单，不能把 Part 字段或未知路径合入业务对象。
++// user 的 summary 容器和 assistant 的生命周期继续由热行承担权威。
+ // FileDiff 通过 Effect Schema 重新验证，外部 SQL 写入的任意 JSON 不能借 thaw 冒充完整业务类型。
+ // 返回对象是完整替换输入；后续修改非冷字段时 diffs 会自然随对象保留，不需要 touched-field 猜测。
+ function restoreMessage(data: (typeof MessageTable.$inferSelect)["data"], value: Envelope, hash: string) {
++  // 回填完整字段而非摘要，provider 重放与 TUI 明细获得同一份原始值。
++  // 恢复只修改 clone；事务回滚时不会向其他消费者暴露半恢复对象。
++  if (data.role === "assistant") {
++    const restored = structuredClone(data)
++    for (const [field, item] of Object.entries(value.fields)) {
++      if (field === "path" && isRecord(item) && typeof item.cwd === "string" && typeof item.root === "string") {
++        restored.path = { ...item, cwd: item.cwd, root: item.root }
++        continue
++      }
++      if (
++        (field === "inputChars" || field === "inputTokens") &&
++        typeof item === "number" &&
++        Number.isSafeInteger(item) &&
++        item >= 0
++      ) {
++        Object.assign(restored, { [field]: item })
++        continue
++      }
++      if (field === "inputBreakdown" && isRecord(item)) {
++        // 与 Step 的历史读取合同一致，保留已存 breakdown 的全部键和值。
++        Object.assign(restored, { inputBreakdown: item })
++        continue
++      }
++      throw new CorruptionError({ message: `Assistant cold field is invalid: ${field}`, hash })
++    }
++    return restored
++  }
+   const summary = data.role === "user" ? data.summary : undefined
+   if (!summary) {
+     throw new CorruptionError({ message: "Message projection cannot accept summary.diffs", hash })
+@@ -812,7 +962,11 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
+       restored.state.error = fieldValue
+       continue
+     }
+-    if (field === "state.metadata" && restored.type === "tool" && (restored.state.status === "completed" || restored.state.status === "error")) {
++    if (
++      field === "state.metadata" &&
++      restored.type === "tool" &&
++      (restored.state.status === "completed" || restored.state.status === "error")
++    ) {
+       restored.state.metadata = storedRecord(fieldValue, "Tool metadata is not an object")
+       continue
+     }
+@@ -820,7 +974,7 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
+       restored.metadata = storedRecord(fieldValue, "Part metadata is not an object")
+       continue
+     }
+-    if (field === "text" && restored.type === "reasoning") {
++    if (field === "text" && (restored.type === "reasoning" || restored.type === "text")) {
+       if (typeof fieldValue !== "string") throw new CorruptionError({ message: "Reasoning text is not a string", hash })
+       restored.text = fieldValue
+       continue
+@@ -851,10 +1005,7 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
+       restored.snapshot = fieldValue
+       continue
+     }
+-    if (
+-      (field === "inputChars" || field === "inputTokens") &&
+-      restored.type === "step-start"
+-    ) {
++    if ((field === "inputChars" || field === "inputTokens") && restored.type === "step-start") {
+       if (typeof fieldValue !== "number" || !Number.isSafeInteger(fieldValue) || fieldValue < 0) {
+         throw new CorruptionError({ message: "Step input estimate is invalid", hash })
+       }
+@@ -869,11 +1020,11 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
+       restored.inputChars = fieldValue
+       continue
+     }
+-    if (
+-      field === "inputBreakdown" &&
+-      (restored.type === "step-start" || restored.type === "step-finish")
+-    ) {
+-      restored.inputBreakdown = storedRecord(fieldValue, "Step input breakdown is not an object") as typeof restored.inputBreakdown
++    if (field === "inputBreakdown" && (restored.type === "step-start" || restored.type === "step-finish")) {
++      restored.inputBreakdown = storedRecord(
++        fieldValue,
++        "Step input breakdown is not an object",
++      ) as typeof restored.inputBreakdown
+       continue
+     }
+     const match = /^state\.attachments\.(\d+)\.url$/.exec(field)
+@@ -912,5 +1063,8 @@
+   row: Pick<typeof SessionMessageTable.$inferSelect, "type" | "data">,
+   use: (target: Record<string, unknown>, key: string, path: string, empty: Json) => void,
++  includeText = true,
+ ) {
+   const data: unknown = row.data
+   if (!isRecord(data)) throw new CorruptionError({ message: "Native message data is not an object" })
++  // 只在子会话抽取正文；恢复按包内已发布路径回填，不受后来会话分类变化影响。
++  if (includeText && (row.type === "user" || row.type === "synthetic")) use(data, "text", "text", "")
+@@ -927,3 +1081,4 @@
+     if (!isRecord(part)) continue
+-    if (part.type === "reasoning") use(part, "text", `content.${index}.text`, "")
++    // 推理沿既有白名单；子助手可见正文与V1 Text享有同样的归档收益。
++    if (part.type === "reasoning" || includeText && part.type === "text") use(part, "text", `content.${index}.text`, "")
+     if (part.type !== "tool" || !isRecord(part.state) || part.state.status !== "completed") continue
+@@ -944,13 +1100,15 @@
+-function extractSessionMessage(row: typeof SessionMessageTable.$inferSelect) {
++function extractSessionMessage(db: TxOrDb, row: typeof SessionMessageTable.$inferSelect) {
+   const projection = structuredClone(row.data)
+   const fields: Record<string, unknown> = {}
++  // parent_id是实际子任务身份，根正文继续服务原SQL热搜索。
++  const child = Boolean(db.select({ parent: SessionTable.parent_id }).from(SessionTable).where(eq(SessionTable.id, row.session_id)).get()?.parent)
+   sessionMessageFields({ ...row, data: projection }, (target, key, path, empty) => {
+     const value = target[key]
+     if (value === undefined || value === null || value === "") return
+     if ((Array.isArray(value) && value.length === 0) || (isRecord(value) && Object.keys(value).length === 0)) return
+     if (path === "summary.diffs" && !isDiffs(value)) {
+       throw new CorruptionError({ message: "Native message diffs fail schema validation" })
+     }
+     fields[path] = value
+     target[key] = empty
+-  })
++  }, child)
+@@ -984,7 +1142,11 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
+ }
+ 
+ // v2 entry fields 使用与 v1 envelope 相同的字段恢复协议；只替换 envelope version，避免复制另一套字段校验。
+-function restorePackedMessage(data: (typeof MessageTable.$inferSelect)["data"], fields: Record<string, Json>, hash: string) {
++function restorePackedMessage(
++  data: (typeof MessageTable.$inferSelect)["data"],
++  fields: Record<string, Json>,
++  hash: string,
++) {
+   return restoreMessage(data, { version: 1, owner: "message", fields }, hash)
+ }
+ 
+@@ -1003,6 +1165,95 @@ function lastMessageCreated(db: TxOrDb, sessionID: SessionID) {
+   return db.select({ value: sql<number | null>`max(${messageTimes.value})` }).from(messageTimes).get()?.value ?? null
+ }
+ 
++function completedReviewMessages(db: TxOrDb, sessionID: SessionID) {
++  // reviewer 复用 Session，但重试创建新 request；已完成 attempt 可以独立冷冻。
++  // 这里仅读取持久事实；业务 reviewer 不获得任何冷冻接口或新状态标记。
++  // 同一 Session 中其他 request 仍可运行，资格只约束关联的这一组消息。
++  const messages = db
++    .select({ id: MessageTable.id, data: MessageTable.data })
++    .from(MessageTable)
++    .where(eq(MessageTable.session_id, sessionID))
++    .all()
++  const requests = new Set(
++    messages.flatMap((row) => (row.data.role === "user" && row.data.agent === "permission-reviewer" ? [row.id] : [])),
++  )
++  const open = new Set(
++    db
++      .select({ id: PartTable.message_id })
++      .from(PartTable)
++      .where(
++        and(
++          eq(PartTable.session_id, sessionID),
++          sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
++          sql`json_extract(${PartTable.data}, '$.state.status') in ('pending', 'running')`,
++        ),
++      )
++      .all()
++      .map((row) => row.id),
++  )
++  const replies = new Map<string, typeof messages>()
++  // 用户请求没有已完成回复时不入选，避免把尚待审计的请求正文提前冻结。
++  // 多个回复共享 parent 时统一检查，单个完成回复不能掩盖仍在运行的回复。
++  for (const row of messages) {
++    if (row.data.role !== "assistant" || !requests.has(row.data.parentID)) continue
++    const group = replies.get(row.data.parentID)
++    if (group) {
++      group.push(row)
++      continue
++    }
++    replies.set(row.data.parentID, [row])
++  }
++  const result = new Set<string>()
++  // 后续协议隐藏走完整对象 replacement，能保留这里移入包的正文。
++  // 手动命令的 immediate transaction 将资格检查和引用切换放在同一写边界。
++  for (const [request, group] of replies) {
++    // completed 时间先于部分异常 Tool 收尾落库，因此同时核实 Tool 已经终态。
++    if (
++      open.has(MessageID.make(request)) ||
++      group.some(
++        (row) =>
++          row.data.role !== "assistant" ||
++          row.data.agent !== "permission-reviewer" ||
++          !row.data.time.completed ||
++          open.has(row.id),
++      )
++    )
++      continue
++    result.add(request)
++    for (const row of group) result.add(row.id)
++  }
++  return result
++}
++
++// Native尝试身份由真实Synthetic请求与助手metadata相连，不能套用V1 parentID或只看会话idle。
++function completedNativeReviewMessages(db: TxOrDb, sessionID: SessionID) {
++  const rows = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sessionID)).all()
++  const requests = new Map<string, (typeof rows)[number]>(rows.flatMap(row => row.type === "synthetic" && row.data.metadata?.permissionReviewerRequest === true ? [[row.id, row]] : []))
++  const groups = new Map<string, typeof rows>()
++  for (const row of rows) {
++    if (row.type !== "assistant" || typeof row.data.metadata?.permissionReviewerRequestID !== "string") continue
++    const request = row.data.metadata.permissionReviewerRequestID
++    if (!requests.has(request)) continue
++    const group = groups.get(request) ?? []
++    group.push(row)
++    groups.set(request, group)
++  }
++  const completed = new Set<number>()
++  for (const [request, group] of groups) {
++    if (group.some(row => {
++      const data: unknown = row.data
++      return !isRecord(data) || data.agent !== "permission-reviewer" || !isRecord(data.time) || typeof data.time.completed !== "number" ||
++        !Array.isArray(data.content) || data.content.some(part => isRecord(part) && part.type === "tool" && isRecord(part.state) &&
++          (part.state.status === "pending" || part.state.status === "running"))
++    })) continue
++    const input = requests.get(request)
++    if (!input) continue
++    completed.add(input.seq)
++    for (const row of group) completed.add(row.seq)
++  }
++  return completed
++}
++
+ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderThanMs = SEVEN_DAYS_MS) {
+   const session = db
+     .select({ updated: SessionTable.time_updated, parentID: SessionTable.parent_id })
+@@ -1045,6 +1296,8 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
+     : session.updated <= now - rootOlderThanMs
+   return {
+     aged,
++    completed: session.parentID ? completedReviewMessages(db, sessionID) : new Set<string>(),
++    nativeCompleted: session.parentID ? completedNativeReviewMessages(db, sessionID) : new Set<number>(),
+     boundary: boundaryRow ? { id: boundaryRow.id, time: boundaryRow.time } : undefined,
+     markerID: boundary?.markerID,
+     summaryID: boundary?.summaryID,
+@@ -1058,13 +1274,17 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
+ // marker、summary 与 tail 即使通过 age/boundary，仍必须通过 extraction 白名单才能真正冻结。
+ function eligible(state: ReturnType<typeof eligibility>, messageID: string, markerPart = false) {
+   if (!state) return false
+-  if (!state.aged && ((markerPart && messageID === state.markerID) || (!markerPart && messageID === state.summaryID))) return false
++  if (state.completed.has(messageID)) return true
++  if (!state.aged && ((markerPart && messageID === state.markerID) || (!markerPart && messageID === state.summaryID)))
++    return false
+   if (state.aged) return true
+   const ownerTime = state.messageTimes.get(messageID)
+   if (ownerTime === undefined || state.boundary === undefined) return false
+   // #0584：同时间 ID 必须按 SQLite BINARY 的 UTF-8 bytes 比较，不能把 caller ID 字典序当作 chronology。
+-  return ownerTime < state.boundary.time ||
++  return (
++    ownerTime < state.boundary.time ||
+     (ownerTime === state.boundary.time && Buffer.compare(Buffer.from(messageID), Buffer.from(state.boundary.id)) < 0)
++  )
+ }
+ 
+ // #0584：空 cursor 是无 closed Message 的 sentinel：任何真实变更都晚于它，无需查行。
+@@ -1090,3 +1349,3 @@
+ function eligibleSessionMessage(state: ReturnType<typeof eligibility>, seq: number) {
+-  return state !== undefined && (state.aged || state.nativeBoundarySeq !== undefined && seq < state.nativeBoundarySeq)
++  return state !== undefined && (state.aged || state.nativeCompleted.has(seq) || state.nativeBoundarySeq !== undefined && seq < state.nativeBoundarySeq)
+ }
+@@ -1209,10 +1429,7 @@ type MessagePackItem = {
+ }
+ 
+ // #524：status eligibility 只需要这些字段；完整 freeze/repack 调用方仍可传入整行。
+-type MessageValueRow = Pick<
+-  typeof MessageTable.$inferSelect,
+-  "id" | "session_id" | "data" | "cold_ref" | "cold_key"
+->
++type MessageValueRow = Pick<typeof MessageTable.$inferSelect, "id" | "session_id" | "data" | "cold_ref" | "cold_key">
+ 
+ // canonical pack 的数组/entry 标点大小可精确增量计算；不能为每个 owner 重编码整个候选 pack，
+ // 否则大 Session 会退化为 O(n²)。duplicate key 不增加 raw bytes，但 owner 仍留在当前 chunk 贡献 refcount。
+@@ -1235,7 +1452,7 @@ function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, items: T[]
+     if (previous !== undefined && previous !== fields) {
+       throw new CorruptionError({ message: "Pack entry key collides with different fields", hash: key })
+     }
+-    const entryBytes = Buffer.byteLength(`{"fields":${fields},"key":${JSON.stringify(key)}}`)
++    const entryBytes = Buffer.byteLength(fields)
+     // target 变化虽不改业务值，却会改变 hash/ref 布局，仍需 plan revision 与物理实测。
+     const delta = previous === undefined ? entryBytes + (unique.size ? 1 : 0) : 0
+     // 首个超大 entry 仍独立成包，完整信息优先于目标大小与平均吞吐。
+@@ -1269,8 +1486,11 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
+ }
+ 
+ function messageV2Value<Row extends MessageValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
+-  if (row.cold_key) throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
+-  const data = row.cold_ref ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref) : row.data
++  if (row.cold_key)
++    throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
++  const data = row.cold_ref
++    ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref)
++    : row.data
+   const value = extractMessageV2(data)
+   if (!value) return
+   return {
+@@ -1283,11 +1503,7 @@ function messageV2Value<Row extends MessageValueRow>(db: TxOrDb, row: Row, cache
+ 
+ // 单 owner freeze 也通过 Session/kind pack builder，保证 direct freeze 与 batch compress 产生相同 key/ref 语义。
+ // 已有同 Session v2 owners 会被纳入重打包；新 pack 先取得 refs，owner row 全部切换后再批量递减旧 pack。
+-function freezeMessagePacked(
+-  db: TxOrDb,
+-  row: typeof MessageTable.$inferSelect,
+-  now: number,
+-): FreezeResult {
++function freezeMessagePacked(db: TxOrDb, row: typeof MessageTable.$inferSelect, now: number): FreezeResult {
+   const target = messageV2Value(db, row)
+   if (!target) return { type: "skipped", reason: "no-fields" }
+   const existing = db
+@@ -1304,14 +1520,16 @@ function freezeMessagePacked(
+     .all()
+     .filter((item) => item.id !== row.id)
+     .map((item) => {
+-      if (!item.cold_ref || !item.cold_key) throw new CorruptionError({ message: "Message v2 owner state is incomplete" })
++      if (!item.cold_ref || !item.cold_key)
++        throw new CorruptionError({ message: "Message v2 owner state is incomplete" })
+       const entries = decodePack(db, item.cold_ref, "message")
+       const fields = entries.get(item.cold_key.toString("hex"))
+-      if (!fields) throw new CorruptionError({ message: "Message v2 owner key is missing from pack", hash: item.cold_ref })
++      if (!fields)
++        throw new CorruptionError({ message: "Message v2 owner key is missing from pack", hash: item.cold_ref })
+       return {
+         row: item,
+         projection: item.data,
+-        entry: { key: Buffer.from(item.cold_key), fields },
++        entry: { key: entryKey("message", fields), fields },
+         oldRef: item.cold_ref,
+       } satisfies MessagePackItem
+     })
+@@ -1327,15 +1545,22 @@ function freezeMessagePacked(
+     )
+     const added = chunk.filter((item) => item.oldRef !== packed.hash).length
+     if (added > 0) retainPackedReference(db, packed.hash, "message", now, added)
+-    for (const item of chunk) assignments.set(item.row.id, { hash: packed.hash, key: Buffer.from(item.entry.key) })
++    for (const item of chunk)
++      assignments.set(item.row.id, { hash: packed.hash, key: requiredPackKey(packed, item.entry.key) })
+   }
+ 
+   for (const item of items) {
+     const assignment = assignments.get(item.row.id)
+-    if (!assignment) throw new CorruptionError({ message: "Message pack assignment is incomplete", hash: item.oldRef ?? undefined })
++    if (!assignment)
++      throw new CorruptionError({ message: "Message pack assignment is incomplete", hash: item.oldRef ?? undefined })
+     const updated = db
+       .update(MessageTable)
+-      .set({ data: item.projection, cold_ref: assignment.hash, cold_key: assignment.key, time_updated: item.row.time_updated })
++      .set({
++        data: item.projection,
++        cold_ref: assignment.hash,
++        cold_key: assignment.key,
++        time_updated: item.row.time_updated,
++      })
+       .where(eq(MessageTable.id, item.row.id))
+       .returning({ id: MessageTable.id })
+       .get()
+@@ -1350,8 +1575,15 @@ function freezeMessagePacked(
+   if (!assigned) throw new CorruptionError({ message: `Message pack target missing: ${row.id}` })
+   const packed = chunks.find((chunk) => chunk.some((item) => item.row.id === row.id))
+   if (!packed) throw new CorruptionError({ message: `Message pack target chunk missing: ${row.id}` })
+-  const envelopeValue = packEnvelope("message", packed.map((item) => item.entry))
+-  const payload = db.select({ compressed_bytes: ColdStorageTable.compressed_bytes }).from(ColdStorageTable).where(eq(ColdStorageTable.hash, assigned.hash)).get()
++  const envelopeValue = packEnvelope(
++    "message",
++    packed.map((item) => item.entry),
++  )
++  const payload = db
++    .select({ compressed_bytes: ColdStorageTable.compressed_bytes })
++    .from(ColdStorageTable)
++    .where(eq(ColdStorageTable.hash, assigned.hash))
++    .get()
+   if (!payload) throw new CorruptionError({ message: "Message pack disappeared after assignment", hash: assigned.hash })
+   return {
+     type: "frozen",
+@@ -1376,10 +1608,17 @@ type PartValueRow = Pick<
+ >
+ 
+ function partV2Value<Row extends PartValueRow>(db: TxOrDb, row: Row, cache?: Map<string, Envelope>) {
+-  if (row.cold_key) throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
+-  if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot or v1 Part has an unexpected cold Stats projection", hash: row.cold_ref ?? undefined })
+-  const data = row.cold_ref ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref) : row.data
+-  const value = extractPartV2(data)
++  if (row.cold_key)
++    throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
++  if (row.cold_stats !== null)
++    throw new CorruptionError({
++      message: "Hot or v1 Part has an unexpected cold Stats projection",
++      hash: row.cold_ref ?? undefined,
++    })
++  const data = row.cold_ref
++    ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref)
++    : row.data
++  const value = extractPartV2(db, data, row.session_id)
+   if (!value) return
+   return {
+     row,
+@@ -1397,13 +1636,7 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
+   const existing = db
+     .select()
+     .from(PartTable)
+-    .where(
+-      and(
+-        eq(PartTable.session_id, row.session_id),
+-        isNotNull(PartTable.cold_ref),
+-        isNotNull(PartTable.cold_key),
+-      ),
+-    )
++    .where(and(eq(PartTable.session_id, row.session_id), isNotNull(PartTable.cold_ref), isNotNull(PartTable.cold_key)))
+     .orderBy(PartTable.id)
+     .all()
+     .filter((item) => item.id !== row.id)
+@@ -1417,7 +1650,7 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
+         row: item,
+         projection: item.data,
+         stats: requirePartStats(item, projectPartStats(data)),
+-        entry: { key: Buffer.from(item.cold_key), fields },
++        entry: { key: entryKey("part", fields), fields },
+         oldRef: item.cold_ref,
+       } satisfies PartPackItem
+     })
+@@ -1425,21 +1658,28 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
+   const chunks = splitPacks("part", items)
+   const assignments = new Map<PartID, { hash: string; key: Buffer }>()
+   for (const chunk of chunks) {
+-    const packed = retainPackPayload(db, "part", chunk.map((item) => item.entry), now)
++    const packed = retainPackPayload(
++      db,
++      "part",
++      chunk.map((item) => item.entry),
++      now,
++    )
+     const added = chunk.filter((item) => item.oldRef !== packed.hash).length
+     if (added > 0) retainPackedReference(db, packed.hash, "part", now, added)
+-    for (const item of chunk) assignments.set(item.row.id, { hash: packed.hash, key: Buffer.from(item.entry.key) })
++    for (const item of chunk)
++      assignments.set(item.row.id, { hash: packed.hash, key: requiredPackKey(packed, item.entry.key) })
+   }
+   for (const item of items) {
+     const assignment = assignments.get(item.row.id)
+-    if (!assignment) throw new CorruptionError({ message: "Part pack assignment is incomplete", hash: item.oldRef ?? undefined })
++    if (!assignment)
++      throw new CorruptionError({ message: "Part pack assignment is incomplete", hash: item.oldRef ?? undefined })
+     const updated = db
+       .update(PartTable)
+       .set({
+         data: item.projection,
+         cold_ref: assignment.hash,
+         cold_key: assignment.key,
+-        cold_stats: item.stats,
++        cold_stats: compactPartStats(item.stats),
+         time_updated: item.row.time_updated,
+       })
+       .where(eq(PartTable.id, item.row.id))
+@@ -1459,7 +1699,11 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
+   if (!assigned) throw new CorruptionError({ message: `Part pack target missing: ${row.id}` })
+   const packed = chunks.find((chunk) => chunk.some((item) => item.row.id === row.id))
+   if (!packed) throw new CorruptionError({ message: `Part pack target chunk missing: ${row.id}` })
+-  const payload = db.select({ raw_bytes: ColdStorageTable.raw_bytes, compressed_bytes: ColdStorageTable.compressed_bytes }).from(ColdStorageTable).where(eq(ColdStorageTable.hash, assigned.hash)).get()
++  const payload = db
++    .select({ raw_bytes: ColdStorageTable.raw_bytes, compressed_bytes: ColdStorageTable.compressed_bytes })
++    .from(ColdStorageTable)
++    .where(eq(ColdStorageTable.hash, assigned.hash))
++    .get()
+   if (!payload) throw new CorruptionError({ message: "Part pack disappeared after assignment", hash: assigned.hash })
+   return {
+     type: "frozen",
+@@ -1471,7 +1715,11 @@ function freezePartPacked(db: TxOrDb, row: typeof PartTable.$inferSelect, now: n
+ 
+ // packed Message thaw 按 hash 分组，每个 pack 只解压一次；entry key 缺失或真实 ref_count 漂移会阻止整批回填。
+ // owner row 清除 ref/key 后再统一 decrement，父子 fork 共享 pack 时不会把仍在使用的 payload 提前删除。
+-function thawPackedMessageRows(db: TxOrDb, rows: Array<typeof MessageTable.$inferSelect & { cold_ref: string; cold_key: Buffer }>, now: number) {
++function thawPackedMessageRows(
++  db: TxOrDb,
++  rows: Array<typeof MessageTable.$inferSelect & { cold_ref: string; cold_key: Buffer }>,
++  now: number,
++) {
+   const hashes = [...new Set(rows.map((row) => row.cold_ref))]
+   const payloads = db.select().from(ColdStorageTable).where(inArray(ColdStorageTable.hash, hashes)).all()
+   if (payloads.length !== hashes.length) throw new CorruptionError({ message: "Message thaw contains a missing pack" })
+@@ -1493,17 +1741,18 @@ function thawPackedMessageRows(db: TxOrDb, rows: Array<typeof MessageTable.$infe
+       .run()
+     return { ...row, data, cold_ref: null, cold_key: null }
+   })
+-  decrementReferences(db, rows.map((row) => row.cold_ref), now)
++  decrementReferences(
++    db,
++    rows.map((row) => row.cold_ref),
++    now,
++  )
+   return restored
+ }
+ 
+ // 一个 pack chunk 内的 owner projection 使用单条 SQLite upsert，而不是每行一次 UPDATE。
+ // maintenance 已持有 immediate transaction；同一批不会被其他 writer 插入竞争，RETURNING 仍验证每个 owner 都被写回。
+-function assignMessagePack(
+-  db: TxOrDb,
+-  items: MessagePackItem[],
+-  hash: string,
+-) {
++function assignMessagePack(db: TxOrDb, items: MessagePackItem[], packed: ReturnType<typeof retainPackPayload>) {
++  const hash = packed.hash
+   for (let offset = 0; offset < items.length; offset += DEFAULT_BATCH_SIZE) {
+     const values = items.slice(offset, offset + DEFAULT_BATCH_SIZE).map((item) => ({
+       id: item.row.id,
+@@ -1512,7 +1761,7 @@ function assignMessagePack(
+       time_updated: item.row.time_updated,
+       data: item.projection,
+       cold_ref: hash,
+-      cold_key: Buffer.from(item.entry.key),
++      cold_key: requiredPackKey(packed, item.entry.key),
+     }))
+     const updated = db
+       .insert(MessageTable)
+@@ -1528,15 +1777,13 @@ function assignMessagePack(
+       })
+       .returning({ id: MessageTable.id })
+       .all()
+-    if (updated.length !== values.length) throw new CorruptionError({ message: "Message pack assignment is incomplete", hash })
++    if (updated.length !== values.length)
++      throw new CorruptionError({ message: "Message pack assignment is incomplete", hash })
+   }
+ }
+ 
+-function assignPartPack(
+-  db: TxOrDb,
+-  items: PartPackItem[],
+-  hash: string,
+-) {
++function assignPartPack(db: TxOrDb, items: PartPackItem[], packed: ReturnType<typeof retainPackPayload>) {
++  const hash = packed.hash
+   // 一个 chunk 使用批量 upsert，避免每个 Part 各执行 UPDATE 导致 SQLite writer 往返成为瓶颈。
+   // 2000 行与公共 batch 上限一致，既降低 statement 次数也不超过当前 SQLite variable 限制。
+   for (let offset = 0; offset < items.length; offset += DEFAULT_BATCH_SIZE) {
+@@ -1550,9 +1797,9 @@ function assignPartPack(
+       data: item.projection,
+       cold_ref: hash,
+       // 每个 owner 保留自己的 key；entry 去重不能丢失一对一恢复定位。
+-      cold_key: Buffer.from(item.entry.key),
++      cold_key: requiredPackKey(packed, item.entry.key),
+       // 非 Tool/Step 的 stats 必须是 NULL，不能沿用上一轮对象中的派生值。
+-      cold_stats: item.stats,
++      cold_stats: compactPartStats(item.stats),
+     }))
+     // data、ref、key、stats 在同一 statement 切换，任何半状态都属于 corruption。
+     // excluded 值只来自已经验证的 extraction projection，不接受任意 storage skeleton。
+@@ -1573,7 +1820,8 @@ function assignPartPack(
+       .all()
+     // payload ref 已由 caller 预先 retain，只有完整 assignment 后才能递减旧引用。
+     // returning 缺一行会回滚 immediate transaction，不能留下已 retain 却未归属的 payload。
+-    if (updated.length !== values.length) throw new CorruptionError({ message: "Part pack assignment is incomplete", hash })
++    if (updated.length !== values.length)
++      throw new CorruptionError({ message: "Part pack assignment is incomplete", hash })
+   }
+ }
+ 
+@@ -1603,11 +1851,16 @@ function freezeMessageBatch(
+   let compressedBytes = 0
+   for (const items of groups.values()) {
+     for (const chunk of splitPacks("message", items)) {
+-      const packed = retainPackPayload(db, "message", chunk.map((item) => item.entry), input.now)
++      const packed = retainPackPayload(
++        db,
++        "message",
++        chunk.map((item) => item.entry),
++        input.now,
++      )
+       retainPackedReference(db, packed.hash, "message", input.now, chunk.length)
+       rawBytes += packed.rawBytes
+       compressedBytes += packed.compressedBytes
+-      assignMessagePack(db, chunk, packed.hash)
++      assignMessagePack(db, chunk, packed)
+       decrementReferences(
+         db,
+         chunk.flatMap((item) => (item.oldRef && item.oldRef !== packed.hash ? [item.oldRef] : [])),
+@@ -1653,12 +1906,17 @@ function freezePartBatch(
+   for (const items of groups.values()) {
+     for (const chunk of splitPacks("part", items)) {
+       // 每个 chunk 先 retain immutable pack，再切 owner，最后递减真实移动的旧 refs。
+-      const packed = retainPackPayload(db, "part", chunk.map((item) => item.entry), input.now)
++      const packed = retainPackPayload(
++        db,
++        "part",
++        chunk.map((item) => item.entry),
++        input.now,
++      )
+       retainPackedReference(db, packed.hash, "part", input.now, chunk.length)
+       // counters 只累加 frame 逻辑 bytes，不把共享 owner 数量当作物理文件大小。
+       rawBytes += packed.rawBytes
+       compressedBytes += packed.compressedBytes
+-      assignPartPack(db, chunk, packed.hash)
++      assignPartPack(db, chunk, packed)
+       // 新旧 hash 相同表示内容未变，不能 retain/decrement 后删除仍被复用的 payload。
+       decrementReferences(
+         db,
+@@ -1730,11 +1988,28 @@ function decodePack(db: TxOrDb, hash: string, owner: OwnerKind) {
+     throw new CorruptionError({ message: "Cold pack compressed size does not match", hash })
+   }
+   const raw = decompress(payload.payload)
+-  if (raw.byteLength !== payload.raw_bytes || digest(packKind(owner), raw) !== hash) {
++  const identity = digest(packKind(owner), raw)
++  if (
++    raw.byteLength !== payload.raw_bytes ||
++    (identity !== hash && Buffer.from(identity, "hex").toString("base64url") !== hash)
++  ) {
+     throw new CorruptionError({ message: "Cold pack size or hash does not match", hash })
+   }
+   const parsed = parsePackEnvelope(owner, raw, hash)
+-  return new Map(parsed.entries.map((entry) => [entry.key.toString("hex"), entry.fields]))
++  return new Map(
++    parsed.entries.map((entry, index) => [
++      (parsed.version === 3 ? slotKey(index) : entry.key).toString("hex"),
++      entry.fields,
++    ]),
++  )
++}
++
++function requiredPackKey(packed: { hash: string; keys: Map<string, Buffer> }, key: Buffer) {
++  // assignment 查的是完整内容身份，返回的短 slot 只负责定位。
++  // 缺失映射应回滚本批，不能写入一个指向其他 entry 的默认序号。
++  const value = packed.keys.get(key.toString("hex"))
++  if (!value) throw new CorruptionError({ message: "Pack assignment entry is missing", hash: packed.hash })
++  return value
+ }
+ 
+ // retainPackPayload 与 v1 retain 对称，但 hash 身份覆盖完整 pack；existing row 必须先用真实 owner ref_count 和 canonical bytes 复验。
+@@ -1756,13 +2031,14 @@ function retainPackPayload(db: TxOrDb, owner: OwnerKind, entries: PackEntry[], n
+     const restored = decodePack(db, value.hash, owner)
+     const restoredValue = packEnvelope(
+       owner,
+-      [...restored].map(([key, fields]) => ({ key: Buffer.from(key, "hex"), fields })),
++      [...restored.values()].map((fields) => ({ key: entryKey(owner, fields), fields })),
+     )
+     if (!restoredValue.raw.equals(value.raw)) {
+       throw new CorruptionError({ message: "Cold pack hash collides with different canonical bytes", hash: value.hash })
+     }
+     return {
+       hash: value.hash,
++      keys: value.keys,
+       rawBytes: value.raw.byteLength,
+       compressedBytes: existing.compressed_bytes,
+     }
+@@ -1782,7 +2058,7 @@ function retainPackPayload(db: TxOrDb, owner: OwnerKind, entries: PackEntry[], n
+       time_updated: now,
+     })
+     .run()
+-  return { hash: value.hash, rawBytes: value.raw.byteLength, compressedBytes: payload.byteLength }
++  return { hash: value.hash, keys: value.keys, rawBytes: value.raw.byteLength, compressedBytes: payload.byteLength }
+ }
+ 
+ // Native统计沿用原公开字符口径，按稳定content槽位保存标量，不复制身份或精确请求账本。
+@@ -1990,3 +2270,3 @@
+   const prepared = inspectSessionMessageRows(db, rows).flatMap(row => {
+-    const value = extractSessionMessage(row)
++    const value = extractSessionMessage(db, row)
+     if (!value || !row.cold_key && !eligibleSessionMessage(input.eligibilityState(row.session_id), row.seq)) return []
+@@ -2008,6 +2288,2 @@
+-    const updated = db.insert(SessionMessageTable).values(chunk.map(item => ({ ...item.row, data: item.projection,
+-      cold_ref: packed.hash, cold_key: Buffer.from(item.entry.key), cold_stats: item.stats })))
+-      .onConflictDoUpdate({ target: SessionMessageTable.id, set: { data: sql`excluded.data`, cold_ref: sql`excluded.cold_ref`,
+-        cold_key: sql`excluded.cold_key`, cold_stats: sql`excluded.cold_stats`, time_updated: sql`excluded.time_updated` } })
+-      .returning({ id: SessionMessageTable.id }).all()
+-    if (updated.length !== chunk.length) throw new CorruptionError({ message: "Native pack assignment is incomplete", hash: packed.hash })
++    // 单次freeze与payload重打包使用同一Native slot写入边界。
++    assignSessionMessagePack(db, chunk, packed)
+@@ -2035,13 +2311,13 @@
+-// 普通读取先选定范围，再预约原连接并原子回填；范围外消息和统计热查询不被预热。
+-export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[], messageProjection?: "viewer") {
++// 普通浏览只恢复返回值；runner显式选择execution后才持久预热已选窗口。
++export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[], messageProjection?: "viewer" | "execution") {
+   // 归档白名单中，冷User除summary仅inline附件需要恢复；不能把Tool或附件占位当成完整消息。
+   const selected = messageProjection === "viewer" ? rows.filter(row => {
+     const data: unknown = row.data
+-    return row.type !== "user" || !row.cold_ref || !isRecord(data) || Array.isArray(data.files) && data.files.some(file => isRecord(file) && file.uri === "")
++    return row.type !== "user" || !row.cold_ref || !isRecord(data) || data.text === "" || Array.isArray(data.files) && data.files.some(file => isRecord(file) && file.uri === "")
+   }) : rows
+-  // 必需内容仍在原同连接事务中整批恢复；summary-only不解压、不清指针、不扣引用。
+-  const restored = !selected.some(row => row.cold_ref)
++  // 同连接预约覆盖整批inspect；执行回填仍保留原事务内重读和引用释放。
++  const restored = messageProjection !== "execution" || !selected.some(row => row.cold_ref)
+-    ? Effect.sync(() => inspectSessionMessageRows(db.sync, selected))
++    ? Database.withSync({ db, sync: db.sync }, sync => inspectSessionMessageRows(sync, selected))
+     : Database.withSync({ db, sync: db.sync }, sync => sync.transaction(
+       tx => thawSessionMessageRowsInTransaction(tx, selected), { behavior: "immediate" },
+     ))
+@@ -2058,7 +2334,7 @@ function retainPackedReference(db: TxOrDb, hash: string, owner: OwnerKind, now:
+ }
+ 
+ // SummaryCache 的 inspect 只解码 aggregate，不修改 Session ref/cursor 或任何 payload ref_count。
+-// 该路径只给内部 cache rebuild 使用；业务 Message/Part 读取必须继续走 thaw，不能借此形成第二套缓存。
++// 该路径只恢复 Session aggregate；Message/Part 仍由对应 owner decoder 恢复。
+ function decodeSummary(db: TxOrDb, hash: string) {
+   const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
+   if (!payload) throw new CorruptionError({ message: "Session summary reference points to a missing payload", hash })
+@@ -1836,7 +2112,10 @@ export function retainSummaryPayload(db: TxOrDb, diffs: SummaryPayload, now: num
+     }
+     const restored = decodeSummary(db, value.hash)
+     if (!Buffer.from(canonical(summaryEnvelope(restored).value)).equals(value.raw)) {
+-      throw new CorruptionError({ message: "Session summary hash collides with different canonical bytes", hash: value.hash })
++      throw new CorruptionError({
++        message: "Session summary hash collides with different canonical bytes",
++        hash: value.hash,
++      })
+     }
+     return { hash: value.hash, compressedBytes: existing.compressed_bytes }
+   }
+@@ -1934,7 +2213,9 @@ export function invalidateSessionSummaryBefore(db: TxOrDb, sessionID: SessionID,
+   if (relation === undefined || relation > 0) return
+   const payload = decodeSummary(db, session.summaryRef)
+   // #0584：seed 内部 cursor 与外层 cursor 各自独立解析：保留晚于变更行的 seed，丢弃已被覆盖的 seed。
+-  const seedRelation = payload.seed ? compareStoredMessageCursor(db, sessionID, messageID, payload.seed.cursor) : undefined
++  const seedRelation = payload.seed
++    ? compareStoredMessageCursor(db, sessionID, messageID, payload.seed.cursor)
++    : undefined
+   const seed = payload.seed && (seedRelation === undefined || seedRelation > 0) ? payload.seed : undefined
+   const updated = db
+     .update(SessionTable)
+@@ -2048,7 +2329,10 @@ export function replacePart(
+   const previous = db.select({ cold_ref: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, row.id)).get()
+   db.insert(PartTable)
+     .values({ ...row, cold_ref: null, cold_key: null, cold_stats: null })
+-    .onConflictDoUpdate({ target: PartTable.id, set: { data: row.data, cold_ref: null, cold_key: null, cold_stats: null } })
++    .onConflictDoUpdate({
++      target: PartTable.id,
++      set: { data: row.data, cold_ref: null, cold_key: null, cold_stats: null },
++    })
+     .run()
+   if (previous?.cold_ref) releaseReference(db, PartTable, row.id, previous.cold_ref)
+ }
+@@ -2111,10 +2395,7 @@ export function releaseSession(db: TxOrDb, sessionID: SessionID) {
+     .get()
+   if (summary?.summary_ref) {
+     // Session FK 是 RESTRICT；summary owner 必须先清除并 release，才能删除 Session 行而不绕过计数。
+-    db.update(SessionTable)
+-      .set({ summary_ref: null, summary_cursor: null })
+-      .where(eq(SessionTable.id, sessionID))
+-      .run()
++    db.update(SessionTable).set({ summary_ref: null, summary_cursor: null }).where(eq(SessionTable.id, sessionID)).run()
+     releaseSummaryReference(db, summary.summary_ref)
+   }
+ }
+@@ -2250,11 +2531,23 @@ export function clonePrefix(
+       .run()
+   }
+ 
++  const targetRoot = !db
++    .select({ parent: SessionTable.parent_id })
++    .from(SessionTable)
++    .where(eq(SessionTable.id, input.sessionID))
++    .get()?.parent
++  // 冷子正文复制到根 Session 时仅恢复目标行，源引用保持不变。
++  const copiedText = new Map(
++    inspectPartRows(
++      db,
++      sourceParts.filter((row) => targetRoot && row.data.type === "text" && row.cold_ref),
++    ).map((row) => [row.id, row.data]),
++  )
+   const parts = sourceParts.map((row) => {
+     const targetID = partMap.get(row.id)
+     const targetMessageID = messageMap.get(row.message_id)
+     if (!targetID || !targetMessageID) throw new ValidationError({ message: `Fork part map misses ${row.id}` })
+-    const data = structuredClone(row.data)
++    const data = structuredClone(copiedText.get(row.id) ?? row.data)
+     if (data.type === "compaction" && data.tail_start_id) {
+       const tailStartID = messageMap.get(data.tail_start_id)
+       if (tailStartID) data.tail_start_id = tailStartID
+@@ -2267,8 +2560,8 @@ export function clonePrefix(
+       time_created: row.time_created,
+       time_updated: row.time_updated,
+       data,
+-      cold_ref: row.cold_ref,
+-      cold_key: row.cold_key ? Buffer.from(row.cold_key) : null,
++      cold_ref: copiedText.has(row.id) ? null : row.cold_ref,
++      cold_key: copiedText.has(row.id) ? null : row.cold_key ? Buffer.from(row.cold_key) : null,
+       // fork 复制同一 immutable payload 的 owner 投影；重新计算会要求无意义地解码整个共享 pack。
+       cold_stats: row.cold_stats,
+     }
+@@ -2281,7 +2574,7 @@ export function clonePrefix(
+ 
+   incrementReferences(
+     db,
+-    [...sourceMessages, ...sourceParts].flatMap((row) => (row.cold_ref ? [{ hash: row.cold_ref }] : [])),
++    [...messages, ...parts].flatMap((row) => (row.cold_ref ? [{ hash: row.cold_ref }] : [])),
+     Date.now(),
+   )
+   // projector 仍拥有 Session usage totals；返回 raw Part data 让它复用既有 step-finish 聚合而不再次查询或 thaw。
+@@ -2330,3 +2606,3 @@
+     const source = row.cold_ref ? { ...row, data: restoreSessionMessage(row, decode(db, row.cold_ref, "session_message")) } : row
+-    const value = extractSessionMessage(source)
++    const value = extractSessionMessage(db, source)
+     if (!value) return { type: "skipped", reason: "no-fields" }
+@@ -2340,6 +2633,6 @@ function freeze(
+   // #0500：Part 与 Message 同构——v1 还原后重提，pack 化写入由 freezePartPacked 统一承担。
+   const source = row.cold_ref ? restorePart(row.data, decode(db, row.cold_ref, "part"), row.cold_ref) : row.data
+-  const value = extractPartV2(source)
++  const value = extractPartV2(db, source, row.session_id)
+   if (!value) return { type: "skipped", reason: "no-fields" }
+   const state =
+     typeof input.eligibilityState === "function"
+@@ -2365,26 +2658,36 @@
+ // corruption 会使整个范围 rollback，模型不会收到部分完整、部分占位的混合上下文。
+ export function thawMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
+   // fast path 只接受严格 hot；v2 的 key-only 状态不能冒充无需处理。
+   if (!rows.some((row) => row.cold_ref)) {
+-    if (rows.some((row) => row.cold_key)) throw new CorruptionError({ message: "Message owner has a key without a ref" })
++    if (rows.some((row) => row.cold_key))
++      throw new CorruptionError({ message: "Message owner has a key without a ref" })
+     return rows
+   }
+   return db.transaction(
+     (db) => {
+       // 输入可能来自过期查询；事务内按 ID 重读才是选择当前 decoder 的事实。
+       const current = rows.map((input) => {
+-        if (input.cold_key && !input.cold_ref) throw new CorruptionError({ message: "Message owner has a key without a ref" })
++        if (input.cold_key && !input.cold_ref)
++          throw new CorruptionError({ message: "Message owner has a key without a ref" })
+         const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
+         if (!row) throw new CorruptionError({ message: `Message disappeared during thaw: ${input.id}` })
+         return row
+       })
+-      const legacy = current.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
+-      const packed = current.filter((row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key)
+-      const restored = new Map<MessageID, typeof current[number]>()
++      const legacy = current.filter(
++        (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
++      )
++      const packed = current.filter(
++        (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
++      )
++      const restored = new Map<MessageID, (typeof current)[number]>()
+       if (legacy.length > 0) {
+         // v1 refs 按 hash 批量 decode，共享 fork owner 不重复解压同一 payload。
+-        const values = decodedBatch(db, legacy.map((row) => row.cold_ref), "message")
++        const values = decodedBatch(
++          db,
++          legacy.map((row) => row.cold_ref),
++          "message",
++        )
+         for (const row of legacy) {
+           const data = restoreMessage(row.data, requiredEnvelope(values, row.cold_ref), row.cold_ref)
+           // data 与 NULL ref/key 一次写回并保留 timestamp，持久预热不改变 chronology。
+           db.update(MessageTable)
+@@ -2393,8 +2696,12 @@
+             .run()
+           restored.set(row.id, { ...row, data, cold_ref: null, cold_key: null })
+         }
+         // legacy owners 全部写热后再递减，共享 payload 不会因首个 fork thaw 被提前删除。
+-        decrementReferences(db, legacy.map((row) => row.cold_ref), Date.now())
++        decrementReferences(
++          db,
++          legacy.map((row) => row.cold_ref),
++          Date.now(),
++        )
+       }
+       if (packed.length > 0) {
+         for (const row of thawPackedMessageRows(db, packed, Date.now())) restored.set(row.id, row)
+@@ -2413,25 +2720,35 @@ export function thawPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+   // fast path 只接受严格 hot `(NULL,NULL,NULL)`；key-only 或 stats-only 状态不能冒充无需处理。
+   if (!rows.some((row) => row.cold_ref)) {
+     if (rows.some((row) => row.cold_key)) throw new CorruptionError({ message: "Part owner has a key without a ref" })
+-    if (rows.some((row) => row.cold_stats !== null)) throw new CorruptionError({ message: "Hot Part has a cold Stats projection" })
++    if (rows.some((row) => row.cold_stats !== null))
++      throw new CorruptionError({ message: "Hot Part has a cold Stats projection" })
+     return rows
+   }
+   return db.transaction(
+     (db) => {
+       // 输入可能来自过期查询；事务内按 ID 重读才是选择当前 decoder 的事实。
+       const current = rows.map((input) => {
+-        if (input.cold_key && !input.cold_ref) throw new CorruptionError({ message: "Part owner has a key without a ref" })
++        if (input.cold_key && !input.cold_ref)
++          throw new CorruptionError({ message: "Part owner has a key without a ref" })
+         const row = db.select().from(PartTable).where(eq(PartTable.id, input.id)).get()
+         if (!row) throw new CorruptionError({ message: `Part disappeared during thaw: ${input.id}` })
+         return row
+       })
+-      const legacy = current.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
+-      const packed = current.filter((row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key)
++      const legacy = current.filter(
++        (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
++      )
++      const packed = current.filter(
++        (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
++      )
+       // Map 按 ID 汇合恢复值，最终仍依输入顺序返回，hash grouping 不改变 Part chronology。
+-      const restored = new Map<PartID, typeof current[number]>()
++      const restored = new Map<PartID, (typeof current)[number]>()
+       if (legacy.length > 0) {
+         // v1 refs 按 hash 批量 decode，共享 fork owner 不重复解压同一 payload。
+-        const values = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
++        const values = decodedBatch(
++          db,
++          legacy.map((row) => row.cold_ref),
++          "part",
++        )
+         for (const row of legacy) {
+           const data = restorePart(row.data, requiredEnvelope(values, row.cold_ref), row.cold_ref)
+           // data 与 NULL ref/key/stats 一次写回并保留 timestamp，持久预热不改变 chronology。
+@@ -2442,12 +2749,17 @@ export function thawPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+           restored.set(row.id, { ...row, data, cold_ref: null, cold_key: null, cold_stats: null })
+         }
+         // legacy owners 全部写热后再递减，共享 payload 不会因首个 fork thaw 被提前删除。
+-        decrementReferences(db, legacy.map((row) => row.cold_ref), Date.now())
++        decrementReferences(
++          db,
++          legacy.map((row) => row.cold_ref),
++          Date.now(),
++        )
+       }
+       if (packed.length > 0) {
+         const hashes = [...new Set(packed.map((row) => row.cold_ref))]
+         const payloads = db.select().from(ColdStorageTable).where(inArray(ColdStorageTable.hash, hashes)).all()
+-        if (payloads.length !== hashes.length) throw new CorruptionError({ message: "Part thaw contains a missing pack" })
++        if (payloads.length !== hashes.length)
++          throw new CorruptionError({ message: "Part thaw contains a missing pack" })
+         // v2 先反算真实 owner count，再验证 kind/refcount；损坏时不写回任何 Part。
+         const counts = ownerCounts(db, hashes)
+         const entries = new Map<string, Map<string, Record<string, Json>>>()
+@@ -2471,7 +2783,11 @@ export function thawPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+           restored.set(row.id, { ...row, data, cold_ref: null, cold_key: null, cold_stats: null })
+         }
+         // owner 全部写回后才递减，最后一个共享 ref 才能删除 immutable payload。
+-        decrementReferences(db, packed.map((row) => row.cold_ref), Date.now())
++        decrementReferences(
++          db,
++          packed.map((row) => row.cold_ref),
++          Date.now(),
++        )
+       }
+       // 返回值均已是热态业务数据，前端不感知本次是否执行 zstd 与持久写回。
+       return current.map((row) => restored.get(row.id) ?? row)
+@@ -2480,18 +2796,49 @@ export function thawPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+   )
+ }
+ 
+-// inspect 只在 SummaryCache rebuild 中恢复内存投影，保留 owner cold_ref 和 payload ref_count 不动。
+-// 它与 thaw 共用 decode/restore corruption gate，但绝不写 PartTable，避免 derived cache 重建反向破坏归档状态。
++// inspect 为普通读取恢复内存对象，保留 owner cold_ref 和 payload ref_count 不动。
++// 它与 thaw 共用完整性门禁，只有持久预热才写回 owner 并释放引用。
++export function inspectMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
++  // 一次读取按包分组，完整 Message 返回值不改变持久引用或时间戳。
++  // 普通查看不调用 release，多个 fork 的共享生命周期保持独立。
++  // v1 的单 owner envelope 与 packed owner 各走明确版本路径。
++  const hashes = [...new Set(rows.flatMap((row) => (row.cold_ref && row.cold_key ? [row.cold_ref] : [])))]
++  requireReferenceMetadata(db, hashes, "message-pack")
++  const packs = new Map(hashes.map((hash) => [hash, decodePack(db, hash, "message")]))
++  const legacy = decodedBatch(
++    db,
++    rows.flatMap((row) => (row.cold_ref && !row.cold_key ? [row.cold_ref] : [])),
++    "message",
++  )
++  return rows.map((row) => {
++    if (!row.cold_ref) {
++      if (row.cold_key) throw new CorruptionError({ message: "Message key has no pack" })
++      return row
++    }
++    if (!row.cold_key)
++      return { ...row, data: restoreMessage(row.data, requiredEnvelope(legacy, row.cold_ref), row.cold_ref) }
++    const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
++    if (!fields) throw new CorruptionError({ message: "Message inspect entry is missing", hash: row.cold_ref })
++    return { ...row, data: restorePackedMessage(row.data, fields, row.cold_ref) }
++  })
++}
++
+ export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+-  const legacy = rows.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
+-  const packed = rows.filter((row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key)
+-  const legacyValues = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
++  const legacy = rows.filter(
++    (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
++  )
++  const packed = rows.filter(
++    (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
++  )
++  const legacyValues = decodedBatch(
++    db,
++    legacy.map((row) => row.cold_ref),
++    "part",
++  )
+   // 非持久 inspect 与 thaw/Stats 共用真实 owner gate，不能仅因 pack bytes 可解码就忽略 refcount drift。
+   const packedHashes = [...new Set(packed.map((row) => row.cold_ref))]
+   requireReferenceMetadata(db, packedHashes, "part-pack")
+-  const packs = new Map(
+-    packedHashes.map((hash) => [hash, decodePack(db, hash, "part")] as const),
+-  )
++  const packs = new Map(packedHashes.map((hash) => [hash, decodePack(db, hash, "part")] as const))
+   return rows.map((row) => {
+     if (!row.cold_ref) {
+       if (row.cold_key) throw new CorruptionError({ message: "Part owner has a key without a ref" })
+@@ -2516,12 +2863,95 @@ export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect
+ // Stats inspect 与业务 inspect 的差异是持久格式合同：v2 只能读取 owner 同行投影，绝不打开 pack。
+ // v1 没有该列，必须按 hash 批量解码并在内存恢复；该 shipped compatibility branch 不写 owner/refcount。
+ // hot row 现场计算同一 projector，因而 hot/v1/v2 不会维护三套统计公式。
++export function matchColdText(db: TxOrDb, tokens: string[], scope?: SQL) {
++  // 只返回命中身份，把最终排序、分页和 title/hot 条件仍交给现有 SQL。
++  // 每个 token 独立记录命中，允许关键词分别出现在标题、热正文和冷正文中。
++  // 范围和可见性先在SQL缩小；调用方已经预约此连接，一次只解码一个包。
++  const rows = db
++    .select({ session: PartTable.session_id, ref: PartTable.cold_ref, key: PartTable.cold_key })
++    .from(PartTable)
++    .innerJoin(
++      MessageTable,
++      and(eq(MessageTable.id, PartTable.message_id), eq(MessageTable.session_id, PartTable.session_id)),
++    )
++    .innerJoin(SessionTable, eq(SessionTable.id, PartTable.session_id))
++    .where(
++      and(
++        scope,
++        isNotNull(PartTable.cold_ref),
++        sql`json_extract(${PartTable.data}, '$.type') = 'text'`,
++        sql`json_type(${PartTable.data}, '$.hidden') is null`,
++        sql`json_type(${MessageTable.data}, '$.hidden') is null`,
++        sql`coalesce(json_extract(${PartTable.data}, '$.synthetic'), 0) = 0`,
++        sql`coalesce(json_extract(${PartTable.data}, '$.ignored'), 0) = 0`,
++      ),
++    )
++    .orderBy(PartTable.cold_ref)
++    .all()
++  const result = tokens.map(() => new Set<SessionID>())
++  // locator按hash排序，仅保留单包临时正文，不建立跨请求缓存或持久索引。
++  let hash: string | undefined
++  let entries = new Map<string, Record<string, Json>>()
++  for (const row of rows) {
++    if (!row.ref || !row.key) throw new CorruptionError({ message: "Cold Text locator is incomplete" })
++    if (hash !== row.ref) {
++      entries = decodePack(db, row.ref, "part")
++      hash = row.ref
++    }
++    const text = entries.get(row.key.toString("hex"))?.text
++    if (typeof text !== "string") throw new CorruptionError({ message: "Cold Text body is missing", hash })
++    // SQLite lower只折叠ASCII，不能改变既有Unicode大小写匹配口径。
++    const folded = text.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
++    tokens.forEach((token, index) => {
++      if (folded.includes(token)) result[index].add(row.session)
++    })
++  }
++  // Native正文沿同一候选宇宙和token集合匹配；不检索reasoning、Tool结果或技术Synthetic。
++  const native = db.select().from(SessionMessageTable).innerJoin(SessionTable, eq(SessionTable.id, SessionMessageTable.session_id)).where(and(
++    scope, isNotNull(SessionMessageTable.cold_ref), isNotNull(SessionMessageTable.cold_key), inArray(SessionMessageTable.type, ["user", "assistant"]),
++    sql`not coalesce((json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
++      and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
++      and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0), 0)`,
++  )).orderBy(SessionMessageTable.cold_ref).all()
++  hash = undefined
++  for (const item of native) {
++    const row = item.session_message
++    const data: unknown = row.data
++    const paths = row.type === "user" ? ["text"] : isRecord(data) && Array.isArray(data.content)
++      ? data.content.flatMap((part, index) => isRecord(part) && part.type === "text" ? [`content.${index}.text`] : []) : []
++    if (!paths.length) continue
++    if (!row.cold_ref || !row.cold_key) throw new CorruptionError({ message: "Native cold Text locator is incomplete" })
++    if (hash !== row.cold_ref) {
++      entries = decodePack(db, row.cold_ref, "session_message")
++      hash = row.cold_ref
++    }
++    const fields = entries.get(row.cold_key.toString("hex"))
++    if (!fields) throw new CorruptionError({ message: "Native cold Text entry is missing", hash })
++    for (const path of paths) {
++      const text = fields[path]
++      if (text === undefined) continue
++      if (typeof text !== "string") throw new CorruptionError({ message: "Native cold Text body is invalid", hash })
++      const folded = text.replace(/[A-Z]/g, letter => letter.toLowerCase())
++      tokens.forEach((token, index) => {
++        if (folded.includes(token)) result[index].add(row.session_id)
++      })
++    }
++  }
++  return result.map((ids) => [...ids])
++}
++
+ export function inspectPartStats(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+   // hot row 出现 cold_stats 表示 writer 未清理派生状态，继续统计会形成两个矛盾数据源。
+   // 此 seam 只返回标量且不执行 owner mutation，Stats 前后 storage-state hash 必须相同。
+-  const legacy = rows.filter((row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key)
++  const legacy = rows.filter(
++    (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
++  )
+   // v1 只能批量 decode 旧 payload，但共用正式 integrity gate，不建立宽松 Stats parser。
+-  const legacyValues = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
++  const legacyValues = decodedBatch(
++    db,
++    legacy.map((row) => row.cold_ref),
++    "part",
++  )
+   // v2 只验证 metadata/refcount，不读取 pack body；完整 archive 扫描属于显式 verify。
+   requireReferenceMetadata(
+     db,
+@@ -2538,7 +2937,10 @@ export function inspectPartStats(db: TxOrDb, rows: (typeof PartTable.$inferSelec
+     if (!row.cold_key) {
+       // v1 row 只允许 NULL stats；当前 writer 在下次压缩时将其升级为 v2。
+       if (row.cold_stats !== null) {
+-        throw new CorruptionError({ message: "Legacy Part has an unexpected cold Stats projection", hash: row.cold_ref })
++        throw new CorruptionError({
++          message: "Legacy Part has an unexpected cold Stats projection",
++          hash: row.cold_ref,
++        })
+       }
+       return projectPartStats(restorePart(row.data, requiredEnvelope(legacyValues, row.cold_ref), row.cold_ref))
+     }
+@@ -2580,3 +2984,3 @@
+     // 已部署Native envelope只在内存恢复；status不能把历史预热或遗漏仍待升级的小消息。
+-    inspectSessionMessageRows(db, native).filter(row => extractSessionMessage(row) !== undefined && eligibleSessionMessage(state(row.session_id), row.seq)).length
++    inspectSessionMessageRows(db, native).filter(row => extractSessionMessage(db, row) !== undefined && eligibleSessionMessage(state(row.session_id), row.seq)).length
+   )
+@@ -2601,8 +3016,9 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
+ // Message SQL candidate 只做必要条件预筛，最终字段白名单与 eligibility 仍由 extraction 路径决定。
+ function messageCandidate() {
+   // v2 不再按 owner 大小筛选；SQL 只识别有 summary.diffs 的 hot user，v1 projection 由 cold_ref 分支纳入。
+-  return sql`json_extract(${MessageTable.data}, '$.role') = 'user'
+-    and json_array_length(json_extract(${MessageTable.data}, '$.summary.diffs')) > 0`
++  return sql`(json_extract(${MessageTable.data}, '$.role') = 'assistant' or
++    (json_extract(${MessageTable.data}, '$.role') = 'user'
++    and json_array_length(json_extract(${MessageTable.data}, '$.summary.diffs')) > 0))`
+ }
+ 
+ // Part candidate 只做 discriminator 前置筛选，最终字段白名单/eligibility 在 JS extraction 再验证。
+@@ -2615,7 +3031,7 @@ function partCandidate() {
+         and json_extract(${PartTable.data}, '$.state.status') in ('completed', 'error')
+       )
+       or (
+-        json_extract(${PartTable.data}, '$.type') = 'reasoning'
++        json_extract(${PartTable.data}, '$.type') in ('reasoning', 'text')
+       )
+       or (
+         json_extract(${PartTable.data}, '$.type') = 'file'
+@@ -2630,3 +3046,3 @@
+ function sessionMessageCandidate() {
+-  return inArray(SessionMessageTable.type, ["user", "assistant"])
++  return inArray(SessionMessageTable.type, ["user", "assistant", "synthetic"])
+ }
+@@ -2640,3 +3056,3 @@
+-    return inspectSessionMessageRows(db, [row]).some(value => extractSessionMessage(value) !== undefined) &&
++    return inspectSessionMessageRows(db, [row]).some(value => extractSessionMessage(db, value) !== undefined) &&
+       eligibleSessionMessage(eligibility(db, row.session_id, now, olderThanMs), row.seq)
+   }
+@@ -2717,8 +3133,9 @@ function repairToolInputShape(db: TxOrDb) {
+   let fixed = 0
+   for (const row of rows) {
+     // SQL 谓词已保证 tool + completed/error；此分支只收窄 union 类型，不复制第二套判定。
+-    if (row.data.type !== "tool" || (row.data.state.status !== "completed" && row.data.state.status !== "error")) continue
++    if (row.data.type !== "tool" || (row.data.state.status !== "completed" && row.data.state.status !== "error"))
++      continue
+     // 字符串才尝试恢复：其余非 object 形态无第二解析路径，统一空对象占位。
+     const normalized = typeof row.data.state.input === "string" ? parseToolInputObject(row.data.state.input) : {}
+     db.update(PartTable)
+       .set({ data: { ...row.data, state: { ...row.data.state, input: normalized } }, time_updated: row.time_updated })
+@@ -2801,8 +3218,8 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
+       if (payload.kind !== owner) corruptOwners++
+       return
+     }
+-    // packed key 固定 32 bytes，并须存在于成功解析的唯一排序 entry 集合。
+-    if (key.byteLength !== 32 || payload.kind !== packKind(owner)) {
++    // 实际解码entry集合约束版本与slot范围，不以摘要字符串长度猜包格式。
++    if ((key.byteLength !== 4 && key.byteLength !== 32) || payload.kind !== packKind(owner)) {
+       corruptOwners++
+       return
+     }
+@@ -2816,7 +3233,11 @@ function verifyWith(db: TxOrDb, input: { repair: boolean; repairToolInput: boole
+     try {
+       if (!owner.ref || !owner.key) {
+         // hot 与 v1 rows 从未由 v2 writer 生成同行投影；非空值只能来自不完整迁移或外部破坏。
+-        if (owner.stats !== null) throw new CorruptionError({ message: "Non-v2 Part has a cold Stats projection", hash: owner.ref ?? undefined })
++        if (owner.stats !== null)
++          throw new CorruptionError({
++            message: "Non-v2 Part has a cold Stats projection",
++            hash: owner.ref ?? undefined,
++          })
+         continue
+       }
+       const entries = packEntries.get(owner.ref)
+@@ -3092,10 +3513,12 @@ function taskCounter(input: Record<string, unknown>, field: string) {
+ }
+ 
+ function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): MaintenanceCursor {
++  // compress 在 owner 扫描后进入既有包阶段；expand 仍只接受 owner cursor。
++  // 同一个持久任务保留明确阶段，恢复时不能把包 hash 当作 Message ID。
+   // cursor 是已提交批次的恢复锚点，缺失时不能默认从头运行并重复 refcount 写入。
+   // operation 决定唯一 cursor family，验证后 maintain 无需再解释任意 JSON shape。
+   if (!isRecord(input)) throw new ValidationError({ message: "Maintenance task cursor is missing" })
+-  if (operation === "compress" || operation === "expand") {
++  if ((operation === "compress" && input.stage !== "payload") || operation === "expand") {
+     if (
+       (input.owner !== "message" && input.owner !== "part" && input.owner !== "session_message" && input.owner !== "session-summary") ||
+       typeof input.lastID !== "string"
+@@ -3115,7 +3538,7 @@ function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): Ma
+   if (input.stage !== "payload" || typeof input.lastHash !== "string") {
+     throw new ValidationError({ message: "Maintenance task payload cursor is invalid" })
+   }
+-  if (input.lastHash && !/^[0-9a-f]{64}$/.test(input.lastHash)) {
++  if (input.lastHash && !/^(?:[0-9a-f]{64}|[A-Za-z0-9_-]{43})$/.test(input.lastHash)) {
+     throw new ValidationError({ message: "Maintenance task payload cursor hash is invalid" })
+   }
+   return { stage: "payload", lastHash: input.lastHash }
+@@ -3218,6 +3641,265 @@ function taskRequest(prepared: PreparedMaintenance, runtime: MaintenanceRuntime)
+ // nextMessageRows 使用稳定 ID cursor 和 cold_ref 状态实现幂等恢复；已提交 owner 不会在 resume 中重复处理。
+ // compress 追加 SQL candidate 必要条件，expand 则只扫描 cold_ref 非空的真实 owner。
+ // session scope 进入同一 SQL，不能先全库读取后在 JS 过滤导致无意义数据搬运。
++type EntryLocation = { hash: string; key: Buffer }
++
++type NativePackItem = {
++  row: typeof SessionMessageTable.$inferSelect; projection: (typeof SessionMessageTable.$inferSelect)["data"]
++  entry: PackEntry; stats: SessionMessageColdStats | null; oldRef: string | null
++}
++
++// Native freeze和重打包共用完整行切换，slot只由同一包的内容身份映射取得。
++function assignSessionMessagePack(db: TxOrDb, items: NativePackItem[], packed: ReturnType<typeof retainPackPayload>) {
++  const updated = db.insert(SessionMessageTable).values(items.map(item => ({ ...item.row, data: item.projection,
++    cold_ref: packed.hash, cold_key: requiredPackKey(packed, item.entry.key), cold_stats: item.stats })))
++    .onConflictDoUpdate({ target: SessionMessageTable.id, set: { data: sql`excluded.data`, cold_ref: sql`excluded.cold_ref`,
++      cold_key: sql`excluded.cold_key`, cold_stats: sql`excluded.cold_stats`, time_updated: sql`excluded.time_updated` } })
++    .returning({ id: SessionMessageTable.id }).all()
++  if (updated.length !== items.length) throw new CorruptionError({ message: "Native pack assignment is incomplete", hash: packed.hash })
++}
++
++// Map 只保存可由数据库重建的地址；正文仍由 cold_storage 的完整校验拥有。
++// cache 命中不代表引用仍存活，实际复用前需要确认目标包尚在数据库中。
++
++// 重打包收集结果；写计划与写执行分离后，批内目的/源依赖才完整可见。
++type RepackBatch = {
++  messages: MessagePackItem[]
++  parts: PartPackItem[]
++  sessionMessages: NativePackItem[]
++  rawBytes: number
++  compressedBytes: number
++}
++
++// 收集阶段只读源包并解码，不写任何 owner 行；summary 只重编码 frame，不进入 pack 搬运。
++function collectRepackRows(
++  db: TxOrDb,
++  hashes: string[],
++  request: { sessionID?: SessionID },
++  admission: ReturnType<typeof batchEligibility>,
++): RepackBatch {
++  const batch: RepackBatch = { messages: [], parts: [], sessionMessages: [], rawBytes: 0, compressedBytes: 0 }
++  for (const hash of hashes) {
++    const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
++    // 批次之间允许用户删除最后一个 owner；已释放的输入包不再需要搬运。
++    if (!payload) continue
++    if (payload.kind === "session-summary") {
++      // summary 没有 entry slot，只更换 zstd frame，保留其原始内容地址和聚合状态。
++      // 编码级别变化不修改 raw_bytes，也不触发 derived summary 重建。
++      decodeSummary(db, hash)
++      const encoded = compress(decompress(payload.payload))
++      db.update(ColdStorageTable)
++        .set({ payload: encoded, compressed_bytes: encoded.length })
++        .where(eq(ColdStorageTable.hash, hash))
++        .run()
++      batch.rawBytes += payload.raw_bytes
++      batch.compressedBytes += encoded.length
++      continue
++    }
++    if (payload.kind !== "message-pack" && payload.kind !== "part-pack" && payload.kind !== "session-message-pack") continue
++    const owner = payload.kind === "message-pack" ? "message" : payload.kind === "part-pack" ? "part" : "session_message"
++    const entries = decodePack(db, hash, owner)
++    // 先核实真实 owner 数，外部损坏不能借重打包被悄悄修正。
++    // 非本次 Session scope 的 owner 保持旧引用，最后一个引用释放前保留旧包。
++    if (payload.ref_count !== ownerCount(db, hash))
++      throw new CorruptionError({ message: "Repack reference count mismatch", hash })
++    batch.rawBytes += payload.raw_bytes
++    if (owner === "message") {
++      const rows = db
++        .select()
++        .from(MessageTable)
++        .where(
++          and(
++            eq(MessageTable.cold_ref, hash),
++            request.sessionID ? eq(MessageTable.session_id, request.sessionID) : undefined,
++          ),
++        )
++        .all()
++      for (const row of rows) {
++        const fields = row.cold_key && entries.get(row.cold_key.toString("hex"))
++        if (!fields) throw new CorruptionError({ message: "Repack Message entry missing", hash })
++        const full = restorePackedMessage(row.data, fields, hash)
++        // 已完整抽取的 owner 仅换编码，避免反复扫描长 Session 的资格历史。
++        const additional = full.role === "assistant" && !Object.hasOwn(fields, "path")
++        const value = additional && eligible(admission(row.session_id), row.id) ? extractMessageV2(full) : undefined
++        batch.messages.push({
++          row,
++          projection: value?.projection ?? row.data,
++          entry: { key: value?.key ?? entryKey(owner, fields), fields: value?.fields ?? fields },
++          oldRef: hash,
++        })
++      }
++      continue
++    }
++    if (owner === "session_message") {
++      const rows = db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.cold_ref, hash),
++        request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined)).all()
++      for (const row of rows) {
++        const fields = row.cold_key && entries.get(row.cold_key.toString("hex"))
++        if (!fields) throw new CorruptionError({ message: "Repack Native entry missing", hash })
++        const data = restoreSessionMessage(row, { version: 1, owner, fields })
++        const stats = projectSessionMessageStats({ ...row, data })
++        if (canonical(parseSessionMessageStats(row.cold_stats, hash)) !== canonical(stats)) {
++          throw new CorruptionError({ message: "Native cold Stats do not match the payload", hash })
++        }
++        // seq资格不因重编码放宽；旧包正文先完整恢复，新增白名单只作用于仍合格的owner。
++        const value = eligibleSessionMessage(admission(row.session_id), row.seq) ? extractSessionMessage(db, { ...row, data }) : undefined
++        batch.sessionMessages.push({ row, projection: value?.projection ?? row.data, stats,
++          entry: { key: value?.key ?? entryKey(owner, fields), fields: value?.fields ?? fields }, oldRef: hash })
++      }
++      continue
++    }
++    const rows = db
++      .select()
++      .from(PartTable)
++      .where(
++        and(eq(PartTable.cold_ref, hash), request.sessionID ? eq(PartTable.session_id, request.sessionID) : undefined),
++      )
++      .all()
++    for (const row of rows) {
++      const fields = row.cold_key && entries.get(row.cold_key.toString("hex"))
++      if (!fields) throw new CorruptionError({ message: "Repack Part entry missing", hash })
++      const full = restorePackedPart(row.data, fields, hash)
++      const stats = requirePartStats(row, projectPartStats(full))
++      // 重编码同时核实原统计投影，再保存新表示；两个表示承载相同精确数值。
++      // 统计检查失败会回滚整个批次，避免正文正确但报表数值漂移。
++      const additional = full.type === "text" && !Object.hasOwn(fields, "text")
++      const value =
++        additional && eligible(admission(row.session_id), row.message_id)
++          ? extractPartV2(db, full, row.session_id)
++          : undefined
++      batch.parts.push({
++        row,
++        projection: value?.projection ?? row.data,
++        stats,
++        entry: { key: value?.key ?? entryKey(owner, fields), fields: value?.fields ?? fields },
++        oldRef: hash,
++      })
++    }
++  }
++  return batch
++}
++
++// 一批 owner 的写入计划：目的引用、行切换回调与旧包释放清单，执行前不改动任何行。
++type RepackPlan = {
++  targets: Map<string, { owner: OwnerKind; count: number }>
++  assignments: Array<() => void>
++  released: string[]
++}
++
++// 计划一批 owner 的搬运：新正文打成新包，可复用正文按既有包地址分组，统一登记到 plan。
++function planPackWrites<T extends MessagePackItem | PartPackItem | NativePackItem>(
++  db: TxOrDb,
++  owner: OwnerKind,
++  items: T[],
++  assign: (rows: T[], packed: ReturnType<typeof retainPackPayload>) => void,
++  known: Map<string, EntryLocation>,
++  now: number,
++  plan: RepackPlan,
++) {
++  let compressedBytes = 0
++  const schedule = (rows: T[], packed: ReturnType<typeof retainPackPayload>) => {
++    // 同一 hash 的入站引用合并后只 retain 一次，保持其真实 owner 计数校验。
++    // 计划阶段不切行，后续目的包的校验仍看到一致的批次起点。
++    const moved = rows.filter((item) => item.oldRef !== packed.hash)
++    const count = (plan.targets.get(packed.hash)?.count ?? 0) + moved.length
++    plan.targets.set(packed.hash, { owner, count })
++    plan.assignments.push(() => assign(rows, packed))
++    // 一个小 entry 可以有大量共享 owner，逐项收集避免 spread 的调用参数上限。
++    for (const item of moved) {
++      if (item.oldRef) plan.released.push(item.oldRef)
++    }
++  }
++  for (const chunk of splitPacks(owner, items)) {
++    // 新正文和可复用正文共用同一 assignment/release 顺序，只有目的地址不同。
++    // Map 的去重范围可以跨 Session，但每个 owner 仍贡献一次真实引用。
++    const reused = new Map<string, { rows: T[]; keys: Map<string, Buffer> }>()
++    const fresh: T[] = []
++    for (const item of chunk) {
++      const identity = `${owner}:${item.entry.key.toString("hex")}`
++      const location = known.get(identity)
++      // identity map 是性能索引；真实引用生命期始终由数据库负责。
++      if (
++        !location ||
++        !db
++          .select({ hash: ColdStorageTable.hash })
++          .from(ColdStorageTable)
++          .where(eq(ColdStorageTable.hash, location.hash))
++          .get()
++      ) {
++        fresh.push(item)
++        continue
++      }
++      const group = reused.get(location.hash) ?? { rows: [], keys: new Map<string, Buffer>() }
++      group.rows.push(item)
++      group.keys.set(item.entry.key.toString("hex"), location.key)
++      reused.set(location.hash, group)
++    }
++    if (fresh.length) {
++      // 先取得目标包并增加真实移动的引用，随后才切换 owner 的整组存储字段。
++      // source==target 时保持计数，防止幂等维护把仍在使用的包删除。
++      const packed = retainPackPayload(
++        db,
++        owner,
++        fresh.map((item) => item.entry),
++        now,
++      )
++      compressedBytes += packed.compressedBytes
++      schedule(fresh, packed)
++      for (const item of fresh)
++        known.set(`${owner}:${item.entry.key.toString("hex")}`, {
++          hash: packed.hash,
++          key: requiredPackKey(packed, item.entry.key),
++        })
++    }
++    for (const [hash, group] of reused) {
++      // 同一目标包的 owner 一起写入，旧包按实际移动次数统一递减。
++      // 这里只重用完整 entry，部分字段相同不构成可共享业务对象。
++      schedule(group.rows, { hash, keys: group.keys, rawBytes: 0, compressedBytes: 0 })
++    }
++  }
++  return compressedBytes
++}
++
++function repackColdBatch(
++  db: TxOrDb,
++  hashes: string[],
++  request: { sessionID?: SessionID; olderThanMs: number },
++  known: Map<string, EntryLocation>,
++) {
++  const now = Date.now()
++  const admission = batchEligibility(db, now, request.olderThanMs)
++  // 普通批次限制的是 raw payload，而非 owner 数；共享 owner 多也不会重复解码包。
++  // 一个超大历史 entry 仍完整保留，容量目标不能通过截断内容满足。
++  const batch = collectRepackRows(db, hashes, request, admission)
++  const plan: RepackPlan = { targets: new Map(), assignments: [], released: [] }
++  // 回调只在当前 immediate transaction 内同步执行，不延迟到提交之后。
++  // 先收集计划才能看见跨组的目的/源依赖，单组正确并不能保证整批正确。
++  // Message/Part 共用搬运算法，业务字段和统计仍由各自 extractor 拥有。
++  const compressedBytes =
++    batch.compressedBytes +
++    planPackWrites(
++      db,
++      "message",
++      batch.messages,
++      (items, packed) => assignMessagePack(db, items, packed),
++      known,
++      now,
++      plan,
++    ) +
++    planPackWrites(db, "part", batch.parts, (items, packed) => assignPartPack(db, items, packed), known, now, plan) +
++    planPackWrites(db, "session_message", batch.sessionMessages, (items, packed) => assignSessionMessagePack(db, items, packed), known, now, plan)
++  // 目的包也可能是同批其他 owner 的源包；全部目的引用先保留，不能逐组释放。
++  // 分阶段提交同时维持 retain 的真实计数检查，避免已移动 owner 造成中间计数漂移。
++  for (const [hash, target] of plan.targets) {
++    if (target.count) retainPackedReference(db, hash, target.owner, now, target.count)
++  }
++  for (const assign of plan.assignments) assign()
++  // 此时所有入站引用都已落到 owner 表，旧包即使同时是目的包也会保留正确余量。
++  // 引用环按计数结算，不依赖 hash、插入顺序或恢复索引的遍历顺序。
++  decrementReferences(db, plan.released, now)
++  return { processed: batch.messages.length + batch.parts.length + batch.sessionMessages.length, rawBytes: batch.rawBytes, compressedBytes }
++}
++
+ function nextMessageRows(
+   db: TxOrDb,
+   request: { sessionID?: SessionID },
+@@ -3367,6 +4014,8 @@ export async function maintain(
+     }
+ 
+     let done = false
++    let packs: Array<{ hash: string; bytes: number }> | undefined
++    const known = new Map<string, EntryLocation>()
+     while (!done) {
+       runtime.lease.assertOwned()
+       if (runtime.signal?.aborted) {
+@@ -3375,7 +4024,76 @@ export async function maintain(
+         return { type: "task", task }
+       }
+ 
+-      if (request.operation === "compress" || request.operation === "expand") {
++      if (request.operation === "compress" && task.cursor && "stage" in task.cursor) {
++        const cursor = task.cursor
++        if (!packs && cursor.lastHash)
++          await run(() => {
++            // checkpoint 只保存进度；重启从已提交的不可变包重建去重索引。
++            // 索引不持有正文，也不参与引用计数，不能成为第二份持久权威。
++            const committed = db
++              .select({ hash: ColdStorageTable.hash, kind: ColdStorageTable.kind })
++              .from(ColdStorageTable)
++              .where(
++                and(
++                  sql`length(${ColdStorageTable.hash}) = 43`,
++                  inArray(ColdStorageTable.kind, ["message-pack", "part-pack", "session-message-pack"]),
++                ),
++              )
++              .all()
++            for (const payload of committed) {
++              const owner = payload.kind === "message-pack" ? "message" : payload.kind === "part-pack" ? "part" : "session_message"
++              for (const [key, fields] of decodePack(db, payload.hash, owner)) {
++                known.set(`${owner}:${entryKey(owner, fields).toString("hex")}`, {
++                  hash: payload.hash,
++                  key: Buffer.from(key, "hex"),
++                })
++              }
++            }
++          })
++        if (!packs)
++          packs = await run(() =>
++            db
++              .select({ hash: ColdStorageTable.hash, bytes: ColdStorageTable.raw_bytes })
++              .from(ColdStorageTable)
++              .where(
++                and(
++                  gt(ColdStorageTable.hash, cursor.lastHash),
++                  request.sessionID
++                    ? sql`(
++              exists (select 1 from ${MessageTable} where ${MessageTable.cold_ref} = ${ColdStorageTable.hash} and ${MessageTable.session_id} = ${request.sessionID}) or
++              exists (select 1 from ${PartTable} where ${PartTable.cold_ref} = ${ColdStorageTable.hash} and ${PartTable.session_id} = ${request.sessionID}) or
++              exists (select 1 from ${SessionMessageTable} where ${SessionMessageTable.cold_ref} = ${ColdStorageTable.hash} and ${SessionMessageTable.session_id} = ${request.sessionID}) or
++              exists (select 1 from ${SessionTable} where ${SessionTable.summary_ref} = ${ColdStorageTable.hash} and ${SessionTable.id} = ${request.sessionID})
++            )`
++                    : undefined,
++                ),
++              )
++              .orderBy(ColdStorageTable.hash)
++              .all(),
++          )
++        // 固定输入集合避免新 hash 再进入本轮；8 MiB 控制普通批次的解码工作量。
++        // SQLite 事务只覆盖一个批次，取消在提交后的 checkpoint 边界生效。
++        // 固定集合只包含地址和大小，维护内存不随全库正文总量增长。
++        const batch: string[] = []
++        let bytes = 0
++        while (packs.length && (batch.length === 0 || bytes + packs[0].bytes <= REPACK_BATCH_BYTES)) {
++          const row = packs.shift()
++          if (!row) break
++          batch.push(row.hash)
++          bytes += row.bytes
++        }
++        if (!batch.length) {
++          done = true
++          continue
++        }
++        const outcome = await run(() => db.transaction((db) => repackColdBatch(db, batch, request, known), {
++          behavior: "immediate",
++        }))
++        task.cursor = { stage: "payload", lastHash: batch[batch.length - 1] }
++        task.processed += outcome.processed
++        task.rawBytes += outcome.rawBytes
++        task.compressedBytes += outcome.compressedBytes
++      } else if (request.operation === "compress" || request.operation === "expand") {
+         const cold = request.operation === "expand"
+         const olderThanMs = request.operation === "compress" ? request.olderThanMs : 0
+         const cursor = task.cursor
+@@ -3854,10 +4571,10 @@ export async function maintain(
+           if (outcome.empty && cold) {
+             // 三类业务owner结束后才展开summary，不能越过Native阶段提前完成。
+             task.cursor = { owner: "session-summary", lastID: "" }
+             await checkpoint()
+             continue
+           }
+-          if (outcome.empty) done = true
++          if (outcome.empty) task.cursor = { stage: "payload", lastHash: "" }
+           else {
+             task.cursor = outcome.cursor
+             task.processed += outcome.processed
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+index 271a007ade0441afd6796ac8a3baded1a96daaef..92b0af86e078764dbf89b9e6c1ddffa645fa6fb9 100644
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -278,6 +278,1 @@
+-        // #121：V2 list 与 opencode 共用 searchCondition
+-        if (input.search) {
+-          const condition = searchCondition(input.search)
+-          if (condition) conditions.push(condition)
+-        }
+         if (input.anchor) {
+@@ -293,8 +288,16 @@
+                 )!,
+           )
+         }
++        const search = input.search
++        if (search) {
++          // 原生V2先保留实际placement与anchor合同，再限定legacy冷正文匹配范围。
++          const condition = yield* Database.withSync(database, (sync) =>
++            searchCondition(sync, search, { scope: and(...conditions) }),
++          )
++          if (condition) conditions.push(condition)
++        }
+         const query = db
+           // 列表和 get 返回同一请求口径，列表刷新不能擦掉已加载的请求身份。
+           // 继续使用既有分页与 placement 条件，投影不改变成员或排序。
+           .select(selection)
+           .from(SessionTable)
+diff --git a/packages/opencode/test/server/session-messages.test.ts b/packages/opencode/test/server/session-messages.test.ts
+index bdcb42c44cff02438da10cb23711f1638a27fd31..9e43cfe9c78fc8a0efe57e2ce6a6ff4e148a0585 100644
+--- a/packages/opencode/test/server/session-messages.test.ts
++++ b/packages/opencode/test/server/session-messages.test.ts
+@@ -301,7 +301,7 @@ describe("session messages endpoint", () => {
+         expect(projectedBody[0]?.parts).toMatchObject([{ type: "text", text: "visible message" }])
+         expect(yield* readColdRef).toBe(frozen)
+ 
+-        // 默认 bounded API 是 Web App/SDK 的完整合同；它必须返回并 thaw 同一份 summary。
++        // 默认 API 保留完整 summary 返回值，同时查看操作继续保持持久冷态。
+         const complete = yield* request(`/session/${session.id}/message?limit=1`)
+         expect(complete.status).toBe(200)
+         const completeBody = yield* json<SessionV1.WithParts[]>(complete)
+@@ -310,7 +310,7 @@ describe("session messages endpoint", () => {
+           body: "summary body",
+           diffs: [{ file: "large.txt", patch, additions: 512, deletions: 0, status: "modified" }],
+         })
+-        expect(yield* readColdRef).toBeNull()
++        expect(yield* readColdRef).toBe(frozen)
+       }),
+     ),
+     { git: true },
+diff --git a/packages/opencode/test/session/messages-pagination.test.ts b/packages/opencode/test/session/messages-pagination.test.ts
+index 715ede35096c1e7b15df9c5fe5c1a1a3a79eacb1..e9775e68bbc287c84e5542a84253e34eb81460d7 100644
+--- a/packages/opencode/test/session/messages-pagination.test.ts
++++ b/packages/opencode/test/session/messages-pagination.test.ts
+@@ -803,7 +803,8 @@ describe("Session.findMessage", () => {
+           matchedPart?.type === "tool" && matchedPart.state.status === "completed" ? matchedPart.state.output : undefined,
+         ).toBe(output)
+         expect(Option.isSome(match) ? match.value.parts.some((part) => part.id === hiddenPartID) : true).toBe(false)
+-        expect(sessionColdOwners(sync, sessionID)).toBe(0)
++        // 命中返回完整值，持久冷态由显式展开或执行窗口预热改变。
++        expect(sessionColdOwners(sync, sessionID)).toBe(1)
+       }),
+     ),
+   )
+diff --git a/packages/opencode/test/storage/cold-v3.test.ts b/packages/opencode/test/storage/cold-v3.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec881bd72db3134c9a570aae8c8720b8285e1c2a
+--- /dev/null
++++ b/packages/opencode/test/storage/cold-v3.test.ts
+@@ -0,0 +1,463 @@
++import { expect } from "bun:test"
++import { createHash } from "node:crypto"
++import { Effect } from "effect"
++import { eq } from "drizzle-orm"
++import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
++import { Database } from "@opencode-ai/core/database/database"
++import { Session } from "@/session/session"
++import { MessageV2 } from "@/session/message-v2"
++import { MessageID, PartID } from "@/session/schema"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import { ColdStorageTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { SessionProjector } from "@opencode-ai/core/session/projector"
++import { testEffect } from "../lib/effect"
++
++// 真实业务层图共享同一连接；隔离运行目录不连接用户正在使用的数据库。
++const it = testEffect(LayerNode.compile(LayerNode.group([Session.node, MessageV2.node, SessionProjector.node, Database.node])))
++
++const withDb = <A>(body: (db: ColdStorage.TxOrDb) => A) => Effect.gen(function* () {
++  const database = yield* Database.Service
++  return yield* Database.withSync(database, body)
++})
++
++it.instance("manual cold Text preserves complete reads and root Text", () =>
++  Effect.gen(function* () {
++    const sessions = yield* Session.Service
++    const root = yield* sessions.create({ title: "cold v3 root" })
++    const child = yield* sessions.create({ parentID: root.id, agent: "permission-reviewer" })
++    const text = "review transcript 中文 % _\n".repeat(1024)
++    // 字面量通配符与中文同时覆盖 SQL 子串语义，不能因冷冻改成 LIKE 模糊匹配。
++    // 同样的正文分别放在根和子 Session，锁定搜索正文的冷冻边界。
++    for (const session of [root, child]) {
++      const messageID = MessageID.ascending()
++      const id = PartID.ascending()
++      yield* sessions.updateMessage({
++        id: messageID,
++        sessionID: session.id,
++        role: "user",
++        agent: "permission-reviewer",
++        time: { created: 1 },
++        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++      })
++      yield* sessions.updatePart({ id, messageID, sessionID: session.id, type: "text", text })
++      // eligibility 使用持久 chronology，而不是业务 JSON 中的 created 字段。
++      yield* withDb((db) => db.update(MessageTable).set({ time_created: 1 }).where(eq(MessageTable.id, messageID)).run())
++      const frozen = yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id, olderThanMs: 0 }))
++      expect(frozen.type).toBe(session.id === child.id ? "frozen" : "skipped")
++      const before = yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get())
++      const result = yield* MessageV2.get({ sessionID: session.id, messageID })
++      expect(result.parts).toEqual([
++        expect.objectContaining({ id, messageID, sessionID: session.id, type: "text", text }),
++      ])
++      // 查看返回完整值，同时保留持久冷态；显式 expand 才负责反向写回。
++      expect(yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get())).toEqual(before)
++      if (session.id === child.id) {
++        expect((yield* sessions.list({ search: "中文 % _" })).some((item) => item.id === child.id)).toBe(true)
++        // 完整读取之后再显式展开，区分返回值恢复和数据库持久恢复两个合同。
++        expect(yield* withDb((db) => ColdStorage.thawOwner(db, { type: "part", id }))).toBe(true)
++        expect((yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get()))?.cold_ref).toBeNull()
++      }
++    }
++  }),
++)
++
++it.instance("compact packs retain full content and exact tool statistics", () =>
++  Effect.gen(function* () {
++    const database = yield* Database.Service
++    const sessions = yield* Session.Service
++    const session = yield* sessions.create({})
++    const messageID = MessageID.ascending()
++    yield* sessions.updateMessage({
++      id: messageID,
++      sessionID: session.id,
++      role: "user",
++      agent: "build",
++      time: { created: 1 },
++      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++    })
++    const id = PartID.ascending()
++    const value = {
++      // 固定名称、callID 和时间，完整对象相等同时保护用户要求常驻热表的身份字段。
++      id,
++      messageID,
++      sessionID: session.id,
++      type: "tool" as const,
++      tool: "read",
++      callID: "call-v3",
++      state: {
++        status: "completed" as const,
++        input: {},
++        output: "content".repeat(1000),
++        title: "read",
++        metadata: { exact: true },
++        time: { start: 10, end: 20 },
++      },
++    }
++    yield* sessions.updatePart(value)
++    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id, olderThanMs: 0 }))).type).toBe("frozen")
++    const row = yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get())
++    if (!row) throw new Error("Tool owner disappeared")
++    // 检查存储定位开销，同时完整哈希校验仍由公开 verify 承担。
++    expect(row.cold_key?.length).toBe(4)
++    expect(row.cold_ref?.length).toBe(43)
++    // {} 的 JSON 长度为 2，正文固定为 7000 字符，期望值独立于统计实现。
++    expect(yield* withDb((db) => ColdStorage.inspectPartStats(db, [row]))).toEqual([
++      { version: 1, type: "tool", inputChars: 2, outputChars: 7000 },
++    ])
++    expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
++    // verify 覆盖引用数和内容完整性，短 locator 不能以降低校验强度换取空间。
++    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
++      corruptOwners: 0,
++      corruptPayloads: 0,
++      refCountMismatches: 0,
++    })
++    // 构造已发布 v2 字节协议，验证维护命令会升级存量数据而非只处理新行。
++    const ownerRef = row.cold_ref
++    if (!ownerRef) throw new Error("Tool owner lost its cold reference")
++    const packed = yield* withDb((db) => db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ownerRef)).all()[0])
++    const fields = {
++      // 直接给定旧协议字段，避免调用新 writer 生成旧格式而形成同源自证。
++      "state.input": {},
++      "state.metadata": { exact: true },
++      "state.output": value.state.output,
++      "state.title": "read",
++    }
++    const legacyKey = createHash("sha256").update("part\0").update(JSON.stringify(fields)).digest()
++    // owner 前缀隔离 Message 与 Part；旧 frame 必须是真实可读的已发布格式。
++    const raw = Buffer.from(
++      JSON.stringify({ entries: [{ fields, key: legacyKey.toString("hex") }], owner: "part", version: 2 }),
++    )
++    const hash = createHash("sha256").update("part-pack\0").update(raw).digest("hex")
++    const payload = Buffer.from(Bun.zstdCompressSync(raw))
++    yield* withDb((sync) => sync.transaction((db) => {
++      // 先建立旧包再切引用，夹具也遵守 RESTRICT 外键及原子替换顺序。
++      db.insert(ColdStorageTable)
++        .values({ ...packed, hash, payload, raw_bytes: raw.length, compressed_bytes: payload.length })
++        .run()
++      db.update(PartTable).set({ cold_ref: hash, cold_key: legacyKey }).where(eq(PartTable.id, id)).run()
++      db.delete(ColdStorageTable).where(eq(ColdStorageTable.hash, packed.hash)).run()
++    }))
++    const prepared = ColdStorage.prepareMaintenance({
++      operation: "compress",
++      sessionID: session.id,
++      olderThanMs: 0,
++      batchSize: 10,
++    })
++    const controller = new AbortController()
++    // 在已提交 payload checkpoint 中断，验证真正的恢复边界而非未开始的任务。
++    const interrupted = yield* Effect.promise(() =>
++      ColdStorage.maintain(database.sync, prepared, {
++        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
++        lease: { assertOwned() {} },
++        signal: controller.signal,
++        checkpoint: async (task) => {
++          if (task.cursor && "stage" in task.cursor && task.cursor.lastHash) controller.abort()
++        },
++      }),
++    )
++    if (interrupted.type !== "task") throw new Error("Expected maintenance task")
++    expect(interrupted.task.status).toBe("interrupted")
++    // 通过公开持久 record parser 恢复，覆盖新 payload cursor 和重建后的引用索引。
++    const task = ColdStorage.parseMaintenanceTask(interrupted.task)
++    const resumed = yield* Effect.promise(() =>
++      ColdStorage.maintain(database.sync, prepared, {
++        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
++        task,
++        lease: { assertOwned() {} },
++        checkpoint: async () => {},
++      }),
++    )
++    expect(resumed.type === "task" && resumed.task.status).toBe("completed")
++    // 恢复后的完整值再与原输入比较，成功状态本身不能证明迁移保真。
++    expect((yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, id)).get()))?.cold_key?.length).toBe(
++      4,
++    )
++    expect((yield* MessageV2.get({ sessionID: session.id, messageID })).parts).toEqual([value])
++    expect(yield* withDb((db) => ColdStorage.thawOwner(db, { type: "part", id }))).toBe(true)
++    expect(yield* withDb((db) => db.select().from(ColdStorageTable).all())).toHaveLength(0)
++    // 最后一个 owner 展开后释放包，防止逻辑成功却遗留冗余冷内容。
++  }),
++)
++
++it.instance("manual freeze admits a completed reviewer attempt in an active child", () =>
++  Effect.gen(function* () {
++    const sessions = yield* Session.Service
++    const root = yield* sessions.create({})
++    const child = yield* sessions.create({ parentID: root.id, agent: "permission-reviewer" })
++    const request = MessageID.ascending()
++    const breakdown = {
++      system: 10,
++      instructions: 20,
++      skills: 0,
++      tools: 30,
++      messages: {
++        userText: 40,
++        assistantText: 0,
++        reasoning: 0,
++        toolInput: 0,
++        toolOutput: 0,
++        attachments: 0,
++        total: 40,
++      },
++    }
++    // 新 request 使用当前时间，确保该用例命中 completed-attempt 分支而非 24h 闲置。
++    const reply = MessageID.ascending()
++    const id = PartID.ascending()
++    yield* sessions.updateMessage({
++      id: request,
++      sessionID: child.id,
++      role: "user",
++      agent: "permission-reviewer",
++      time: { created: Date.now() },
++      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++    })
++    yield* sessions.updatePart({
++      id,
++      messageID: request,
++      sessionID: child.id,
++      type: "text",
++      text: "completed review request",
++      metadata: { permissionReviewerRequest: true, reviewID: "review-v3" },
++    })
++    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id }))).type).toBe("skipped")
++    // 请求已经存在还不足以冷冻，必须具备其关联执行的完成事实。
++    // 仍在使用的 reviewer Session 可以包含已完成 attempt，资格按关联消息确定。
++    yield* sessions.updateMessage({
++      id: reply,
++      sessionID: child.id,
++      role: "assistant",
++      parentID: request,
++      agent: "permission-reviewer",
++      mode: "permission-reviewer",
++      path: { cwd: ".", root: "." },
++      time: { created: Date.now(), completed: Date.now() },
++      finish: "stop",
++      cost: 0,
++      tokens: { input: 12, output: 3, reasoning: 2, cache: { read: 4, write: 0 } },
++      inputEstimate: { bodyChars: 100, input: 25, confirmed: false, inputBreakdown: breakdown },
++      providerID: ProviderV2.ID.make("test"),
++      modelID: ModelV2.ID.make("test"),
++    })
++    const toolID = PartID.ascending()
++    // timeout 路径可能先写 assistant.completed 再收尾 Tool，锁住这个真实写入间隙。
++    yield* sessions.updatePart({
++      id: toolID,
++      messageID: reply,
++      sessionID: child.id,
++      type: "tool",
++      tool: "read",
++      callID: "pending-review",
++      state: { status: "running", input: {}, time: { start: 1 } },
++    })
++    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id }))).type).toBe("skipped")
++    yield* sessions.updatePart({
++      id: toolID,
++      messageID: reply,
++      sessionID: child.id,
++      type: "tool",
++      tool: "read",
++      callID: "pending-review",
++      state: { status: "error", input: {}, error: "cancelled", time: { start: 1, end: 2 } },
++    })
++    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id }))).type).toBe("frozen")
++    const result = yield* MessageV2.get({ sessionID: child.id, messageID: request })
++    expect(result.parts[0]).toMatchObject({ text: "completed review request", metadata: { reviewID: "review-v3" } })
++    expect((yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "message", id: reply }))).type).toBe("frozen")
++    const restored = yield* MessageV2.get({ sessionID: child.id, messageID: reply })
++    expect(restored.info).toMatchObject({
++      path: { cwd: ".", root: "." },
++      tokens: { input: 12, output: 3, reasoning: 2 },
++    })
++    // TUI viewer 同样需要完整 assistant path，不能接收仅供内部 predicate 的 HotInfo。
++    const page = yield* MessageV2.page({ sessionID: child.id, limit: 10, messageProjection: "viewer" })
++    expect(page.items.find((item) => item.info.id === reply)?.info).toMatchObject({ path: { cwd: ".", root: "." } })
++    // 搜索必须同时覆盖冷子正文与原有热字段，不能只验证根 Session。
++    expect((yield* sessions.list({ search: "completed request" })).some((item) => item.id === child.id)).toBe(true)
++    const fork = yield* sessions.fork({ sessionID: child.id })
++    // 新 root 的正文必须可直接搜索，源 child 仍可保留自己的冷引用。
++    expect(
++      (yield* sessions.list({ search: "completed request", roots: true })).some((item) => item.id === fork.id),
++    ).toBe(true)
++    // 按 reviewer 的真实调用顺序隐藏完成 attempt，冷诊断字段必须随完整 Info 保留。
++    const hidden = { time: Date.now(), reason: "permission-reviewer-protocol-retry" as const }
++    yield* sessions.updateMessage({ ...result.info, hidden })
++    yield* sessions.updateMessage({ ...restored.info, hidden })
++    const hiddenReply = yield* MessageV2.get({ sessionID: child.id, messageID: reply, includeHidden: true })
++    expect(hiddenReply.info).toEqual({ ...restored.info, hidden })
++    expect(hiddenReply.info).toMatchObject({ inputEstimate: { bodyChars: 100, input: 25, confirmed: false, inputBreakdown: breakdown } })
++    expect((yield* MessageV2.page({ sessionID: child.id, limit: 10 })).items).toHaveLength(0)
++    const text = result.parts.find((part) => part.type === "text")
++    if (!text) throw new Error("Reviewer request Text missing")
++    // 冷 Text 的完整 replacement 释放旧引用，同时保留 reviewID 等业务 metadata。
++    yield* sessions.updatePart({ ...text, text: "revised reviewer request" })
++    const revised = yield* MessageV2.get({ sessionID: child.id, messageID: request, includeHidden: true })
++    expect(revised.parts).toContainEqual({ ...text, text: "revised reviewer request" })
++    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
++      corruptOwners: 0,
++      corruptPayloads: 0,
++      refCountMismatches: 0,
++    })
++  }),
++)
++
++it.instance("resumed repack retains every destination until all owners move", () =>
++  Effect.gen(function* () {
++    const database = yield* Database.Service
++    const sessions = yield* Session.Service
++    const session = yield* sessions.create({ title: "repack destination cycle" })
++    const messageID = MessageID.ascending()
++    yield* sessions.updateMessage({
++      id: messageID,
++      sessionID: session.id,
++      role: "user",
++      agent: "build",
++      time: { created: 1 },
++      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++    })
++    const fields = (output: string) => ({
++      "state.input": {},
++      "state.metadata": {},
++      "state.output": output,
++      "state.title": "cycle regression",
++    })
++    const x = fields("cycle-x-0"),
++      y = fields("cycle-y-0")
++    const digest = (owner: string, value: object) =>
++      createHash("sha256")
++        .update(owner + "\0")
++        .update(JSON.stringify(value))
++        .digest()
++    const pack = (entries: ReturnType<typeof fields>[]) => {
++      const sorted = entries.toSorted((a, b) => Buffer.compare(digest("part", a), digest("part", b)))
++      const raw = Buffer.from(JSON.stringify({ entries: sorted, owner: "part", version: 3 }))
++      const hash = createHash("sha256").update("part-pack\0").update(raw).digest("base64url")
++      return { entries: sorted, hash, raw, payload: Buffer.from(Bun.zstdCompressSync(raw)) }
++    }
++    const p = pack([x, y]),
++      q = pack([x]),
++      r = pack([y])
++    expect(p.hash < q.hash).toBe(true)
++    const checkpointID = PartID.ascending()
++    yield* sessions.updatePart({
++      id: checkpointID,
++      messageID,
++      sessionID: session.id,
++      type: "tool",
++      tool: "read",
++      callID: "checkpoint",
++      state: {
++        status: "completed",
++        input: {},
++        output: "checkpoint-29",
++        title: "cycle regression",
++        metadata: {},
++        time: { start: 1, end: 2 },
++      },
++    })
++    yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id: checkpointID, olderThanMs: 0 }))
++    const prepared = ColdStorage.prepareMaintenance({
++      operation: "compress",
++      sessionID: session.id,
++      olderThanMs: 0,
++      batchSize: 10,
++    })
++    const controller = new AbortController()
++    // 先运行真实批次取得 checkpoint，再通过正常删除形成已释放的旧输入包。
++    const interrupted = yield* Effect.promise(() =>
++      ColdStorage.maintain(database.sync, prepared, {
++        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
++        lease: { assertOwned() {} },
++        signal: controller.signal,
++        checkpoint: async (task) => {
++          if (task.cursor && "stage" in task.cursor && task.cursor.lastHash) controller.abort()
++        },
++      }),
++    )
++    if (interrupted.type !== "task" || !interrupted.task.cursor || !("stage" in interrupted.task.cursor))
++      throw new Error("Missing payload checkpoint")
++    expect(interrupted.task.status).toBe("interrupted")
++    expect(interrupted.task.cursor.lastHash < p.hash).toBe(true)
++    yield* sessions.removePart({ sessionID: session.id, messageID, partID: checkpointID })
++    // P 中 x 已无 owner；这与正常删除一个共享包 owner 后的持久状态一致。
++    // 插入顺序 Q/P/R 让恢复索引选择 x->P、y->R，输入 hash 顺序则先搬走 P 的 y。
++    // 只描述合法持久布局，不调用被测重打包函数来生成预期目的关系。
++    const records = [
++      { pack: q, value: x },
++      { pack: p, value: y },
++      { pack: r, value: y },
++    ]
++    for (const record of records) {
++      const id = PartID.ascending()
++      const value = {
++        id,
++        messageID,
++        sessionID: session.id,
++        type: "tool" as const,
++        tool: "read",
++        callID: id,
++        state: {
++          status: "completed" as const,
++          input: {},
++          output: record.value["state.output"],
++          title: "cycle regression",
++          metadata: {},
++          time: { start: 1, end: 2 },
++        },
++      }
++      yield* sessions.updatePart(value)
++      const slot = Buffer.alloc(4)
++      slot.writeUInt32LE(record.pack.entries.indexOf(record.value))
++      yield* withDb((sync) => sync.transaction((db) => {
++        db.insert(ColdStorageTable)
++          .values({
++            hash: record.pack.hash,
++            kind: "part-pack",
++            codec: "zstd",
++            payload: record.pack.payload,
++            raw_bytes: record.pack.raw.length,
++            compressed_bytes: record.pack.payload.length,
++            ref_count: 1,
++            time_created: 1,
++            time_updated: 1,
++          })
++          .run()
++        db.update(PartTable)
++          .set({
++            data: { type: "tool", tool: "read", callID: id, state: { ...value.state, output: "", title: "" } },
++            cold_ref: record.pack.hash,
++            cold_key: slot,
++            cold_stats: [2, 0, 2, value.state.output.length],
++          })
++          .where(eq(PartTable.id, id))
++          .run()
++      }))
++    }
++    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
++      corruptOwners: 0,
++      corruptPayloads: 0,
++      refCountMismatches: 0,
++    })
++    // 原始任务参数和实际持久 cursor 原样恢复，不伪造进度或修改 Session scope。
++    const task = ColdStorage.parseMaintenanceTask(interrupted.task)
++    const result = yield* Effect.promise(() =>
++      ColdStorage.maintain(database.sync, prepared, {
++        task, lease: { assertOwned() {} }, checkpoint: async () => {},
++        run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)),
++      }),
++    )
++    expect(result.type === "task" && result.task.status).toBe("completed")
++    const message = yield* MessageV2.get({ sessionID: session.id, messageID })
++    expect(
++      message.parts.flatMap((part) =>
++        part.type === "tool" && part.state.status === "completed" ? [part.state.output] : [],
++      ),
++    ).toEqual(["cycle-x-0", "cycle-y-0", "cycle-y-0"])
++    expect(yield* withDb((db) => ColdStorage.verify(db, { repair: false }))).toMatchObject({
++      corruptOwners: 0,
++      corruptPayloads: 0,
++      refCountMismatches: 0,
++    })
++  }),
++)
+diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
+index ec6d4ebe8b7859193c63ffc515d0fd604ce228fc..35b6875b1e859f090257385ea62f0539b556595b 100644
+--- a/packages/opencode/test/storage/cold.test.ts
++++ b/packages/opencode/test/storage/cold.test.ts
+@@ -254,13 +254,13 @@ describe.serial("ColdStorage", () => {
+       expect(coldOwnerCount(sync, [session.id])).toBe(1)
+ 
+       // 断言走真实业务读取 seam，而不是直接查询 projection/cold blob。
+-      // 首次读取应同步 thaw 并持久回填；第二次读取因此不再依赖 cold payload。
++      // 两次完整读取均透明恢复正文，并保持用户显式维护建立的冷态。
+       const first = yield* MessageV2.get({ sessionID: session.id, messageID })
+       const firstTool = first.parts.find((part) => part.id === partID)
+       expect(
+         firstTool?.type === "tool" && firstTool.state.status === "completed" ? firstTool.state.output : undefined,
+       ).toBe(output)
+-      expect(coldOwnerCount(sync, [session.id])).toBe(0)
++      expect(coldOwnerCount(sync, [session.id])).toBe(1)
+ 
+       const second = yield* MessageV2.get({ sessionID: session.id, messageID })
+       const secondTool = second.parts.find((part) => part.id === partID)
+@@ -476,7 +476,7 @@ describe.serial("ColdStorage", () => {
+           ? restoredTool.state.attachments?.[0]?.url
+           : undefined,
+       ).toBe(attachmentURL)
+-      expect(coldOwnerCount(sync, [session.id])).toBe(0)
++      expect(coldOwnerCount(sync, [session.id])).toBe(4)
+       yield* sessions.remove(session.id)
+     }),
+   )
+@@ -1286,6 +1286,9 @@ describe.serial("ColdStorage", () => {
+       expect(
+         childTool?.type === "tool" && childTool.state.status === "completed" ? childTool.state.output : undefined,
+       ).toBe(output)
++      // 显式 thaw 只释放当前 fork owner，普通完整读取保持共享引用。
++      if (!childPart) throw new Error("Fork Part missing")
++      expect(ColdStorage.thawOwner(sync, { type: "part", id: childPart.id })).toBe(true)
+       expect(coldOwnerCount(sync, [source.id, child.id])).toBe(1)
+ 
+       const thawedSource = yield* MessageV2.get({ sessionID: source.id, messageID })
+@@ -1293,6 +1296,7 @@ describe.serial("ColdStorage", () => {
+       expect(
+         sourceTool?.type === "tool" && sourceTool.state.status === "completed" ? sourceTool.state.output : undefined,
+       ).toBe(output)
++      expect(ColdStorage.thawOwner(sync, { type: "part", id: partID })).toBe(true)
+       expect(coldOwnerCount(sync, [source.id, child.id])).toBe(0)
+       yield* sessions.remove(child.id)
+       yield* sessions.remove(source.id)
+@@ -1772,7 +1776,8 @@ describe.serial("ColdStorage", () => {
+       )
+       expect(compressed.type).toBe("task")
+       expect(compressed.type === "task" ? compressed.task.status : undefined).toBe("completed")
+-      expect(coldOwnerCount(sync, [session.id])).toBe(1)
++      // assistant path 与 Tool payload 分别由各自 owner 冷冻。
++      expect(coldOwnerCount(sync, [session.id])).toBe(2)
+       expect(checkpoints.some((task) => task.status === "running")).toBe(true)
+ 
+       const expanded = yield* Effect.promise(() =>
+@@ -1942,7 +1947,7 @@ describe.serial("ColdStorage", () => {
+         ),
+       )
+       expect(resumed.type === "task" ? resumed.task.status : undefined).toBe("completed")
+-      expect(coldOwnerCount(sync, [session.id])).toBe(1)
++      expect(coldOwnerCount(sync, [session.id])).toBe(2)
+       yield* sessions.remove(session.id)
+     }),
+   )
+@@ -2037,7 +2042,8 @@ describe.serial("Packed ColdStorage V2", () => {
+         ColdStorage.maintain(
+         sync,
+           ColdStorage.prepareMaintenance({
+             operation: "compress",
++            sessionID: session.id,
+             olderThanMs: 0,
+             batchSize: ColdStorage.DEFAULT_BATCH_SIZE,
+           }),
+@@ -2096,6 +2102,8 @@ describe.serial("Packed ColdStorage V2", () => {
+       const test = yield* TestInstance
+       const sessions = yield* SessionNs.Service
+       const session = yield* sessions.create({ title: "status raw F4 pack" })
++      // 普通查看现在保留旧测试的冷 owner；此统计夹具显式建立独立冷集合。
++      ColdStorage.expand(sync, { all: true })
+       // 两个不同 patch 强制不同 entry key，排除「碰巧同 key 共享」把 pure pack 变成 entry_shared。
+       yield* addCompletedSummaryEdit(sessions, {
+         sessionID: session.id,
+@@ -2105,7 +2113,7 @@ describe.serial("Packed ColdStorage V2", () => {
+       })
+       yield* addCompletedSummaryEdit(sessions, {
+         sessionID: session.id,
+-        directory: test.directory,
++        directory: path.join(test.directory, "second"),
+         file: "src/status-b.ts",
+         patch: "+status-b\n",
+       })
+@@ -2114,7 +2122,8 @@ describe.serial("Packed ColdStorage V2", () => {
+         ColdStorage.maintain(
+           sync,
+           ColdStorage.prepareMaintenance({
+             operation: "compress",
++            sessionID: session.id,
+             olderThanMs: 0,
+             batchSize: ColdStorage.DEFAULT_BATCH_SIZE,
+           }),
+@@ -2710,12 +2719,11 @@ describe.serial("Packed ColdStorage V2", () => {
+       expect(page.items).toHaveLength(1)
+       // page limit=1 同时断言 more=true，证明第二条仅作为范围探针而非被 hydrate 的 item。
+       expect(page.more).toBe(true)
+-      // cold owner 数从 3 到 2 是持久预热范围的数据库证据，不断言内部 SQL 次数。
+-      expect(coldOwnerCount(sync, [session.id])).toBe(2)
+-      // explicit no-limit consumer 随后降到 0，保护 export/Revert 类完整历史合同。
++      // 页面与完整历史读取都恢复业务值，均不改变持久冷态。
++      expect(coldOwnerCount(sync, [session.id])).toBe(3)
+       expect(yield* sessions.messages({ sessionID: session.id })).toHaveLength(3)
+       // 原始文本可由完整 suite 的 Message round-trip覆盖，本例只锁定选择范围和 owner 生命周期。
+-      expect(coldOwnerCount(sync, [session.id])).toBe(0)
++      expect(coldOwnerCount(sync, [session.id])).toBe(3)
+     }),
+   )
+ 
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -119,3 +119,3 @@
+   const matched = cache?.boundary === boundary ? mismatch < 0 ? rows.length : mismatch : 0
+-  const suffix = yield* ColdStorage.readSessionMessageRows(db, rows.slice(matched))
++  const suffix = yield* ColdStorage.readSessionMessageRows(db, rows.slice(matched), "execution")
+   const decoded = yield* Effect.forEach(suffix, (row) =>
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -88,5 +88,31 @@
+-      const title = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha", { mode: "title" })).all().pipe(Effect.orDie)
++      const title = yield* Database.withSync({ db, sync: db.sync }, sync => sync.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition(sync, "alpha", { mode: "title" })).all())
+       expect(title.map(row => row.id).toSorted()).toEqual(ids.slice(0, 2).toSorted())
+-      const cross = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition("alpha beta", { mode: "title" })).all().pipe(Effect.orDie)
++      const cross = yield* Database.withSync({ db, sync: db.sync }, sync => sync.select({ id: SessionTable.id }).from(SessionTable).where(searchCondition(sync, "alpha beta", { mode: "title" })).all())
+       expect(cross).toEqual([])
++      // 同一真实用户投影改为闲置子会话，冷正文仍参与原跨字段交集。
++      yield* db.update(SessionTable).set({ parent_id: ids[3] }).where(inArray(SessionTable.id, [ids[0], ids[2]])).run().pipe(Effect.orDie)
++      const coldIDs = [0, 2].map(index => SessionMessage.ID.make(`msg_search_${index}`))
++      yield* db.update(SessionMessageTable).set({ time_created: 0 }).where(inArray(SessionMessageTable.id, coldIDs)).run().pipe(Effect.orDie)
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        for (const id of coldIDs) {
++          expect(ColdStorage.freezeOwner(sync, { type: "session_message", id, now: Date.now() }).type).toBe("frozen")
++          const row = sync.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, id)).get()
++          expect(row?.cold_key?.byteLength).toBe(4)
++          expect(row?.data).toMatchObject({ text: "" })
++        }
++      })
++      const cold = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, coldIDs)).all().pipe(Effect.orDie)
++      expect(cold).toHaveLength(2)
++      expect(yield* search("alpha beta")).toEqual([ids[0], ids[2]].toSorted())
++      expect(yield* sessions.message({ sessionID: ids[0], messageID: coldIDs[0] })).toMatchObject({ text: "contains beta token" })
++      // 搜索及公开读取不消费引用，完整字段只恢复到本次返回值。
++      expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, coldIDs)).all().pipe(Effect.orDie)).toEqual(cold)
++      const cache = SessionHistory.makeCache()
++      const window = yield* SessionHistory.entriesForRunner(db, ids[0], -1, cache)
++      expect(window.map(entry => entry.message.id)).toEqual([coldIDs[0]])
++      expect(window[0]?.message).toMatchObject({ text: "contains beta token" })
++      // 只有选中的执行窗口变热，另一个子会话和已验证的搜索结果保持不变。
++      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, coldIDs[0])).get().pipe(Effect.orDie))?.cold_ref).toBeNull()
++      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, coldIDs[1])).get().pipe(Effect.orDie))?.cold_ref).toBeTruthy()
++      expect(yield* search("alpha beta")).toEqual([ids[0], ids[2]].toSorted())
+     }),
+@@ -124,3 +150,26 @@
+         expect(ColdStorage.parseMaintenanceRequest({ operation: "compress" })).toMatchObject({ olderThanMs: 7 * day })
+       })
++      // 同一活跃reviewer子会话中，真实请求身份仅允许完成且无open工具的尝试提前归档。
++      const reviewer = SessionV2.ID.make("ses_native_review_completed")
++      yield* db.insert(SessionTable).values({ id: reviewer, parent_id: parent, project_id: Project.ID.global, slug: reviewer, directory: "/project", title: "reviewer", version: "test", time_updated: now }).run().pipe(Effect.orDie)
++      const timestamp = DateTime.makeUnsafe(now)
++      for (const [index, complete] of [true, false].entries()) {
++        const request = SessionMessage.ID.make(`msg_native_review_request_${index}`)
++        const reply = SessionMessage.ID.make(`msg_native_review_reply_${index}`)
++        const messages = [
++          SessionMessage.Synthetic.make({ id: request, sessionID: reviewer, type: "synthetic", text: "review request", metadata: { permissionReviewerRequest: true }, time: { created: timestamp } }),
++          SessionMessage.Assistant.make({ id: reply, type: "assistant", agent: "permission-reviewer", model, metadata: { permissionReviewerRequestID: request }, content: [{ type: "text", id: "answer", text: "review answer" }], time: { created: timestamp, ...(complete ? { completed: timestamp } : {}) } }),
++        ]
++        yield* db.insert(SessionMessageTable).values(messages.map((message, offset) => {
++          const { id, type, ...data } = encodeMessage(message)
++          return { id: SessionMessage.ID.make(id), type, data, session_id: reviewer, seq: index * 2 + offset + 1, time_created: now }
++        })).run().pipe(Effect.orDie)
++        yield* Database.withSync({ db, sync: db.sync }, sync => {
++          for (const id of [request, reply]) {
++            const input = { type: "session_message" as const, id, now }
++            expect(ColdStorage.isEligibleOwner(sync, input)).toBe(complete)
++            if (complete) expect(ColdStorage.freezeOwner(sync, input).type).toBe("frozen")
++          }
++        })
++      }
+     }),
+@@ -158,5 +207,6 @@
+-      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 3, skipped: 2,
+-        cursor: { owner: "session_message" } } })
++      expect(compressed).toMatchObject({ type: "task", task: { status: "completed", processed: 4, skipped: 2,
++        cursor: { stage: "payload" } } })
+       if (compressed.type !== "task") return yield* Effect.die("Missing maintenance task")
+       expect(ColdStorage.parseMaintenanceTask(compressed.task)).toEqual(compressed.task)
+       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_ref).toBeTruthy()
++      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, oldID)).get())?.cold_key?.byteLength).toBe(4)

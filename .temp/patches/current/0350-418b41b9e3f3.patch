@@ -688,6 +688,491 @@ index 0000000000000000000000000000000000000000..744f6cfb63aee91af9a39f9fa34f381c
 +
 +所有改动遵循 Effect-first 架构、[local-smark] 标记、向后兼容、手术刀式修改。
 
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -62,1 +62,2 @@
+       inputEnded: boolean
++      input?: unknown
+@@ -354,1 +355,2 @@
+         tool.called = true
++        tool.input = event.input
+@@ -396,1 +398,1 @@
+-          return
++          return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+@@ -408,1 +410,1 @@
+-        return
++        return { failed: false, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+@@ -428,1 +430,1 @@
+-        return
++        return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -123,1 +123,5 @@
+     const config = yield* Config.Service
++    const permission = yield* PermissionV2.Service
++    // 同工具成功才重置错误；不同Session和不同工具互不冲掉计数。
++    const errors = new Map<SessionSchema.ID, Map<string, number>>()
++    const nearOverflowNotified = new Set<SessionSchema.ID>()
+@@ -303,1 +307,8 @@
++      const prior = context.findLast(message => message.type === "assistant" && message.inputEstimate)
++      const estimatedInput = prior?.type === "assistant" ? prior.inputEstimate?.input ?? 0 : 0
++      const usableTokens = compaction.inputBudget({ model })
++      // 仅用前轮真实prepared快照作轻量提醒，本轮硬溢出仍走原压缩入口。
++      const nearOverflow = !decide && !isLastStep && !nearOverflowNotified.has(session.id) && usableTokens > 0 && estimatedInput >= Math.floor(usableTokens * 0.8)
++      if (nearOverflow) nearOverflowNotified.add(session.id)
++      const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
+       const request = LLM.request({
+@@ -321,1 +332,1 @@
+-        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
++        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+@@ -326,2 +337,4 @@
+-      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request }))
++      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })) {
++        nearOverflowNotified.delete(session.id)
+         return yield* Effect.die(continueAfterCompaction(currentStep))
++      }
+@@ -359,1 +372,16 @@
+-        withPublication(publisher.publish(event, outputPaths))
++        withPublication(Effect.gen(function* () {
++          // publisher只为已接受的终态返回凭证，重复/忽略事件不能虚增错误。
++          const settled = yield* publisher.publish(event, outputPaths)
++          if (!settled) return
++          const counts = errors.get(session.id) ?? new Map<string, number>()
++          errors.set(session.id, counts)
++          if (!settled.failed) { counts.delete(settled.name); return }
++          const count = (counts.get(settled.name) ?? 0) + 1
++          counts.set(settled.name, count)
++          if (count < 3) return
++          yield* permission.assert({ action: "doom_loop", resources: [settled.name], save: [settled.name], sessionID: session.id, agent: agent.id,
++            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: count },
++            source: { type: "tool", messageID: settled.assistantMessageID, callID: settled.callID },
++          }).pipe(Effect.orDie)
++          counts.delete(settled.name)
++        }))
+@@ -406,1 +437,16 @@
+-                toolMaterialization.settle({
++                Effect.gen(function* () {
++                  const history = yield* getContext(session.id).pipe(Effect.orDie)
++                  const current = history.find(message => message.type === "assistant" && message.id === assistantMessageID)
++                  const parts = current?.type === "assistant" ? current.content : []
++                  const index = parts.findIndex(part => part.type === "tool" && part.id === event.id)
++                  let recent = parts.slice(0, index + 1).slice(-3)
++                  if (recent.length < 3) {
++                    const previous = history.findLast(message => message.type === "assistant" && message.id !== assistantMessageID)
++                    if (previous?.type === "assistant") recent = [...previous.content.filter(part => part.type === "tool" && part.state.status !== "pending").slice(-3), ...recent].slice(-3)
++                  }
++                  // 每次只检查截止当前call的三项，避免并行后到调用使较早call误触发。
++                  if (recent.length === 3 && recent.every(part => part.type === "tool" && part.state.status !== "pending" && part.name === event.name && JSON.stringify(part.state.input) === JSON.stringify(event.input)))
++                    yield* permission.assert({ action: "doom_loop", resources: [event.name], save: [event.name], sessionID: session.id, agent: agent.id,
++                      metadata: { tool: event.name, input: event.input }, source: { type: "tool", messageID: assistantMessageID, callID: event.id },
++                    }).pipe(Effect.orDie)
++                  return yield* toolMaterialization.settle({
+@@ -412,1 +459,2 @@
+-                }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output))),
++                }, (bounded) => withPublication(publisher.interruptedOutput(event.id, bounded.output)))
++                }),
+@@ -455,1 +503,4 @@
+-            return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
++          {
++            nearOverflowNotified.delete(session.id)
++            return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
++          }
+@@ -582,1 +633,2 @@
++      nearOverflowNotified.delete(input.sessionID)
+       if (input.maintenance === "compact") {
+@@ -659,1 +711,2 @@
+     FSUtil.node,
++    PermissionV2.node,
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -218,3 +218,3 @@
+-  const inputBudget = (input: Input) => {
++  const inputBudget = (input: Pick<Input, "model"> & { readonly request?: LLMRequest }) => {
+     const context = input.model.route.defaults.limits?.context ?? 0
+-    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
++    const output = input.request?.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+@@ -364,1 +364,2 @@
+     compactAfterOverflow,
++    inputBudget,
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -30,1 +30,3 @@
++type CaptureInput = Pick<BoundInput, "sessionID" | "toolCallID"> & { readonly direction?: "head" | "tail" }
++
+ export interface BoundResult {
+@@ -52,1 +54,1 @@
+-    input: Pick<BoundInput, "sessionID" | "toolCallID">,
++    input: CaptureInput,
+@@ -88,2 +90,5 @@
+-const preview = (text: string, maxLines: number, maxBytes: number) => {
++const preview = (text: string, maxLines: number, maxBytes: number, direction?: "head" | "tail") => {
+   const lines = text.split("\n")
++  // 方向是producer的呈现偏好，实际行/字节限额仍只由本owner实施。
++  if (direction === "head") return { head: takePrefix(lines.slice(0, maxLines).join("\n"), maxBytes), tail: "" }
++  if (direction === "tail") return { head: "", tail: takeSuffix(lines.slice(-maxLines).join("\n"), maxBytes) }
+@@ -112,9 +121,9 @@
+-const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") => string, maxLines: number, maxBytes: number) => {
+-  const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, "head+tail"), "utf-8")
++const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "tail" | "head+tail") => string, maxLines: number, maxBytes: number, direction?: "head" | "tail") => {
++  const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, direction ?? "head+tail"), "utf-8")
+   // 极小预算优先保住完整恢复路径；不能裁断标签后声称原文仍可恢复。
+-  if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), "head")
++  if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), direction ?? "head")
+   // 八字节覆盖分隔换行和KB/MB边界处的显示长度变化，不改变原head/tail选择。
+-  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8)
++  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8, direction)
+   const shown = bounded.tail ? `${bounded.head}\n${bounded.tail}` : bounded.head
+-  const marker = format(outputStats(shown), bounded.tail ? "head+tail" : "head")
++  const marker = format(outputStats(shown), bounded.tail ? bounded.head ? "head+tail" : "tail" : "head")
+   return bounded.tail ? `${bounded.head}\n\n${marker}\n\n${bounded.tail}` : `${bounded.head}\n\n${marker}`
+@@ -136,1 +145,1 @@
+-    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
++    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; direction?: "head" | "tail"; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
+@@ -167,1 +176,1 @@
+-      input: Pick<BoundInput, "sessionID" | "toolCallID">,
++      input: CaptureInput,
+@@ -174,1 +183,1 @@
+-      const captured = { path: "", retain: false, totalBytes: 0, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
++      const captured = { path: "", retain: false, totalBytes: 0, direction: input.direction, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
+@@ -260,1 +269,1 @@
+-      const notice = (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") =>
++      const notice = (shown: ReturnType<typeof outputStats>, direction: "head" | "tail" | "head+tail") =>
+@@ -271,1 +280,5 @@
+ 
++      // Bash的独立末段承载退出/超时/取消通知，选择正文方向不能把执行结果截掉。
++      const suffix = captured?.direction && text.length > 1 ? sanitizeVisibleText(text.at(-1)?.text ?? "") : ""
++      const window = suffix ? contextual.slice(0, -suffix.length) : contextual
++      const bounded = () => boundedPreview(window, notice, outputLimits.maxLines - (suffix ? lineCount(suffix) + 2 : 0), outputLimits.maxBytes - (suffix ? Buffer.byteLength(suffix) + 2 : 0), captured?.direction) + (suffix ? `\n\n${sanitizeVisibleText(suffix)}` : "")
+@@ -278,1 +292,1 @@
+-              text: boundedPreview(contextual, notice, outputLimits.maxLines, outputLimits.maxBytes),
++              text: bounded(),
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -77,1 +77,2 @@
+   diagnosticDiscardedChars: Schema.Number.pipe(Schema.optional),
++  hasErrors: Schema.Boolean.pipe(Schema.optional),
+@@ -85,1 +86,2 @@
+   warnings: Schema.Array(Schema.String).pipe(Schema.optional),
++  executionNotice: Schema.String.pipe(Schema.optional),
+@@ -99,1 +101,1 @@
+-  if (output.timeout || output.interrupted) return warnings.trimStart()
++  if (output.timeout || output.interrupted) return [output.executionNotice, warnings.trimStart()].filter(Boolean).join("\n\n")
+@@ -182,1 +184,2 @@
+             ...(output.diagnosticDiscardedChars === undefined ? {} : { diagnosticDiscardedChars: output.diagnosticDiscardedChars }),
++            ...(output.hasErrors === undefined ? {} : { hasErrors: output.hasErrors }),
+@@ -281,1 +284,8 @@
++              let commandForMatch = input.command.trim()
++              while (true) {
++                const match = commandForMatch.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
++                if (!match) break
++                commandForMatch = commandForMatch.slice(match[0].length).trimStart()
++              }
++              const useHead = /^(ls|dir|find|tree|git\s+(status|diff|log|ls-files))/.test(commandForMatch.toLowerCase())
+               const parts: string[] = []
+@@ -288,1 +300,11 @@
++                if (useHead) {
++                  const bytes = Buffer.from(text)
++                  let end = Math.min(bytes.length, Math.max(0, MAX_CAPTURE_BYTES - captured))
++                  // 保留列表开头时也须在UTF-8边界截断，原始capture仍接收全部字节。
++                  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--
++                  if (end > 0) parts.push(bytes.subarray(0, end).toString("utf8"))
++                  captured += end
++                  if (end < bytes.length) cut = true
++                  return
++                }
+                 parts.push(text)
+@@ -338,1 +360,5 @@
++              const emptyTimeout = !result && !interrupted && !text ? "The process produced no output before timeout. This may indicate:\n- The command is block-buffering output (common for build tools like bun install, bundle install); consider adding --verbose or running with a larger timeout.\n- The process is waiting for interactive input; provide input or use a non-interactive flag.\n- The process is hung; check the command and environment." : undefined
++              const command = input.command.trim().toLowerCase()
++              const verification = /^(bun|npm|pnpm|yarn)\s+(run\s+)?(typecheck|test|build|lint|check|audit)(\s|$)/.test(command) || /^node\s+--check(\s|$)/.test(command) || /^python\s+-m\s+py_compile(\s|$)/.test(command) || /^tsc\s+--noemit(\s|$)/.test(command)
++              const hasErrors = verification && ((result !== undefined && result.exitCode !== 0) || /error TS\d|SyntaxError|FAIL|Error:|✗/i.test(output))
+               // 传真实调用 command，不使用描述或重新解析执行命令。
+@@ -342,1 +375,1 @@
+-              const projected = [compressed.text, executionNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
++              const projected = [compressed.text, emptyTimeout, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings, executionNotice })
+@@ -355,1 +388,2 @@
+-                contextOutput: [compressed.text, notice, executionNotice, appendix].filter(Boolean).join("\n\n"),
++                contextOutput: [compressed.text, notice, emptyTimeout, appendix].filter(Boolean).join("\n\n"),
++                executionNotice,
+@@ -363,1 +397,2 @@
++                hasErrors,
+                 ...(warnings.length ? { warnings } : {}),
+@@ -368,1 +403,1 @@
+-              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID }, (write) => appProcess.run(command, {
++              return yield* outputStore.capture<Output, AppProcess.AppProcessError>({ sessionID: context.sessionID, toolCallID: context.toolCallID, direction: useHead ? "head" : "tail" }, (write) => appProcess.run(command, {
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -13,1 +13,2 @@
+ import { SessionStore } from "../session/store"
++import { FileEvidence } from "../session/file-evidence"
+@@ -29,1 +30,4 @@
+   command: Schema.String.pipe(Schema.optional),
++  inspected_files: Schema.optional(Schema.Literals(["none", "summary"])).annotate({
++    description: "Controls whether to pass parent session's inspected file list to the subagent. 'none': no file list (default for resume). 'summary': compact file path + range table (default for new subagents).",
++  }),
+@@ -109,1 +113,7 @@
++      // 摘录冻结于本次父历史，排队的extension不能改采稍后的其他调用上下文。
++      const parentContext = (input.inspected_files ?? (input.task_id ? "none" : "summary")) === "summary"
++        ? FileEvidence.parentSummary(history.flatMap(message => message.type === "assistant" ? message.content.flatMap(part =>
++          part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.time.pruned === undefined && part.state.status === "completed"
++            ? [part.state.structured.read] : []) : [])) : undefined
++      const prompt = parentContext ? `${input.prompt}\n\n<parent_context>\n${parentContext}\n</parent_context>` : input.prompt
+       const runTask = Effect.gen(function* () {
+@@ -119,1 +130,1 @@
+-        yield* sessions.prompt({ sessionID: child.id, prompt: { text: input.prompt }, resume: false })
++        yield* sessions.prompt({ sessionID: child.id, prompt: { text: prompt }, resume: false })
+@@ -130,1 +141,4 @@
+-      }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Subagent failed (task_id: ${child.id})`, error })))
++      }).pipe(
++        // 父级通知与前台结果共用同一次成功文本归一；错误/取消不会被改成空成功。
++        Effect.map(text => !text.trim() ? "Subagent produced no output (may have been aborted or lacked required tools)." : text.length > 32_000 ? `${text.slice(0, 32_000)}\n...[truncated]` : text),
++        Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Subagent failed (task_id: ${child.id})`, error })))
+diff --git a/packages/core/src/tool/skill.ts b/packages/core/src/tool/skill.ts
+--- a/packages/core/src/tool/skill.ts
++++ b/packages/core/src/tool/skill.ts
+@@ -9,1 +9,2 @@
+ import { PermissionV2 } from "../permission"
++import { SessionStore } from "../session/store"
+@@ -24,1 +25,2 @@
+   output: Schema.String,
++  deduped: Schema.Boolean,
+@@ -62,1 +64,2 @@
+     const permission = yield* PermissionV2.Service
++    const sessions = yield* SessionStore.Service
+@@ -84,1 +87,11 @@
+                 const directory = path.dirname(skill.location)
++                // structured可能完整但content已限幅；只有模型仍可见的全文才授权去重。
++                const loaded = (yield* sessions.context(context.sessionID)).some(message => message.type === "assistant" && message.content.some(part => {
++                  if (part.type !== "tool" || part.name !== name || part.provider?.executed === true || part.time.pruned !== undefined || part.state.status !== "completed" || part.state.input.name !== input.name) return false
++                  const output = part.state.structured.output
++                  return typeof output === "string" && output.startsWith(`<skill_content name="${skill.name}">`) && output.endsWith("</skill_content>") && part.state.content.some(item => item.type === "text" && item.text === output)
++                }))
++                if (loaded) return {
++                  name: skill.name, directory, deduped: true,
++                  output: `Skill '${input.name}' was already loaded in this session. Refer to the prior tool output for instructions.`,
++                }
+@@ -95,1 +109,2 @@
+                   output: toModelOutput(skill, files),
++                  deduped: false,
+@@ -108,1 +123,1 @@
+-  deps: [ToolRegistry.node, FSUtil.node, SkillV2.node, PermissionV2.node],
++  deps: [ToolRegistry.node, FSUtil.node, SkillV2.node, PermissionV2.node, SessionStore.node],
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -89,1 +89,13 @@
+     expect(JSON.stringify(results(read("overlap-first", defaultPage), read("overlap-next", overlap))[1])).toContain('type=\\"overlap\\"')
++    const high = { ...overlap, offset: 121, next: 221, read: { ...overlap.read, start: 121, end: 220 } }
++    const highResult = JSON.stringify(results(read("high-first", defaultPage), read("high-next", high, { path: "note.txt", offset: 121, limit: 100 }))[1])
++    expect(highResult).toContain("stub_high_overlap_visible")
++    expect(highResult).toContain("Lines 121-220 have 80% overlap with visible read 121-200 (latest version, file unchanged); do NOT re-read.")
++    expect(highResult).toContain("offset=201 for unread lines")
++    const below = { ...high, offset: 122, next: 222, read: { ...high.read, start: 122, end: 221 } }
++    expect(JSON.stringify(results(read("below-first", defaultPage), read("below-next", below, { path: "note.txt", offset: 122, limit: 100 }))[1])).not.toContain("stub_high_overlap_visible")
++    // 被省略页的未见尾部不能反过来作为下一次去重凭证。
++    const tail = { ...high, offset: 201, content: "line\n".repeat(19) + "line", read: { ...high.read, start: 201, end: 220, returned: 20 } }
++    expect(results(read("tail-first", defaultPage), read("tail-high", high), read("tail-unseen", tail))[2]).toMatchObject({ type: "json" })
++    const changedHigh = { ...high, read: { ...high.read, modifiedMs: 2 } }
++    expect(results(read("changed-first", defaultPage), read("changed-high", changedHigh))[1]).toMatchObject({ type: "json" })
+diff --git a/packages/core/test/tool-skill.test.ts b/packages/core/test/tool-skill.test.ts
+--- a/packages/core/test/tool-skill.test.ts
++++ b/packages/core/test/tool-skill.test.ts
+@@ -4,1 +4,1 @@
+-import { Effect, Layer } from "effect"
++import { Effect, Layer, Schema } from "effect"
+@@ -9,1 +9,3 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionStore } from "@opencode-ai/core/session/store"
++import { SessionMessage } from "@opencode-ai/core/session/message"
+@@ -68,1 +70,2 @@
++          const history: SessionMessage.Message[] = []
+           const skillToolLayer = AppNodeBuilder.build(
+@@ -74,1 +77,2 @@
++              [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? history : []) })],
+             ],
+@@ -108,1 +112,18 @@
++            // 只有当前可见的完整工具结果才去重；pruned或限幅正文必须重载。
++            const full = SkillTool.toModelOutput(info, [reference])
++            const prior = (content: string, pruned?: number) => Schema.decodeUnknownSync(SessionMessage.Assistant)({
++              id: "msg_loaded", type: "assistant", agent: "build", model: { id: "test", providerID: "test" }, time: { created: 0, completed: 1 },
++              content: [{ type: "tool", id: "loaded", name: "skill", time: { created: 0, completed: 1, ...(pruned === undefined ? {} : { pruned }) },
++                state: { status: "completed", input: { name: "effect" }, structured: { output: full }, content: [{ type: "text", text: content }] } }],
++            })
++            const load = () => executeTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "repeat", name: "skill", input: { name: "effect" } } })
++            history.push(prior(full))
++            const before = assertions.length
++            expect(yield* load()).toEqual({ type: "text", value: "Skill 'effect' was already loaded in this session. Refer to the prior tool output for instructions." })
++            expect(assertions.length).toBe(before + 1)
++            for (const visible of [prior(full, 0), prior("bounded excerpt")]) {
++              history.splice(0, history.length, visible)
++              expect(yield* load()).toEqual({ type: "text", value: full })
++            }
++            history.length = 0
+             expect(
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -777,1 +777,5 @@
+-      const earlierData = { ...earlier.data, content: [tool] }
++      const searches = [
++        { ...tool, id: "grep", name: "grep", state: { ...tool.state, input: { pattern: "needle", path: "src" }, structured: { items: [{ path: "file.ts" }], partial: true, truncated: false } } },
++        { ...tool, id: "glob", name: "glob", state: { ...tool.state, input: { pattern: "*.ts" }, structured: { value: [{ path: "file.ts" }] } } },
++      ]
++      const earlierData = { ...earlier.data, content: [tool, ...searches] }
+@@ -784,1 +789,7 @@
++      const evidence = yield* SessionHistory.evidence(db, sessionID, boundary.seq)
++      expect(evidence.compactionCount).toBe(2)
++      expect(evidence.searches).toEqual([
++        { tool: "grep", pattern: "needle", path: "src", matches: 1, partial: true },
++        { tool: "glob", pattern: "*.ts", path: ".", matches: 1, partial: false },
++      ])
+       expect((yield* SessionHistory.load(db, sessionID)).some(message => message.id === earlier.id)).toBe(false)
+diff --git a/packages/core/test/session-runner-tool-events.test.ts b/packages/core/test/session-runner-tool-events.test.ts
+--- a/packages/core/test/session-runner-tool-events.test.ts
++++ b/packages/core/test/session-runner-tool-events.test.ts
+@@ -75,1 +75,1 @@
+-  await Effect.runPromise(publisher.publish(result))
++  expect(await Effect.runPromise(publisher.publish(result))).toMatchObject({ failed: false, name: "read", input: call.input, callID: call.id })
+@@ -102,1 +102,1 @@
+-  await Effect.runPromise(
++  const accepted = await Effect.runPromise(
+@@ -111,1 +111,4 @@
++  expect(accepted).toMatchObject({ failed: true, name: "read", input: call.input, callID: call.id })
++  const repeated = await Effect.runPromise(publisher.publish(LLMEvent.toolResult({ id: call.id, name: call.name, result: { type: "error", value: "duplicate" } })))
++  expect(repeated).toBeUndefined()
+   expect(published.some((event) => event.type === "session.next.tool.success.1")).toBe(false)
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -229,1 +229,2 @@
+                   diagnosticDiscardedChars: 0,
++                  hasErrors: false,
+@@ -773,1 +774,1 @@
+-                text: "",
++                text: expect.stringContaining('reason="timeout"'),
+@@ -784,1 +785,11 @@
++              expect(text).not.toContain("block-buffering")
++              result = { ...result, output: Buffer.alloc(0), stdout: Buffer.alloc(0) }
++              const empty = yield* withTool(tmp.path, registry => settleTool(registry, call({ command: "sleep 60", timeout: 10 }, "empty-timeout")))
++              const shown = empty.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("") ?? ""
++              expect(shown).toContain("block-buffering")
++              expect(shown).toContain("--verbose")
++              expect(shown.match(/reason="timeout"/g)).toHaveLength(1)
++              runFailure = undefined
++              const normal = yield* withTool(tmp.path, registry => settleTool(registry, call({ command: "echo", timeout: 10 }, "normal-empty")))
++              expect(JSON.stringify(normal.output?.content)).not.toContain("block-buffering")
+             }),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -92,1 +92,2 @@
++const doomAssertions: PermissionV2.AssertInput[] = []
+ const environment = { ...process.env, OPENCODE_EXPERIMENTAL_PLAN_MODE: "false" }
+@@ -166,1 +167,1 @@
+-    assert: () => Effect.die("unused"),
++    assert: input => input.action === "doom_loop" ? Effect.sync(() => { doomAssertions.push(input) }) : Effect.die("unused"),
+@@ -372,1 +373,2 @@
+   response = []
++  doomAssertions.length = 0
+@@ -1074,1 +1077,10 @@
+     yield* sessions.switchModel({ sessionID, model: parentModel })
++    // 用真实事件序列构造已读历史，不能手填seq占用稍后模型切换的投影位置。
++    const parentEvents = yield* EventV2.Service
++    const parentRead = { sessionID, assistantMessageID: SessionMessage.ID.make("msg_task_parent"), timestamp: DateTime.makeUnsafe(0) }
++    yield* parentEvents.publish(SessionEvent.Step.Started, { ...parentRead, agent: "plan", model: parentModel })
++    yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "read-parent", name: "read" })
++    yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "read-parent", tool: "read", input: { path: "/project/src/module.ts" }, provider: { executed: false } })
++    yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "read-parent", structured: { read: { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 4, end: 8 } }, content: [], provider: { executed: false } })
++    yield* parentEvents.publish(SessionEvent.Step.Ended, { ...parentRead, finish: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
++    expect((yield* sessions.context(sessionID)).find(message => message.id === parentRead.assistantMessageID)).toMatchObject({ content: [{ type: "tool", name: "read", state: { status: "completed", structured: { read: { start: 4, end: 8 } } } }] })
+@@ -1091,4 +1101,4 @@
+-    const invoke = (task_id?: string, subagent_type = "research") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
++    const invoke = (task_id?: string, subagent_type = "research", inspected_files?: "none" | "summary") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
+       sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
+       call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
+-        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}) } },
++        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}), ...(inspected_files ? { inspected_files } : {}) } },
+@@ -1110,1 +1120,0 @@
+-      { action: "external_directory", resource: "/approved/*", effect: "allow" },
+@@ -1114,1 +1123,3 @@
++      { action: "read", resource: "*", effect: "allow" },
++      { action: "external_directory", resource: "/approved/*", effect: "allow" },
+       { action: "todowrite", resource: "*", effect: "deny" },
+@@ -1117,4 +1128,4 @@
+-    // 固定结果由真实求值器检查；父allow没有下放，有序ask仍覆盖较早deny及会话allow。
++    // 共同允许的会话窄例外按末条生效；其他外部路径和edit禁令仍须真实拒绝。
+     expect(PermissionV2.evaluate("edit", "/file.ts", inherited).effect).toBe("deny")
+     expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
+-    expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("ask")
++    expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("allow")
+@@ -1123,1 +1133,3 @@
+-    expect(userTexts(actual!)).toContain("Inspect the requested module")
++    expect(userTexts(actual!).join("\n")).toContain("Inspect the requested module")
++    expect(userTexts(actual!).join("\n")).toContain("<parent_context>\n### Parent Session Inspected Files")
++    expect(userTexts(actual!).join("\n")).toContain("| project/src/module.ts | 4-8 |")
+@@ -1130,1 +1142,2 @@
++    expect((yield* sessions.context(child.id)).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
+     expect(yield* store.permissions(child.id)).toEqual(inherited)
+@@ -1142,1 +1155,12 @@
++    response = fragmentFixture("text", "summary-override", ["Summary result"]).completeEvents
++    yield* invoke(childID, "research", "summary")
++    expect((yield* sessions.context(child.id)).findLast(message => message.type === "user")).toMatchObject({ text: expect.stringContaining("<parent_context>") })
++    const without = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
++    expect((yield* sessions.context(SessionV2.ID.make(without.task_id))).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
++    response = fragmentFixture("text", "empty-child", ["   "]).completeEvents
++    const empty = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
++    expect(empty.output).toBe("Subagent produced no output (may have been aborted or lacked required tools).")
++    response = fragmentFixture("text", "large-child", ["x".repeat(32_001)]).completeEvents
++    const large = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
++    expect(large.output).toBe("x".repeat(32_000) + "\n...[truncated]")
+     // 提升现有前台job触发同一后台通知入口，不修改全局实验开关。
+@@ -3781,2 +3810,16 @@
+         { type: "assistant", finish: "stop", content: [{ type: "text", id: "text-after-error", text: "Recovered" }] },
+       ])
++      // 第一轮错误已持久化；两个新step继续同工具失败才触发第三次错误审批。
++      const failedTurn = (id: string, attempt: number) => [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id, name: "missing", input: { attempt } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })]
++      responses = [failedTurn("error-two", 2), failedTurn("error-three", 3), fragmentFixture("text", "error-recovered", ["Recovered again"]).completeEvents]
++      yield* session.resume(sessionID)
++      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
++      doomAssertions.length = 0
++      responses = [
++        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "loop-one", name: "echo", input: { text: "same" } }), LLMEvent.toolCall({ id: "loop-two", name: "echo", input: { text: "same" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
++        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "loop-three", name: "echo", input: { text: "same" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
++        fragmentFixture("text", "loop-recovered", ["Changed strategy"]).completeEvents,
++      ]
++      yield* session.resume(sessionID)
++      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["echo"], metadata: { tool: "echo", input: { text: "same" } } }])
++      expect(doomAssertions).toHaveLength(1)
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -743,1 +743,1 @@
+-            Effect.sync(() => {
++            Effect.gen(function* () {
+@@ -748,1 +748,17 @@
+               expect(settled.output?.structured).not.toHaveProperty("resource")
++              // 两个命令只经过AppProcess替身；正文方向、统一限幅和原文恢复均走真实owner。
++              const raw = "FIRST-LISTING\n" + "ordinary row\n".repeat(100_000) + "LAST-LISTING\n"
++              for (const command of ["git status", "bun test"]) {
++                reset()
++                result = { ...result, exitCode: 7, output: Buffer.from(raw) }
++                const output = yield* withTool(tmp.path, registry => settleTool(registry, call({ command, compress_output: false }, command)))
++                const shown = output.output?.content.flatMap(part => part.type === "text" ? [part.text] : []).join("") ?? ""
++                expect(shown).toContain(command === "git status" ? "FIRST-LISTING" : "LAST-LISTING")
++                expect(shown).not.toContain(command === "git status" ? "LAST-LISTING" : "FIRST-LISTING")
++                expect(shown).toContain("Command exited with code 7")
++                expect(Buffer.byteLength(shown)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
++                expect(output.output?.structured).toMatchObject({ hasErrors: command === "bun test" })
++                const retained = output.outputPaths?.[0]
++                if (!retained) return yield* Effect.die("Missing raw output")
++                expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(raw)
++              }
 diff --git a/packages/opencode/test/session/file-evidence.test.ts b/packages/opencode/test/session/file-evidence.test.ts
 new file mode 100644
 --- /dev/null
@@ -740,48 +1225,138 @@ diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/t
 diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
 --- a/packages/opencode/src/session/file-evidence.ts
 +++ b/packages/opencode/src/session/file-evidence.ts
-@@ -22,4 +22,6 @@
- export const render = Effect.fn("CompactionFileEvidence.render")(function* (
-   messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string,
-+  compactionCount = 1,
- ) {
-   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
-+  const searches = new Map<string, { tool: string; pattern: string; path: string; matches: number }>()
-@@ -27,3 +29,15 @@
-     for (const part of message.parts) {
-+      if (part.type === "tool" && part.state.status === "completed" && (part.tool === "grep" || part.tool === "glob")) {
-+        const pattern = part.state.input.pattern
-+        if (typeof pattern === "string" && pattern) {
-+          const location = typeof part.state.input.path === "string" ? part.state.input.path : "."
-+          const meta = part.state.metadata
-+          const count = part.tool === "grep" ? meta.totalMatches ?? meta.matches : meta.total ?? meta.count
-+          const key = JSON.stringify([part.tool, pattern, location])
-+          // 同一搜索只保留最近结果，预算按去重后的真实时间顺序截取。
-+          searches.delete(key)
-+          searches.set(key, { tool: part.tool, pattern: pattern.slice(0, 60), path: location, matches: typeof count === "number" ? count : 0 })
-+        }
-+      }
-       if (part.type !== "tool" || part.tool !== "read" || part.state.status !== "completed") continue
-       const parsed = Schema.decodeUnknownOption(Receipt)(part.state.metadata.read)
-@@ -48,3 +62,3 @@
+@@ -9,5 +9,11 @@
+-export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string) =>
++export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1) =>
+   FileEvidence.render(messages.flatMap((message) => message.parts.flatMap((part) =>
+     part.type === "tool" && part.tool === "read" && part.state.status === "completed"
+       ? [part.state.metadata.read] : [],
+-  )), fs, worktree)
++  )), fs, worktree, { compactionCount, searches: messages.flatMap(message => message.parts.flatMap(part => {
++    if (part.type !== "tool" || part.state.status !== "completed" || (part.tool !== "grep" && part.tool !== "glob")) return []
++    const pattern = part.state.input.pattern
++    if (typeof pattern !== "string" || !pattern) return []
++    const count = part.tool === "grep" ? part.state.metadata.totalMatches ?? part.state.metadata.matches : part.state.metadata.total ?? part.state.metadata.count
++    return [{ tool: part.tool, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: typeof count === "number" ? count : 0 }]
++  })) })
+diff --git a/packages/core/src/session/file-evidence.ts b/packages/core/src/session/file-evidence.ts
+--- a/packages/core/src/session/file-evidence.ts
++++ b/packages/core/src/session/file-evidence.ts
+@@ -19,4 +19,13 @@
++export interface SearchReceipt {
++  readonly tool: "grep" | "glob"
++  readonly pattern: string
++  readonly path: string
++  readonly matches: number
++  readonly partial?: boolean
++}
++
+ export const kind = "compaction_evidence_handoff"
+ 
+ export const render = Effect.fn("FileEvidence.render")(function* (
+   receipts: readonly unknown[], fs: FSUtil.Interface, worktree: string,
++  context: { readonly searches?: readonly SearchReceipt[]; readonly compactionCount?: number } = {},
+@@ -45,1 +55,9 @@
 -  if (files.size === 0) return undefined
++  const searches = new Map<string, SearchReceipt>()
++  for (const search of context.searches ?? []) {
++    if (!search.pattern) continue
++    // 完整pattern参与去重，展示截短不能合并两个不同的查询。
++    const key = JSON.stringify([search.tool, search.pattern, search.path])
++    searches.delete(key)
++    searches.set(key, search)
++  }
 +  if (files.size === 0 && searches.size === 0) return undefined
-   // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
-   const visible = [...files.values()].toReversed().slice(0, 20)
-@@ -73,8 +87,11 @@
-   return [
+@@ -71,5 +89,8 @@
 -    "## Evidence Handoff", "", "### Inspected Files",
 -    "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows,
 +    "## Evidence Handoff",
 +    ...(rows.length ? ["", "### Inspected Files", "| path | ranges | total | modified | status |", "|---|---:|---:|---|---|", ...rows] : []),
      ...(files.size > visible.length ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`] : []),
-+    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern)} | ${cell(search.path)} | ${search.matches} |`)] : []),
++    ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? "+" : ""} |`)] : []),
 +    ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
      "", "### Lost Context Notice", "- Use current evidence before repeating reads or commands.",
      "- Treat stale evidence as advisory only.",
-+    `- This is compaction #${compactionCount}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
-   ].join("\n")
++    `- This is compaction #${context.compactionCount ?? 1}. Summary fidelity may be degraded; verify critical facts by re-reading.`,
+diff --git a/packages/core/src/session/file-evidence.ts b/packages/core/src/session/file-evidence.ts
+--- a/packages/core/src/session/file-evidence.ts
++++ b/packages/core/src/session/file-evidence.ts
+@@ -87,3 +87,24 @@
+   const pad = (n: number) => String(n).padStart(2, "0")
+   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+ }
++
++export function parentSummary(receipts: readonly unknown[]) {
++  const parse = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.String, canonicalPath: Schema.optional(Schema.String), start: Schema.Number, end: Schema.Number, stub: Schema.optional(Schema.Boolean) }))
++  const files = new Map<string, { path: string; ranges: string[] }>()
++  for (const value of receipts) {
++    const parsed = parse(value)
++    if (Option.isNone(parsed) || parsed.value.stub) continue
++    const read = parsed.value
++    const key = read.canonicalPath || read.path
++    const ranges = [...(files.get(key)?.ranges ?? []), `${read.start}-${read.end}`]
++    // 此表仅传父级已见位置，不读盘或把历史时间伪装成当前新鲜度证明。
++    files.delete(key)
++    files.set(key, { path: read.path, ranges })
++  }
++  if (!files.size) return undefined
++  return [
++    "### Parent Session Inspected Files", "| path | ranges |", "|---|---|",
++    ...[...files.values()].toReversed().slice(0, 20).map(file => `| ${cell(file.path.split(/[\\/]/).slice(-3).join("/"))} | ${file.ranges.join(", ")} |`),
++    ...(files.size > 20 ? [`Omitted: ${files.size - 20} files due to budget.`] : []),
++  ].join("\n")
++}
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -3,1 +3,2 @@
+ import { Database } from "../database/database"
++import type { FileEvidence } from "./file-evidence"
+@@ -118,8 +119,8 @@
+-export const readReceipts = Effect.fn("SessionHistory.readReceipts")(function* (
++export const evidence = Effect.fn("SessionHistory.evidence")(function* (
+   db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number,
+ ) {
+   const rows = yield* db.select().from(SessionMessageTable).where(and(
+-    eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), lte(SessionMessageTable.seq, throughSeq),
++    eq(SessionMessageTable.session_id, sessionID), or(eq(SessionMessageTable.type, "assistant"), eq(SessionMessageTable.type, "compaction")), lte(SessionMessageTable.seq, throughSeq),
+   )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
+-  const messages = yield* Effect.forEach(rows, decodeMessageRow)
+-  return messages.flatMap((message) => message.type === "assistant" && !hidden(message.metadata?.hidden)
++  const messages = (yield* Effect.forEach(rows, decodeMessageRow)).filter(message => !hidden(message.metadata?.hidden))
++  const receipts = messages.flatMap((message) => message.type === "assistant"
+@@ -131,3 +133,22 @@
+   )
++  const searches: FileEvidence.SearchReceipt[] = []
++  for (const message of messages) {
++    if (message.type !== "assistant") continue
++    for (const part of message.content) {
++      if (part.type !== "tool" || part.provider?.executed === true || part.state.status !== "completed" || (part.name !== "grep" && part.name !== "glob")) continue
++      const pattern = part.state.input.pattern
++      if (typeof pattern !== "string" || !pattern) continue
++      const output = part.state.structured
++      // 数组领域结果经publisher.record包装为value；不能拿正文行数伪造匹配数。
++      const items = part.name === "grep" ? output.items : output.value
++      if (!Array.isArray(items)) continue
++      searches.push({ tool: part.name, pattern, path: typeof part.state.input.path === "string" ? part.state.input.path : ".", matches: items.length,
++        partial: part.name === "grep" ? output.partial === true || output.truncated === true || output.timedOut === true : typeof part.state.input.limit === "number" && items.length >= part.state.input.limit,
++      })
++    }
++  }
++  return { receipts, searches, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
  })
+ 
++export const readReceipts = (db: DatabaseService, sessionID: SessionSchema.ID, throughSeq: number) =>
++  evidence(db, sessionID, throughSeq).pipe(Effect.map(result => result.receipts))
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -246,1 +246,1 @@
+-    const receipts = yield* SessionHistory.readReceipts(dependencies.db, input.sessionID, throughSeq)
++    const evidence = yield* SessionHistory.evidence(dependencies.db, input.sessionID, throughSeq)
+@@ -332,1 +332,1 @@
+-    const fileEvidence = yield* FileEvidence.render(receipts, dependencies.fs, dependencies.worktree)
++    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, evidence)
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
@@ -1054,10 +1629,10 @@ diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/t
      }),
    )
 
-diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
---- a/packages/opencode/src/tool/read-outline.ts
-+++ b/packages/opencode/src/tool/read-outline.ts
-@@ -309,3 +309,38 @@ stream.destroy()
+diff --git a/packages/core/src/tool/read-outline.ts b/packages/core/src/tool/read-outline.ts
+--- a/packages/core/src/tool/read-outline.ts
++++ b/packages/core/src/tool/read-outline.ts
+@@ -309,3 +309,40 @@ stream.destroy()
    // #142：返回大纲
  return { items, truncated }
  }
@@ -1073,12 +1648,14 @@ diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/
 +  total: number,
 +  offset: number,
 +  size: number,
-+  modifiedMs: number,
++  modifiedMs: number | undefined,
 +  totalExact = true,
 +): Promise<Outline | undefined> {
 +  // [local-smark] 仅在 offset<=1 时使用缓存（readOutline 内部也仅在此条件生成 outline）。
 +  // offset>1 时不查缓存也不生成 outline，保持原有行为。
 +  if (offset > 1) return undefined
++  // 无稳定版本不缓存，仍使用原大纲读取，避免unknown版本串用结果。
++  if (modifiedMs === undefined) return readOutline(filepath, total, offset, totalExact)
 +  const canonical = process.platform === "win32"
 +    ? filepath.replaceAll("\\", "/").toLowerCase()
 +    : filepath.replaceAll("\\", "/")
@@ -1109,72 +1686,7 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
  import { InstanceState } from "@/effect/instance-state"
  import { assertExternalDirectoryEffect } from "./external-directory"
  import { Instruction } from "../session/instruction"
-@@ -36,6 +36,10 @@ const MAX_LINE_LENGTH = 2000
- const OVERLAP_MIN_LINES = 20
- // #142：重叠占比阈值
- const OVERLAP_MIN_RATIO = 0.3
-+// [local-smark] 高重叠 suppress 阈值：当已可见读取与当前请求的重叠率 >= 80% 时，
-+// 直接返回 stub（而非仅 note），避免大量部分重叠的重复读取。
-+// 仍走 size+modifiedMs 同版本门控（findReadStub/findOverlapNote 内部已检查）。
-+const OVERLAP_SUPPRESS_RATIO = 0.8
- 
- 
- // 设备文件保护 - 阻止会导致进程挂起或无限输出的设备文件
-@@ -163,7 +167,8 @@ class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
- 
- // #142：可见上下文 stub 状态
- // #142：stub 两种语义：同区间已见 / 被更大区间覆盖
--type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible"
-+// [local-smark] 新增 stub_high_overlap_visible：高重叠（>=80%）时 suppress
-+type ReadStubStatus = "stub_same_range_visible" | "stub_covered_range_visible" | "stub_high_overlap_visible"
- 
- // #142：区间元数据写入 metadata.read，供后续 stub 比对
- type ReadRangeMeta = {
-@@ -846,9 +851,52 @@ const stub = findReadStub(visibleReads, current)
-         }
-       }
- 
-+      // [local-smark] 高重叠 suppress：当已可见读取与当前请求的重叠率 >= 80% 时，
-+      // 直接返回 stub 而非仅 note。这减少了大量部分重叠的重复读取（如偏移微调的重复读）。
-+      // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
-+      // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
-+      const overlapRange = findOverlapNote(visibleReads, current)
-+      if (overlapRange) {
-+        // 计算实际重叠比例
-+        const [overlapStart, overlapEnd] = overlapRange.split("-").map(Number)
-+        const overlapLines = overlapEnd - overlapStart + 1
-+        const requestedLines = Math.max(1, end - start + 1)
-+        if (overlapLines / requestedLines >= OVERLAP_SUPPRESS_RATIO) {
-+          const read = { ...current, returned: 0, stub: true, stubStatus: "stub_high_overlap_visible" as const, coveredBy: overlapRange }
-+          const visibleEnd = overlapEnd
-+          const nextOffset = visibleEnd + 1
-+          const reachedEof = file.totalExact && visibleEnd >= file.count
-+          const offsetExit = reachedEof
-+            ? "No unread lines remain (end of file reached); use grep to locate symbols."
-+            : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
-+          const message = `Lines ${start}-${end} have ${Math.round((overlapLines / requestedLines) * 100)}% overlap with visible read ${overlapRange} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
-+          const suppressOutput = [
-+            `<path>${escapeXmlText(filepath)}</path>`,
-+            `<type>file</type>`,
-+            `<file size="${size}" modified="${escapeXmlAttr(modified)}" />`,
-+            `<range start="${start}" end="${end}" total="${file.count}" returned="0" />`,
-+            `<stub status="stub_high_overlap_visible" covered_by="${overlapRange}">`,
-+            message,
-+            "</stub>",
-+          ].join("\n")
-+          return {
-+            title,
-+            output: suppressOutput,
-+            metadata: readToolMetadata({
-+              preview: suppressOutput,
-+              truncated: false,
-+              loaded: loaded.map((item) => item.filepath),
-+              read,
-+            }),
-+          }
-+        }
-+      }
-+
+@@ -665,6 +665,8 @@
        // #142：异步大纲，失败不应阻断主读取（promise 内自处理）
        // #142：异步 outline
 -const outline = yield* Effect.promise(() => readOutline(filepath, file.count, file.offset, file.totalExact))
@@ -1185,6 +1697,47 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
        // #142：overlap 判定
  const overlap = findOverlapNote(visibleReads, current)
 
+diff --git a/packages/opencode/src/tool/read-outline.ts b/packages/opencode/src/tool/read-outline.ts
+--- a/packages/opencode/src/tool/read-outline.ts
++++ b/packages/opencode/src/tool/read-outline.ts
+@@ -1,1 +1,1 @@
+-export { readOutline, type Outline } from "@opencode-ai/core/tool/read-outline"
++export { readOutline, readOutlineCached, type Outline } from "@opencode-ai/core/tool/read-outline"
+diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+--- a/packages/core/src/tool/read-filesystem.ts
++++ b/packages/core/src/tool/read-filesystem.ts
+@@ -11,1 +11,1 @@
+-import { readOutline } from "./read-outline"
++import { readOutlineCached } from "./read-outline"
+@@ -295,4 +295,4 @@
+-        const outline = yield* Effect.promise(() => readOutline(real, total, offset, exact))
+-        const after = yield* file.stat
+         const modified = Option.getOrUndefined(info.mtime)?.getTime()
++        const outline = yield* Effect.promise(() => readOutlineCached(real, total, offset, Number(info.size), modified, exact))
++        const after = yield* file.stat
+         const stable = modified !== undefined && after.size === info.size && Option.getOrUndefined(after.mtime)?.getTime() === modified
+diff --git a/packages/core/src/tool/read-presentation.ts b/packages/core/src/tool/read-presentation.ts
+--- a/packages/core/src/tool/read-presentation.ts
++++ b/packages/core/src/tool/read-presentation.ts
+@@ -25,1 +25,1 @@
+-  stubStatus: Schema.optional(Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible"])),
++  stubStatus: Schema.optional(Schema.Literals(["stub_same_range_visible", "stub_covered_range_visible", "stub_high_overlap_visible"])),
+@@ -57,1 +57,7 @@
++  // 只使用同版本最佳单交集；多个重复页不能叠加出虚假的80%覆盖。
++  const overlap = findOverlapNote(visibleReads, current)
++  if (!overlap) return undefined
++  const [start, end] = overlap.split("-").map(Number)
++  if ((end - start + 1) / Math.max(1, current.end - current.start + 1) >= 0.8)
++    return { status: "stub_high_overlap_visible" as const, coveredBy: overlap }
+   return undefined
+@@ -138,1 +144,1 @@
+-  status: "stub_same_range_visible" | "stub_covered_range_visible"
++  status: "stub_same_range_visible" | "stub_covered_range_visible" | "stub_high_overlap_visible"
+@@ -154,1 +160,3 @@
+-      : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
++      : input.status === "stub_high_overlap_visible"
++        ? `Lines ${input.start}-${input.end} have ${Math.round((visibleEnd - Number(coverage.split("-")[0]) + 1) / Math.max(1, input.end - input.start + 1) * 100)}% overlap with visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
++        : `Lines ${input.start}-${input.end} covered by visible read ${coverage} (latest version, file unchanged); do NOT re-read.\n${offsetExit}`
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts

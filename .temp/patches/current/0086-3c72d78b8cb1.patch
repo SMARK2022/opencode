@@ -10,7 +10,70 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc424245592735cfdded8 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -2222,10 +2222,69 @@
+@@ -47,7 +47,7 @@
+ import { useLocal } from "../../context/local"
+ import { Locale } from "../../util/locale"
+ import { createThrottledSignal } from "../../util/signal"
+-import { webSearchProviderLabel } from "../../util/tool-display"
++import { toolDisplayMetadata, webSearchProviderLabel } from "../../util/tool-display"
+ import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+ import { useSDK } from "../../context/sdk"
+ import { useEditorContext } from "../../context/editor"
+@@ -1768,7 +1768,8 @@
+   const { theme } = useTheme()
++  // 沿源保留斜体强调色，展开透明度仍由现有思考状态决定。
+   const fg = () =>
+     props.open
+-      ? RGBA.fromValues(theme.warning.r, theme.warning.g, theme.warning.b, theme.thinkingOpacity)
+-      : theme.warning
++      ? RGBA.fromValues(theme.markdownEmph.r, theme.markdownEmph.g, theme.markdownEmph.b, theme.thinkingOpacity)
++      : theme.markdownEmph
+   // 统计清理后全文，不受预览或摘要截断影响；加密块不传此值，标题不推测密文长度。
+   const characters = () => (props.characters === undefined ? "" : `${props.characters.toLocaleString()} chars`)
+@@ -1782,15 +1783,16 @@
+     <Switch>
+       <Match when={!props.done}>
+-        <box flexDirection="row">
+-          <Spinner color={fg()}>
++        <box flexDirection="row" gap={1}>
++          <Spinner color={fg()} />
++          <text fg={fg()} attributes={TextAttributes.ITALIC}>
+             {[props.title ? "Thinking: " + props.title : "Thinking", characters()].filter(Boolean).join(" · ")}
+-          </Spinner>
++          </text>
+         </box>
+       </Match>
+       <Match when={true}>
+-        <text fg={fg()} wrapMode="none">
++        <text fg={fg()} attributes={TextAttributes.ITALIC} wrapMode="none">
+           {completed()}
+         </text>
+       </Match>
+     </Switch>
+   )
+@@ -1833,7 +1835,8 @@
+   const toolprops = {
+     get metadata() {
+-      return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
++      // V2结果在structured，历史V1仍在metadata；共用展示入口而不改变持久化信封。
++      return props.part.state.status === "pending" ? {} : { ...props.part.state.metadata, ...toolDisplayMetadata(props.part.state) }
+     },
+     get input() {
+       return props.part.state.input ?? {}
+     },
+@@ -2257,9 +2260,11 @@
+ function Write(props: ToolProps) {
+   const { theme, syntax } = useTheme()
+   const pathFormatter = usePathFormatter()
+   const ctx = use()
++  // 两代输入采用不同字段名，展示使用实际调用路径，不改写模型输入。
++  const filepath = createMemo(() => stringValue(props.input.filePath) ?? stringValue(props.input.path))
+   // 文件预览默认收缩；展开信号只控制显示，不改写工具输入或诊断。
+   const [expanded, setExpanded] = createSignal(false)
+   const code = createMemo(() => {
+     return stringValue(props.input.content) ?? ""
+   })
+@@ -2270,10 +2275,69 @@
    const limited = createMemo(() => {
      if (expanded() || !collapsed().overflow) return code()
      return collapsed().output
@@ -18,7 +81,7 @@ index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc42424559273
 +  // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
 +  const diff = createMemo(() => props.metadata.diff as string | undefined)
 +  // 覆写判断：文件已存在且 diff 非空时显示 diff 视图
-+  const isOverwrite = createMemo(() => props.metadata.exists === true && !!diff())
++  const isOverwrite = createMemo(() => (props.metadata.exists === true || props.metadata.existed === true) && !!diff())
 +  // diff 样式：跟随用户配置的 diff_style，stacked 模式下使用 unified 视图
 +  // diff 视图模式：stacked 模式强制 unified，auto 模式按终端宽度选择 split/unified
 +  const diffView = createMemo(() => {
@@ -43,7 +106,7 @@ index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc42424559273
      <Switch>
 +      <Match when={isOverwrite()}>
 +        <BlockTool
-+          title={"← Write " + pathFormatter.format(stringValue(props.input.filePath)) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
++          title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
 +          part={props.part}
 +          onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
 +        >
@@ -53,7 +116,7 @@ index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc42424559273
 +              diff={diff()!}
 +              syncScroll={true}
 +              view={diffView()}
-+              filetype={filetype(stringValue(props.input.filePath))}
++              filetype={filetype(filepath())}
 +              syntaxStyle={syntax()}
 +              showLineNumbers={true}
 +              width="100%"
@@ -74,12 +137,40 @@ index 7fcee68c770875018ba003fbba3e6fc70ba9acdd..b69271eed6025a3914cbc42424559273
 +            <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
 +          </Show>
 +          {/* 诊断信息：覆写后显示 LSP 错误和警告 */}
-+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
 +        </BlockTool>
 +      </Match>
-       <Match when={props.metadata.diagnostics !== undefined}>
+-      <Match when={props.metadata.diagnostics !== undefined}>
++      <Match when={props.metadata.diagnostics !== undefined || props.metadata.operation === "write"}>
          <BlockTool
-           title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
+-          title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
++          title={"# Wrote " + pathFormatter.format(filepath())}
+@@ -2284,7 +2348,7 @@
+             <code
+               conceal={false}
+               fg={theme.text}
+-              filetype={filetype(stringValue(props.input.filePath))}
++              filetype={filetype(filepath())}
+               syntaxStyle={syntax()}
+               content={limited()}
+             />
+@@ -2292,13 +2356,13 @@
+           <Show when={collapsed().overflow}>
+             <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+           </Show>
+-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
++          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />
+         </BlockTool>
+       </Match>
+       <Match when={true}>
+-        <InlineTool icon="←" pending="Preparing write…" complete={stringValue(props.input.filePath)} part={props.part}>
+-          Write {pathFormatter.format(stringValue(props.input.filePath))}
++        <InlineTool icon="←" pending="Preparing write…" complete={filepath()} part={props.part}>
++          Write {pathFormatter.format(filepath())}
+         </InlineTool>
+       </Match>
+     </Switch>
+   )
 @@ -2598,6 +2657,8 @@
            {/* 保留完整 diff 供解析，不能用省略号截断 hunk；展开时只解除高度限制。 */}
            <box paddingLeft={1} maxHeight={!expanded() && overflow() ? 15 : undefined}>
@@ -113,6 +204,133 @@ index 766ed3c116ce7d423222a82465ede965553ab3c9..9910e32627658b9aa9a9d0abd8b909de
              filetype={ft()}
 
 
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -3,6 +3,7 @@
+ import { makeLocationNode } from "./effect/app-node"
+ import { Context, Effect, Layer, Schema } from "effect"
++import { createTwoFilesPatch } from "diff"
+ import { dirname } from "path"
+ import { KeyedMutex } from "./effect/keyed-mutex"
+ import { FSUtil } from "./fs-util"
+ 
+@@ -40,6 +41,8 @@
+ export interface WriteResult {
+   readonly operation: "write"
+   readonly target: string
+   readonly resource: string
+   readonly existed: boolean
++  // 仅文本覆写生成展示patch，普通创建和二进制写入保持原结果。
++  readonly diff?: string
+ }
+@@ -115,8 +118,19 @@
+           yield* fs.writeWithDirs(
+             input.target.canonical,
+             joinBom(next.text, Boolean(current && hasUtf8Bom(current)) || next.bom),
+           )
+-          return writeResult(input.target, current !== undefined)
++          if (current === undefined) return writeResult(input.target, false)
++          // 前像与最终回读位于同一目标锁，不能把后继写入混进本次覆写diff。
++          const final = yield* fs.readFileString(input.target.canonical)
++          return {
++            ...writeResult(input.target, true),
++            diff: createTwoFilesPatch(
++              input.target.resource,
++              input.target.resource,
++              splitBom(new TextDecoder().decode(current)).text,
++              splitBom(final).text,
++            ),
++          }
+         }),
+       ),
+     )
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -30,8 +30,10 @@
+ export const Output = Schema.Struct({
+   operation: Schema.Literal("write"),
+   target: Schema.String,
+   resource: Schema.String,
+   existed: Schema.Boolean,
++  // canonical编码保留覆写diff，供TUI消费；模型成功正文保持原契约。
++  diff: Schema.optionalKey(Schema.String),
+ })
+ export type Output = typeof Output.Type
+ 
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -2,7 +2,7 @@
+ import path from "path"
+ import { fileURLToPath } from "url"
+ import { describe, expect, test } from "bun:test"
+-import { Effect, Layer } from "effect"
++import { Effect, Layer, Schema } from "effect"
+ import { FileMutation } from "@opencode-ai/core/file-mutation"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+@@ -143,8 +143,12 @@
+             Effect.gen(function* () {
+               expect(settled.result).toEqual({ type: "text", value: "Wrote file successfully: existing.txt" })
+               expect(settled.output?.structured).toMatchObject({ resource: "existing.txt", existed: true })
++              // 先按真实输出Schema读取，避免Bun的连续非对称匹配改写实际对象字段。
++              const output = Schema.decodeUnknownSync(WriteTool.Output)(settled.output?.structured)
++              expect(output.diff).toContain("-before\n")
++              expect(output.diff).toContain("+after\n")
+               expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "existing.txt"), "utf8"))).toBe(
+                 "after",
+               )
+               expect(writes).toHaveLength(1)
+             }),
+diff --git a/packages/core/test/file-mutation.test.ts b/packages/core/test/file-mutation.test.ts
+--- a/packages/core/test/file-mutation.test.ts
++++ b/packages/core/test/file-mutation.test.ts
+@@ -244,11 +244,12 @@
+-          const first = yield* files.write({ target: firstPlan, content: "first" }).pipe(Effect.forkChild)
++          const first = yield* files.writeTextPreservingBom({ target: firstPlan, content: "first" }).pipe(Effect.forkChild)
+           yield* Deferred.await(firstStarted)
+-          const second = yield* files.write({ target: secondPlan, content: "second" }).pipe(Effect.forkChild)
++          const second = yield* files.writeTextPreservingBom({ target: secondPlan, content: "second" }).pipe(Effect.forkChild)
+           yield* Effect.yieldNow
+           expect(yield* Deferred.isDone(secondStarted)).toBe(false)
+ 
+           yield* Deferred.succeed(releaseFirst, undefined)
+           yield* Deferred.await(secondStarted)
+-          yield* Fiber.join(first)
+-          yield* Fiber.join(second)
++          // 每个diff必须对应自己持锁时的前像，第二次不能误用最初快照。
++          expect((yield* Fiber.join(first)).diff).toContain("-initial\n")
++          expect((yield* Fiber.join(second)).diff).toContain("-first\n")
+           expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("second")
+diff --git a/packages/tui/test/util/tool-display.test.ts b/packages/tui/test/util/tool-display.test.ts
+--- a/packages/tui/test/util/tool-display.test.ts
++++ b/packages/tui/test/util/tool-display.test.ts
+@@ -25,7 +25,10 @@
+   test("returns structured metadata for non-pending states", () => {
+     const structured = { provider: "parallel", numResults: 3 }
+ 
+     expect(toolDisplayMetadata({ status: "running", structured })).toBe(structured)
+     expect(toolDisplayMetadata({ status: "completed", structured })).toBe(structured)
+     expect(toolDisplayMetadata({ status: "error", structured })).toBe(structured)
++    // V2覆写展示读取完整structured，不回退到空的旧metadata。
++    const write = { operation: "write", existed: true, diff: "@@ -1 +1 @@\n-before\n+after\n" }
++    expect(toolDisplayMetadata({ status: "completed", metadata: {}, structured: write })).toBe(write)
+   })
+diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
+--- a/packages/opencode/test/tool/write.test.ts
++++ b/packages/opencode/test/tool/write.test.ts
+@@ -166,6 +166,9 @@
+         yield* Effect.promise(() => fs.writeFile(filepath, "old", "utf-8"))
+         const result = yield* run({ filePath: filepath, content: "new" })
+ 
+         expect(result.metadata).toHaveProperty("filepath", filepath)
+         expect(result.metadata).toHaveProperty("exists", true)
++        // source86的展示数据必须实际返回，不能用exists断言冒充diff验证。
++        expect(result.metadata.diff).toContain("-old")
++        expect(result.metadata.diff).toContain("+new")
+       }),
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
 index 37be6d8c47bcec6ecc6c768b2c990e3597333500..b6550b320e479eef19bcb9da8dc41d841d9f79f8 100644
 --- a/packages/opencode/src/tool/write.ts

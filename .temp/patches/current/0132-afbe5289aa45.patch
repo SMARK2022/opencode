@@ -186,13 +186,15 @@ new file mode 100644
 index 0000000000..cffe17793f
 --- /dev/null
 +++ b/packages/core/src/database/migration/20260723100000_normalize_global_session_path.ts
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,20 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +
 +// #132：Windows 全局 session.path 补全盘符
 +export default {
 +  id: "20260723100000_normalize_global_session_path",
++  // 已规范化的旧库保留原完成记录，不因文件重命名再次修改路径。
++  legacy: ["20260513000000_normalize_global_session_path"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      yield* tx.run(`UPDATE \`session\`

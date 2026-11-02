@@ -4044,130 +4044,31 @@ index c3006754c6575df0c3dee0e13c9c6900cbfd41cf..f65cd2cabf8345965c2e1c01fb2dc2ca
 +  return "LSP checked: no errors found in this file."
  }
 diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
-index 665d010738f532c7a3ec62753af5462724fa050e..cd561c31f32f04b857fd4e6358f3ab3918ed5b5f 100644
 --- a/packages/opencode/src/lsp/lsp.ts
 +++ b/packages/opencode/src/lsp/lsp.ts
-@@ -126,6 +126,8 @@ interface State {
-   spawning: Map<string, Promise<LSPClient.Info | undefined>>
-   // bridge 能连通不代表 diagnostics endpoint 成功；status 需要这条信号避免 clean 误报
-   bridgeDiagnostics?: "ok" | "failed"
-+  // 保存最近一次 strong touch 的同请求快照，后续 diagnostics() 只读缓存，不再产生第二段等待。
-+  bridgeSnapshot: Record<string, LSPClient.Diagnostic[]>
- }
- 
- export interface Interface {
-@@ -210,6 +212,7 @@ export const layer = Layer.effect(
-           broken: new Set(),
-           spawning: new Map(),
-           bridgeDiagnostics: undefined,
-+          bridgeSnapshot: {},
-         }
- 
-         yield* Effect.addFinalizer(() =>
-@@ -339,16 +342,18 @@ export const layer = Layer.effect(
-       })
-     })
- 
--    // [local-smark] 通过 bridge 调用 LSP 端点，失败返回 undefined（触发回退）
-+    // [local-smark] 通过 bridge 调用 LSP 端点。失败返回 undefined，由诊断调用方保留真实失败状态。
-+    // timeout 只由 strong diagnostic touch 传入；hover 等其他 bridge 能力保持各自原有上限。
-     const callLspBridge = Effect.fnUntraced(function* (
-       endpoint: string,
-       body: Record<string, unknown>,
-       filePath?: string,
-+      timeoutMs?: number,
-     ) {
-       const ctx = yield* InstanceState.context
-       return yield* Effect.promise(async () => {
-         try {
--          return await VscodeBridge.callBridge({ cwd: ctx.directory, path: endpoint, body, filePath })
-+          return await VscodeBridge.callBridge({ cwd: ctx.directory, path: endpoint, body, filePath, timeoutMs })
-         } catch {
-           return undefined
-         }
-@@ -438,8 +443,26 @@ export const layer = Layer.effect(
-       const bridge = yield* resolveLspBridge(input)
-       if (bridge) {
-         if (!diagnostics) return
--        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input)
--        if (touched) return
-+        const touched = yield* callLspBridge("/lsp/touch", { filePath: input }, input, 1000)
-+        const mapped = bridgeDiagnosticsToMap(touched)
-+        const s = yield* InstanceState.get(state)
-+        if (mapped) {
-+          const normalized = FSUtil.normalizePath(input)
-+          // 空数组也覆盖旧快照，保证“未发现错误”不会保留上一次错误。
-+          // 非空数组同样固定在本次 Tool 结果中，后到事件不能修改已经返回的输出。
-+          s.bridgeSnapshot[normalized] = mapped[normalized] ?? []
-+          s.bridgeDiagnostics = "ok"
-+          return
-+        }
-+        s.bridgeDiagnostics = "failed"
-+        // bridge 已被选中后失败属于真实失败，不允许再切换内置 LSP 改变诊断语义。
-+        return
-+      }
-+      if (diagnostics) {
-+        const s = yield* InstanceState.get(state)
-+        // strong touch 没有 bridge 时直接标记失败；仅 light warm 保留原有内置 LSP 兼容路径。
-+        s.bridgeDiagnostics = "failed"
-+        return
-       }
+@@ -290,3 +290,4 @@
+     const touchFile = Effect.fn("LSP.touchFile")(function* (input: string, diagnostics?: "document" | "full") {
++      // 产品固定停用，显式document也只消费空clients，不恢复bridge或第二次诊断读取。
        yield* Effect.logInfo("touching file", { file: input })
        const clients = yield* getClients(input)
-@@ -463,30 +486,15 @@ export const layer = Layer.effect(
-     })
- 
-     const diagnostics = Effect.fn("LSP.diagnostics")(function* () {
--      // [local-smark] 优先 bridge，回退内置
-+      // [local-smark] touch 已返回同一请求的快照；这里不再发第二个 bridge 请求。
-+      // 空对象与 bridge 失败由 status 区分，成功的空文件快照则保留规范化文件 key 和空数组。
-       const s = yield* InstanceState.get(state)
-       const bridge = yield* resolveLspBridge()
--      if (bridge) {
--        // 成功解析 `{ diagnostics: [] }` 也算可用；undefined/坏结构才标记失败
--        const result = yield* callLspBridge("/lsp/diagnostics", {})
--        const mapped = bridgeDiagnosticsToMap(result)
--        if (mapped) {
--          s.bridgeDiagnostics = "ok"
--          return mapped
--        }
--        // bridge 可连接不等于 diagnostics 可用；失败后 status 不能再让工具输出 clean 误报
-+      if (!bridge) {
-         s.bridgeDiagnostics = "failed"
-+        return {}
-       }
--      const results: Record<string, LSPClient.Diagnostic[]> = {}
--      const all = yield* Effect.promise(() => Promise.all(s.clients.map((client) => client.diagnostics)))
--      for (const result of all) {
--        for (const [p, diags] of result.entries()) {
--          const arr = results[p] || []
--          arr.push(...diags)
--          results[p] = arr
--        }
--      }
--      return results
-+      return s.bridgeDiagnostics === "failed" ? {} : s.bridgeSnapshot
-     })
- 
-     const hover = Effect.fn("LSP.hover")(function* (input: LocInput) {
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
 index 3b1ddb43d..cc9872496 100644
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
 @@ -9,6 +9,7 @@ import { LSP } from "@/lsp/lsp"
  import * as LSPServer from "@/lsp/server"
- import * as VscodeBridge from "@/ide/vscode-bridge"
+ import { VscodeBridge } from "@/ide/vscode-bridge"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
  import { TestInstance } from "../fixture/fixture"
- import { awaitWithTimeout, testEffect } from "../lib/effect"
+ import { testEffect } from "../lib/effect"
  
 @@ -131,6 +131,5 @@ describe("lsp.spawn", () => {
        ),
    )
 -
    it.instance(
-     "uses VSCode bridge touch for document diagnostics",
+     "keeps document diagnostics disabled despite an advertised bridge",
      () =>
 @@ -144,13 +144,16 @@ describe("lsp.spawn", () => {
              source: "registry",
@@ -4178,12 +4079,12 @@ index 3b1ddb43d..cc9872496 100644
  
            try {
              yield* lsp.touchFile(file, "document")
-             // edit/write/apply_patch 需要 strong touch 触发 VSCode/Pylance 诊断计算
--            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file }))
-+            // 空数组是成功的“未发现错误”快照，必须保留文件 key，不能退化为 unavailable。
-+            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", filePath: file, timeoutMs: 1000 }))
-+            expect(yield* lsp.diagnostics()).toEqual({ [FSUtil.normalizePath(file)]: [] })
-+            expect(yield* lsp.status()).toEqual([{ id: "vscode", name: "VSCode", root: ".", status: "connected" }])
+             // 用户已停用整个LSP能力，显式document也不能调用IDE后端。
+-            expect(call).toHaveBeenCalledTimes(0)
++            // bridge广告或空快照不能恢复产品能力，更不能把未执行误报成clean。
++            expect(call).toHaveBeenCalledTimes(0)
++            expect(yield* lsp.diagnostics()).toEqual({})
++            expect(yield* lsp.hasClients(FSUtil.normalizePath(file))).toBe(false)
            } finally {
              resolve.mockRestore()
              call.mockRestore()
@@ -4191,7 +4092,7 @@ index 3b1ddb43d..cc9872496 100644
 @@ -210,7 +212,39 @@ describe("lsp.spawn", () => {
    )
  
-+  it.instance("returns diagnostics from the VSCode bridge touch without a second request", () =>
++  it.instance("keeps bridge diagnostics unavailable without a touch or a second request", () =>
 +    LSP.Service.use((lsp) =>
 +      Effect.gen(function* () {
 +        const dir = (yield* TestInstance).directory
@@ -4211,11 +4112,11 @@ index 3b1ddb43d..cc9872496 100644
 +
 +        try {
 +          yield* lsp.touchFile(file, "document")
-+          // touch 响应已经携带诊断；再次读取必须命中同一缓存而不是发送第二个 HTTP 请求。
-+            expect((yield* lsp.diagnostics())[FSUtil.normalizePath(file)]).toEqual([
-+            expect.objectContaining({ message: "type mismatch", severity: 1, source: "test" }),
-+          ])
-+          expect(call).toHaveBeenCalledTimes(1)
++          // 停用时连非空候选快照也不读取，连续调用不能产生首次或第二次bridge请求。
++          expect(yield* lsp.diagnostics()).toEqual({})
++          expect(yield* lsp.diagnostics()).toEqual({})
++          expect(yield* lsp.status()).toEqual([])
++          expect(call).toHaveBeenCalledTimes(0)
 +        } finally {
 +          resolve.mockRestore()
 +          call.mockRestore()
@@ -4224,7 +4125,7 @@ index 3b1ddb43d..cc9872496 100644
 +    ),
 +  )
    it.instance(
-     "publishes lsp.updated after custom LSP initialization",
+     "custom LSP config cannot initialize a server or publish lsp.updated",
      () =>
        Effect.gen(function* () {
          const dir = (yield* TestInstance).directory
@@ -4246,12 +4147,12 @@ index 3b1ddb43d..cc9872496 100644
 -            yield* lsp.diagnostics()
 -            // bridge 存活不等于 diagnostics 成功；失败后 status 不能让工具输出 clean
 +            yield* lsp.touchFile(file, "document")
-+            // bridge 存活不等于诊断成功；失败后不能输出 clean，也不能再叠加第二次诊断请求。
-+            // 此处同时锁定状态和调用次数，避免未来把失败重新包装成空成功。
++            // 固定停用不消费失败bridge，空诊断和空status不能被解释为已运行成功。
++            // 连续读取仍为不可用，不恢复内置后端或追加第二次请求。
              expect(yield* lsp.status()).toEqual([])
--            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/diagnostics" }))
-+            expect(call).toHaveBeenCalledTimes(1)
-+            expect(call).toHaveBeenCalledWith(expect.objectContaining({ path: "/lsp/touch", timeoutMs: 1000 }))
+-            expect(call).toHaveBeenCalledTimes(0)
++            expect(call).toHaveBeenCalledTimes(0)
++            expect(yield* lsp.diagnostics()).toEqual({})
            } finally {
              resolve.mockRestore()
              call.mockRestore()
@@ -4310,7 +4211,7 @@ index 3b1ddb43d..cc9872496 100644
 +  )
 +
    it.instance(
-     "uses pyright instead of ty by default",
+     "keeps pyright and ty disabled by default",
      () =>
 diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
 index 88bd02b51082fb1d8ee8f2a8a322d5827d5ec60b..11b11be29a7fabc201dc32db7fba9aafe55898e1 100644
@@ -4334,84 +4235,3 @@ index 88bd02b51082fb1d8ee8f2a8a322d5827d5ec60b..11b11be29a7fabc201dc32db7fba9aaf
    })
  
    // [local-smark] newErrors 返回新错误数组，供 metadata 存储给 TUI 渲染
-diff --git a/sdks/vscode/src/lsp.ts b/sdks/vscode/src/lsp.ts
-index c7681bb4bb7efda2b9fc077e18758159f78d4ed2..14224eedd8e4812430764fbc594995d69029d16b 100644
---- a/sdks/vscode/src/lsp.ts
-+++ b/sdks/vscode/src/lsp.ts
-@@ -1,37 +1,39 @@
- import * as vscode from "vscode"
- 
--// [local-smark] showTextDocument 是触发 Pylance 等 LSP 扩展诊断计算的必需条件。
--// openTextDocument 只在 VSCode 内部打开文档，不触发诊断计算。
--// preview + preserveFocus 不抢占用户焦点。
--async function ensureOpen(filePath: string): Promise<vscode.Uri> {
--  const uri = vscode.Uri.file(filePath)
--  const doc = await vscode.workspace.openTextDocument(uri)
--  try {
--    await vscode.window.showTextDocument(doc, { preview: true, preserveFocus: true })
--  } catch {
--    // showTextDocument 失败时 openTextDocument 仍提供基本文档访问
--  }
--  return uri
--}
-+// [local-smark] 给 hidden open 和本地 HTTP 返回预留 200ms，保证 OpenCode 外层 1s 总截止时间。
-+// 这是同一个总预算的内部切分，不是 800ms 之后再追加 1s。
-+const DIAGNOSTIC_TIMEOUT_MS = 800
- 
--// [local-smark] 等待 VSCode 为指定 uri 计算诊断。使用 onDidChangeDiagnostics 事件。
--// 新文件约 0.5s 触发事件；已打开文件（诊断无变化）等满超时。
--async function awaitDiagnosticsRefresh(uri: vscode.Uri, timeoutMs = 2000): Promise<void> {
-+// [local-smark] 只使用 hidden document 和 VS Code 诊断事件，不抢占用户编辑器。
-+// listener 必须先于 open 注册，否则快速 provider 可能在监听建立前完成首次发布。
-+async function collectDiagnostics(filePath: string): Promise<ReturnType<typeof formatDiag>[]> {
-+  const uri = vscode.Uri.file(filePath)
-   return new Promise((resolve) => {
-+    let latest: vscode.Diagnostic[] = []
-     let resolved = false
-+    let timer: ReturnType<typeof setTimeout> | undefined
-     const finish = () => {
-       if (resolved) return
-       resolved = true
-       disposable.dispose()
--      clearTimeout(timer)
--      resolve()
-+      if (timer) clearTimeout(timer)
-+      resolve(latest.map((diagnostic) => formatDiag(diagnostic, uri.fsPath)))
-     }
--    const disposable = vscode.languages.onDidChangeDiagnostics((e) => {
--      if (e.uris.some((u) => u.toString() === uri.toString())) {
--        setTimeout(finish, 50)
--      }
-+    const disposable = vscode.languages.onDidChangeDiagnostics((event) => {
-+      if (!event.uris.some((item) => item.toString() === uri.toString())) return
-+      latest = vscode.languages.getDiagnostics(uri)
-+      // 错误/警告等非空诊断立即返回；空结果按产品约定等到本次观察窗口结束。
-+      if (latest.length > 0) finish()
-     })
--    const timer = setTimeout(finish, timeoutMs)
-+    // deadline 只读取最新快照，不增加 quiet delay，也不会在响应后继续更新 Tool 输出。
-+    timer = setTimeout(finish, DIAGNOSTIC_TIMEOUT_MS)
-+    void vscode.workspace.openTextDocument(uri).then(
-+      () => {
-+        latest = vscode.languages.getDiagnostics(uri)
-+        if (latest.length > 0) finish()
-+      },
-+      () => finish(),
-+    )
-   })
- }
- 
-@@ -88,11 +90,9 @@ function formatHover(hover: vscode.Hover) {
-   }
- }
- 
--// [local-smark] touch: showTextDocument + awaitDiagnosticsRefresh — 触发诊断计算
-+// [local-smark] touch: hidden open + request-local diagnostics observation
- export async function lspTouch(args: { filePath: string }) {
--  const uri = await ensureOpen(args.filePath)
--  await awaitDiagnosticsRefresh(uri)
--  return { ok: true }
-+  return { ok: true, diagnostics: await collectDiagnostics(args.filePath) }
- }
- 
- // [local-smark] diagnostics: 只读取，不 ensureOpen，不等待（依赖之前 touch）

@@ -528,20 +528,16 @@ index 0000000000000000000000000000000000000000..095b5d0b70d9ad9cae5efb51fe99cf32
 +The task may be marked `verified` only after an independent full-scope result of
 +`No blocking findings` for the current implementation and approved plan
 +revision.
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
-index 27aa70736998cfb87a9da9d22b2e65b0ec382030..21805459f9b47f11b32c3985693780356ae69a98 100644
---- a/packages/opencode/src/tool/edit-apply.ts
-+++ b/packages/opencode/src/tool/edit-apply.ts
-@@ -51,7 +51,7 @@ type LineSpan = { start: number; end: number }
- // 9. 单元素 edits 与多元素 edits 不得分叉到不同匹配算法。
- // 10. newString 禁止再走 normalizeForMatch，避免改写用户意图插入文本。
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
+--- a/packages/core/src/tool/edit-apply.ts
++++ b/packages/core/src/tool/edit-apply.ts
+@@ -58,4 +58,4 @@
  // 11. hybrid 连字符：字面一次、归一化两次 → 无 replaceAll 必歧义失败。
 -// 12. 重叠 range 在 reverse 前拒绝，避免部分写盘。
 +// 12. range 先按偏移原位排序再重叠检查与 reverse apply（顺序不变性），避免错位拼接与部分写盘。
- // 13. identical（oldString === newString）条目校验后跳写，不推入 allRanges；
- //     唯一 no-op 门是批级内容等值（505-511），逐条不再拒绝。
- //     其 syncEdits 历史为提交形态（零写入即无命中切片可记），真实条目沿用 actualOld。
-@@ -119,6 +119,7 @@ function getReplacementLineRange(lines: LineSpan[], replacement: TextReplacement
+ // 13. identical 条目校验后跳写并保留提交形态；批级等值仍是唯一 no-op 门，真实编辑记录 actualOld。
+ // 14. 兼容 replace() 仅允许 length-1 委托，禁止复制粘贴第二实现。
+@@ -105,6 +105,7 @@ function getReplacementLineRange(lines: LineSpan[], replacement: TextReplacement
  }
  
  function applyReplacements(content: string, replacements: TextReplacement[], offset = 0): string {
@@ -549,7 +545,7 @@ index 27aa70736998cfb87a9da9d22b2e65b0ec382030..21805459f9b47f11b32c398569378035
    // 从高 offset 到低 offset 写回，保证同一快照上的多 range 互不干扰
    let result = content
    for (let i = replacements.length - 1; i >= 0; i--) {
-@@ -504,11 +505,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -492,11 +493,12 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
      })
    }
  
@@ -567,6 +563,11 @@ index 27aa70736998cfb87a9da9d22b2e65b0ec382030..21805459f9b47f11b32c398569378035
      if (previous.matchIndex + previous.matchLength > current.matchIndex) {
        throw new Error(
          `edits[${previous.editIndex}] and edits[${current.editIndex}] overlap in ${path}. Merge them into one edit or target disjoint regions.`,
+@@ -509,3 +511,3 @@
+   const contentNew = usedNormalized
+     ? applyReplacementsPreservingUnchangedLines(content, replacementBase, allRanges)
+-    : applyReplacements(replacementBase, sorted)
++    : applyReplacements(replacementBase, allRanges)
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
 index 726aa4da0e83e5c4a70ba227825313fb7b88a3c7..fa37d6cae59071e678e5c6afa04d372b30af690f 100644
 --- a/packages/opencode/test/tool/edit.test.ts

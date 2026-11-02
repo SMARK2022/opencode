@@ -196,15 +196,21 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 @@ -21,1 +21,1 @@
 -import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
 +import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, normalizePowerShellOutput, renderDiagnosticAppendix } from "./bash-compress"
-@@ -313,3 +313,4 @@
+@@ -304,6 +304,7 @@
                const output = text || "(no output)"
 +              const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
+               const truncated = cut || result?.outputTruncated === true
+               const outcome = result ? { exit: result.exitCode } : { timeout: true }
+               const timeoutNotice = result ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
                // 传真实调用 command，不使用描述或重新解析执行命令。
 -              const compressed = compressVisibleOutput(output, { enabled }, input.command)
 +              const compressed = compressVisibleOutput(normalized, { enabled }, input.command)
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
+@@ -282,1 +282,1 @@
+-                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'Continue'", "$DebugPreference = 'Continue'", "& {", "pwd", "} *>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
++                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'Continue'", "$DebugPreference = 'Continue'", "& {", "pwd", "} 3>&1 4>&1 5>&1 6>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
 @@ -460,3 +460,34 @@
                }), LayerNode.compile(AppProcess.node), shell, false, undefined, encoding)
              }
@@ -240,3 +246,21 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +              }), LayerNode.compile(AppProcess.node), shell, mode === "config" ? false : undefined, undefined, "auto")
 +            }
            }
+@@ -892,2 +892,4 @@
+         // 命令参数由真实 registry caller 传入；固定输出替身不安装四个外部工具。
++        // PowerShell 先还原 CLIXML，再进入通用压缩；其他 shell 仍保留 wrapped 路径。
++        const plainClixml = process.platform === "win32" && Shell.ps(Shell.acceptable())
+         for (const [command, output, marker] of [
+@@ -901,2 +903,2 @@
+-          ["clixml-low-savings", ordinaryClixml, ordinaryDecoded.text],
+-          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', "<high-entropy powershell-clixml>ordinary</high-entropy>"],
++          ["clixml-low-savings", ordinaryClixml, plainClixml ? ordinary : ordinaryDecoded.text],
++          ["clixml-expanding", '<Objs><S S="Output">ordinary</S></Objs>', plainClixml ? "ordinary" : "<high-entropy powershell-clixml>ordinary</high-entropy>"],
+@@ -921,1 +923,1 @@
+-            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
++            if (command === "clixml-expanding") expect(settled.output?.structured).toMatchObject({ compression: plainClixml ? { compressed: false, compressionHighEntropyLines: 0, compressionOriginalBytes: 8, compressionCompressedBytes: 8, compressionSavedBytes: 0 } : { compressed: false, compressionHighEntropyLines: 1, compressionOriginalBytes: 39, compressionCompressedBytes: 55, compressionSavedBytes: -16 } })
+@@ -1018,3 +1020,3 @@
+           expect(text).toContain("actual-stdout")
+           expect(text).toContain("actual-stderr")
+-          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: 1 } })
++          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: plainClixml ? 0 : 1 } })

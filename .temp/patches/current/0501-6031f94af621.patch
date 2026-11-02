@@ -6,9 +6,9 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-适配：0499 端口已前置吸收 cwd: root→dir（EBUSY 确定性失败）与 create spy；
-本 patch 落地剩余增量——terminal/transition 双循环 try/finally 改按 iteration
-Effect.scoped finalizer（JS finally 在 Effect 失败时不执行，防 mock 跨轮泄漏）。
+适配：用户固定停用两代 LSP；active client 的 cwd/terminal/claim 测试随能力退役。
+完整保留归档计划；仍有效的 Effect 失败清理规则用于现存配置对象零 spawn 测试，
+由测试 scope 恢复 spy，不恢复语言服务、子进程或已退役的生命周期接口。
 diff --git a/docs/plans/windows-lsp-lifecycle-test-ci-fix.md b/docs/plans/windows-lsp-lifecycle-test-ci-fix.md
 new file mode 100644
 --- /dev/null
@@ -473,193 +473,32 @@ new file mode 100644
 diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
 --- a/packages/opencode/test/lsp/index.test.ts
 +++ b/packages/opencode/test/lsp/index.test.ts
-@@ -135,93 +135,114 @@ describe("lsp session lifecycle", () => {
-               },
-             }
-           })
-+          // #0501：shutdown 计数 spy 覆盖 LSPClient.create——测试 scope 关闭时统一恢复，防跨测试泄漏。
-           yield* Effect.addFinalizer(() => Effect.sync(() => create.mockRestore()))
-+          // prune 认 client.root 是否存在，不认 process.cwd。
-+          // fake 进程 cwd 固定为 instance 目录，避免 Windows 因 cwd 锁住 root 而无法删/改名目录。
-+          // Effect.gen 的 JS finally 在 Effect 失败时不执行；spawn/root spy 必须按 iteration 用 scoped finalizer 恢复。
-           for (const terminal of ["root", "process"] as const) {
--            const root = path.join(dir, terminal),
--              file = path.join(root, "index.ts")
--            let child: ReturnType<typeof lspSpawn> | undefined
-+            const root = path.join(dir, terminal)
-+            const file = path.join(root, "index.ts")
-             yield* Effect.promise(() => fs.mkdir(root, { recursive: true }))
-             yield* Effect.promise(() => Bun.write(file, "export {}\n"))
--            const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
--            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => ({
--              process: (child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })),
--            }))
--            try {
--              yield* lsp.touchFile(file)
--              expect((yield* lsp.status()).some((item) => item.id === "typescript")).toBe(true)
--              if (!child) return yield* Effect.die(new Error("fake LSP process was not captured"))
--              const processHandle = child
--              // #499：root 与 child exit 都必须进入 exact-entry detach/shutdown 终态，
--              // 而不是只隐藏 status row。
--              if (terminal === "root") yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
--              else yield* Effect.promise(() => Process.stop(processHandle))
--              yield* pollWithTimeout(
--                lsp.status().pipe(
--                  Effect.map((rows) =>
--                    !rows.some((item) => item.id === "typescript") && observed.shutdowns === (terminal === "root" ? 1 : 2)
--                      ? true
--                      : undefined,
-+            yield* Effect.scoped(
-+              Effect.gen(function* () {
-+                let child: ReturnType<typeof lspSpawn> | undefined
-+                const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
-+                const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => ({
-+                  process: (child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })),
-+                }))
-+                yield* Effect.addFinalizer(() =>
-+                  Effect.sync(() => {
-+                    resolveRoot.mockRestore()
-+                    spawn.mockRestore()
-+                  }),
-+                )
-+                yield* lsp.touchFile(file)
-+                expect((yield* lsp.status()).some((item) => item.id === "typescript")).toBe(true)
-+                // #0501：die 同样触发 scoped finalizer——这是相对 JS finally 的关键差异。
-+                if (!child) return yield* Effect.die(new Error("fake LSP process was not captured"))
-+                const processHandle = child
-+                // root 消失与 child exit 都必须 exact-entry detach/shutdown，而不是只从 status 列表隐藏。
-+                if (terminal === "root") yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
-+                else yield* Effect.promise(() => Process.stop(processHandle))
-+                yield* pollWithTimeout(
-+                  lsp.status().pipe(
-+                    Effect.map((rows) =>
-+                      // #0501：shutdown 计数入终态判定——root 终态 1 次、process 终态累计 2 次，防只隐藏 row 的假绿。
-+                      !rows.some((item) => item.id === "typescript") && observed.shutdowns === (terminal === "root" ? 1 : 2)
-+                        ? true
-+                        : undefined,
-+                    ),
-                   ),
--                ),
--                `${terminal} terminal did not remove LSP client`,
--              )
--            } finally {
--              resolveRoot.mockRestore()
--              spawn.mockRestore()
--            }
-+                  `${terminal} terminal did not remove LSP client`,
-+                )
-+              }),
-+            )
-           }
-+
-+          // handoff：新 generation 接管 inflight spawn；reload：无接管者时 disposed State 清孤儿；
-+          // missing-root：initialize 完成前 root 消失则不得登记可用 client，进程须退出。
-           const sessionID = SessionID.make("ses_lsp_stale_generation")
-           for (const transition of ["handoff", "reload", "missing-root"] as const) {
--            const root = path.join(dir, transition),
--              file = path.join(root, "index.ts")
-+            const root = path.join(dir, transition)
-+            const file = path.join(root, "index.ts")
-+            // #0501：Deferred 对按 transition 成对新建——上一轮 barrier 状态不得泄漏到下一轮。
-             const [started, release] = yield* Effect.all([Deferred.make<void>(), Deferred.make<void>()])
--            let child: ReturnType<typeof lspSpawn> | undefined
-             yield* Effect.promise(() => fs.mkdir(root, { recursive: true }))
-             yield* Effect.promise(() => Bun.write(file, "export {}\n"))
--            const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
--            const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => {
--              child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })
--              Effect.runSync(Deferred.succeed(started, undefined))
--              await Effect.runPromise(Deferred.await(release))
--              return { process: child }
+@@ -287,19 +287,17 @@ describe("lsp.spawn", () => {
+       LSP.Service.use((lsp) =>
+         Effect.gen(function* () {
+           const dir = (yield* TestInstance).directory
+           const spy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+ 
+-          try {
+-            yield* lsp.hover({
+-              file: path.join(dir, "src", "inside.ts"),
+-              line: 0,
+-              character: 0,
 -            })
--            try {
--              const touch = yield* Effect.gen(function* () {
--                yield* lsp.init()
--                yield* lsp.touchFile(file)
--              }).pipe(LSP.withSession(sessionID, Effect.void), Effect.forkChild)
--              yield* awaitWithTimeout(Deferred.await(started), "LSP spawn did not reach the controlled boundary")
--
--              // #499：新 token 必须接管同一 spawn；没有接管者的 disposed State 仍要销毁孤儿。
--              const handoff = Effect.yieldNow.pipe(
--                Effect.andThen(Deferred.succeed(release, undefined)),
--                Effect.forkChild,
--                Effect.andThen(touchAs(lsp, sessionID, file)),
--              )
--              yield* (
--                transition === "handoff"
-+            // 与 terminal 环相同：scoped finalizer 保证本 transition 失败也不会把 mock 泄漏到下一轮。
-+            yield* Effect.scoped(
-+              Effect.gen(function* () {
-+                let child: ReturnType<typeof lspSpawn> | undefined
-+                const resolveRoot = spyOn(LSPServer.Typescript, "root").mockResolvedValue(root)
-+                const spawn = spyOn(LSPServer.Typescript, "spawn").mockImplementation(async () => {
-+                  // cwd=dir 使 missing-root 的 rename(root) 在 Windows 上可达，仍测 client.root 复验。
-+                  child = lspSpawn(process.execPath, [fakeServerPath], { cwd: dir })
-+                  Effect.runSync(Deferred.succeed(started, undefined))
-+                  await Effect.runPromise(Deferred.await(release))
-+                  return { process: child }
-+                })
-+                yield* Effect.addFinalizer(() =>
-+                  Effect.sync(() => {
-+                    resolveRoot.mockRestore()
-+                    spawn.mockRestore()
-+                  }),
-+                )
-+                const touch = yield* Effect.gen(function* () {
-+                  yield* lsp.init()
-+                  yield* lsp.touchFile(file)
-+                }).pipe(LSP.withSession(sessionID, Effect.void), Effect.forkChild)
-+                yield* awaitWithTimeout(Deferred.await(started), "LSP spawn did not reach the controlled boundary")
-+
-+                // 新 token 接管同一 spawn；无接管者时 disposed State / 消失 root 仍须销毁孤儿。
-+                const handoff = Effect.yieldNow.pipe(
-+                  Effect.andThen(Deferred.succeed(release, undefined)),
-+                  Effect.forkChild,
-+                  Effect.andThen(touchAs(lsp, sessionID, file)),
-+                )
-+                yield* (transition === "handoff"
-                   ? handoff
--                  : (
--                      transition === "missing-root"
--                        ? Effect.promise(() => fs.rename(root, `${root}.gone`))
--                        : Effect.promise(() => disposeInstance(dir))
--                    ).pipe(Effect.andThen(Deferred.succeed(release, undefined)))
--              )
--              yield* Fiber.join(touch)
--              if (transition === "missing-root")
--                yield* pollWithTimeout(
--                  Effect.sync(() =>
--                    child && (child.exitCode !== null || child.signalCode !== null) ? true : undefined,
--                  ),
--                  "missing-root client process did not exit",
-+                  : (transition === "missing-root"
-+                      ? Effect.promise(() => fs.rename(root, `${root}.gone`))
-+                      : Effect.promise(() => disposeInstance(dir))
-+                    ).pipe(Effect.andThen(Deferred.succeed(release, undefined))))
-+                // #0501：join 在 release 之后——touch 的成败属于断言面而非清理面。
-+                yield* Fiber.join(touch)
-+                if (transition === "missing-root") {
-+                  yield* pollWithTimeout(
-+                    Effect.sync(() =>
-+                      // #0501：exitCode/signalCode 双通道——Windows 上强杀路径可能只置 signalCode。
-+                      child && (child.exitCode !== null || child.signalCode !== null) ? true : undefined,
-+                    ),
-+                    "missing-root client process did not exit",
-+                  )
-+                }
-+                expect((yield* lsp.status()).filter((item) => item.id === "typescript")).toEqual(
-+                  transition === "handoff" ? [expect.objectContaining({ sessionIDs: [sessionID] })] : [],
-                 )
--              expect((yield* lsp.status()).filter((item) => item.id === "typescript")).toEqual(
--                transition === "handoff" ? [expect.objectContaining({ sessionIDs: [sessionID] })] : [],
--              )
--            } finally {
--              resolveRoot.mockRestore()
--              spawn.mockRestore()
--            }
-+              }),
-+            )
-           }
+-            expect(spy).toHaveBeenCalledTimes(0)
+-          } finally {
+-            spy.mockRestore()
+-          }
++          // Effect 失败不运行生成器的 JS finally；由测试 scope 恢复 spy，零 spawn 断言不变。
++          yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()))
++          yield* lsp.hover({
++            file: path.join(dir, "src", "inside.ts"),
++            line: 0,
++            character: 0,
++          })
++          expect(spy).toHaveBeenCalledTimes(0)
          }),
        ),
+     {
+       config: {
 

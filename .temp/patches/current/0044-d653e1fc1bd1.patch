@@ -2,7 +2,7 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -0,0 +1,1030 @@
+@@ -0,0 +1,1000 @@
 +import fs from "fs/promises"
 +import os from "os"
 +import path from "path"
@@ -15,18 +15,8 @@ new file mode 100644
 +import { estimateDataUrlInputTokens } from "./token-estimate"
 +import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
 +// 提示词文本资产由 Bun 内嵌，估算无需加载服务或依赖打包后的源码目录。
-+import PROMPT_META from "../../../opencode/src/session/prompt/meta.txt"
-+import PROMPT_BEAST from "../../../opencode/src/session/prompt/beast.txt"
-+import PROMPT_ASTRA from "../../../opencode/src/session/prompt/gpt-astra.txt"
-+import PROMPT_CODEX from "../../../opencode/src/session/prompt/codex.txt"
-+import PROMPT_GPT from "../../../opencode/src/session/prompt/gpt.txt"
-+import PROMPT_GEMINI from "../../../opencode/src/session/prompt/gemini.txt"
-+import PROMPT_ANTHROPIC from "../../../opencode/src/session/prompt/anthropic.txt"
-+import PROMPT_TRINITY from "../../../opencode/src/session/prompt/trinity.txt"
-+import PROMPT_MINIMAX from "../../../opencode/src/session/prompt/minimax.txt"
-+import PROMPT_DEEPSEEK from "../../../opencode/src/session/prompt/deepseek.txt"
-+import PROMPT_KIMI from "../../../opencode/src/session/prompt/kimi.txt"
-+import PROMPT_DEFAULT from "../../../opencode/src/session/prompt/default.txt"
++import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
++import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
 +
 +function truthy(key: string) {
 +  // 技能扫描只观察环境快照，不引入 Config/Flag 服务或另一份目录来源。
@@ -41,26 +31,6 @@ new file mode 100644
 +  // withDefault 只处理缺失值；实际 Config.boolean 保留 yes/on/1 等编码及非法值失败，不自行复制真值表。
 +  const experimental = Effect.runSync(boolean("OPENCODE_EXPERIMENTAL").pipe(withDefault(false)).parse(provider))
 +  return Effect.runSync(boolean(key).pipe(withDefault(experimental)).parse(provider))
-+}
-+
-+function systemProviderPrompt(model: Provider["models"][string]): string[] {
-+  // 模板路由使用 API ID；网关展示名变化不能改选模型族提示词。
-+  const id = model.api?.id ?? model.id
-+  if (id.includes("muse")) return [PROMPT_META.replaceAll("{{MODEL_NAME}}", id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark")]
-+  if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return [PROMPT_BEAST]
-+  if (id.includes("gpt")) {
-+    // GPT-6 先于 Codex 匹配，保留 provider 的大小写与分支优先级。
-+    if (id.includes("gpt-6")) return [PROMPT_ASTRA]
-+    if (id.includes("codex")) return [PROMPT_CODEX]
-+    return [PROMPT_GPT]
-+  }
-+  if (id.includes("gemini-")) return [PROMPT_GEMINI]
-+  if (id.includes("claude")) return [PROMPT_ANTHROPIC]
-+  if (id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
-+  if (id.toLowerCase().includes("minimax") || id.toLowerCase().includes("mini-max")) return [PROMPT_MINIMAX]
-+  if (id.toLowerCase().includes("deepseek")) return [PROMPT_DEEPSEEK]
-+  if (id.toLowerCase().includes("kimi") || ["kimi-for-coding", "moonshotai", "moonshotai-cn"].includes(model.providerID)) return [PROMPT_KIMI]
-+  return [PROMPT_DEFAULT]
 +}
 +
 +// 指引跟随本次定义集合；模型/权限过滤后的 patch-only 请求不能宣称拥有 edit/write。
@@ -703,8 +673,8 @@ new file mode 100644
 +  return Object.entries(EMBEDDED_TOOL_CATALOG).map(([name, entry]) => {
 +    // TaskTool 默认广告 BaseParameters；后台开关开启才同时广告完整参数与后台运行说明。
 +    const parameters = name === "task" && !background ? EMBEDDED_TOOL_CATALOG.task.baseParameters : entry.parameters
-+    const description = name === "task" && background
-+      ? [entry.description, EMBEDDED_TOOL_CATALOG.task.backgroundDescription].join("\n\n")
++    const description = name === "task"
++      ? [TaskPrompt.description, ...(background ? [EMBEDDED_TOOL_CATALOG.task.backgroundDescription] : [])].join("\n\n")
 +      : entry.description
 +    // 序列化必须保留 optional/required/default 与嵌套字段；这里只选择 owner 资产，不重建 Schema。
 +    return { name, text: [`Tool: ${name}`, description.replaceAll("${cwd}", paths.cwd).replaceAll("${worktree}", paths.worktree ?? paths.cwd), JSON.stringify(parameters)].join("\n") }
@@ -785,7 +755,7 @@ new file mode 100644
 +  // 未找到模型时只省略族模板；环境与用户 system 仍由调用方正常组装。
 +  if (!model) return ""
 +  // 模板字符串来自静态 asset，估算不再读取源码路径；packed binary 与源码运行使用同一文本。
-+  return systemProviderPrompt(model).join("\n")
++  return SessionPrompts.provider(model.api?.id ?? model.id, model.providerID)
 +}
 +
 +// 分段间的换行也是字符载荷；环境与族提示分别组装后统一估算，不能按段落名称补固定 token。
@@ -1408,7 +1378,7 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 new file mode 100644
 --- /dev/null
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -0,0 +1,569 @@
+@@ -0,0 +1,570 @@
 +import { describe, expect, test } from "bun:test"
 +import { createComputed, createRoot, createSignal } from "solid-js"
 +import { createStore } from "solid-js/store"
@@ -1421,6 +1391,7 @@ new file mode 100644
 +import type { Agent, Message, Part, Provider, TextPart } from "@opencode-ai/sdk/v2"
 +import { computeContextData, filterCompactedMessages, resolveToolDescriptions } from "../src/util/context-usage"
 +import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
++import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
 +import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
 +
 +// 窗口/输入/输出故意不相等，才能让测试区分模型预留与压缩缓冲而非只验证零差额。
@@ -1673,7 +1644,7 @@ new file mode 100644
 +        }
 +        const task = resolveToolDescriptions({ cwd: process.cwd() }).find((entry) => entry.name === "task")!
 +        // 完整文本检查同时约束参数选择、后台说明的有无和分隔符，非空 token 无法提供这个保证。
-+        expect(task.text).toBe(["Tool: task", enabled ? [TOOL_CATALOG.task.description, backgroundDescription].join("\n\n") : TOOL_CATALOG.task.description, JSON.stringify(enabled ? full : base)].join("\n"))
++        expect(task.text).toBe(["Tool: task", enabled ? [TaskPrompt.description, backgroundDescription].join("\n\n") : TaskPrompt.description, JSON.stringify(enabled ? full : base)].join("\n"))
 +      }
 +    } finally {
 +      // 恢复缺失与显式值的区别，后续 provider/flag 测试不能继承本 case 的后台模式。

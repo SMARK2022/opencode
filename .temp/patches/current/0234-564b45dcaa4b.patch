@@ -589,8 +589,8 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
    if (!jupyter.isActive) await jupyter.activate()
    const allCommands = await vscode.commands.getCommands(true)
    if (!allCommands.includes(RESTART_CMD)) {
--    return { ran: true, summary: "jupyter.restartkernel command is not registered.", data: { path: primaryPath, operation: "restart", reason, restartCommandFound: false, durationMs: Date.now() - startedAt } }
-+    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "jupyter.restartkernel command is not registered."].join("\n"), data: { path: primaryPath, operation: "restart", reason, restartCommandFound: false, durationMs: Date.now() - startedAt } }
+-    return { ran: true, summary: "jupyter.restartkernel command is not registered.", data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
++    return { ran: true, summary: [...envSummaryHeader(notebook, "restart", "failed"), "jupyter.restartkernel command is not registered."].join("\n"), data: { path: primaryPath, operation: "restart", reason, jupyterFound: true, jupyterActive: jupyter.isActive, restartCommandFound: false, durationMs: Date.now() - startedAt } }
    }
    const config = vscode.workspace.getConfiguration(CONFIG_SECTION)
    const original = config.get<boolean>(CONFIG_KEY)

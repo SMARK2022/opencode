@@ -25,7 +25,7 @@ diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Pro
 -> 三处fail-closed属于新附件生产边界；B历史消费不增加修复器，C仍为显式离线维护脚本。
 -> 本文涉及Sharp 0.34.5 loader细节保留为源谱系记录，实际实现按目标版本精确适配。
 +> **目标适配（#485/#488）**：普通格式复用Photon，TIFF/AVIF/HEIF/HEIC复用共享Core Sharp 0.33.5及既有原生打包链。
-+> C改为显式路径的自动preview/apply迁移；B历史消费不增加修复器，正常图片不重编码、坏Tool图片按授权弃用。
++> C以同一Core Image策略自动preview/apply V1 part与Native session_message；B不增加读时修复器，正常图不重编码、坏completed Tool图按授权弃用。
 +> 下文Sharp 0.34.5及原扫描数字保留为源谱系证据，目标输出以同一Image.Service的实际结果为准。
 -Date: 2026-07-14
 -
@@ -791,13 +791,15 @@ diff --git a/docs/Proposal/tui-image-validation-and-history-repair.md b/docs/Pro
 diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/opencode/script/migrate-image-attachment.ts
 --- a/packages/opencode/script/migrate-image-attachment.ts
 +++ b/packages/opencode/script/migrate-image-attachment.ts
-@@ -1,300 +1,264 @@
+@@ -1,300 +1,276 @@
  #!/usr/bin/env bun
  
- import { Image } from "../src/image/image"
-+// Image.layer由#485导出供本脚本复用生产normalize链，不复制第二套缩放实现。
- import { Config } from "../src/config/config"
- import { MessageID, PartID, SessionID } from "../src/session/schema"
+-import { Image } from "../src/image/image"
++import { Image } from "@opencode-ai/core/image"
++// 两代历史映射到同一生产图片服务，不为Native伪造V1 Part身份或复制缩放算法。
+-import { Config } from "../src/config/config"
++import { Config } from "@opencode-ai/core/config"
+-import { MessageID, PartID, SessionID } from "../src/session/schema"
  import { Database } from "bun:sqlite"
  import { Effect, Layer } from "effect"
 -import { createHash } from "node:crypto"
@@ -831,9 +833,11 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 -}
 +The default mode is a read-only preview. --apply updates the current database in one transaction.`
  
-+// PartRow镜像part表四列；data是完整JSON文本，所有判断都在其结构上进行。
- type PartRow = { id: string; message_id: string; session_id: string; data: string }
- type FileAttachment = { type: "file"; mime: string; url: string; [key: string]: unknown }
++// Native的type在独立SQL列，不在data里；两代始终保留完整旧JSON用于CAS。
+-type PartRow = { id: string; message_id: string; session_id: string; data: string }
++type ImageRow = { id: string; session_id: string; data: string; type?: string }
+-type FileAttachment = { type: "file"; mime: string; url: string; [key: string]: unknown }
++type ImageAttachment = { location: string; index: number; value: Record<string, unknown>; mime: string; uri: string; field: "url" | "uri"; list: unknown[]; state?: Record<string, unknown>; toolIndex?: number }
  
 -const values = parseArgs({
 -  // 所有恢复依据都由调用者显式提供；脚本不扫描目录或根据文件名猜测完整原件。
@@ -897,16 +901,22 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +  // query_only在数据库层面挡写：比依赖应用层纪律更强，preview副作用无从发生。
  
 -await main(options)
-+  // SQL只做已观察数据库形态的低成本预筛，真正图片边界仍由Part结构和声明MIME决定。
-+  const rows = db
-+    .query<PartRow, []>("SELECT id, message_id, session_id, data FROM part WHERE instr(data, 'image/') > 0 ORDER BY id")
-+    .all()
++  // 显式识别两代表，兼容只含其中一代的合法库存；SQL错误不转成空成功。
++  const tables = new Set(db.query<{ name: string }, []>("SELECT name FROM sqlite_schema WHERE type = 'table'").all().map(row => row.name))
++  if (!tables.has("part") && !tables.has("session_message")) throw new Error("No supported message table was found")
++  const rows = (["part", "session_message"] as const).flatMap(table =>
++    tables.has(table)
++      ? db.query<ImageRow, []>(
++          `SELECT id, session_id, data${table === "session_message" ? ", type" : ""} FROM ${table} WHERE instr(data, 'image/') > 0 ORDER BY id`,
++        ).all().map(row => ({ ...row, table }))
++      : [],
++  )
 +  // Effect.runPromise桥接CLI顶层；gen内的错误沿rejection进入catch统一回滚。
 +  const result = await Effect.runPromise(
 +    Effect.gen(function* () {
 +      // 单次解析Image.Service：整批共享同一实例与内部缓存，避免每行重复装载。
 +      const image = yield* Image.Service
-+      const changes: Array<{ row: PartRow; nextData: string }> = []
++      const changes: Array<{ row: ImageRow & { table: "part" | "session_message" }; nextData: string }> = []
 +      // 计划与统计分离：changes只存待写行，报告字段由四组计数器推导，避免双重真相。
 +      const normalizedItems: Array<Record<string, unknown>> = []
 +      const unavailableItems: Array<Record<string, unknown>> = []
@@ -917,6 +927,8 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +      let newPayloadBytes = 0
 +      let oldPartJsonBytes = 0
 +      let newPartJsonBytes = 0
++      let oldMessageJsonBytes = 0
++      let newMessageJsonBytes = 0
  
 -async function main(input: Options) {
 -  // Dry-run以只读方式打开数据库；任何写权限和备份成本都只在显式--apply后启用。
@@ -948,28 +960,30 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +        // clone后只修改已授权的图片字段，Part未来新增的未知字段不会因迁移丢失。
 +        const part = JSON.parse(row.data)
 +        const next = structuredClone(part)
-+        const attachments: Array<{ location: "part" | "tool"; index: number; value: FileAttachment }> = []
-+        // location区分两类持久化位置；写回路径按它分派，报告也用它让用户定位修改点。
-+        // 顶层FilePart是当前Prompt持久化形态，与Tool attachment必须进入同一Sharp策略。
-+        if (
-+          part?.type === "file" &&
-+          typeof part.mime === "string" &&
-+          part.mime.startsWith("image/") &&
-+          typeof part.url === "string"
-+        )
-+          attachments.push({ location: "part", index: 0, value: part })
-+        if (part?.type === "tool" && part.state?.status === "completed" && Array.isArray(part.state.attachments))
-+          // 只有completed的Tool才可能携带真实输出；running/failed状态的图片不在授权范围内。
-+          part.state.attachments.forEach((value: unknown, index: number) => {
-+            if (
-+              isRecord(value) &&
-+              value.type === "file" &&
-+              typeof value.mime === "string" &&
-+              value.mime.startsWith("image/") &&
-+              typeof value.url === "string"
-+          )
-+              // 原数组index必须保留到写回和报告，过滤非图片后不能重排定位。
-+              attachments.push({ location: "tool", index, value: value as FileAttachment })
++        const attachments: ImageAttachment[] = []
++        // 槽位保留clone对象和原索引：多个坏图删除后也不会错写相邻图片。
++        const addAttachments = (list: unknown, field: "url" | "uri", location: string, state?: Record<string, unknown>, toolIndex?: number) => {
++          if (!Array.isArray(list)) return
++          list.forEach((value: unknown, index) => {
++            if (!isRecord(value)) return
++            const uri = value[field]
++            if (typeof value.mime !== "string" || !value.mime.startsWith("image/") || typeof uri !== "string") return
++            if ((field === "url" || location === "tool-content") && value.type !== "file") return
++            attachments.push({ location, index, value, mime: value.mime, uri, field, list, state, toolIndex })
++          })
++        }
++        if (row.table === "part") {
++          if (next?.type === "file") addAttachments([next], "url", "part")
++          if (next?.type === "tool" && next.state?.status === "completed")
++            addAttachments(next.state.attachments, "url", "tool", next.state)
++        }
++        if (row.table === "session_message" && row.type === "user") addAttachments(next.files, "uri", "user")
++        if (row.table === "session_message" && row.type === "assistant" && Array.isArray(next.content))
++          next.content.forEach((tool: unknown, toolIndex: number) => {
++            if (!isRecord(tool) || tool.type !== "tool" || !isRecord(tool.state) || tool.state.status !== "completed") return
++            // Native模型实际消费content文件；展示attachments不是它的替代数据源。
++            addAttachments(tool.state.attachments, "uri", "tool-attachment", tool.state, toolIndex)
++            addAttachments(tool.state.content, "uri", "tool-content", tool.state, toolIndex)
 +          })
 +        // SQL可能命中普通文本中的image/，结构筛选确保这类行不进入空间统计或UPDATE计划。
 +        // attachments为空说明只是文本命中image/：不计空间也不进UPDATE计划。
@@ -1008,25 +1022,27 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 -      return
 -    }
 +        // JSON字节数按原始data文本计量，避免二次序列化引入编码偏差。
-+        oldPartJsonBytes += Buffer.byteLength(row.data)
++        if (row.table === "part") oldPartJsonBytes += Buffer.byteLength(row.data)
++        if (row.table === "session_message") oldMessageJsonBytes += Buffer.byteLength(row.data)
 +        // unavailable按原数组index收集，先规范化后统一移除，保证写回次序与扫描次序无关。
-+        const unavailable = new Set<number>()
++        const unavailable = new Set<Record<string, unknown>>()
 +        let rowChanged = false
 +        for (const attachment of attachments) {
 +          // 每个附件独立normalize：一个坏图不能阻断同Part内其他正常图片的修复。
 +          imageAttachments++
 +          // 坏图的旧载荷也计入总量，弃用后new bytes为零，报告才能体现真实释放空间。
-+          const oldBytes = dataUrlBytes(attachment.value.url).length
++          const oldBytes = dataUrlBytes(attachment.uri).length
 +          oldPayloadBytes += oldBytes
++          const detail = row.table === "part"
++            ? { part: row.id, location: attachment.location, index: attachment.index }
++            : { message: row.id, location: attachment.location, index: attachment.index, tool_index: attachment.toolIndex }
 +          // 所有来源共用默认Image.Service，不传token budget，保证正常图片走metadata fast-path而不被二次压缩。
 +          const normalized = yield* image
-+            .normalize({
-+              id: PartID.make(row.id),
-+              messageID: MessageID.make(row.message_id),
-+              sessionID: SessionID.make(row.session_id),
-+              type: "file",
-+              mime: attachment.value.mime,
-+              url: attachment.value.url,
++            .normalize(attachment.uri, {
++              uri: attachment.uri,
++              mime: attachment.mime,
++              content: attachment.uri.slice(attachment.uri.indexOf(";base64,") + ";base64,".length),
++              encoding: "base64",
 +            })
 +            .pipe(
 +              // match把失败变成数据：同一循环内区分弃用与终止，而不是中断整个扫描。
@@ -1059,12 +1075,13 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +          if (!normalized.ok) {
 +            // 非Tool位置或非DecodeError都向上传播：迁移工具绝不掩盖授权范围之外的失败。
 +            // 用户只授权弃用真实存在的completed Tool坏图；Sharp装载失败或顶层失败绝不能转成成功。
-+            if (attachment.location !== "tool" || normalized.error._tag !== "ImageDecodeError")
++            if (!attachment.state || !(normalized.error instanceof Image.DecodeError))
 +              return yield* normalized.error
 +            // DecodeError说明数据库bytes自身不可恢复；移除附件并保留Tool文本比猜外部源更符合当前持久化链。
-+            unavailable.add(attachment.index)
++            attachment.list.splice(attachment.list.indexOf(attachment.value), 1)
++            unavailable.add(attachment.state)
 +            // 弃用决策同时进入报告明细，preview阶段用户可逐条审计后再--apply。
-+            unavailableItems.push({ part: row.id, location: attachment.location, index: attachment.index })
++            unavailableItems.push(detail)
 +            rowChanged = true
 +            continue
 +          }
@@ -1095,10 +1112,13 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 -    db.close()
 -  }
 -}
-+          const newBytes = dataUrlBytes(normalized.value.url).length
++          const url = normalized.value.mime === attachment.mime && normalized.value.content === attachment.uri.slice(attachment.uri.indexOf(";base64,") + ";base64,".length)
++            ? attachment.uri
++            : `data:${normalized.value.mime};base64,${normalized.value.content}`
++          const newBytes = dataUrlBytes(url).length
 +          // 新载荷先计量再写回，saved_payload_bytes才能在报告里反映真实的存储收益。
 +          newPayloadBytes += newBytes
-+          if (normalized.value.mime === attachment.value.mime && normalized.value.url === attachment.value.url) {
++          if (normalized.value.mime === attachment.mime && url === attachment.uri) {
 +            // fast-path以MIME和URL双重相等为准，正常图片不能仅因被扫描就产生数据库写入。
 +            unchanged++
 +            continue
@@ -1123,39 +1143,32 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +          rowChanged = true
 +          // 明细记录old/new bytes：重编码收益需要逐条可见，而不是只有聚合计数。
 +          normalizedItems.push({
-+            part: row.id,
-+            location: attachment.location,
-+            index: attachment.index,
++            ...detail,
 +            old_bytes: oldBytes,
 +            new_bytes: newBytes,
 +          })
-+          if (attachment.location === "part") {
-+            // 顶层FilePart只替换图片载荷，filename/source等未知字段由clone原样保留。
-+            next.mime = normalized.value.mime
-+            next.url = normalized.value.url
-+            continue
-+          }
-+          next.state.attachments[attachment.index] = {
-+            // 展开原附件再覆盖两个字段：type与未来新增的附件元数据原样保留。
-+            ...attachment.value,
-+            mime: normalized.value.mime,
-+            url: normalized.value.url,
-+          }
++          // 两代只替换目标图片字段，其他字段及数组顺序均由clone原样保留。
++          attachment.value.mime = normalized.value.mime
++          attachment.value[attachment.field] = url
 +        }
 +
-+        if (unavailable.size > 0) {
-+          // filter重建数组后重新赋值：原数组可能被同Part其他写回路径共享引用。
-+          // 先完成同一ToolPart内其他图片的规范化，再按原index统一移除坏附件，避免数组位移写错对象。
-+          next.state.attachments = next.state.attachments.filter((_: unknown, index: number) => !unavailable.has(index))
-+          if (next.state.attachments.length === 0) delete next.state.attachments
-+          // 空attachments字段直接删除而不是留空数组，保持与运行时持久化形态一致。
-+          // 固定说明是用户可见的弃用凭据；包含检查保证异常中断后的重跑也不会重复追加。
-+          if (!next.state.output.includes(unavailableNote)) next.state.output = `${next.state.output}\n\n${unavailableNote}`
++        for (const state of unavailable) {
++          if (Array.isArray(state.attachments) && state.attachments.length === 0) delete state.attachments
++          // Native保留必需content数组；每个Tool只追加一次说明，不改opaque result/structured。
++          if (row.table === "session_message") {
++            if (!Array.isArray(state.content)) throw new Error("Completed native tool is missing content")
++            if (!state.content.some((value: unknown) => isRecord(value) && value.type === "text" && typeof value.text === "string" && value.text.includes(unavailableNote)))
++              state.content.push({ type: "text", text: unavailableNote })
++            continue
++          }
++          if (typeof state.output !== "string") throw new Error("Completed legacy tool is missing output")
++          if (!state.output.includes(unavailableNote)) state.output = `${state.output}\n\n${unavailableNote}`
 +        }
 +
 +        const nextData = rowChanged ? JSON.stringify(next) : row.data
 +        // 未变更的Part也计入new bytes：逻辑节省量必须以全库为分母才有意义。
-+        newPartJsonBytes += Buffer.byteLength(nextData)
++        if (row.table === "part") newPartJsonBytes += Buffer.byteLength(nextData)
++        if (row.table === "session_message") newMessageJsonBytes += Buffer.byteLength(nextData)
 +        // changed_parts按Part而非附件计数，同一Part有多图时仍只执行一次CAS UPDATE。
 +        if (rowChanged) changes.push({ row, nextData })
 +      }
@@ -1169,13 +1182,17 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +          unchanged,
 +          normalized: normalizedItems.length,
 +          unavailable: unavailableItems.length,
-+          changed_parts: changes.length,
++          changed_parts: changes.filter(change => change.row.table === "part").length,
++          changed_messages: changes.filter(change => change.row.table === "session_message").length,
 +          old_payload_bytes: oldPayloadBytes,
 +          new_payload_bytes: newPayloadBytes,
 +          saved_payload_bytes: oldPayloadBytes - newPayloadBytes,
 +          old_part_json_bytes: oldPartJsonBytes,
 +          new_part_json_bytes: newPartJsonBytes,
 +          logical_part_json_bytes_saved: oldPartJsonBytes - newPartJsonBytes,
++          old_message_json_bytes: oldMessageJsonBytes,
++          new_message_json_bytes: newMessageJsonBytes,
++          logical_message_json_bytes_saved: oldMessageJsonBytes - newMessageJsonBytes,
 +          // UPDATE释放的页不会自动缩小SQLite主文件；物理回收需要本任务之外的VACUUM。
 +          database_file_shrinks_without_vacuum: false,
 +          normalized_items: normalizedItems,
@@ -1187,7 +1204,7 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +      }
 +    }).pipe(
 +      // 空配置只选择Image.Service仓库默认值；迁移策略不再因历史来源或当前Project配置分叉。
-+      Effect.provide(Image.layer.pipe(Layer.provide(Layer.mock(Config.Service, { get: () => Effect.succeed({}) })))),
++      Effect.provide(Image.layer.pipe(Layer.provide(Layer.mock(Config.Service, { entries: () => Effect.succeed([]) })))),
 +    ),
    )
 -}
@@ -1244,7 +1261,7 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 +    // 完整旧JSON参与CAS；即使未来改变锁策略，也不能覆盖同一Part的未知并发字段。
 +    result.changes.forEach((change) => {
 +      const updated = db
-+        .query("UPDATE part SET data = ? WHERE id = ? AND data = ?")
++        .query(`UPDATE ${change.row.table} SET data = ? WHERE id = ? AND data = ?`)
 +        .run(change.nextData, change.row.id, change.row.data)
 +      if (updated.changes !== 1)
 +        throw new Error(`CAS updated ${updated.changes} rows for ${change.row.id} instead of 1`)
@@ -1311,7 +1328,7 @@ diff --git a/packages/opencode/script/migrate-image-attachment.ts b/packages/ope
 diff --git a/packages/opencode/test/image/attachment-migration.test.ts b/packages/opencode/test/image/attachment-migration.test.ts
 --- a/packages/opencode/test/image/attachment-migration.test.ts
 +++ b/packages/opencode/test/image/attachment-migration.test.ts
-@@ -33,118 +33,146 @@
+@@ -33,118 +33,244 @@
  })
  
  describe("image attachment migration", () => {
@@ -1565,6 +1582,131 @@ diff --git a/packages/opencode/test/image/attachment-migration.test.ts b/package
 +    expect(check.query<{ data: string }, []>("SELECT data FROM part ORDER BY id").all().map((row) => row.data)).toEqual(input.rows)
 +    check.close()
 +  }, 120_000)
++
++  test("normalizes both durable media layouts in one atomic transaction", async () => {
++    await using tmp = await tmpdir()
++    const dbPath = path.join(tmp.path, "opencode.db")
++    const input = await fixture(dbPath)
++    const small = { mime: "image/webp", uri: `data:image/webp;base64,${input.small.toString("base64")}`, name: "small.webp" }
++    const large = { mime: "image/png", uri: `data:image/png;base64,${input.large.toString("base64")}`, name: "large.png", source: { preserved: true } }
++    const broken = { mime: "image/png", uri: `data:image/png;base64,${input.broken.toString("base64")}` }
++    const pdf = { mime: "application/pdf", uri: "data:application/pdf;base64,AA==" }
++    const note = "[Image unavailable: stored image data could not be decoded.]"
++    // Native的type在SQL列，data中没有type/id；content-only媒体不能依赖展示附件发现。
++    const messages = [
++      { type: "user", data: JSON.stringify({ text: "small", files: [small], preserved: "small" }, null, 2) },
++      { type: "user", data: JSON.stringify({ text: "large", files: [large], preserved: "large" }) },
++      { type: "assistant", data: JSON.stringify({ content: [
++        { type: "tool", id: "done", name: "read", time: { created: 1, completed: 2 }, state: {
++          status: "completed", input: { file: "large.png" }, structured: { preserved: true }, outputPaths: ["kept"],
++          attachments: [large, broken, pdf], content: [{ type: "text", text: "original output" }, { type: "file", ...large }, { type: "file", ...broken }],
++        } },
++        { type: "tool", id: "content-only", name: "read", time: { created: 1, completed: 2 }, state: {
++          status: "completed", input: {}, structured: {}, content: [{ type: "file", ...large }],
++        } },
++        { type: "tool", id: "running", name: "read", time: { created: 1 }, state: {
++          status: "running", input: {}, structured: {}, content: [{ type: "file", ...broken }],
++        } },
++        { type: "tool", id: "error", name: "read", time: { created: 1, completed: 2 }, state: {
++          status: "error", input: {}, structured: {}, content: [{ type: "file", ...broken }], error: { message: "kept" },
++        } },
++      ], preserved: "assistant" }) },
++    ]
++    const db = new Database(dbPath)
++    try {
++      db.run("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)")
++      messages.forEach((message, index) => db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(`msg_native_${index}`, "ses_native", message.type, index, index + 1, index + 1, message.data))
++      const read = (table: "part" | "session_message") => db.query<{ data: string }, []>(`SELECT data FROM ${table} ORDER BY id`).all().map(row => row.data)
++      const preview = await migrateImageAttachment([dbPath])
++      expect(preview.exitCode).toBe(0)
++      const previewReport = JSON.parse(preview.stdout.slice(preview.stdout.lastIndexOf('{\n  "status"')))
++      // 计数按实际存储槽位，不把attachments/content两份物理载荷误当一次。
++      expect(previewReport).toMatchObject({ image_attachments: 11, unchanged: 2, normalized: 6, unavailable: 3, changed_parts: 3, changed_messages: 2 })
++      expect(read("part")).toEqual(input.rows)
++      expect(read("session_message")).toEqual(messages.map(message => message.data))
++      // Native后行拒绝CAS时，先完成的V1写入和Native用户行也必须一起撤销。
++      db.run("CREATE TRIGGER reject_native_update BEFORE UPDATE OF data ON session_message WHEN OLD.id = 'msg_native_2' BEGIN SELECT RAISE(IGNORE); END")
++      expect((await migrateImageAttachment([dbPath, "--apply"])).exitCode).not.toBe(0)
++      expect(read("part")).toEqual(input.rows)
++      expect(read("session_message")).toEqual(messages.map(message => message.data))
++      db.run("DROP TRIGGER reject_native_update")
++      const applied = await migrateImageAttachment([dbPath, "--apply"])
++      expect(applied.exitCode).toBe(0)
++      const report = JSON.parse(applied.stdout.slice(applied.stdout.lastIndexOf('{\n  "status"')))
++      const nativeText = read("session_message")
++      const stored = nativeText.map(data => JSON.parse(data))
++      const legacy = read("part").map(data => JSON.parse(data))
++      expect(nativeText[0]).toBe(messages[0].data)
++      expect(stored[1].preserved).toBe("large")
++      const uri = stored[1].files[0].uri
++      const mime = stored[1].files[0].mime
++      expect(uri).toBe(legacy[1].url)
++      expect(uri).not.toBe(large.uri)
++      expect(stored[1].files[0].source).toEqual({ preserved: true })
++      const tools = stored[2].content
++      expect(tools[0].state.attachments).toEqual([{ ...large, uri, mime }, pdf])
++      expect(tools[0].state.content).toEqual([{ type: "text", text: "original output" }, { type: "file", ...large, uri, mime }, { type: "text", text: note }])
++      expect(tools[0].state.structured).toEqual({ preserved: true })
++      expect(tools[0].state.outputPaths).toEqual(["kept"])
++      expect(tools[1].state.content).toEqual([{ type: "file", ...large, uri, mime }])
++      expect(tools.slice(2)).toEqual(JSON.parse(messages[2].data).content.slice(2))
++      expect(stored[2].preserved).toBe("assistant")
++      expect(db.query("SELECT type, seq, time_created, time_updated FROM session_message ORDER BY id").all()).toEqual(messages.map((message, index) => ({ type: message.type, seq: index, time_created: index + 1, time_updated: index + 1 })))
++      // 空间按回读JSON与fixture载荷独立重算，不复用迁移器计数来证明自己。
++      expect(report.old_payload_bytes).toBe(input.small.length * 2 + input.large.length * 6 + input.broken.length * 3)
++      expect(report.new_payload_bytes).toBe(input.small.length * 2 + Buffer.from(uri.split(",")[1], "base64").length * 6)
++      expect(report.old_message_json_bytes).toBe(messages.reduce((sum, message) => sum + Buffer.byteLength(message.data), 0))
++      expect(report.new_message_json_bytes).toBe(nativeText.reduce((sum, data) => sum + Buffer.byteLength(data), 0))
++      const repeated = await migrateImageAttachment([dbPath])
++      expect(repeated.exitCode).toBe(0)
++      expect(JSON.parse(repeated.stdout.slice(repeated.stdout.lastIndexOf('{\n  "status"')))).toMatchObject({ normalized: 0, unavailable: 0, changed_parts: 0, changed_messages: 0 })
++      // 用户坏图不能借Tool的弃用授权变成成功，非base64错误同样保持原行。
++      const invalid = JSON.stringify({ text: "broken user", files: [broken] })
++      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run("msg_native_bad", "ses_native", "user", 3, 4, 4, invalid)
++      expect((await migrateImageAttachment([dbPath, "--apply"])).exitCode).not.toBe(0)
++      expect(read("session_message")).toEqual([...nativeText, invalid])
++      const remote = JSON.stringify({ files: [{ ...broken, uri: "https://example.invalid/image.png" }] })
++      db.query("UPDATE session_message SET data = ? WHERE id = 'msg_native_bad'").run(remote)
++      expect((await migrateImageAttachment([dbPath, "--apply"])).exitCode).not.toBe(0)
++      expect(read("session_message")).toEqual([...nativeText, remote])
++      db.run("DELETE FROM session_message WHERE id = 'msg_native_bad'")
++      // Native-only库也合法，不通过捕获缺表异常伪造空扫描。
++      db.run("DROP TABLE part")
++      const nativeOnly = await migrateImageAttachment([dbPath])
++      expect(nativeOnly.exitCode).toBe(0)
++      const nativeReport = JSON.parse(nativeOnly.stdout.slice(nativeOnly.stdout.lastIndexOf('{\n  "status"')))
++      expect(nativeReport.changed_messages).toBe(0)
++    } finally {
++      db.close()
++    }
++  }, 120_000)
  })
  
 
+diff --git a/packages/core/src/image.ts b/packages/core/src/image.ts
+--- a/packages/core/src/image.ts
++++ b/packages/core/src/image.ts
+@@ -45,7 +45,8 @@
+ 
+ export class Service extends Context.Service<Service, Interface>()("@opencode/Image") {}
+ 
++// 离线维护显式提供空配置复用同一生产策略，不装配Location或应用运行时。
+-const layer = Layer.effect(
++export const layer = Layer.effect(
+   Service,
+   Effect.gen(function* () {
+     const config = yield* Config.Service
+
+diff --git a/packages/core/src/image/photon.ts b/packages/core/src/image/photon.ts
+--- a/packages/core/src/image/photon.ts
++++ b/packages/core/src/image/photon.ts
+@@ -38,7 +38,7 @@
+       const bytes = Buffer.byteLength(content.content, "utf-8")
+       const withinLimits = width <= limits.maxWidth && height <= limits.maxHeight && bytes <= limits.maxBase64Bytes
+-      // BMP 即使未超限也须转码；禁用缩放时只尝试原尺寸编码。
+-      if (withinLimits && content.mime !== "image/bmp") return content
++      // 两代共用默认策略：仅原生支持的MIME保持原编码，BMP或未知声明仍须规整。
++      if (withinLimits && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
+       if (!limits.autoResize && !withinLimits)
+         return yield* new SizeError({
+           resource,

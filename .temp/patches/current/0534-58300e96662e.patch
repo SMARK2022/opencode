@@ -713,13 +713,13 @@ diff --git a/packages/core/src/image/photon.ts b/packages/core/src/image/photon.
 -      try: () => photon.PhotonImage.new_from_byteslice(Buffer.from(content.content, "base64")),
 +      try: () => photon.PhotonImage.new_from_byteslice(buffer),
 @@ -41,1 +43,1 @@
--      if (withinLimits && content.mime !== "image/bmp") return content
-+      if (withinLimits && !isBmp(buffer)) return content
+-      if (withinLimits && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
++      if (withinLimits && !isBmp(buffer) && ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(content.mime)) return content
 
 diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 --- a/packages/core/src/tool/read.ts
 +++ b/packages/core/src/tool/read.ts
-@@ -104,12 +104,18 @@
+@@ -122,13 +122,18 @@
                if (
                  "encoding" in content &&
                  content.encoding === "base64" &&
@@ -730,13 +730,14 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
                  return yield* image
                    // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
                    .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
+-                  .pipe(Effect.map(attach))
 +                  // 只适配Image的typed内容错误；读盘/权限错误与interrupt仍沿原失败通道。
 +                  .pipe(Effect.catch(() => Effect.succeed({
 +                    ...content,
 +                    encoding: "utf8" as const,
 +                    mime: "text/plain",
 +                    content: "Image omitted: could not be decoded or resized within the image size limit.",
-+                  })))
++                  })), Effect.map(attach))
                }
                if ("encoding" in content && content.encoding === "base64")
                  return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
@@ -910,7 +911,7 @@ index c5ff8db3d..868c747ac 100644
 +// 由 util/media.isImageAttachment 单一谓词排除；是否可解码由真实 backend 决定，read 不再自持白名单。
  
  const MAX_CONTENT_TOKENS = 16000
- // #142：单行展示上限
+ 
 @@ -728,18 +729,7 @@ export const ReadTool = Tool.define<
        const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
 -      // BMP 需具备完整文件头和 DIB 头，避免把 BM 开头的纯文本当图片。
@@ -1431,7 +1432,7 @@ index e88f2e2c1..4ad57dbe1 100644
 +        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
 +        // #509：execute 返回的 attachments 会过 FilePart Schema；缺 id/messageID/sessionID 的原始对象被丢弃，
 +        // 必须补全持久化字段才能真实进入 #534 的 prepare 边界。
-+        const ordinary = aiTool({
++        const ordinary = tool({
 +          description: "ordinary image result",
 +          inputSchema: z.object({ path: z.string() }),
 +          execute: async () => ({
@@ -1467,16 +1468,16 @@ index e88f2e2c1..4ad57dbe1 100644
 +          messages: [{ role: "user", content: "ordinary result" }],
 +          tools: { ordinary },
 +        })
-+        const tool = (yield* MessageV2.parts(msg.id)).find(
++        const completed = (yield* MessageV2.parts(msg.id)).find(
 +          (part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "ordinary",
 +        )
 +        // 事件与 SQLite 同源：omission 文案只拼接一次，durable state 不存在未处理原始 payload。
-+        expect(tool?.state.status).toBe("completed")
-+        if (tool?.state.status !== "completed") return
-+        expect(tool.state.output).toBe(
++        expect(completed?.state.status).toBe("completed")
++        if (completed?.state.status !== "completed") return
++        expect(completed.state.output).toBe(
 +          "ordinary output\n\n[1 image omitted: could not be decoded or resized within the image size limit.]",
 +        )
-+        expect(tool.state.attachments).toBeUndefined()
++        expect(completed.state.attachments).toBeUndefined()
 +        expect(seen).toContain(MessageV2.Event.PartUpdated.type)
 +      }),
 +    { git: true, config: (url) => providerCfg(url) },
@@ -1787,3 +1788,135 @@ diff --git a/bun.lock b/bun.lock
 +    "sharp/@img/sharp-win32-ia32": ["@img/sharp-win32-ia32@0.34.5", "", { "os": "win32", "cpu": "ia32" }, "sha512-FV9m/7NmeCmSHDD5j4+4pNI8Cp3aW+JvLoXcTUo0IqyjSfAZJ8dIUmijx1qaJsIiU+Hosw6xM5KijAWRJCSgNg=="],
 +    "sharp/@img/sharp-win32-x64": ["@img/sharp-win32-x64@0.34.5", "", { "os": "win32", "cpu": "x64" }, "sha512-+29YMsqY2/9eFEiW93eqWnuLcWcufowXewwSNIT6UwZdUUCrM3oFjMWH/Z6/TMmb4hlFenmfAVbpWeup2jryCw=="],
      "sharp/detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
+diff --git a/packages/core/src/session/runner/images.ts b/packages/core/src/session/runner/images.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/runner/images.ts
+@@ -0,0 +1,37 @@
++import { Message, type ToolContent } from "@opencode-ai/llm"
++import { Effect } from "effect"
++import { Image } from "../../image"
++
++// 模型交付复用Location解码策略；原始admission不变，不能因图片规整破坏exact retry。
++export const normalizeImages = Effect.fn("SessionRunner.normalizeImages")(function* (
++  messages: ReadonlyArray<Message>,
++  image: Image.Interface,
++) {
++  const normalize = (file: ToolContent): Effect.Effect<ToolContent> => {
++    if (file.type !== "file" || !file.mime.startsWith("image/") || !file.uri.startsWith("data:")) return Effect.succeed(file)
++    const marker = file.uri.indexOf(";base64,")
++    // 仅消费已在输入中的bytes；不下载远程URI，不额外读取文件或切换decoder。
++    return image.normalize(file.name ?? "image attachment", { ...file, encoding: "base64", content: marker < 0 ? "" : file.uri.slice(marker + 8) }).pipe(
++      Effect.map(content => ({ ...file, mime: content.mime, uri: `data:${content.mime};base64,${content.content}` })),
++      Effect.catch(() => Effect.succeed({ type: "text" as const, text: "Image omitted: could not be decoded or resized within the image size limit." })),
++    )
++  }
++  // 只替换媒体payload，消息身份、角色、工具调用及其他原话均原样传递。
++  return yield* Effect.forEach(messages, message => Effect.gen(function* () {
++    const content = yield* Effect.forEach(message.content, part => Effect.gen(function* () {
++      if (part.type === "media" && part.mediaType.startsWith("image/")) {
++        const uri = typeof part.data === "string" ? part.data : `data:${part.mediaType};base64,${Buffer.from(part.data).toString("base64")}`
++        const file = yield* normalize({ type: "file", uri, mime: part.mediaType, name: part.filename })
++        return file.type === "text" ? file : { ...part, mediaType: file.mime, data: file.uri }
++      }
++      // 通用工具和provider已完成结果共用同一逐文件政策，坏图不抹掉其他正文或伪造失败。
++      if (part.type === "tool-result" && part.result.type === "content") {
++        const files: ReadonlyArray<ToolContent> = part.result.value
++        const value = yield* Effect.forEach(files, normalize)
++        return { ...part, result: { type: "content" as const, value } }
++      }
++      return part
++    }))
++    return Message.make({ ...message, content })
++  }))
++})
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -59,4 +59,6 @@
+ import { FSUtil } from "../../fs-util"
+ import { ToolDiffs } from "../tool-diffs"
+ import { Global } from "../../global"
++import { Image } from "../../image"
++import { normalizeImages } from "./images"
+ 
+@@ -126,6 +128,7 @@
+     const skillGuidance = yield* SkillGuidance.Service
+     const referenceGuidance = yield* ReferenceGuidance.Service
+     const config = yield* Config.Service
++    const image = yield* Image.Service
+     const permission = yield* PermissionV2.Service
+     const nearOverflowNotified = new Set<SessionSchema.ID>()
+     const snapshots = yield* Snapshot.Service
+@@ -355,4 +358,6 @@
+       const nearOverflow = !decide && !isLastStep && !nearOverflowNotified.has(session.id) && usableTokens > 0 && estimatedInput >= threshold
+       if (nearOverflow) nearOverflowNotified.add(session.id)
+       const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
++      // 正常请求和压缩共用准备后的消息；不把坏图交给provider，也不改写持久历史。
++      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
+       const request = LLM.request({
+@@ -373,5 +378,5 @@
+         } },
+         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
+         system: selection.openaiOAuth ? undefined : systemParts,
+-        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
++        messages,
+         tools: toolMaterialization?.definitions ?? [],
+@@ -818,6 +823,7 @@
+     SkillGuidance.node,
+     ReferenceGuidance.node,
+     Config.node,
++    Image.node,
+     Snapshot.node,
+     Database.node,
+     FSUtil.node,
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -3038,3 +3038,46 @@
+   )
+ 
++  it.live("omits unsafe Native user and tool images while preserving durable prompt retries", () => Effect.gen(function* () {
++    yield* setup
++    const { default: sharp } = yield* Effect.promise(() => import("sharp"))
++    const png = yield* Effect.promise(() => sharp({ create: { width: 1, height: 1, channels: 4, background: "#ff0000" } }).png().toBuffer())
++    const bad = Buffer.from(png)
++    bad[bad.indexOf(Buffer.from("IDAT")) + 4] ^= 0xff
++    const valid = `data:image/png;base64,${png.toString("base64")}`
++    const broken = `data:image/png;base64,${bad.toString("base64")}`
++    const session = yield* SessionV2.Service
++    const registry = yield* ToolRegistry.Service
++    // 真正的canonical工具先完成，再观察下一次fake模型请求；不能只调用图片helper自证。
++    yield* registry.register({ picture: Tool.make({
++      description: "Return a requested image fixture",
++      input: Schema.Struct({}), output: Schema.Struct({}),
++      execute: () => Effect.succeed({}),
++      toModelOutput: () => [{ type: "file", mime: "image/png", data: bad.toString("base64"), name: "broken-tool.png" }, { type: "text", text: "Tool text retained" }],
++    }) })
++    const promptID = SessionMessage.ID.make("msg_native_images")
++    const prompt = { text: "Inspect these images", files: [{ uri: valid, mime: "image/png", name: "valid.png" }, { uri: broken, mime: "image/png", name: "broken.png" }] }
++    yield* session.prompt({ id: promptID, sessionID, prompt, resume: false })
++    requests.length = 0
++    responses = [[
++      LLMEvent.stepStart({ index: 0 }),
++      LLMEvent.toolCall({ id: "call-picture", name: "picture", input: {} }),
++      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++      LLMEvent.finish({ reason: "tool-calls" }),
++    ], fragmentFixture("text", "images-final", ["Images inspected"]).completeEvents]
++    yield* session.resume(sessionID)
++    expect(requests).toHaveLength(2)
++    const shown = JSON.stringify(requests.map(request => request.messages))
++    expect(shown).toContain(valid)
++    expect(shown).not.toContain(broken)
++    expect(shown).toContain("Image omitted: could not be decoded or resized within the image size limit.")
++    expect(shown).toContain("Tool text retained")
++    // 同ID精确重试仍按原始输入认领，规整不改变durable admission的幂等合同。
++    const retry = yield* session.prompt({ id: promptID, sessionID, prompt, resume: false })
++    expect(retry.id).toBe(promptID)
++    const history = yield* session.context(sessionID)
++    expect(history.find(message => message.type === "user")).toMatchObject({ files: [{ uri: valid }, { uri: broken }] })
++    expect(history.flatMap(message => message.type === "assistant" ? message.content : []).find(part => part.type === "tool" && part.id === "call-picture")).toMatchObject({ state: { status: "completed" } })
++    responses = undefined
++  }))
++
+   it.effect("projects reasoning and tool events without executing or continuing tools", () =>

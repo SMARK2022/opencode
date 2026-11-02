@@ -368,27 +368,42 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 --- a/packages/core/src/tool/goal.ts
 +++ b/packages/core/src/tool/goal.ts
-@@ -16,1 +16,1 @@
--      description: "Read the current goal with no arguments before marking any status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Mark complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Mark blocked with a reason only at a genuine impasse after three consecutive goal turns with the same blocker; the tool tracks the attempts and keeps earlier attempts active. Do not block merely because work is hard, slow, uncertain or incomplete. Mark active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-+      description: "Read the current goal with no arguments before marking any status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Mark complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Mark blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the goal active for further exploration; the second confirms a persistent genuine blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Mark active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-@@ -37,3 +37,3 @@
+@@ -23,3 +23,3 @@
+-        "- Mark as `blocked` with a `reason` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. The tool tracks consecutive attempts automatically — call blocked once per goal turn, and the status will only change to blocked on the third consecutive attempt with the same reason.",
++        "- Mark as `blocked` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call `mark: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. The second consecutive call marks the Goal as blocked.",
+         "- Mark as `active` (no reason needed) to resume a goal that you previously marked complete or blocked, but only in a later user-initiated turn. You cannot resume a goal that was paused or terminated by the user.",
+-        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, mark as `blocked` again.",
++        "- If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least two consecutive resumed goal turns, mark as `blocked` again.",
+@@ -34,1 +34,1 @@
+-          description: "Mark the goal as `complete` when the objective is achieved, or `blocked` when genuinely stuck after at least three consecutive failed attempts. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
++          description: "Mark the goal as `complete` when the objective is achieved. Mark it as `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Mark as `active` to resume a model-produced terminal goal in a later user turn. Omit to get the current goal status.",
+@@ -52,3 +52,3 @@
          if (!turn?.read) return yield* Effect.fail(new ToolFailure({
 -          message: "goal tool: must call get (no arguments) before marking a status. Read the current goal first.",
 +          message: "You must call the goal tool with no arguments to read the current goal before marking it. Read the current goal, then retry the transition with mark and reason.",
          }))
-@@ -62,1 +62,1 @@
--              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. The goal remains active. Continue working, or call blocked in the next goal turn with the same reason if the blocker persists.`
+@@ -77,1 +77,1 @@
+-              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. The goal remains active. Continue working, or call blocked again in the next goal turn with the same reason if the blocker persists.`
 +              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call mark blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -741,4 +741,27 @@
+@@ -737,1 +737,1 @@
+-    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with status", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
++    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with mark", "two consecutive eligible Goal turns", "the same trimmed reason", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
+@@ -824,3 +824,32 @@
      // 无 step-finish 的 EOF 不能被当作正常完成后再自动续跑。
      expect(requests).toHaveLength(1)
      expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
 +
 +    // 沿真实原生runner跨两个eligible turn确认blocker，工具read与mark仍各占provider step。
 +    yield* goals.set(sessionID, { objective: "Verify two-turn blocking and later recovery", status: "active" })
++    // 技术提醒仍进入模型历史，但不得重置trusted read或伪造另一个eligible turn。
++    const goalDatabase = yield* Database.Service
++    const beforeReminder = yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)
++    const goalEvents = yield* EventV2.Service
++    yield* goalEvents.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Technical plan reminder" })
++    expect(yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)).toEqual(beforeReminder)
 +    const callGoal = (id: string, input: Record<string, string>) => [
 +      LLMEvent.stepStart({ index: 0 }),
 +      LLMEvent.toolCall({ id, name: "goal", input }),
@@ -409,7 +424,6 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    yield* session.resume(sessionID)
 +    expect(requests).toHaveLength(3)
 +    expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "active", reason: null })
-   }),
 diff --git a/packages/opencode/src/tool/goal.ts b/packages/opencode/src/tool/goal.ts
 --- a/packages/opencode/src/tool/goal.ts
 +++ b/packages/opencode/src/tool/goal.ts
@@ -1599,6 +1613,42 @@ index 4573d6b48ca9fa1607c032147b0c50e8a59907c3..a002e6c8bfa87dc144eb6c4a9c05a7b2
      test("invalid", () => expect(toJsonSchema(Invalid)).toMatchSnapshot())
      test("lsp", () => expect(toJsonSchema(Lsp)).toMatchSnapshot())
 
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -1,1 +1,1 @@
+-import { and, asc, desc, eq, gt, gte, lte, ne, or } from "drizzle-orm"
++import { and, asc, desc, eq, gt, gte, lte, ne, or, sql } from "drizzle-orm"
+@@ -166,7 +166,10 @@
+   const rows = yield* db.select({ id: SessionMessageTable.id, type: SessionMessageTable.type })
+     .from(SessionMessageTable)
+     .where(and(eq(SessionMessageTable.session_id, sessionID),
+-      or(eq(SessionMessageTable.type, "user"), eq(SessionMessageTable.type, "synthetic"))))
++      or(eq(SessionMessageTable.type, "user"), and(
++        eq(SessionMessageTable.type, "synthetic"),
++        sql`json_extract(${SessionMessageTable.data}, '$.text') LIKE ${"<session-goal-continuation>%"}`,
++      ))))
+     .orderBy(desc(SessionMessageTable.seq)).limit(2).all().pipe(Effect.orDie)
+   if (!rows[0]) return
+-  // 原生Synthetic的实际producer是Goal continuation；Compaction和普通provider step不另开turn。
++  // 只接受既有Goal continuation producer的标记；计划提醒等技术Synthetic不创建或重排turn。
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -130,5 +130,8 @@
+-          // 用户恢复沿现有全局Session所有权执行；失败留日志，不另建runner或伪造执行结果。
+-          if (goal.status === "active") yield* session.resume(ctx.params.sessionID).pipe(
+-            Effect.catchCause(cause => Effect.logError("goal resume failed", { cause })),
+-            Effect.forkIn(scope),
+-          )
++          // 空Session只保存active Goal；已有user历史才沿原全局所有权恢复，不以技术提醒代替用户。
++          if (goal.status === "active") {
++            const messages = yield* session.messages({ sessionID: ctx.params.sessionID }).pipe(Effect.orDie)
++            if (messages.some(message => message.type === "user")) yield* session.resume(ctx.params.sessionID).pipe(
++              Effect.catchCause(cause => Effect.logError("goal resume failed", { sessionID: ctx.params.sessionID, cause })),
++              Effect.forkIn(scope, { startImmediately: true }),
++            )
++          }
 diff --git a/packages/core/src/session/goal.sql.ts b/packages/core/src/session/goal.sql.ts
 
 --- a/packages/core/src/session/goal.sql.ts

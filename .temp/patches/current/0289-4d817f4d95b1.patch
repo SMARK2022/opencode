@@ -8,10 +8,10 @@ Content-Transfer-Encoding: 8bit
 
 
 
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
 index f27b9a57a4b33dd9c1686d767b3746a7f69c83a1..e69fa6f2f69c28e4b365e2edd4e2d5b3f9a4d2c1 100644
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
 @@ -17,7 +17,11 @@
  type ExecutionNotice = {
 -  severity: "warning"
@@ -26,10 +26,31 @@ index f27b9a57a4b33dd9c1686d767b3746a7f69c83a1..e69fa6f2f69c28e4b365e2edd4e2d5b3
  }
  
  type Notice = Record<string, string | number | undefined>
+@@ -51,4 +55,11 @@
+ export function formatExecutionNotice(input: ExecutionNotice) {
+   return formatNotice({ type: "execution", source: "shell", ...input })
+ }
++
++// 采样遗漏只说明观察边界，不能替代真实错误摘录或吞掉失败退出码。
++export function formatExitNotice(code: number | null, emptyOutput: boolean, appendix = "") {
++  if (code === null || (!emptyOutput && (code === 0 || appendix.includes("<bash_high_signal_excerpt>")))) return
++  return formatExecutionNotice({ severity: code === 0 ? "info" : "error", reason: "exit", exit_code: code })
++}
++
+ 
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -1,1 +1,1 @@
+-export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatCompactionClearedNotice, truncateForCompaction } from "@opencode-ai/core/util/output-notice"
++export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, truncateForCompaction } from "@opencode-ai/core/util/output-notice"
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 index e4b83d268..2489abcab 100644
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
+@@ -18,1 +18,1 @@
+-import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
++import { formatExecutionNotice, formatExitNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 @@ -869,8 +869,9 @@
          file = yield* trunc.write(raw)
        }
@@ -42,24 +63,13 @@ index e4b83d268..2489abcab 100644
  
        if (cut && file) {
          // 末尾换行不额外算一行；内存只保留计数器与原有尾部窗口。
-@@ -894,6 +895,22 @@
+@@ -894,6 +895,11 @@
        // 先完成最终窗口再判定可见性，不能用截断前的原文隐藏附录。
        const appendix = renderDiagnosticAppendix(diagnostic, { durationMs: Date.now() - started, exitCode: code, visibleOutput: output, config: { enabled: input.compressOutput } })
        if (appendix) output += "\n\n" + appendix
 +      // #289：metadata.exit 不进入模型回放，空输出或缺少诊断的失败需补退出码 notice。
 +      // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
-+      const exitNotice =
-+        code === null
-+          ? undefined
-+          : emptyOutput
-+            ? formatExecutionNotice({
-+                severity: code === 0 ? "info" : "error",
-+                reason: "exit",
-+                exit_code: code,
-+              })
-+            : code !== 0 && !appendix
-+              ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
-+              : undefined
++      const exitNotice = formatExitNotice(code, emptyOutput, appendix)
 +      if (exitNotice) meta.push(exitNotice)
 +
        if (meta.length > 0) {
@@ -194,3 +204,36 @@ index ccf2e36dd..0b02c5013 100644
    it.live("streams metadata updates progressively", () =>
      runIn(
        projectRoot,
+diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
+--- a/packages/opencode/test/tool/bash-compress.test.ts
++++ b/packages/opencode/test/tool/bash-compress.test.ts
+@@ -2,1 +2,2 @@
+-import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
++import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
++import { formatExitNotice } from "@opencode-ai/core/util/output-notice"
+@@ -5,1 +6,25 @@
+ describe("tool.bash-compress", () => {
++  test("keeps failed exit status when only diagnostic sampling was omitted", () => {
++    const raw = "a".repeat(5_000)
++    const collector = new BashDiagnosticCollector()
++    collector.push(raw)
++    collector.end()
++    const snapshot = collector.snapshot()
++    const appendix = renderDiagnosticAppendix(snapshot, { durationMs: 3_000, exitCode: 7, visibleOutput: raw, config: { enabled: false } })
++    expect(snapshot.errorLikeLines).toBe(0)
++    expect(snapshot.discardedChars).toBeGreaterThan(0)
++    expect(appendix).toContain("diagnostic sampling omitted")
++    // 真实采样说明不含失败证据，仍须交付退出码；取消与超时不得伪造exit。
++    expect(formatExitNotice(7, false, appendix)).toBe('<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" />')
++    expect(formatExitNotice(0, true)).toContain('severity="info" reason="exit" exit_code="0"')
++    expect(formatExitNotice(42, true)).toContain('severity="error" reason="exit" exit_code="42"')
++    expect(formatExitNotice(null, false, appendix)).toBeUndefined()
++    expect(formatExitNotice(0, false, appendix)).toBeUndefined()
++    const failure = new BashDiagnosticCollector()
++    failure.push("fatal: hidden root cause\n")
++    failure.end()
++    const diagnosed = renderDiagnosticAppendix(failure.snapshot(), { durationMs: 3_000, exitCode: 9, visibleOutput: "tail" })
++    expect(diagnosed).toContain("<bash_high_signal_excerpt>")
++    expect(formatExitNotice(9, false, diagnosed)).toBeUndefined()
++  })
++

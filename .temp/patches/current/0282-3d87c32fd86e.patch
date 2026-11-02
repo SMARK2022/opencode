@@ -558,16 +558,16 @@ index b51fe1f14..18ab8c2b2 100644
  import { iife } from "@/util/iife"
  import { errorMessage } from "@/util/error"
  import { isMedia } from "@/util/media"
-+import { formatCompactionClearedNotice } from "@/util/output-notice"
++import { formatCompactionClearedNotice, truncateForCompaction } from "@/util/output-notice"
  import type { SystemError } from "bun"
  import type { Provider } from "@/provider/provider"
  import { Effect, Schema } from "effect"
-@@ -79,7 +80,7 @@ export { isMedia }
+@@ -79,7 +80,5 @@ export { isMedia }
  function truncateToolOutput(text: string, maxChars?: number) {
-   if (!maxChars || text.length <= maxChars) return text
-   const omitted = text.length - maxChars
+-  if (!maxChars || text.length <= maxChars) return text
+-  const omitted = text.length - maxChars
 -  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
-+  return `${text.slice(0, maxChars)}\n[... compaction truncated ${omitted} chars]`
++  return truncateForCompaction(text, maxChars)
  }
  
  export const Event = {
@@ -663,10 +663,10 @@ index 4a92ac63a..19c165406 100644
 +          output
 +      }
 +
-       // 单独脱敏也广告原文路径；写盘输入仍是未改动的 raw。
--      if (file && (cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
+       // 呈现变化与单独脱敏都广告原文路径，不能把收益布尔值当作恢复条件。
+-      if (file && (transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
 -        output = `${cut ? "...output truncated..." : "...output compacted or diagnostic frames sampled..."}\n\nFull output saved to: ${file}\n\n` + output
-+      if (file && !cut && (compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
++      if (file && !cut && (transformed || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0)) {
 +        output = `...output compacted or diagnostic frames sampled...\n\nFull output saved to: ${file}\n\n` + output
        }
  
@@ -1049,16 +1049,13 @@ index 78d635673..72ac3b657 100644
          expect(result.content).not.toContain("Task tool")
        }),
      )
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
 new file mode 100644
 index 000000000..a35c1f531
 --- /dev/null
-+++ b/packages/opencode/src/util/output-notice.ts
-@@ -0,0 +1,86 @@
-+// #282：模型可见工具输出 notice 的唯一 owner：块级 opencode_notice 标签 +
-+// 机器可解析的行内省略标记。所有旧格式（...output truncated...、<shell_metadata>、
-+// [Tool output truncated for compaction: ...]、[Old tool result content cleared]）
-+// 一律迁移到这里，禁止调用方再各自拼写。
++++ b/packages/core/src/util/output-notice.ts
+@@ -0,0 +1,89 @@
++// 两代共享模型可见的notice和省略标记；统计、转义及属性顺序只维护一处。
 +type OutputAmount = {
 +  lines?: number
 +  bytes?: number
@@ -1067,7 +1064,7 @@ index 000000000..a35c1f531
 +type OutputTruncatedNotice = {
 +  source: "tool" | "shell"
 +  total: OutputAmount
-+  shown: OutputAmount & { direction: "head" | "tail" }
++  shown: OutputAmount & { direction: "head" | "tail" | "head+tail" }
 +  path: string
 +}
 +
@@ -1110,6 +1107,12 @@ index 000000000..a35c1f531
 +  return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
 +}
 +
++// 截断只作用于模型交付文本，不标记持久历史已被清理；零上限沿源语义禁用截断。
++export function truncateForCompaction(text: string, maxChars?: number) {
++  if (!maxChars || text.length <= maxChars) return text
++  return `${text.slice(0, maxChars)}\n[... compaction truncated ${text.length - maxChars} chars]`
++}
++
 +function formatNotice(input: Notice) {
 +  // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
 +  return `<opencode_notice ${Object.entries(input)
@@ -1141,3 +1144,225 @@ index 000000000..a35c1f531
 +function escapeAttribute(value: string) {
 +  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;")
 +}
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -0,0 +1 @@
++export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatCompactionClearedNotice, truncateForCompaction } from "@opencode-ai/core/util/output-notice"
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -11,1 +11,2 @@
+ import { sanitizeVisibleText } from "./util/terminal-text"
++import { formatOutputTruncatedNotice, outputStats } from "./util/output-notice"
+@@ -111,7 +112,10 @@
+-const boundedPreview = (text: string, marker: string, maxLines: number, maxBytes: number) => {
+-  const markerOnly = takePrefix(marker, maxBytes).split("\n").slice(0, maxLines).join("\n")
+-  const markerBytes = Buffer.byteLength(marker, "utf-8")
+-  if (maxLines <= 4 || maxBytes <= markerBytes + 4) return markerOnly
+-  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 4)
++const boundedPreview = (text: string, format: (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") => string, maxLines: number, maxBytes: number) => {
++  const markerBytes = Buffer.byteLength(format({ lines: maxLines, bytes: maxBytes }, "head+tail"), "utf-8")
++  // 极小预算优先保住完整恢复路径；不能裁断标签后声称原文仍可恢复。
++  if (maxLines <= 4 || maxBytes <= markerBytes + 8) return format(outputStats(""), "head")
++  // 八字节覆盖分隔换行和KB/MB边界处的显示长度变化，不改变原head/tail选择。
++  const bounded = preview(text, maxLines - 4, maxBytes - markerBytes - 8)
++  const shown = bounded.tail ? `${bounded.head}\n${bounded.tail}` : bounded.head
++  const marker = format(outputStats(shown), bounded.tail ? "head+tail" : "head")
+   return bounded.tail ? `${bounded.head}\n\n${marker}\n\n${bounded.tail}` : `${bounded.head}\n\n${marker}`
+ }
+@@ -132,1 +137,1 @@
+-    const captures = new Map<string, { path: string; retain: boolean; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
++    const captures = new Map<string, { path: string; retain: boolean; totalBytes: number; flush: () => Effect.Effect<string, Error>; onInterrupted?: () => Effect.Effect<ToolOutput> }>()
+@@ -170,1 +175,1 @@
+-      const captured = { path: "", retain: false, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
++      const captured = { path: "", retain: false, totalBytes: 0, onInterrupted, flush: (): Effect.Effect<string, Error> => Effect.uninterruptible(Effect.gen(function* () {
+@@ -185,1 +190,3 @@
+           if (!chunk.byteLength) return
++          // 原始归档计数跨flush累加；编码未确认时不把解码窗口行数冒充原文行数。
++          captured.totalBytes += chunk.byteLength
+@@ -253,8 +260,12 @@
+-      const marker = captured
+-        ? `... output ${fits ? "presentation changed" : "truncated"}; captured raw output saved to ${outputPath} ...`
+-        : `... output ${fits ? "presentation changed" : "truncated"}; full content saved to ${outputPath} ...`
++      const total = captured ? { bytes: captured.totalBytes } : outputStats(raw)
++      const notice = (shown: ReturnType<typeof outputStats>, direction: "head" | "head+tail") =>
++        formatOutputTruncatedNotice({ source: "tool", total, shown: { direction, ...shown }, path: outputPath })
++      // 未截断呈现变化仍沿原恢复广告；真实限幅才报告output_truncated。
++      const marker = fits
++        ? captured ? `... output presentation changed; captured raw output saved to ${outputPath} ...` : `... output presentation changed; full content saved to ${outputPath} ...`
++        : notice(outputStats(""), "head")
+       captures.delete(captureKey(input))
+-      // 通用预算仍只在这里执行；恢复标记本身也占用字节与行数预算。
++      // 通用预算仍只在这里执行；仅完整路径本身超额时允许固定notice开销。
+       const withMarker = `${contextual}\n\n${marker}`
+       // 若总预算允许就保留原 content 分段，退出状态与媒体位置不能因增加路径而变化。
+       const preserveParts = lineCount(withMarker) <= outputLimits.maxLines && Buffer.byteLength(withMarker) <= outputLimits.maxBytes
+@@ -268,1 +278,1 @@
+-              text: boundedPreview(contextual, marker, outputLimits.maxLines, outputLimits.maxBytes),
++              text: boundedPreview(contextual, notice, outputLimits.maxLines, outputLimits.maxBytes),
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -23,1 +23,2 @@
+ import { createAutoTextDecoder } from "../text-decoding"
++import { formatExecutionNotice } from "../util/output-notice"
+@@ -96,2 +97,2 @@
+-  if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.`
+-  if (output.interrupted) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command interrupted before completion.`
++  // 终止原因已由唯一finish写入正文，状态投影不再叠加第二条同义提示。
++  if (output.timeout || output.interrupted) return warnings.trimStart()
+@@ -317,1 +318,3 @@
+-              const timeoutNotice = result || interrupted ? undefined : `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`
++              const executionNotice = result && !interrupted ? undefined : formatExecutionNotice({
++                severity: "warning", reason: interrupted ? "user_abort" : "timeout", ...(interrupted ? {} : { timeout_ms: timeout }),
++              })
+@@ -322,1 +325,1 @@
+-              const projected = [compressed.text, timeoutNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
++              const projected = [compressed.text, executionNotice, diagnostics].filter(Boolean).join("\n\n") + modelOutput({ ...outcome, truncated, output, contextOutput: "", warnings })
+@@ -334,2 +337,2 @@
+-                output: [output, notice, timeoutNotice].filter(Boolean).join("\n\n"),
+-                contextOutput: [compressed.text, notice, timeoutNotice, appendix].filter(Boolean).join("\n\n"),
++                output: [output, notice, executionNotice].filter(Boolean).join("\n\n"),
++                contextOutput: [compressed.text, notice, executionNotice, appendix].filter(Boolean).join("\n\n"),
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -19,1 +19,2 @@
+ import { SessionHistory } from "./history"
++import { truncateForCompaction } from "../util/output-notice"
+@@ -112,2 +113,2 @@
+-const truncate = (value: string) =>
+-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
++// 保留原2000字符预算；只统一模型省略说明，不重做tail、memento或持久清理。
++const truncate = (value: string) => truncateForCompaction(value, TOOL_OUTPUT_MAX_CHARS)
+@@ -122,1 +123,1 @@
+-const serialize = (message: SessionMessage.Message) => {
++export const serialize = (message: SessionMessage.Message) => {
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -71,6 +71,13 @@
+         expect(result.output.content[0].text).toContain("HEAD-safe\\x07end\n")
+         expect(result.output.content[0].text).not.toContain("\u0007")
+         expect(result.output.content[0].text).not.toContain("\u001b")
++        // total对应归档，shown只对应head/tail正文，不将notice自身算入预览。
++        const visible = result.output.content[0].text
++        expect(visible).toContain('type="output_truncated" source="tool"')
++        expect(visible).toContain(`path="${result.outputPaths[0]}" />`)
++        expect(visible).toMatch(/total="2L\/59KB"/)
++        const excerpt = visible.replace(/\n\n<opencode_notice[^>]+ \/>\n\n/, "\n")
++        expect(visible).toContain(`shown="head+tail ${excerpt.split("\n").length}L/`)
+       }),
+     ),
+   )
+@@ -172,6 +179,20 @@
+         if (!saved) throw new Error("expected published raw output")
+         expect(yield* fs.readFileString(saved)).toBe(text)
+         expect(yield* fs.readDirectory(directory)).toHaveLength(1)
++        // 两次写入跨越flush；UTF-16原字节不能由UTF-8模型窗口反推。
++        const bytes = Buffer.from("AB".repeat(20_000), "utf16le")
++        yield* store.capture(input, (write) => Effect.gen(function* () {
++          yield* write(bytes.subarray(0, 20_000))
++          yield* write(bytes.subarray(20_000))
++          return { value: undefined, retain: true }
++        }))
++        const captured = yield* store.bound({ ...input, output: { structured: {}, content: [{ type: "text", text: "x".repeat(20_000) }] } })
++        expect(Buffer.from(yield* fs.readFile(captured.outputPaths[0]))).toEqual(bytes)
++        const notice = captured.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
++        expect(notice).toContain('total="78KB"')
++        expect(notice).not.toContain('total="1L/')
++        expect(notice).toContain(`path="${captured.outputPaths[0]}" />`)
++        expect(Buffer.byteLength(notice)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+       }),
+     ),
+   )
+@@ -329,14 +350,20 @@
+-      ({ store }) =>
++      ({ store, fs }) =>
+         Effect.gen(function* () {
+-          expect(yield* store.limits()).toEqual({ maxLines: 2, maxBytes: 1_000 })
++          expect(yield* store.limits()).toEqual({ maxLines: 2, maxBytes: 1 })
+           const result = yield* store.bound({
+             sessionID,
+             toolCallID: "call-config",
+             output: { structured: {}, content: [{ type: "text", text: "one\ntwo\nthree" }] },
+           })
+           expect(result.outputPaths).toHaveLength(1)
++          // 恢复地址即使超过极小预算也必须完整；空预览不能报成原文丢失。
++          const text = result.output.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("")
++          expect(text).toContain('total="3L/13B" shown="head 0L/0B"')
++          expect(text).toContain(`path="${result.outputPaths[0]}" />`)
++          expect(text).toStartWith("<opencode_notice ")
++          expect(yield* fs.readFileString(result.outputPaths[0])).toBe("one\ntwo\nthree")
+         }),
+-      new Config.Info({ tool_output: new ConfigToolOutput.Info({ max_lines: 2, max_bytes: 1_000 }) }),
++      new Config.Info({ tool_output: new ConfigToolOutput.Info({ max_lines: 2, max_bytes: 1 }) }),
+     ),
+   )
+ 
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -4,1 +4,5 @@
+ import { Token } from "@opencode-ai/core/util/token"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
++import { DateTime } from "effect"
+@@ -51,3 +55,27 @@
+   expect(serialized).toBe("Image read successfully\n[Attached image/png: pixel.png]")
+   expect(serialized).not.toContain(base64)
++  // 检查真实shell与已完成工具序列化；只省略交付文本，不改持久消息或媒体策略。
++  const text = "x".repeat(2_006)
++  const created = DateTime.makeUnsafe(0)
++  const shell = SessionMessage.Shell.make({
++    id: SessionMessage.ID.make("msg_notice_shell"), type: "shell", callID: "shell-notice",
++    command: "pwd", output: text, time: { created, completed: created },
++  })
++  const assistant = SessionMessage.Assistant.make({
++    id: SessionMessage.ID.make("msg_notice_assistant"), type: "assistant", agent: "build",
++    model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
++    content: [SessionMessage.AssistantTool.make({
++      type: "tool", id: "notice-tool", name: "read", time: { created, completed: created },
++      state: SessionMessage.ToolStateCompleted.make({ status: "completed", input: {}, structured: {}, content: [{ type: "text", text }] }),
++    })],
++    time: { created, completed: created },
++  })
++  for (const message of [shell, assistant]) {
++    const result = SessionCompaction.serialize(message)
++    expect(result).toContain(`${"x".repeat(2_000)}\n[... compaction truncated 6 chars]`)
++    expect(result).not.toContain("[truncated]")
++    expect(result).not.toContain("compaction_cleared")
++  }
++  expect(shell.output).toBe(text)
++  expect(SessionCompaction.serialize({ ...shell, output: "short" })).toBe("[Shell]: pwd\nshort")
+ })
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -749,9 +749,9 @@
+-              expect(text).toContain("Command exceeded timeout of 10 ms")
+-              expect(text).toContain("Retry with a larger timeout")
++              expect(text).toContain('type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="10"')
++              expect(text.match(/reason="timeout"/g)).toHaveLength(1)
+               expect(settled.output?.content[1]).toMatchObject({
+                 type: "text",
+-                text: expect.stringContaining("Command timed out"),
++                text: "",
+               })
+               expect(settled.output?.structured).toMatchObject({
+                 timeout: true,
+                 truncated: false,
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -4177,5 +4177,5 @@
+-          expect(text).toContain("Command interrupted before completion.")
++          expect(text).toContain('reason="user_abort"')
+           expect(text).not.toContain("�")
+           if (size === 16) expect(text).toContain("READY")
+           expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+-          const retained = /captured raw output saved to (.+?) \.\.\./.exec(text)?.[1]
++          const retained = /(?:captured raw output saved to |path=")(.+?)(?: \.\.\.|" \/>)/.exec(text)?.[1]

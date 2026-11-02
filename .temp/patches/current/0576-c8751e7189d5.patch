@@ -10,7 +10,7 @@ Content-Transfer-Encoding: 8bit
 
 逐条 oldString===newString 不再整批拒绝：条目过 locate/唯一性校验后跳写（零字节写入），混合批次成功并在 output 末尾追加 no-op warning；成功 output 以 post-formatter 最终 diff 说明实际变化（含 create/overwrite），并按 truncation limits 做预算保护保证末尾 warning 恒可见。历史 _syncInput 保持提交形态，TUI/apply_patch/write 与通用截断层零改动，权限审批预览不回归。
 
-适配说明：目标 edit.ts 已含 #514/#518/#131 注释夹层、EventV2Bridge/FSUtil 服务名与 else 分支 +2 缩进漂移，七个 edit.ts hunks 中六个按真实锚点重写；edit-apply.ts 三 hunks 与测试 H2/H3 语义原样（H3 由 220 行 9 用例承载）；itTruncated 按目标 LayerNode.override 槽位风格重写（Bus.layer→EventV2Bridge.node）。批级内容等值门为目标既有（fork 早期），本补丁不重复引入。
+适配说明：唯一EditApply已迁Core，两代Edit同步移除逐条预拒绝，保留定位/唯一性后跳写、提交形态与批级等值门。V1保留最终diff/局部预算及十个源回归，Native复用formatter后diff和通用head+tail限幅，补同义末尾warning、真实替换计数及既有settlement回归；不恢复LSP或空needle覆盖。
 
 
 diff --git a/docs/plans/edit-identical-noop-tolerance.md b/docs/plans/edit-identical-noop-tolerance.md
@@ -360,21 +360,19 @@ new file mode 100644
 +Verdict 记录后按 policy 仅进行管理性字段更新：Status → verified、Approved revision → R5、Implementation allowed → no further changes without revision；无任何实质性设计修改。
 \ No newline at end of file
 
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
---- a/packages/opencode/src/tool/edit-apply.ts
-+++ b/packages/opencode/src/tool/edit-apply.ts
-@@ -50,7 +50,9 @@ type LineSpan = { start: number; end: number }
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
+--- a/packages/core/src/tool/edit-apply.ts
++++ b/packages/core/src/tool/edit-apply.ts
+@@ -54,7 +54,7 @@ type LineSpan = { start: number; end: number }
  // 10. newString 禁止再走 normalizeForMatch，避免改写用户意图插入文本。
  // 11. hybrid 连字符：字面一次、归一化两次 → 无 replaceAll 必歧义失败。
  // 12. 重叠 range 在 reverse 前拒绝，避免部分写盘。
 -// 13. no-op（content 不变）视为错误，逼迫模型检查输入。
-+// 13. identical（oldString === newString）条目校验后跳写，不推入 allRanges；
-+//     唯一 no-op 门是批级内容等值（505-511），逐条不再拒绝。
-+//     其 syncEdits 历史为提交形态（零写入即无命中切片可记），真实条目沿用 actualOld。
++// 13. identical 条目校验后跳写并保留提交形态；批级等值仍是唯一 no-op 门，真实编辑记录 actualOld。
  // 14. 兼容 replace() 仅允许 length-1 委托，禁止复制粘贴第二实现。
  
  
-@@ -411,9 +413,6 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -399,9 +399,6 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "file") {
            : `edits[${i}].oldString is empty after normalization in ${path}.`,
        )
      }
@@ -384,7 +382,7 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
    }
  
    // 是否需要整批 elevation：任一条 exact 找不到、或归一化出现次数与字面次数分歧（hybrid dash 等）
-@@ -469,17 +468,26 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -457,17 +454,26 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "file") {
        )
      }
  
@@ -423,16 +421,16 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -20,6 +20,8 @@ import { closestWindow } from "@/patch/match"
- import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+@@ -19,6 +19,8 @@ import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
+ import { EditApply } from "@opencode-ai/core/tool/edit-apply"
  // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
  import * as Mutation from "./file-mutation-coordinator"
 +// 0576：预算纪律消费 Truncate limits——与 wrapper 通用截断同源，确保末段 warning 不被外层截断丢弃。
-+import * as Truncate from "./truncate"
++import { Truncate } from "./truncate"
  // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
  
- /**
-@@ -100,6 +102,8 @@ export const EditTool = Tool.define(
+ // 既有单条导出仍委托共享引擎，不保留第二套匹配实现。
+@@ -63,6 +65,8 @@ export const EditTool = Tool.define(
      const afs = yield* FSUtil.Service
      const format = yield* Format.Service
      const events = yield* EventV2Bridge.Service
@@ -441,7 +439,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
  
      return {
        description: DESCRIPTION,
-@@ -129,11 +133,9 @@ export const EditTool = Tool.define(
+@@ -92,11 +96,8 @@ export const EditTool = Tool.define(
              throw new Error("edits[].oldString must not be empty except for a single create/overwrite edit.")
            }
  
@@ -450,9 +448,8 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 -              throw new Error("No changes to apply: oldString and newString are identical.")
 -            }
 -          }
-+          // [local-smark] 逐条 oldString===newString 不再整批拒绝：identical 条目交由
-+          // applyEdits 的 locate/唯一性校验与跳写处理，混入真实变化的 batch 按无操作容忍。
-+          // create+空 newString 语义保持既有拒绝契约（edit.test.ts 锁定），不随逐条容忍放宽。
++          // identical 条目须通过共享引擎定位/唯一性校验后跳写，不能提前否决混合批次。
++          // create+空 newString 仍拒绝，不随无操作容忍放宽已有创建边界。
            if (isCreate(edits) && edits[0].oldString === edits[0].newString) {
              throw new Error("No changes to apply: oldString and newString are identical.")
            }
@@ -473,13 +470,12 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
                // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
                // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
                // actualOld 已在 applyEdits.syncEdits 中（历史 needle，非 preserve 整行块）；
-@@ -345,6 +337,17 @@ export const EditTool = Tool.define(
+@@ -306,6 +297,16 @@ export const EditTool = Tool.define(
                }
              }
  
-+          // 共享出口统一重算 diff：此刻两分支的 contentNew 均已同步 commit/formatter 后的
-+          // 最终磁盘内容，output 的 Changed 段与 metadata.diff 因此共用 post-formatter 真值；
-+          // 权限请求的预计算 diff 保留在各自 ask 之前，审批预览不受影响（R5）。
++          // 两分支都已同步 formatter 后的最终内容，回执与 metadata 因此共用同一 diff。
++          // 权限请求仍使用各自 ask 前的预计算，不能拿成功后的真值替代审批预览。
 +          diff = trimDiff(
 +            createTwoFilesPatch(
 +              filePath,
@@ -491,7 +487,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
            const diffOld = normalizeLineEndings(contentOld)
            const diffNew = normalizeLineEndings(contentNew)
            // #131：统计增删行时忽略行尾风格
-@@ -371,6 +374,49 @@ export const EditTool = Tool.define(
+@@ -331,6 +332,47 @@ export const EditTool = Tool.define(
  
            // #514：多块编辑成功回执标注块数，与单块形态区分
            let output = `Edit applied successfully${edits.length > 1 ? ` (${edits.length} blocks)` : ""}.`
@@ -501,10 +497,8 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 +            (edit) => normalizeLineEndings(edit.oldString) === normalizeLineEndings(edit.newString),
 +          ).length
 +
-+          // [local-smark] R-01 变化说明 = 出口 post-formatter diff（-/+ 行即逐条变化），
-+          // 与 metadata.diff 同串单一真值。output 有物理上限：按与 wrapper 截断同源的
-+          // limits 做预算纪律——diff/LSP 段可裁剪，末尾 warning 段不可裁剪（B-02b 教训：
-+          // 通用 head 截断丢尾部 warning），裁剪标记用纯事实句不指向模型不可见通道。
++          // Changed 使用最终 diff；与 wrapper 同源的限额为 warning 留出位置，避免 head 截断丢尾。
++          // 裁剪只陈述省略事实，不指向模型看不到的 metadata 通道。
 +          const { maxLines: limitLines, maxBytes: limitBytes } = yield* truncate.limits()
 +          const reserveBytes = 2048
 +          const reserveLines = 10
@@ -541,7 +535,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
            const normalizedFilePath = FSUtil.normalizePath(filePath)
            // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
            const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
-@@ -383,21 +429,38 @@ export const EditTool = Tool.define(
+@@ -344,21 +386,38 @@ export const EditTool = Tool.define(
            const delta = LSP.Diagnostic.deltaSummary(currentIssues, beforeIssues)
            // summary 只有在 LSP 可靠可用时才传给 TUI，避免 unavailable 时出现绿色 clean
            let diagnosticSummary: typeof delta | undefined = delta
@@ -854,3 +848,119 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
      it.instance("throws error when oldString not found in file", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
+
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -60,6 +60,8 @@ export const Output = Schema.Struct({
+   files: Schema.Array(FileDiff.Info),
+   replacements: Schema.Number,
+   syncInput: Schema.optional(Input),
++  // 模型回执与结构化结果共用同一跳写事实，不从 formatter 后的 diff 猜测无操作数量。
++  warning: Schema.optional(Schema.String),
+ })
+ export type Output = typeof Output.Type
+ 
+@@ -83,6 +85,8 @@ export const toModelOutput = (output: Output) =>
+     "```",
+     // 最终文件 diff 保持完整；LSP 固定停用，不能把成功当作诊断通过。
+     "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
++    // 通用 owner 默认保留 head+tail，末尾 warning 不需要复制 V1 的 head 截断补偿。
++    ...(output.warning ? ["", output.warning] : []),
+   ].join("\n")
+ 
+ /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
+@@ -158,8 +162,4 @@ const layer = Layer.effectDiscard(
+-                if (input.edits.some(edit => edit.oldString === edit.newString)) {
+-                  return yield* new ToolFailure({
+-                    message: "No changes to apply: oldString and newString are identical.",
+-                  })
+-                }
++                // 与 V1 一样先定位/校验，混批中的 identical 条目由共享引擎跳写。
+                 if (input.edits.some(edit => edit.oldString === "")) {
+                   return yield* new ToolFailure({
+                     message: "oldString must not be empty. Use write to create or overwrite a file.",
+@@ -238,7 +241,9 @@ const layer = Layer.effectDiscard(
+-                const replacements = editsLF.reduce((count, edit) => count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1), 0)
++                // 替换次数只统计真正写入项；跳写计数按 LF 提交形态，与引擎和历史一致。
++                const unchangedEntries = editsLF.filter(edit => edit.oldString === edit.newString).length
++                const replacements = editsLF.reduce((count, edit) => edit.oldString === edit.newString ? count : count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1), 0)
+                 const replaced = convertToLineEnding(applied.contentNew, ending)
+                 const diffOld = normalizeLineEndings(source.text)
+                 const diffNew = normalizeLineEndings(replaced)
+                 // 统计和展示共用逻辑文本，CR-only 不得被误计成整行替换。
+                 const counts = diffLines(diffOld, diffNew).reduce(
+                   (result, item) => ({
+@@ -272,6 +277,10 @@ const layer = Layer.effectDiscard(
+                     },
+                   ],
+                   replacements,
++                  // 此处只能由整批有真实变化的成功路径抵达，warning 不会把全 no-op 伪装成成功。
++                  ...(unchangedEntries > 0 ? {
++                    warning: `Warning: ${unchangedEntries} of ${input.edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`,
++                  } : {}),
+                   // 仅保存实际旧 needle；非创建编辑不猜测 formatter 后的局部新 needle。
+                   syncInput: { path: input.path, edits: applied.syncEdits.map(edit => ({
+                     oldString: convertToLineEnding(edit.oldString, ending),
+
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -160,6 +160,39 @@ describe("EditTool", () => {
+         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 done\n\n")
+         expect(formatted.result).toMatchObject({ type: "text", value: expect.stringContaining("+say $& $1 done") })
+         expect(formatted.output?.structured).toMatchObject({ syncInput: { edits: [{ oldString: "end", newString: "done" }] } })
++        reset()
++        // 真实结算同时观察归一化跳写字节、warning、替换次数和历史，不只测试孤立 matcher。
++        const mixedEdits = [{ oldString: "x", newString: "y" }, { oldString: "foo - bar", newString: "foo - bar" }]
++        yield* Effect.promise(() => fs.writeFile(target, "x\nfoo \u2013 bar\n"))
++        const mixed = yield* run(mixedEdits)
++        expect(mixed.result).toMatchObject({ type: "text", value: expect.stringContaining("Warning: 1 of 2 edit(s) were no-ops") })
++        expect(mixed.output?.structured).toMatchObject({ replacements: 1, syncInput: { edits: mixedEdits } })
++        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nfoo \u2013 bar\n")
++        expect(writes).toHaveLength(1)
++        for (const example of [
++          { before: "x\nsame same", edits: [{ oldString: "x", newString: "y" }, { oldString: "same", newString: "same" }], reason: "occurrences" },
++          { before: "x\nsame", edits: [{ oldString: "x", newString: "y" }, { oldString: "missing", newString: "missing" }], reason: "Could not find edits[1]" },
++          { before: "foo \u2013 bar", edits: [{ oldString: "foo - bar", newString: "foo - bar" }], reason: "identical" },
++        ]) {
++          reset()
++          // 无操作条目同样必须定位且唯一；任何失败整批零写入，漂移全 no-op 也不能成功。
++          yield* Effect.promise(() => fs.writeFile(target, example.before))
++          expect((yield* run(example.edits)).result).toMatchObject({ type: "error", value: expect.stringContaining(example.reason) })
++          expect(writes).toEqual([])
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
++        }
++        reset()
++        yield* Effect.promise(() => fs.writeFile(target, "x\nsame same"))
++        const repeated = yield* run([{ oldString: "x", newString: "y" }, { oldString: "same", newString: "same", replaceAll: true }])
++        expect(repeated.output?.structured).toMatchObject({ replacements: 1 })
++        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nsame same")
++        // 超过通用默认预算仍必须在实际模型结果尾部看到 warning，原文保留沿用既有 owner。
++        const long = "z".repeat(20000)
++        yield* Effect.promise(() => fs.writeFile(target, `${long}\nkeep`))
++        const bounded = yield* run([{ oldString: long, newString: `${long}q` }, { oldString: "keep", newString: "keep" }])
++        expect(bounded.result).toMatchObject({ type: "text", value: expect.stringContaining("Warning: 1 of 2 edit(s) were no-ops") })
++        expect(bounded.outputPaths?.length).toBeGreaterThan(0)
++        expect(bounded.output?.structured).toMatchObject({ replacements: 1 })
+       }),
+       tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+     ),
+@@ -433,7 +470,7 @@ describe("EditTool", () => {
+       (tmp) => {
+         reset()
+         const target = path.join(tmp.path, "matches.txt")
+-        return Effect.promise(() => fs.writeFile(target, "same same")).pipe(
++        return Effect.promise(() => fs.writeFile(target, "same")).pipe(
+           Effect.andThen(
+             withTool(tmp.path, (registry) =>
+               Effect.gen(function* () {
+@@ -443,6 +480,8 @@ describe("EditTool", () => {
+                   type: "error",
+                   value: "No changes to apply: oldString and newString are identical.",
+                 })
++                // 全 no-op 使用唯一 needle；独立歧义断言仍沿用多候选原文。
++                yield* Effect.promise(() => fs.writeFile(target, "same same"))
+                 expect(
+                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "", newString: "after" })),
+                 ).toEqual({

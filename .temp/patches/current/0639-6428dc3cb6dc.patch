@@ -631,13 +631,18 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 index a8cb066..0f378ca 100644
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -1,5 +1,6 @@
+@@ -1,10 +1,11 @@
  import { PromptVoiceInput } from "../../src/prompt-voice-input"
+ import { resolveVoiceTarget } from "@opencode-ai/core/voice"
 -import { describe, expect, test } from "bun:test"
 +import { describe, expect, spyOn, test } from "bun:test"
 +import { createRequire } from "node:module"
  import path from "path"
  import { createRoot, createSignal } from "solid-js"
+ import { Effect } from "effect"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { TuiConfigHost } from "../../src/config/host"
  import { tmpdir } from "../fixture/fixture"
 @@ -13,6 +14,60 @@ import {
  // createRefreshClock 是录音计时器走数的基础设施（主 Prompt 的 now 信号由它驱动）

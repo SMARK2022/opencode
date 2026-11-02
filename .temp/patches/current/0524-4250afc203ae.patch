@@ -520,7 +520,7 @@ index 1be17dfc8..fc0fdf7e7 100644
      const error = isRecord(body) && typeof body.error === "string" ? body.error : `daemon returned ${response.status}`
      throw new MaintenanceUnavailableError(error)
    }
-@@ -117,6 +119,7 @@ async function runOffline(db: ColdStorage.TxOrDb, prepared: ColdStorage.Prepared
+@@ -122,6 +124,7 @@ async function runOffline(db: Database.Interface, prepared: ColdStorage.Prepared
  
  // 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
  // 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
@@ -528,7 +528,7 @@ index 1be17dfc8..fc0fdf7e7 100644
  async function executeMaintenance(db: Database.Interface, request: ColdStorage.MaintenanceRequest) {
    const lock = await liveDaemon()
    if (lock) {
-@@ -234,12 +237,19 @@ const StatusCommand = effectCmd({
+@@ -238,12 +241,19 @@ const StatusCommand = effectCmd({
          return
        }
        if (lock) {
@@ -558,7 +558,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 index 5954d0443..d9653d0e5 100644
 --- a/packages/core/src/storage/cold-storage.ts
 +++ b/packages/core/src/storage/cold-storage.ts
-@@ -1120,6 +1120,12 @@ type MessagePackItem = {
+@@ -1214,6 +1214,12 @@ type MessagePackItem = {
    oldRef: string | null
  }
  
@@ -571,7 +571,7 @@ index 5954d0443..d9653d0e5 100644
  // canonical pack 的数组/entry 标点大小可精确增量计算；不能为每个 owner 重编码整个候选 pack，
  // 否则大 Session 会退化为 O(n²)。duplicate key 不增加 raw bytes，但 owner 仍留在当前 chunk 贡献 refcount。
  function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, items: T[]) {
-@@ -1174,7 +1180,7 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
+@@ -1268,7 +1274,7 @@ function cachedEnvelope(db: TxOrDb, hash: string, owner: OwnerKind, cache?: Map<
    return value
  }
  
@@ -580,7 +580,7 @@ index 5954d0443..d9653d0e5 100644
    if (row.cold_key) throw new CorruptionError({ message: "Message v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
    const data = row.cold_ref ? restoreMessage(row.data, cachedEnvelope(db, row.cold_ref, "message", cache), row.cold_ref) : row.data
    const value = extractMessageV2(data)
-@@ -1184,7 +1190,7 @@ function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache
+@@ -1278,7 +1284,7 @@ function messageV2Value(db: TxOrDb, row: typeof MessageTable.$inferSelect, cache
      projection: value.projection,
      entry: { key: value.key, fields: value.fields },
      oldRef: row.cold_ref,
@@ -589,7 +589,7 @@ index 5954d0443..d9653d0e5 100644
  }
  
  // 单 owner freeze 也通过 Session/kind pack builder，保证 direct freeze 与 batch compress 产生相同 key/ref 语义。
-@@ -1275,7 +1281,13 @@ type PartPackItem = {
+@@ -1369,7 +1375,13 @@ type PartPackItem = {
    oldRef: string | null
  }
  
@@ -604,7 +604,7 @@ index 5954d0443..d9653d0e5 100644
    if (row.cold_key) throw new CorruptionError({ message: "Part v2 owner was selected for repack", hash: row.cold_ref ?? undefined })
    if (row.cold_stats !== null) throw new CorruptionError({ message: "Hot or v1 Part has an unexpected cold Stats projection", hash: row.cold_ref ?? undefined })
    const data = row.cold_ref ? restorePart(row.data, cachedEnvelope(db, row.cold_ref, "part", cache), row.cold_ref) : row.data
-@@ -1287,7 +1299,7 @@ function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map
+@@ -1381,7 +1393,7 @@ function partV2Value(db: TxOrDb, row: typeof PartTable.$inferSelect, cache?: Map
      stats: projectPartStats(data),
      entry: { key: value.key, fields: value.fields },
      oldRef: row.cold_ref,
@@ -613,7 +613,7 @@ index 5954d0443..d9653d0e5 100644
  }
  
  // Part direct freeze 与 Message 对称；现有同 Session v2 parts 会在需要时重打包，保证 key/ref 生命周期独立。
-@@ -2456,17 +2468,33 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
+@@ -2737,19 +2749,35 @@ function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
    const messageCondition = or(messageCandidate(), isNotNull(MessageTable.cold_ref))
    const partCondition = or(partCandidate(), isNotNull(PartTable.cold_ref))
    if (!messageCondition || !partCondition) return 0
@@ -644,12 +644,14 @@ index 5954d0443..d9653d0e5 100644
      .from(PartTable)
      .where(and(isNull(PartTable.cold_key), partCondition))
      .all()
+   const native = db.select().from(SessionMessageTable)
+     .where(and(isNull(SessionMessageTable.cold_key), sessionMessageCandidate())).all()
    return (
 +    // #524：泛型 messageV2Value/partV2Value 使 status 与 freeze 共享同一 extraction 主路径。
      messages.filter((row) => {
        const value = messageV2Value(db, row, legacyCache)
        if (!value) return false
-@@ -3386,10 +3414,21 @@ export function status(db: TxOrDb): StatusReport {
+@@ -3732,10 +3760,21 @@ export function status(db: TxOrDb): StatusReport {
    const pageSize = pragmaNumber(db, "page_size")
    const pages = pragmaNumber(db, "page_count")
    const freelistPages = pragmaNumber(db, "freelist_count")
@@ -759,11 +761,43 @@ index 6bacf5965..a0328f7c2 100644
      "daemon startup resumes an interrupted maintenance task from its persisted record",
      async () => {
 
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -110,6 +110,27 @@ describe("SessionProjector", () => {
+       yield* db.update(ColdStorageTable).set({ payload: Buffer.from([0]) }).where(eq(ColdStorageTable.hash, payload.hash)).run()
++      // Native已打包owner的status只读metadata；坏body不能被此报告解压或被悄悄修复。
++      // 与随后业务读取必失败形成对照，完整行比较继续保护seq/ref/key/stats及共享引用。
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        const owners = sync.select().from(SessionMessageTable).all()
++        const payloads = sync.select().from(ColdStorageTable).all()
++        const report = ColdStorage.status(sync)
++        expect(Object.keys(report)).toHaveLength(17)
++        expect(report).toMatchObject({
++          targetBytes: 1_500_000_000, eligibleOwners: 0, coldOwners: 2, payloads: 1,
++          summaryOwners: 0, summaryPayloads: 0, summaryRawBytes: 0, summaryCompressedBytes: 0,
++          rawBytes: payload.raw_bytes * 2, compressedBytes: payload.compressed_bytes,
++          sharedBytes: payload.raw_bytes, refCountMismatches: 0, orphans: 0,
++        })
++        expect(report.pageSize).toBeGreaterThan(0)
++        expect(report.pageCount).toBeGreaterThan(0)
++        expect(report.freelistPages).toBeGreaterThanOrEqual(0)
++        expect(report.activeBytes).toBe((report.pageCount - report.freelistPages) * report.pageSize)
++        expect(ColdStorage.status(sync)).toEqual(report)
++        expect(sync.select().from(SessionMessageTable).all()).toEqual(owners)
++        expect(sync.select().from(ColdStorageTable).all()).toEqual(payloads)
++      })
+       const failed = yield* ColdStorage.readSessionMessageRows(db, cold).pipe(Effect.exit)
+       expect(failed._tag).toBe("Failure")
+       expect((yield* db.select().from(SessionMessageTable).all()).filter(row => row.cold_ref !== null)).toEqual(cold)
+       expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(2)
+       yield* db.update(ColdStorageTable).set({ payload: payload.payload }).where(eq(ColdStorageTable.hash, payload.hash)).run()
+
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 index 24fd3b00f..f64075a52 100644
 --- a/packages/opencode/test/storage/cold.test.ts
 +++ b/packages/opencode/test/storage/cold.test.ts
-@@ -23,6 +23,8 @@ import { aggregateStats } from "@/cli/cmd/stats-data"
+@@ -24,6 +24,8 @@ import { aggregateStats } from "@/cli/cmd/stats-data"
  import { TestInstance, tmpdirScoped } from "../fixture/fixture"
  import type { SessionID } from "@/session/schema"
  import path from "path"
@@ -772,7 +806,7 @@ index 24fd3b00f..f64075a52 100644
  
  const coldLayer = LayerNode.compile(LayerNode.group([SessionNs.node, MessageV2.node, SessionProjector.node, SessionSummary.node, Database.node, EventV2Bridge.node, Storage.node, CrossSpawnSpawner.node]))
  const it = testEffect(coldLayer)
-@@ -1019,6 +1021,80 @@ describe.serial("ColdStorage", () => {
+@@ -1041,6 +1043,80 @@ describe.serial("ColdStorage", () => {
    // task 分类断言不依赖随机 taskID，保持测试跨运行稳定。
    // 测试故意不调用 cleanup，verify repair 与 orphan 删除的责任在下一用例独立证明。
    // session 删除发生在 owner 已热态后，验证 expand 不留下外键或 refcount 残余。

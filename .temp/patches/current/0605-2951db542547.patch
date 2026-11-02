@@ -633,127 +633,117 @@ new file mode 100644
 diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
 --- a/packages/opencode/src/config/tui.ts
 +++ b/packages/opencode/src/config/tui.ts
-@@ -22,6 +22,8 @@
- import { ConfigVariable } from "@/config/variable"
- import { Npm } from "@opencode-ai/core/npm"
- import { FormatError, FormatUnknownError } from "@/cli/error"
-+import type { VoiceTranscriber } from "@opencode-ai/tui/prompt-voice-input"
-+import { ConfigV2Compat } from "./v2-compat"
- import { TuiConfig } from "@opencode-ai/tui/config"
- 
- export const Info = TuiConfig.Info
-@@ -87,9 +89,14 @@
-   args: ["transcribe-file", "--file", "{file}", "--json"],
- }
- 
--type VoiceTranscriber = NonNullable<Info["voice"]>["transcriber"]
-+// filepath 缺省表示无实体文件（OPENCODE_CONFIG_CONTENT 内容源）：auth 节点没有可写回的落点，
-+// 推导必须退回旧 argv 形态；有实体文件时 scope 决定凭据可写回（user）还是仅驻内存（project）。
-+type VoiceTranscriberSource = { filepath?: string; scope: "user" | "project" }
- 
--function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber | undefined {
-+function voiceTranscriberFromMcpConfig(input: unknown, cwd: string, source: VoiceTranscriberSource): VoiceTranscriber | undefined {
-   if (!isRecord(input) || !isRecord(input.mcp)) return
--  for (const [key, server] of Object.entries(input.mcp)) {
-+  // 只降低MCP结构，复用上游servers/disabled与flat优先级；auth仍按原文件位置读取。
-+  const lowered = ConfigV2Compat.lower({ mcp: input.mcp }, source.filepath).value
-+  if (!isRecord(lowered) || !isRecord(lowered.mcp)) return
-+  for (const [key, server] of Object.entries(lowered.mcp)) {
-     // 只复用名称明确包含 chatgpt 的 MCP 配置，避免把其它本地 MCP server 误当成语音后端。
-@@ -105,12 +108,14 @@ function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTransc
-     if (!mcpServer || !command[0]) continue
-     // 相对路径按当前项目目录解析，保持和本地 MCP 配置文件里的路径语义一致。
-     const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
--    return {
--      // 直接执行 mcp-server.js 时没有显式解释器；沿用 shebang 依赖的 node 运行同目录 chatgpt.js。
--      command: path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0],
--      // voice 默认只复用 ChatGPT MCP 同目录的 CLI 入口；不注册 MCP tool，也不要求 chatgpt-browser-agent 在 PATH。
--      args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
--    }
-+    // 直接执行 mcp-server.js 时没有显式解释器；沿用 shebang 依赖的 node 运行同目录 chatgpt.js。
-+    const interpreter = path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0]
-+    const script = path.join(path.dirname(resolved), "chatgpt.js")
-+    const argv: { command: string; args: string[] } = { command: interpreter, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
-+    // OPENCODE_CONFIG_CONTENT 没有可写回的文件：保留旧 argv 形态（配置源域的合法分支）。
-+    if (!source.filepath) return argv
-+    // 有实体配置文件时产出 direct 变体：内嵌同一 argv 供直连失败后的用户批准回退。
-+    return { type: "chatgpt-direct", config: source.filepath, key, interpreter, script, scope: source.scope, transcriber: argv }
-   }
- }
- 
-@@ -180,18 +185,18 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
-       return yield* load(text, filepath)
-     })
- 
--  const loadMcpVoiceTranscriberFile = (filepath: string): Effect.Effect<VoiceTranscriber | undefined> =>
-+  const loadMcpVoiceTranscriberFile = (file: string, scope: "user" | "project"): Effect.Effect<VoiceTranscriber | undefined> =>
-     Effect.gen(function* () {
-       // MCP 配置缺失是正常情况；这里只是寻找更精确的 ChatGPT agent 安装位置。
--      const text = yield* afs.readFileStringSafe(filepath).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-+      const text = yield* afs.readFileStringSafe(file).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-       if (!text) return
-       const expanded = yield* Effect.promise(() =>
--        ConfigVariable.substitute({ text, type: "path", path: filepath, missing: "empty" }),
-+        ConfigVariable.substitute({ text, type: "path", path: file, missing: "empty" }),
-       )
--      const transcriber = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, filepath), ctx.directory)
-+      const transcriber = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, file), ctx.directory, { filepath: file, scope })
-       if (!transcriber) return
--      const script = transcriber.args?.[0]
-       // 推导出的 chatgpt.js 必须存在，否则保留默认 CLI，让 controller 在录音前给出更清晰的配置错误。
-+      const script = transcriber.type === "chatgpt-direct" ? transcriber.script : transcriber.args?.[0]
-       if (!script || !(yield* afs.existsSafe(script))) return
-       return transcriber
-     }).pipe(
-@@ -199,20 +204,22 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
-         Effect.sync(() => {
-           const error = Cause.squash(cause)
-           const reason = FormatError(error) ?? FormatUnknownError(error)
--          Effect.logWarning("skipping invalid mcp config while resolving voice transcriber", { path: filepath, reason })
-+          Effect.logWarning("skipping invalid mcp config while resolving voice transcriber", { path: file, reason })
-           return undefined
-         }),
-       ),
-     )
- 
--  const loadMcpVoiceTranscriber = (files: string[]): Effect.Effect<VoiceTranscriber | undefined> =>
-+  const loadMcpVoiceTranscriber = (sources: { file: string; scope: "user" | "project" }[]): Effect.Effect<VoiceTranscriber | undefined> =>
-     Effect.gen(function* () {
-       let result: VoiceTranscriber | undefined
--      for (const file of files) result = (yield* loadMcpVoiceTranscriberFile(file)) ?? result
-+      for (const source of sources) result = (yield* loadMcpVoiceTranscriberFile(source.file, source.scope)) ?? result
-       if (process.env.OPENCODE_CONFIG_CONTENT) {
-         result = voiceTranscriberFromMcpConfig(
-           ConfigParse.jsonc(process.env.OPENCODE_CONFIG_CONTENT, "OPENCODE_CONFIG_CONTENT"),
-           ctx.directory,
-+          // 无实体文件：保留 argv 形态，auth 节点无处写回。
-+          { scope: "project" },
-         ) ?? result
-       }
-       return result
-@@ -284,11 +291,18 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory:
- 
+@@ -163,8 +163,8 @@
    const defaultVoiceTranscriber =
      // 这里读取 opencode MCP 配置而不是 tui.json，复用用户已经安装好的 ChatGPT browser-agent 载体。
-+    // scope 判定：全局 config / OPENCODE_CONFIG / OPENCODE_CONFIG_DIR 是用户级（auth 可写回）；
-+    // project 文件与 .opencode 目录受版本管理，凭据只驻内存。
-     (yield* loadMcpVoiceTranscriber([
+     (yield* TuiConfigHost.loadMcpVoiceTranscriber([
 -      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
 -      ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
 -      ...projectOpencodeFiles,
 -      ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
-+      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode").map((file) => ({ file, scope: "user" as const })),
++      ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode").map(file => ({ file, scope: "user" as const })),
 +      ...(Flag.OPENCODE_CONFIG ? [{ file: Flag.OPENCODE_CONFIG, scope: "user" as const }] : []),
-+      ...projectOpencodeFiles.map((file) => ({ file, scope: "project" as const })),
-+      ...dirs.flatMap((dir) =>
-+        ConfigPaths.fileInDirectory(dir, "opencode").map((file) => ({
-+          file,
-+          scope: (dir === Flag.OPENCODE_CONFIG_DIR ? "user" : "project") as "user" | "project",
-+        })),
-+      ),
-     ])) ?? DefaultVoiceTranscriber
++      ...projectOpencodeFiles.map(file => ({ file, scope: "project" as const })),
++      ...dirs.flatMap(dir => ConfigPaths.fileInDirectory(dir, "opencode").map(file => ({ file, scope: (dir === Flag.OPENCODE_CONFIG_DIR ? "user" : "project") as "user" | "project" }))),
+     ], ctx.directory)) ?? TuiConfigHost.DefaultVoiceTranscriber
+
+diff --git a/packages/tui/src/config/host.ts b/packages/tui/src/config/host.ts
+--- a/packages/tui/src/config/host.ts
++++ b/packages/tui/src/config/host.ts
+@@ -14,6 +14,7 @@
+ import { TuiKeybind } from "./keybind"
+ import { isRecord } from "../util/record"
++import type { VoiceTranscriber } from "../prompt-voice-input"
  
-   const result = TuiConfig.resolve(
+ export const DefaultVoiceTranscriber = {
+   // 默认CLI和MCP推导共用字面量argv，配置阶段不启动转写器或解释shell。
+   command: "chatgpt-browser-agent",
+@@ -20,5 +21,7 @@
+   args: ["transcribe-file", "--file", "{file}", "--json"],
+ }
+-type VoiceTranscriber = NonNullable<TuiConfig.Info["voice"]>["transcriber"]
++// 无实体文件的内容配置保留argv；有文件时来源决定用户级写回或项目级仅内存。
++// 两个host携带来源而不各自实现凭据存储，raw auth仍由唯一reader/writer维护。
++type VoiceTranscriberSource = { filepath?: string; scope: "user" | "project" }
+ 
+ export const parse = Effect.fn("TuiConfigHost.parse")(function* (text: string, filepath: string) {
+@@ -52,19 +55,24 @@
+-function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber {
++function voiceTranscriberFromMcpConfig(input: unknown, cwd: string, source: VoiceTranscriberSource): VoiceTranscriber | undefined {
+   if (!isRecord(input) || !isRecord(input.mcp)) return
+-  for (const [key, server] of Object.entries(input.mcp)) {
++  // 仅投影两种原始MCP布局；flat同名优先，不能将lower结果写回配置或引入Legacy依赖。
++  const servers = { ...(isRecord(input.mcp.servers) ? input.mcp.servers : {}), ...input.mcp }
++  for (const [key, server] of Object.entries(servers)) {
+     // 只有明确命名的本地ChatGPT服务是转写载体，普通MCP与远程配置不参与推导。
+     if (!key.toLowerCase().includes("chatgpt") || !isRecord(server)) continue
+-    if (server.enabled === false || (server.type !== undefined && server.type !== "local")) continue
++    if (server.enabled === false || server.disabled === true || (server.type !== undefined && server.type !== "local")) continue
+     if (!Array.isArray(server.command)) continue
+     const command = server.command.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+     const mcpServer = command.find((item) => path.basename(item).toLowerCase() === "mcp-server.js")
+     if (!mcpServer || !command[0]) continue
+     // 与原本地MCP一致，相对脚本以项目目录解析，不以配置文件目录解析。
+     const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
+-    return {
+-      // 直接执行 mcp-server.js 时没有显式解释器；沿用 shebang 依赖的 node 运行同目录 chatgpt.js。
+-      command: path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0],
+-      args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
+-    }
++    // 直接执行mcp-server.js仍沿shebang使用node，同一argv供显式配置和直连失败回退。
++    const interpreter = path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0]
++    const script = path.join(path.dirname(resolved), "chatgpt.js")
++    const argv = { command: interpreter, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
++    // 内容源没有auth写回落点，不因引入direct改变其原argv产品语义。
++    if (!source.filepath) return argv
++    // project/user只决定凭据存储范围，不改变录音、会话agent或聊天模型选择。
++    return { type: "chatgpt-direct", config: source.filepath, key, interpreter, script, scope: source.scope, transcriber: argv }
+   }
+ }
+@@ -72,18 +80,19 @@
+ export const loadMcpVoiceTranscriber = Effect.fn("TuiConfigHost.loadMcpVoiceTranscriber")(function* (
+-  files: string[], cwd: string,
++  sources: { file: string; scope: "user" | "project" }[], cwd: string,
+ ) {
+   const fs = yield* FSUtil.Service
+-  let result: VoiceTranscriber
+-  for (const filepath of files) {
++  let result: VoiceTranscriber | undefined
++  for (const source of sources) {
++    const filepath = source.file
+     const transcriber = yield* Effect.gen(function* () {
+       const text = yield* fs.readFileStringSafe(filepath)
+       if (!text) return
+       const expanded = yield* Effect.promise(() =>
+         ConfigVariable.substitute({ text, type: "path", path: filepath, missing: "empty" }),
+       )
+-      const value = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, filepath), cwd)
+-      const script = value?.args?.[0]
++      const value = voiceTranscriberFromMcpConfig(ConfigParse.jsonc(expanded, filepath), cwd, { filepath, scope: source.scope })
++      const script = value?.type === "chatgpt-direct" ? value.script : value?.args?.[0]
+       // 缺失脚本不覆盖前一个有效配置；默认CLI仍由同一controller在录音前校验。
+       if (!script || !(yield* fs.existsSafe(script))) return
+       return value
+     }).pipe(Effect.catchCause((cause) => Effect.logWarning("skipping invalid mcp config while resolving voice transcriber", {
+@@ -93,6 +102,6 @@
+   }
+   if (process.env.OPENCODE_CONFIG_CONTENT) {
+     result = voiceTranscriberFromMcpConfig(
+-      ConfigParse.jsonc(process.env.OPENCODE_CONFIG_CONTENT, "OPENCODE_CONFIG_CONTENT"), cwd,
++      ConfigParse.jsonc(process.env.OPENCODE_CONFIG_CONTENT, "OPENCODE_CONFIG_CONTENT"), cwd, { scope: "project" },
+     ) ?? result
+   }
+@@ -125,6 +134,6 @@
+   const transcriber = yield* loadMcpVoiceTranscriber([
+-    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode"),
+-    ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
+-    ...projectMcpFiles,
+-    ...dirs.flatMap((dir) => ConfigPaths.fileInDirectory(dir, "opencode")),
++    ...ConfigPaths.fileInDirectory(Global.Path.config, "opencode").map(file => ({ file, scope: "user" as const })),
++    ...(Flag.OPENCODE_CONFIG ? [{ file: Flag.OPENCODE_CONFIG, scope: "user" as const }] : []),
++    ...projectMcpFiles.map(file => ({ file, scope: "project" as const })),
++    ...dirs.flatMap(dir => ConfigPaths.fileInDirectory(dir, "opencode").map(file => ({ file, scope: (dir === Flag.OPENCODE_CONFIG_DIR ? "user" : "project") as "user" | "project" }))),
+   ], directory)
 
 diff --git a/packages/tui/src/prompt-voice-input.ts b/packages/tui/src/prompt-voice-input.ts
 --- a/packages/tui/src/prompt-voice-input.ts
@@ -1334,8 +1324,8 @@ diff --git a/packages/tui/src/config/index.tsx b/packages/tui/src/config/index.t
 +  options: ResolveOptions,
 +): Resolved {
    const keybinds: TuiKeybind.KeybindOverrides = { ...input.keybinds }
-   if (!options.terminalSuspend) {
-     keybinds.terminal_suspend = "none"
+   if (process.platform === "darwin") {
+     // 两个host均在合并完成后进入这里；只补缺省值，显式none/false/空绑定数组不能被F8重新打开。
 
 diff --git a/packages/tui/package.json b/packages/tui/package.json
 --- a/packages/tui/package.json
@@ -1385,7 +1375,7 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 +import os from "node:os"
  import path from "path"
  import { createRoot, createSignal } from "solid-js"
- import { tmpdir } from "../fixture/fixture"
+ import { Effect } from "effect"
 @@ -11,7 +12,9 @@
    voiceHintVisible,
    type VoiceRecorderHandle,
@@ -1396,6 +1386,13 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
  // createRefreshClock 是录音计时器走数的基础设施（主 Prompt 的 now 信号由它驱动）
  import { createRefreshClock } from "../../src/util/signal"
  
+@@ -264,5 +267,5 @@
+     expect(config.voice?.transcriber).toEqual(scenario === "explicit"
+       ? { command: "explicit-voice", args: ["{file}"] }
+       : scenario === "mcp" || scenario === "direct"
+-        ? { command: scenario === "direct" ? "node" : process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
++        ? { type: "chatgpt-direct", config: path.join(tmp.path, "opencode.json"), key: "chatgpt", scope: "project", interpreter: scenario === "direct" ? "node" : process.execPath, script, transcriber: { command: scenario === "direct" ? "node" : process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] } }
+         : TuiConfigHost.DefaultVoiceTranscriber)
 @@ -908,6 +911,139 @@
      },
      240_000,
@@ -2033,12 +2030,15 @@ new file mode 100644
 diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts
-@@ -3,10 +3,15 @@
+@@ -3,10 +3,17 @@
  import { pathToFileURL } from "url"
  import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 +import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
- import { Effect, Layer } from "effect"
++import { ConfigMCP } from "@opencode-ai/core/config/mcp"
++import { TuiConfigHost } from "@opencode-ai/tui/config/host"
+-import { Effect, Layer } from "effect"
++import { Effect, Layer, Schema } from "effect"
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { Global } from "@opencode-ai/core/global"
  import { Config } from "@/config/config"
@@ -2131,7 +2131,7 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
      }),
    ),
  )
-@@ -678,7 +686,77 @@
+@@ -678,7 +686,85 @@
        })
  
        const config = yield* getTuiConfig(test.directory)
@@ -2203,6 +2203,14 @@ diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/
 +        const decoded = ConfigParse.schema(ConfigMCPV1.Info, lowered.mcp.chatgpt, config)
 +        expect(decoded.type).toBe("local")
 +        expect("auth" in decoded).toBe(false)
++        // 直接检查writer真实产物经过Native schema和共享host；不能拿Legacy lower的结果冒充两代覆盖。
++        const native = ConfigParse.jsonc(text ?? "{}", config)
++        if (!isRecord(native) || !isRecord(native.mcp)) throw new Error("expected raw MCP config")
++        const rawServer = Object.hasOwn(native.mcp, "chatgpt") ? native.mcp.chatgpt : isRecord(native.mcp.servers) ? native.mcp.servers.chatgpt : undefined
++        expect(Schema.decodeUnknownSync(ConfigMCP.Local)(rawServer)).not.toHaveProperty("auth")
++        const shared = yield* TuiConfigHost.loadMcpVoiceTranscriber([{ file: config, scope: "project" }], test.directory)
++        expect(shared?.type === "chatgpt-direct").toBe(item.enabled)
++        if (item.enabled) expect(shared).toMatchObject({ config, key: "chatgpt", scope: "project", script: path.join(agentDir, "chatgpt.js") })
 +        const resolved = yield* getTuiConfig(test.directory)
 +        expect(resolved.voice?.transcriber?.type === "chatgpt-direct").toBe(item.enabled)
 +        if (item.enabled) expect(resolved.voice?.transcriber).toMatchObject({ config, key: "chatgpt", scope: "project", script: path.join(agentDir, "chatgpt.js") })

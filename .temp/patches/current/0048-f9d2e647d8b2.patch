@@ -1,26 +1,25 @@
 diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/context-usage.ts
 --- a/packages/tui/src/util/context-usage.ts
 +++ b/packages/tui/src/util/context-usage.ts
-@@ -9,7 +9,9 @@
+@@ -9,6 +9,8 @@
  import { boolean, withDefault } from "effect/Config"
  import { estimateDataUrlInputTokens } from "./token-estimate"
  import EMBEDDED_TOOL_CATALOG from "./tool-definition-catalog.json"
 +import GIT_SAFETY from "../../../core/src/git-safety.txt"
 +import SHELL_DESCRIPTION from "../../../opencode/src/tool/shell/shell.txt"
  // 提示词文本资产由 Bun 内嵌，估算无需加载服务或依赖打包后的源码目录。
- import PROMPT_META from "../../../opencode/src/session/prompt/meta.txt"
- import PROMPT_BEAST from "../../../opencode/src/session/prompt/beast.txt"
- import PROMPT_ASTRA from "../../../opencode/src/session/prompt/gpt-astra.txt"
-@@ -696,12 +698,77 @@
+ import { SessionPrompts } from "@opencode-ai/core/system-context/prompts"
+ import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
+@@ -667,12 +669,77 @@
  // 两份 Task 参数都是手工运输的完整 JSON；字段说明也参与字符估算，不能当作自动生成资产排除。
  export function resolveToolDescriptions(paths: ContextUsagePaths, background = enabledByExperimental("OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS")) {
    return Object.entries(EMBEDDED_TOOL_CATALOG).map(([name, entry]) => {
      // TaskTool 默认广告 BaseParameters；后台开关开启才同时广告完整参数与后台运行说明。
      const parameters = name === "task" && !background ? EMBEDDED_TOOL_CATALOG.task.baseParameters : entry.parameters
--    const description = name === "task" && background
+-    const description = name === "task"
 +    // V1 description 已从 Shell.guidance 消费共享 Git 文本；目录估算使用同一资产，旧 catalog 不再复制政策。
-+    const description = name === "bash" ? [GIT_SAFETY, SHELL_DESCRIPTION].join("\n\n") : name === "task" && background
-       ? [entry.description, EMBEDDED_TOOL_CATALOG.task.backgroundDescription].join("\n\n")
++    const description = name === "bash" ? [GIT_SAFETY, SHELL_DESCRIPTION].join("\n\n") : name === "task"
+       ? [TaskPrompt.description, ...(background ? [EMBEDDED_TOOL_CATALOG.task.backgroundDescription] : [])].join("\n\n")
        : entry.description
      // 序列化必须保留 optional/required/default 与嵌套字段；这里只选择 owner 资产，不重建 Schema。
 -    return { name, text: [`Tool: ${name}`, description.replaceAll("${cwd}", paths.cwd).replaceAll("${worktree}", paths.worktree ?? paths.cwd), JSON.stringify(parameters)].join("\n") }
@@ -125,11 +124,11 @@ diff --git a/packages/tui/src/util/context-usage.ts b/packages/tui/src/util/cont
 diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context-usage.test.ts
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -263,3 +263,3 @@
+@@ -264,3 +264,3 @@
          const task = resolveToolDescriptions({ cwd: process.cwd() }).find((entry) => entry.name === "task")!
          // 完整文本检查同时约束参数选择、后台说明的有无和分隔符，非空 token 无法提供这个保证。
--        expect(task.text).toBe(["Tool: task", enabled ? [TOOL_CATALOG.task.description, backgroundDescription].join("\n\n") : TOOL_CATALOG.task.description, JSON.stringify(enabled ? full : base)].join("\n"))
-+        expect(task.text).toBe(["Tool: task", enabled ? [TOOL_CATALOG.task.description, backgroundDescription].join("\n\n") : TOOL_CATALOG.task.description, `Parameters: ${JSON.stringify(enabled ? full : base)}`].join("\n"))
+-        expect(task.text).toBe(["Tool: task", enabled ? [TaskPrompt.description, backgroundDescription].join("\n\n") : TaskPrompt.description, JSON.stringify(enabled ? full : base)].join("\n"))
++        expect(task.text).toBe(["Tool: task", enabled ? [TaskPrompt.description, backgroundDescription].join("\n\n") : TaskPrompt.description, `Parameters: ${JSON.stringify(enabled ? full : base)}`].join("\n"))
 @@ -332,7 +332,7 @@
      // instructionFiles 是完整覆盖，真实 AGENTS.md 不应偷偷叠加进注入的 2 token。
      expect(data.details.instructions[0]?.tokens).toBe(2)
@@ -293,9 +292,9 @@ diff --git a/packages/opencode/src/tool/grep.txt b/packages/opencode/src/tool/gr
  - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
 -- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 +- For open-ended search, use glob/grep/read directly first. Consider Task only when exploration splits into 3+ independent branches and does not block your next local step.
-diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
---- a/packages/opencode/src/tool/task.txt
-+++ b/packages/opencode/src/tool/task.txt
+diff --git a/packages/core/src/tool/task.txt b/packages/core/src/tool/task.txt
+--- a/packages/core/src/tool/task.txt
++++ b/packages/core/src/tool/task.txt
 @@ -1,2 +1,3 @@
 +# task 工具：禁止跨会话复用非法 task_id，须显式新建
  Launch a new agent to handle complex, multistep tasks autonomously.
@@ -473,10 +472,10 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -875,6 +875,8 @@
+@@ -892,6 +892,8 @@
        expect(requests.map((request) => request.system.map((part) => part.text))).toEqual([
-         ["Initial context", expectedToolGuidance, expectedModelIdentity],
-         ["Initial context", expectedToolGuidance, expectedModelIdentity],
+         [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
+         [PROMPT_DEFAULT, "Initial context", expectedToolGuidance, expectedModelIdentity],
        ])
 +      // echo/defect 的真实请求不广告 bash，完整 system 不能从宿主默认 shell 泄漏 Git 政策。
 +      expect(requests[0]?.system.map((part) => part.text).join("\n")).not.toContain("# Git repository state changes")

@@ -11,6 +11,204 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
+diff --git a/packages/llm/src/route/http-timing.ts b/packages/llm/src/route/http-timing.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/llm/src/route/http-timing.ts
+@@ -0,0 +1,9 @@
++export * as FetchTiming from "./http-timing"
++
++import type { HttpClientResponse } from "effect/unstable/http"
++
++let sequence = 0
++export const begin = (startedAt: number) => ({ requestID: ++sequence, startedAt })
++
++// 只关联同一物理响应的诊断，不保留响应寿命，也不参与重试或业务选择。
++export const responses = new WeakMap<HttpClientResponse.HttpClientResponse, ReturnType<typeof begin>>()
+diff --git a/packages/llm/src/route/executor.ts b/packages/llm/src/route/executor.ts
+--- a/packages/llm/src/route/executor.ts
++++ b/packages/llm/src/route/executor.ts
+@@ -1,1 +1,1 @@
+-import { Cause, Context, Effect, Layer, Random } from "effect"
++import { Cause, Clock, Context, Effect, Layer, Random } from "effect"
+@@ -25,1 +25,2 @@
+ import { isContextOverflow } from "../provider-error"
++import { FetchTiming } from "./http-timing"
+@@ -370,7 +371,22 @@
+     const executeOnce = (request: HttpClientRequest.HttpClientRequest) =>
+       Effect.gen(function* () {
++        const timing = FetchTiming.begin(yield* Clock.currentTimeMillis)
++        const log = (phase: string, fields: Record<string, unknown> = {}) => Clock.currentTimeMillis.pipe(
++          Effect.flatMap((now) => Effect.logInfo("timing", { phase, requestID: timing.requestID, elapsedMs: now - timing.startedAt, ...fields })),
++          Effect.annotateLogs({ service: "provider.fetch" }),
++        )
++        // 重试每次真实发出请求都取得独立ID；只量已缓冲字节，不读取正文或凭据。
++        yield* log("fetch.start", { method: request.method, bodyBytes: request.body._tag === "Uint8Array" ? request.body.body.byteLength : undefined })
+         const redactedNames = yield* Headers.CurrentRedactedNames
+-        return yield* http
++        const response = yield* http
+           .execute(request)
+-          .pipe(Effect.mapError(toHttpError(redactedNames)), Effect.flatMap(statusError(request, redactedNames)))
++          .pipe(
++            Effect.mapError(toHttpError(redactedNames)),
++            Effect.tapError((error) => log("fetch.error", { errorName: error.name, errorKind: error.reason._tag, errorCode: error.reason._tag === "Transport" ? error.reason.kind : undefined })),
++          )
++        FetchTiming.responses.set(response, timing)
++        const contentType = response.headers["content-type"]
++        // 响应头先于状态分类记录，非2xx不能被误判为尚未收到HTTP响应。
++        yield* log("fetch.response", { status: response.status, contentType, isSSE: contentType?.includes("text/event-stream") ?? false })
++        return yield* statusError(request, redactedNames)(response)
+       })
+diff --git a/packages/llm/src/route/transport/http.ts b/packages/llm/src/route/transport/http.ts
+--- a/packages/llm/src/route/transport/http.ts
++++ b/packages/llm/src/route/transport/http.ts
+@@ -1,2 +1,3 @@
+-import { Effect, Schedule, Stream } from "effect"
+-import { Headers, HttpClientRequest } from "effect/unstable/http"
++import { Cause, Clock, Effect, Schedule, Stream } from "effect"
++import { Headers, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
++import { FetchTiming } from "../http-timing"
+@@ -10,1 +11,40 @@
++function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LLMRequest) {
++  const timing = FetchTiming.responses.get(response)
++  if (!timing || !response.headers["content-type"]?.includes("text/event-stream")) return response.stream
++  return Stream.unwrap(Effect.gen(function* () {
++    let lastChunkAt = yield* Clock.currentTimeMillis
++    let chunkCount = 0
++    let bytes = 0
++    let maxGapMs = 0
++    const log = (phase: string, extra: Record<string, unknown> = {}) => Clock.currentTimeMillis.pipe(
++      Effect.flatMap((now) => Effect.logInfo("timing", {
++        phase, requestID: timing.requestID, elapsedMs: now - timing.startedAt,
++        providerID: request.model.provider, modelID: request.model.id,
++        sessionID: response.request.headers["x-session-affinity"] ?? response.request.headers["x-opencode-session"],
++        chunkCount, bytes, maxGapMs, idleMs: now - lastChunkAt, ...extra,
++      })),
++      Effect.annotateLogs({ service: "provider.fetch" }),
++    )
++    return response.stream.pipe(
++      Stream.tap((chunk) => Effect.gen(function* () {
++        const now = yield* Clock.currentTimeMillis
++        const gapMs = now - lastChunkAt
++        lastChunkAt = now
++        chunkCount++
++        bytes += chunk.byteLength
++        maxGapMs = Math.max(maxGapMs, gapMs)
++        // 心跳先计原始首块，191的started仍只在交付协议frame时改变。
++        if (chunkCount === 1) yield* log("sse.first_chunk", { gapMs, bytes: chunk.byteLength })
++      })),
++      Stream.tapError((error) => {
++        const cause = "cause" in error.reason ? error.reason.cause : undefined
++        const timeout = Cause.isTimeoutError(cause) || (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "SSE_READ_TIMEOUT")
++        return log(timeout ? "sse.timeout" : "sse.error", { errorName: error.name, errorKind: error.reason._tag })
++      }),
++      // 只在原始EOF记end；语义提前结束或取消不额外drain，也不伪报完成。
++      Stream.onEnd(log("sse.end")),
++    )
++  }))
++}
++
+ export type JsonRequestInput<Body> = TransportPrepareInput<Body>
+@@ -134,1 +174,2 @@
+         runtime.http.execute(prepared.request).pipe(
++          Effect.annotateLogs({ providerID: request.model.provider, modelID: request.model.id, sessionID: prepared.request.headers["x-session-affinity"] ?? prepared.request.headers["x-opencode-session"] }),
+@@ -137,1 +178,1 @@
+-              response.stream.pipe(
++              observeSSE(response, request).pipe(
+diff --git a/packages/llm/test/executor.test.ts b/packages/llm/test/executor.test.ts
+--- a/packages/llm/test/executor.test.ts
++++ b/packages/llm/test/executor.test.ts
+@@ -2,1 +2,1 @@
+-import { Effect, Fiber, Layer, Random, Ref } from "effect"
++import { Cause, Effect, Fiber, Layer, Logger, Random, Ref, References, Stream } from "effect"
+@@ -4,1 +4,1 @@
+-import { Headers, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
++import { Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+@@ -11,1 +11,3 @@
+ import { it } from "./lib/effect"
++import { Framing } from "../src/route/framing"
++import { HttpTransport } from "../src/route/transport"
+@@ -502,1 +504,80 @@
++
++  it.live("correlates native fetch and raw SSE timing without exposing payload or changing cancellation", () => Effect.suspend(() => {
++    const logs: Record<string, unknown>[] = []
++    const all: Record<string, unknown>[] = []
++    let firstRaw: (() => void) | undefined
++    const logger = Logger.make((options) => {
++      for (const value of Array.isArray(options.message) ? options.message : [options.message]) {
++        if (!value || typeof value !== "object" || !("phase" in value)) continue
++        const entry = { ...options.fiber.getRef(References.CurrentLogAnnotations), ...value }
++        logs.push(entry)
++        all.push(entry)
++        if (value.phase === "sse.first_chunk") firstRaw?.()
++      }
++    })
++    return Effect.gen(function* () {
++      const encoder = new TextEncoder()
++      const native = LLM.request({ model: OpenAIChat.route.model({ id: "timed-native" }), prompt: "PRIVATE_PAYLOAD" })
++      const prepared = { request: request.pipe(HttpClientRequest.bodyText("PRIVATE_PAYLOAD"), HttpClientRequest.setHeader("x-session-affinity", "ses_timing")), framing: Framing.sse }
++      const collect = (responses: Response[]) => Effect.gen(function* () {
++        const executor = yield* RequestExecutor.Service
++        return yield* HttpTransport.sseJson.with<unknown>().frames(prepared, native, { http: executor }).pipe(Stream.runCollect)
++      }).pipe(Effect.provide(responsesLayer(responses)), Effect.scoped)
++      const body = new ReadableStream<Uint8Array>({ start(controller) {
++        controller.enqueue(encoder.encode(": heartbeat\n\n"))
++        controller.enqueue(encoder.encode("data: ok\n\n"))
++        controller.close()
++      } })
++      expect(yield* collect([new Response(body, { headers: { "content-type": "text/event-stream" } })])).toEqual(["ok"])
++      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", "sse.end"])
++      expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
++      expect(logs[0]).toMatchObject({ method: "POST", service: "provider.fetch", providerID: native.model.provider, modelID: "timed-native", sessionID: "ses_timing", bodyBytes: 15 })
++      expect(logs.at(-1)).toMatchObject({ chunkCount: 2, bytes: encoder.encode(": heartbeat\n\ndata: ok\n\n").byteLength })
++      // 状态失败也必须先记录真实响应，不能把HTTP错误当成尚未收到响应头。
++      logs.length = 0
++      const denied = yield* collect([new Response("PRIVATE_RESPONSE", { status: 400 })]).pipe(Effect.exit)
++      expect(denied._tag).toBe("Failure")
++      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response"])
++      logs.length = 0
++      const failedHTTP = RequestExecutor.layer.pipe(Layer.provide(Layer.succeed(HttpClient.HttpClient,
++        HttpClient.make((request) => Effect.fail(new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({ request, cause: new Error("PRIVATE_TRANSPORT_ERROR") }) }))),
++      )))
++      const failed = yield* Effect.gen(function* () {
++        const executor = yield* RequestExecutor.Service
++        return yield* executor.execute(prepared.request)
++      }).pipe(Effect.provide(failedHTTP), Effect.exit)
++      expect(failed._tag).toBe("Failure")
++      expect(logs.map((entry) => entry.phase)).toEqual(Array.from({ length: 3 }, () => ["fetch.start", "fetch.error"]).flat())
++      expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(3)
++      // 已有typed timeout与普通读错误保持失败，不额外设置计时器或重放已交付frame。
++      for (const timeout of [false, true]) {
++        logs.length = 0
++        let pulls = 0
++        const broken = new ReadableStream<Uint8Array>({ pull(controller) {
++          if (pulls++ === 0) {
++            controller.enqueue(encoder.encode(": heartbeat\n\ndata: ok\n\n"))
++            return
++          }
++          controller.error(timeout ? new Cause.TimeoutError() : new Error("PRIVATE_BODY_ERROR"))
++        } })
++        const exit = yield* collect([new Response(broken, { headers: { "content-type": "text/event-stream" } })]).pipe(Effect.exit)
++        expect(exit._tag).toBe("Failure")
++        expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk", timeout ? "sse.timeout" : "sse.error"])
++        expect(new Set(logs.map((entry) => entry.requestID)).size).toBe(1)
++        expect(JSON.stringify(logs)).not.toContain("PRIVATE_BODY_ERROR")
++      }
++      logs.length = 0
++      const ready = Promise.withResolvers<void>()
++      firstRaw = () => ready.resolve()
++      const stalled = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(": heartbeat\n\n")) } })
++      const pending = yield* collect([new Response(stalled, { headers: { "content-type": "text/event-stream" } })]).pipe(Effect.forkScoped)
++      yield* Effect.promise(() => ready.promise)
++      yield* Fiber.interrupt(pending)
++      expect(logs.map((entry) => entry.phase)).toEqual(["fetch.start", "fetch.response", "sse.first_chunk"])
++      // 所有阶段均只输出计数/分类；不能把error.message、请求URL或正文送入日志。
++      expect(JSON.stringify(all)).not.toContain("PRIVATE_")
++      expect(JSON.stringify(all)).not.toContain("secret")
++      expect(JSON.stringify(all)).not.toContain("heartbeat")
++    }).pipe(Effect.provideService(Logger.CurrentLoggers, new Set([logger])))
++  }))
+ })
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts

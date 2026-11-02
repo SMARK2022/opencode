@@ -867,19 +867,31 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
            continue
          }
  
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -185,6 +185,8 @@
+           objective: Schema.optional(Schema.String),
+           status: Schema.optional(SessionGoal.Status),
+           // 缺省保留预算，null清除，数值由唯一存储owner校验。
+           tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
++          // 用户策略由共享Goal持久化；省略不改，显式false可关闭错误续跑。
++          continueOnError: Schema.optional(Schema.Boolean),
+         }),
+         success: Schema.Struct({ goal: SessionGoal.Goal }),
 diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
 --- a/packages/core/src/session/runner/llm.ts
 +++ b/packages/core/src/session/runner/llm.ts
-@@ -350,6 +350,8 @@ const layer = Layer.effect(
-         withPublication(publisher.publish(event, outputPaths))
-       const startedAt = DateTime.toEpochMillis(yield* DateTime.now)
+@@ -419,6 +419,8 @@ const layer = Layer.effect(
        let overflowFailure: ProviderErrorEvent | undefined
 +      // 只有本轮显式provider错误携带续跑资格，不能从投影中的unknown推断中断或EOF。
 +      let terminalError = false
        const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
          // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
          inputEstimate = {
-@@ -377,6 +379,7 @@ const layer = Layer.effect(
+           ...Token.estimateRequest(body, samples, system.sections),
+           contextLimit: model.defaults?.limits?.context ?? model.route.defaults.limits?.context ?? 0,
+@@ -451,6 +453,7 @@ const layer = Layer.effect(
                  overflowFailure = event
                  return
                }
@@ -887,7 +899,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
              }
              yield* publish(event)
              if (event.type !== "tool-call" || event.providerExecuted) return
-@@ -502,10 +505,15 @@ const layer = Layer.effect(
+@@ -603,10 +606,15 @@ const layer = Layer.effect(
            if (settled._tag === "Failure" && isUserDeclined(settled.cause)) return yield* Effect.interrupt
 +          // typed鉴权/路由/格式/策略错误不等同于source的API/Unknown错误。
 +          // 只在本轮结算后读取显式策略，原始中断和未授权错误继续传播同一cause。
@@ -904,7 +916,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
            }
            if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
              return yield* Effect.failCause(settled.cause)
-@@ -518,14 +526,14 @@ const layer = Layer.effect(
+@@ -619,14 +627,14 @@ const layer = Layer.effect(
                Effect.catchDefect((defect) => Effect.logError("goal accountUsage defect", { defect: String(defect) })),
              )
            }
@@ -933,7 +945,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
    InvalidRequestReason,
    type LLMClientShape,
    type LLMRequest,
-@@ -735,6 +736,54 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
+@@ -827,6 +828,64 @@ goalTests.effect("continues native goals within the turn limit, preserves queue priority and honors completion", () =>
    }),
  )
  
@@ -944,6 +956,16 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    const session = yield* SessionV2.Service
 +    const runner = yield* SessionRunner.Service
 +    const goals = yield* SessionGoal.Service
++    // 通过真实共享存储验证策略局部更新，不以Git fixture或影子对象替代持久化。
++    const original = yield* goals.set(sessionID, { objective: "policy", tokenBudget: 50000 })
++    expect(original.continueOnError).toBe(false)
++    expect(yield* goals.set(sessionID, { continueOnError: true })).toMatchObject({ id: original.id, objective: "policy", tokenBudget: 50000, continueOnError: true })
++    yield* goals.accountUsage(sessionID, 10, 1)
++    for (const input of [{ objective: "updated" }, { status: "paused" as const }, { status: "active" as const }]) {
++      expect((yield* goals.set(sessionID, input)).continueOnError).toBe(true)
++    }
++    expect(yield* goals.set(sessionID, { continueOnError: false })).toMatchObject({ id: original.id, objective: "updated", tokensUsed: 10, tokenBudget: 50000, continueOnError: false, time: { created: original.time.created } })
++    yield* goals.clear(sessionID)
 +    const normal = [
 +      LLMEvent.stepStart({ index: 0 }),
 +      LLMEvent.stepFinish({ index: 0, reason: "stop" }),
@@ -1389,13 +1411,15 @@ diff --git a/packages/core/src/database/migration/20260812100000_goal_continue_o
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/database/migration/20260812100000_goal_continue_on_error.ts
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,14 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +// [local-smark] session_goal 增加 continue_on_error 列：错误后续跑策略。
 +// NOT NULL DEFAULT false 保证升级后旧 GOAL 行为不变（终止型错误后停止）
 +export default {
 +  id: "20260812100000_goal_continue_on_error",
++  // 已有列与用户策略值由旧迁移建立，不重复ALTER或重置默认值。
++  legacy: ["20260710195446_goal_continue_on_error"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      yield* tx.run(`ALTER TABLE \`session_goal\` ADD \`continue_on_error\` integer DEFAULT false NOT NULL;`)
@@ -1412,178 +1436,91 @@ diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/dat
 +    import("./migration/20260812100000_goal_continue_on_error"),
    ])
  ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+diff --git a/packages/client/src/generated-effect/client.ts b/packages/client/src/generated-effect/client.ts
+--- a/packages/client/src/generated-effect/client.ts
++++ b/packages/client/src/generated-effect/client.ts
+@@ -99,11 +99,17 @@ type Endpoint3_5Input = {
+   readonly objective?: Endpoint3_5Request["payload"]["objective"]
+   readonly status?: Endpoint3_5Request["payload"]["status"]
+   readonly tokenBudget?: Endpoint3_5Request["payload"]["tokenBudget"]
++  readonly continueOnError?: Endpoint3_5Request["payload"]["continueOnError"]
+ }
+ const Endpoint3_5 = (raw: RawClient["server.session"]) => (input: Endpoint3_5Input) =>
+   raw["session.goal.set"]({
+     params: { sessionID: input["sessionID"] },
+-    payload: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
++    payload: {
++      objective: input["objective"],
++      status: input["status"],
++      tokenBudget: input["tokenBudget"],
++      continueOnError: input["continueOnError"],
++    },
+   }).pipe(Effect.mapError(mapClientError))
+ 
+ type Endpoint3_6Request = Parameters<RawClient["server.session"]["session.goal.clear"]>[0]
+diff --git a/packages/client/src/generated/client.ts b/packages/client/src/generated/client.ts
+--- a/packages/client/src/generated/client.ts
++++ b/packages/client/src/generated/client.ts
+@@ -368,7 +368,12 @@ export function make(options: ClientOptions) {
+           {
+             method: "POST",
+             path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
+-            body: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
++            body: {
++              objective: input["objective"],
++              status: input["status"],
++              tokenBudget: input["tokenBudget"],
++              continueOnError: input["continueOnError"],
++            },
+             successStatus: 200,
+             declaredStatuses: [400, 404, 401],
+             empty: false,
 diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
 --- a/packages/client/src/generated/types.ts
 +++ b/packages/client/src/generated/types.ts
-@@ -143,7 +143,7 @@ export type AgentsListOutput = {
-     readonly permissions: ReadonlyArray<{
-       readonly action: string
-       readonly resource: string
--      readonly effect: "allow" | "deny" | "ask"
-+      readonly effect: "allow" | "deny" | "ask" | "auto"
-     }>
-   }>
+@@ -527,6 +527,7 @@ export type SessionsGoalOutput = {
+     readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
+     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
+     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
++    readonly continueOnError: boolean
+     readonly time: {
+       readonly created: number | "Infinity" | "-Infinity" | "NaN"
+       readonly updated: number | "Infinity" | "-Infinity" | "NaN"
+@@ -540,17 +541,26 @@ export type SessionsGoalSetInput = {
+     readonly objective?: string | undefined
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
++    readonly continueOnError?: boolean | undefined
+   }["objective"]
+   readonly status?: {
+     readonly objective?: string | undefined
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
++    readonly continueOnError?: boolean | undefined
+   }["status"]
+   readonly tokenBudget?: {
+     readonly objective?: string | undefined
+     readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
+     readonly tokenBudget?: number | null | undefined
++    readonly continueOnError?: boolean | undefined
+   }["tokenBudget"]
++  readonly continueOnError?: {
++    readonly objective?: string | undefined
++    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
++    readonly tokenBudget?: number | null | undefined
++    readonly continueOnError?: boolean | undefined
++  }["continueOnError"]
  }
-@@ -268,6 +268,15 @@ export type SessionsListOutput = {
-             readonly attachments: number
-             readonly total: number
-           }
-+          readonly media?: {
-+            readonly rawChars: number
-+            readonly textChars: number
-+            readonly tokens: number
-+            readonly count: number
-+            readonly imageTokens: number
-+            readonly pdfTokens: number
-+            readonly otherTokens: number
-+          }
-         }
-         readonly afterPartID?: string
-         readonly contextLimit?: number
-@@ -365,6 +374,15 @@ export type SessionsCreateOutput = {
-             readonly attachments: number
-             readonly total: number
-           }
-+          readonly media?: {
-+            readonly rawChars: number
-+            readonly textChars: number
-+            readonly tokens: number
-+            readonly count: number
-+            readonly imageTokens: number
-+            readonly pdfTokens: number
-+            readonly otherTokens: number
-+          }
-         }
-         readonly afterPartID?: string
-         readonly contextLimit?: number
-@@ -438,6 +456,15 @@ export type SessionsGetOutput = {
-             readonly attachments: number
-             readonly total: number
-           }
-+          readonly media?: {
-+            readonly rawChars: number
-+            readonly textChars: number
-+            readonly tokens: number
-+            readonly count: number
-+            readonly imageTokens: number
-+            readonly pdfTokens: number
-+            readonly otherTokens: number
-+          }
-         }
-         readonly afterPartID?: string
-         readonly contextLimit?: number
-@@ -711,6 +738,15 @@ export type SessionsContextOutput = {
-               readonly attachments: number
-               readonly total: number
-             }
-+            readonly media?: {
-+              readonly rawChars: number
-+              readonly textChars: number
-+              readonly tokens: number
-+              readonly count: number
-+              readonly imageTokens: number
-+              readonly pdfTokens: number
-+              readonly otherTokens: number
-+            }
-           }
-           readonly afterPartID?: string
-           readonly contextLimit?: number
-@@ -963,6 +999,15 @@ export type SessionsHistoryOutput = {
-                 readonly attachments: number
-                 readonly total: number
-               }
-+              readonly media?: {
-+                readonly rawChars: number
-+                readonly textChars: number
-+                readonly tokens: number
-+                readonly count: number
-+                readonly imageTokens: number
-+                readonly pdfTokens: number
-+                readonly otherTokens: number
-+              }
-             }
-             readonly afterPartID?: string
-             readonly contextLimit?: number
-@@ -1053,6 +1098,15 @@ export type SessionsHistoryOutput = {
-                 readonly attachments: number
-                 readonly total: number
-               }
-+              readonly media?: {
-+                readonly rawChars: number
-+                readonly textChars: number
-+                readonly tokens: number
-+                readonly count: number
-+                readonly imageTokens: number
-+                readonly pdfTokens: number
-+                readonly otherTokens: number
-+              }
-             }
-             readonly afterPartID?: string
-             readonly contextLimit?: number
-@@ -1544,6 +1598,15 @@ export type SessionsEventsOutput =
-               readonly attachments: number
-               readonly total: number
-             }
-+            readonly media?: {
-+              readonly rawChars: number
-+              readonly textChars: number
-+              readonly tokens: number
-+              readonly count: number
-+              readonly imageTokens: number
-+              readonly pdfTokens: number
-+              readonly otherTokens: number
-+            }
-           }
-           readonly afterPartID?: string
-           readonly contextLimit?: number
-@@ -1634,6 +1697,15 @@ export type SessionsEventsOutput =
-               readonly attachments: number
-               readonly total: number
-             }
-+            readonly media?: {
-+              readonly rawChars: number
-+              readonly textChars: number
-+              readonly tokens: number
-+              readonly count: number
-+              readonly imageTokens: number
-+              readonly pdfTokens: number
-+              readonly otherTokens: number
-+            }
-           }
-           readonly afterPartID?: string
-           readonly contextLimit?: number
-@@ -2058,6 +2130,15 @@ export type SessionsMessageOutput = {
-               readonly attachments: number
-               readonly total: number
-             }
-+            readonly media?: {
-+              readonly rawChars: number
-+              readonly textChars: number
-+              readonly tokens: number
-+              readonly count: number
-+              readonly imageTokens: number
-+              readonly pdfTokens: number
-+              readonly otherTokens: number
-+            }
-           }
-           readonly afterPartID?: string
-           readonly contextLimit?: number
-@@ -2253,6 +2334,15 @@ export type MessagesListOutput = {
-               readonly attachments: number
-               readonly total: number
-             }
-+            readonly media?: {
-+              readonly rawChars: number
-+              readonly textChars: number
-+              readonly tokens: number
-+              readonly count: number
-+              readonly imageTokens: number
-+              readonly pdfTokens: number
-+              readonly otherTokens: number
-+            }
-           }
-           readonly afterPartID?: string
-           readonly contextLimit?: number
+ 
+ export type SessionsGoalSetOutput = {
+@@ -562,6 +572,7 @@ export type SessionsGoalSetOutput = {
+     readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
+     readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
+     readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
++    readonly continueOnError: boolean
+     readonly time: {
+       readonly created: number | "Infinity" | "-Infinity" | "NaN"
+       readonly updated: number | "Infinity" | "-Infinity" | "NaN"
 diff --git a/packages/sdk/js/src/v2/gen/sdk.gen.ts b/packages/sdk/js/src/v2/gen/sdk.gen.ts
 --- a/packages/sdk/js/src/v2/gen/sdk.gen.ts
 +++ b/packages/sdk/js/src/v2/gen/sdk.gen.ts
@@ -2833,6 +2770,728 @@ diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/ge
  export type TuiControlNextData = {
    body?: never
    path?: never
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -25,8 +25,9 @@
+   | EventSessionNextPromptCompleted
+   | EventSessionNextRequestEstimated
+   | EventSessionNextContextUpdated
+   | EventSessionNextSynthetic
++  | EventSessionNextMessagesHidden
+   | EventSessionNextShellStarted
+   | EventSessionNextShellEnded
+   | EventSessionNextStepStarted
+   | EventSessionNextStepEnded
+@@ -1017,8 +1018,18 @@
+         }
+       }
+     | {
+         id: string
++        type: "session.next.messages.hidden"
++        properties: {
++          timestamp: number
++          sessionID: string
++          messageIDs: Array<string>
++          hidden: SessionMessageHidden
++        }
++      }
++    | {
++        id: string
+         type: "session.next.shell.started"
+         properties: {
+           timestamp: number
+           sessionID: string
+@@ -1069,8 +1080,12 @@
+             }
+           }
+           snapshot?: string
+           files?: Array<string>
++          summary?: {
++            messageID: string
++            diffs: Array<SnapshotFileDiff>
++          }
+         }
+       }
+     | {
+         id: string
+@@ -1290,8 +1305,14 @@
+           messageID: string
+           reason: "auto" | "manual"
+           text: string
+           recent: string
++          recent_user_messages?: Array<{
++            id: string
++            text: string
++            truncated?: boolean
++          }>
++          file_evidence?: string
+           usage?: {
+             tokens: {
+               input: number
+               output: number
+@@ -1840,8 +1861,9 @@
+     | SyncEventSessionNextPromptCompleted
+     | SyncEventSessionNextRequestEstimated
+     | SyncEventSessionNextContextUpdated
+     | SyncEventSessionNextSynthetic
++    | SyncEventSessionNextMessagesHidden
+     | SyncEventSessionNextShellStarted
+     | SyncEventSessionNextShellEnded
+     | SyncEventSessionNextStepStarted
+     | SyncEventSessionNextStepEnded
+@@ -3051,8 +3073,9 @@
+   | SessionNextPromptCompleted
+   | SessionNextRequestEstimated
+   | SessionNextContextUpdated
+   | SessionNextSynthetic
++  | SessionNextMessagesHidden
+   | SessionNextShellStarted
+   | SessionNextShellEnded
+   | SessionNextStepStarted
+   | SessionNextStepEnded
+@@ -3197,8 +3220,9 @@
+   | SessionNextPromptCompleted
+   | SessionNextRequestEstimated
+   | SessionNextContextUpdated
+   | SessionNextSynthetic
++  | SessionNextMessagesHidden
+   | SessionNextShellStarted
+   | SessionNextShellEnded
+   | SessionNextStepStarted
+   | SessionNextStepEnded
+@@ -3471,8 +3495,13 @@
+   type: "unknown"
+   message: string
+ }
+ 
++export type SessionMessageHidden = {
++  time: number
++  reason: "permission-reviewer-protocol-retry"
++}
++
+ export type LlmProviderMetadata = {
+   [key: string]: {
+     [key: string]: unknown
+   }
+@@ -3874,8 +3903,25 @@
+     }
+   }
+ }
+ 
++export type SyncEventSessionNextMessagesHidden = {
++  type: "sync"
++  id: string
++  syncEvent: {
++    type: "session.next.messages.hidden.1"
++    id: string
++    seq: number
++    aggregateID: string
++    data: {
++      timestamp: number
++      sessionID: string
++      messageIDs: Array<string>
++      hidden: SessionMessageHidden
++    }
++  }
++}
++
+ export type SyncEventSessionNextShellStarted = {
+   type: "sync"
+   id: string
+   syncEvent: {
+@@ -3954,8 +4000,12 @@
+         }
+       }
+       snapshot?: string
+       files?: Array<string>
++      summary?: {
++        messageID: string
++        diffs: Array<SnapshotFileDiff>
++      }
+     }
+   }
+ }
+ 
+@@ -4230,8 +4280,14 @@
+       messageID: string
+       reason: "auto" | "manual"
+       text: string
+       recent: string
++      recent_user_messages?: Array<{
++        id: string
++        text: string
++        truncated?: boolean
++      }>
++      file_evidence?: string
+       usage?: {
+         tokens: {
+           input: number
+           output: number
+@@ -4484,8 +4540,11 @@
+   }
+   text: string
+   files?: Array<PromptFileAttachment>
+   agents?: Array<PromptAgentAttachment>
++  summary?: {
++    diffs: Array<SnapshotFileDiff>
++  }
+   type: "user"
+ }
+ 
+ export type SessionMessageSynthetic = {
+@@ -4647,8 +4706,14 @@
+   type: "compaction"
+   reason: "auto" | "manual"
+   summary: string
+   recent: string
++  recent_user_messages?: Array<{
++    id: string
++    text: string
++    truncated?: boolean
++  }>
++  file_evidence?: string
+   id: string
+   metadata?: {
+     [key: string]: unknown
+   }
+@@ -4871,8 +4936,28 @@
+     text: string
+   }
+ }
+ 
++export type SessionNextMessagesHidden = {
++  id: string
++  metadata?: {
++    [key: string]: unknown
++  }
++  type: "session.next.messages.hidden"
++  durable?: {
++    aggregateID: string
++    seq: number
++    version: number
++  }
++  location?: LocationRef
++  data: {
++    timestamp: number
++    sessionID: string
++    messageIDs: Array<string>
++    hidden: SessionMessageHidden
++  }
++}
++
+ export type SessionNextShellStarted = {
+   id: string
+   metadata?: {
+     [key: string]: unknown
+@@ -4964,8 +5049,12 @@
+       }
+     }
+     snapshot?: string
+     files?: Array<string>
++    summary?: {
++      messageID: string
++      diffs: Array<SnapshotFileDiff>
++    }
+   }
+ }
+ 
+ export type SessionNextStepFailed = {
+@@ -5282,8 +5371,14 @@
+     messageID: string
+     reason: "auto" | "manual"
+     text: string
+     recent: string
++    recent_user_messages?: Array<{
++      id: string
++      text: string
++      truncated?: boolean
++    }>
++    file_evidence?: string
+     usage?: {
+       tokens: {
+         input: number
+         output: number
+@@ -7099,8 +7194,19 @@
+     text: string
+   }
+ }
+ 
++export type EventSessionNextMessagesHidden = {
++  id: string
++  type: "session.next.messages.hidden"
++  properties: {
++    timestamp: number
++    sessionID: string
++    messageIDs: Array<string>
++    hidden: SessionMessageHidden
++  }
++}
++
+ export type EventSessionNextShellStarted = {
+   id: string
+   type: "session.next.shell.started"
+   properties: {
+@@ -7156,8 +7262,12 @@
+       }
+     }
+     snapshot?: string
+     files?: Array<string>
++    summary?: {
++      messageID: string
++      diffs: Array<SnapshotFileDiff>
++    }
+   }
+ }
+ 
+ export type EventSessionNextStepFailed = {
+@@ -7395,8 +7505,14 @@
+     messageID: string
+     reason: "auto" | "manual"
+     text: string
+     recent: string
++    recent_user_messages?: Array<{
++      id: string
++      text: string
++      truncated?: boolean
++    }>
++    file_evidence?: string
+     usage?: {
+       tokens: {
+         input: number
+         output: number
+@@ -12606,8 +12722,9 @@
+   query?: {
+     workspace?: string
+     limit?: number
+     order?: "asc" | "desc"
++    start?: number
+     search?: string
+     directory?: string
+     project?: string
+     subpath?: string
+@@ -12746,8 +12863,124 @@
+ }
+ 
+ export type V2SessionGetResponse = V2SessionGetResponses[keyof V2SessionGetResponses]
+ 
++export type V2SessionGoalClearData = {
++  body?: never
++  path: {
++    sessionID: string
++  }
++  query?: never
++  url: "/api/session/{sessionID}/goal"
++}
++
++export type V2SessionGoalClearErrors = {
++  /**
++   * InvalidRequestError
++   */
++  400: InvalidRequestError
++  /**
++   * UnauthorizedError
++   */
++  401: UnauthorizedError
++  /**
++   * SessionNotFoundError
++   */
++  404: SessionNotFoundError
++}
++
++export type V2SessionGoalClearError = V2SessionGoalClearErrors[keyof V2SessionGoalClearErrors]
++
++export type V2SessionGoalClearResponses = {
++  /**
++   * Success
++   */
++  200: {
++    cleared: boolean
++  }
++}
++
++export type V2SessionGoalClearResponse = V2SessionGoalClearResponses[keyof V2SessionGoalClearResponses]
++
++export type V2SessionGoalData = {
++  body?: never
++  path: {
++    sessionID: string
++  }
++  query?: never
++  url: "/api/session/{sessionID}/goal"
++}
++
++export type V2SessionGoalErrors = {
++  /**
++   * InvalidRequestError
++   */
++  400: InvalidRequestError
++  /**
++   * UnauthorizedError
++   */
++  401: UnauthorizedError
++  /**
++   * SessionNotFoundError
++   */
++  404: SessionNotFoundError
++}
++
++export type V2SessionGoalError = V2SessionGoalErrors[keyof V2SessionGoalErrors]
++
++export type V2SessionGoalResponses = {
++  /**
++   * Success
++   */
++  200: {
++    goal: SessionGoal
++  }
++}
++
++export type V2SessionGoalResponse = V2SessionGoalResponses[keyof V2SessionGoalResponses]
++
++export type V2SessionGoalSetData = {
++  body: {
++    objective?: string
++    status?: "active" | "paused" | "complete" | "blocked"
++    tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++    continueOnError?: boolean
++  }
++  path: {
++    sessionID: string
++  }
++  query?: never
++  url: "/api/session/{sessionID}/goal"
++}
++
++export type V2SessionGoalSetErrors = {
++  /**
++   * InvalidRequestError
++   */
++  400: InvalidRequestError
++  /**
++   * UnauthorizedError
++   */
++  401: UnauthorizedError
++  /**
++   * SessionNotFoundError
++   */
++  404: SessionNotFoundError
++}
++
++export type V2SessionGoalSetError = V2SessionGoalSetErrors[keyof V2SessionGoalSetErrors]
++
++export type V2SessionGoalSetResponses = {
++  /**
++   * Success
++   */
++  200: {
++    goal: SessionGoal
++  }
++}
++
++export type V2SessionGoalSetResponse = V2SessionGoalSetResponses[keyof V2SessionGoalSetResponses]
++
+ export type V2SessionSwitchAgentData = {
+   body: {
+     agent: string
+   }
+@@ -12889,8 +13122,12 @@
+    * SessionNotFoundError
+    */
+   404: SessionNotFoundError
+   /**
++   * ConflictError
++   */
++  409: ConflictError
++  /**
+    * ServiceUnavailableError
+    */
+   503: ServiceUnavailableError
+ }
+@@ -12970,8 +13207,12 @@
+    * MessageNotFoundError | SessionNotFoundError
+    */
+   404: MessageNotFoundError | SessionNotFoundError
+   /**
++   * ConflictError
++   */
++  409: ConflictError
++  /**
+    * UnknownError
+    */
+   500: UnknownError1
+ }
+@@ -13011,8 +13252,12 @@
+    * SessionNotFoundError
+    */
+   404: SessionNotFoundError
+   /**
++   * ConflictError
++   */
++  409: ConflictError
++  /**
+    * UnknownError
+    */
+   500: UnknownError1
+ }
+@@ -13049,8 +13294,12 @@
+   /**
+    * SessionNotFoundError
+    */
+   404: SessionNotFoundError
++  /**
++   * ConflictError
++   */
++  409: ConflictError
+ }
+ 
+ export type V2SessionRevertCommitError = V2SessionRevertCommitErrors[keyof V2SessionRevertCommitErrors]
+ 
+@@ -13255,8 +13504,42 @@
+ }
+ 
+ export type V2SessionMessageResponse = V2SessionMessageResponses[keyof V2SessionMessageResponses]
+ 
++export type V2SessionPreviewData = {
++  body: {
++    sessionIDs: Array<string>
++    limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++  }
++  path?: never
++  query?: never
++  url: "/api/session/preview"
++}
++
++export type V2SessionPreviewErrors = {
++  /**
++   * InvalidRequestError
++   */
++  400: InvalidRequestError
++  /**
++   * UnauthorizedError
++   */
++  401: UnauthorizedError
++}
++
++export type V2SessionPreviewError = V2SessionPreviewErrors[keyof V2SessionPreviewErrors]
++
++export type V2SessionPreviewResponses = {
++  /**
++   * Success
++   */
++  200: {
++    [key: string]: Array<string>
++  }
++}
++
++export type V2SessionPreviewResponse = V2SessionPreviewResponses[keyof V2SessionPreviewResponses]
++
+ export type V2SessionMessagesData = {
+   body?: never
+   path: {
+     sessionID: string
+diff --git a/packages/sdk/js/src/v2/gen/sdk.gen.ts b/packages/sdk/js/src/v2/gen/sdk.gen.ts
+--- a/packages/sdk/js/src/v2/gen/sdk.gen.ts
++++ b/packages/sdk/js/src/v2/gen/sdk.gen.ts
+@@ -360,8 +360,14 @@
+   V2SessionEventsErrors,
+   V2SessionEventsResponses,
+   V2SessionGetErrors,
+   V2SessionGetResponses,
++  V2SessionGoalClearErrors,
++  V2SessionGoalClearResponses,
++  V2SessionGoalErrors,
++  V2SessionGoalResponses,
++  V2SessionGoalSetErrors,
++  V2SessionGoalSetResponses,
+   V2SessionHistoryErrors,
+   V2SessionHistoryResponses,
+   V2SessionInterruptErrors,
+   V2SessionInterruptResponses,
+@@ -378,8 +384,10 @@
+   V2SessionPermissionListErrors,
+   V2SessionPermissionListResponses,
+   V2SessionPermissionReplyErrors,
+   V2SessionPermissionReplyResponses,
++  V2SessionPreviewErrors,
++  V2SessionPreviewResponses,
+   V2SessionPromptErrors,
+   V2SessionPromptResponses,
+   V2SessionQuestionListErrors,
+   V2SessionQuestionListResponses,
+@@ -5410,8 +5418,68 @@
+     })
+   }
+ }
+ 
++export class Goal2 extends HeyApiClient {
++  /**
++   * Clear session goal
++   */
++  public clear<ThrowOnError extends boolean = false>(
++    parameters: {
++      sessionID: string
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
++    return (options?.client ?? this.client).delete<V2SessionGoalClearResponses, V2SessionGoalClearErrors, ThrowOnError>(
++      {
++        url: "/api/session/{sessionID}/goal",
++        ...options,
++        ...params,
++      },
++    )
++  }
++
++  /**
++   * Set session goal
++   */
++  public set<ThrowOnError extends boolean = false>(
++    parameters: {
++      sessionID: string
++      objective?: string
++      status?: "active" | "paused" | "complete" | "blocked"
++      tokenBudget?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++      continueOnError?: boolean
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "path", key: "sessionID" },
++            { in: "body", key: "objective" },
++            { in: "body", key: "status" },
++            { in: "body", key: "tokenBudget" },
++            { in: "body", key: "continueOnError" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).post<V2SessionGoalSetResponses, V2SessionGoalSetErrors, ThrowOnError>({
++      url: "/api/session/{sessionID}/goal",
++      ...options,
++      ...params,
++      headers: {
++        "Content-Type": "application/json",
++        ...options?.headers,
++        ...params.headers,
++      },
++    })
++  }
++}
++
+ export class Revert extends HeyApiClient {
+   /**
+    * Stage session revert
+    *
+@@ -5761,8 +5829,9 @@
+     parameters?: {
+       workspace?: string
+       limit?: number
+       order?: "asc" | "desc"
++      start?: number
+       search?: string
+       directory?: string
+       project?: string
+       subpath?: string
+@@ -5777,8 +5846,9 @@
+           args: [
+             { in: "query", key: "workspace" },
+             { in: "query", key: "limit" },
+             { in: "query", key: "order" },
++            { in: "query", key: "start" },
+             { in: "query", key: "search" },
+             { in: "query", key: "directory" },
+             { in: "query", key: "project" },
+             { in: "query", key: "subpath" },
+@@ -5864,8 +5934,25 @@
+     })
+   }
+ 
+   /**
++   * Get session goal
++   */
++  public goal<ThrowOnError extends boolean = false>(
++    parameters: {
++      sessionID: string
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams([parameters], [{ args: [{ in: "path", key: "sessionID" }] }])
++    return (options?.client ?? this.client).get<V2SessionGoalResponses, V2SessionGoalErrors, ThrowOnError>({
++      url: "/api/session/{sessionID}/goal",
++      ...options,
++      ...params,
++    })
++  }
++
++  /**
+    * Switch session agent
+    *
+    * Switch the agent used by subsequent provider turns.
+    */
+@@ -6151,8 +6238,43 @@
+     })
+   }
+ 
+   /**
++   * Batch session preview
++   *
++   * Retrieve the most recent user message text for multiple sessions in a single request.
++   */
++  public preview<ThrowOnError extends boolean = false>(
++    parameters?: {
++      sessionIDs?: Array<string>
++      limit?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
++    },
++    options?: Options<never, ThrowOnError>,
++  ) {
++    const params = buildClientParams(
++      [parameters],
++      [
++        {
++          args: [
++            { in: "body", key: "sessionIDs" },
++            { in: "body", key: "limit" },
++          ],
++        },
++      ],
++    )
++    return (options?.client ?? this.client).post<V2SessionPreviewResponses, V2SessionPreviewErrors, ThrowOnError>({
++      url: "/api/session/preview",
++      ...options,
++      ...params,
++      headers: {
++        "Content-Type": "application/json",
++        ...options?.headers,
++        ...params.headers,
++      },
++    })
++  }
++
++  /**
+    * Get session messages
+    *
+    * Retrieve projected messages for a session. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline.
+    */
+@@ -6184,8 +6306,13 @@
+       ...params,
+     })
+   }
+ 
++  private _goal?: Goal2
++  get goal2(): Goal2 {
++    return (this._goal ??= new Goal2({ client: this.client }))
++  }
++
+   private _revert?: Revert
+   get revert(): Revert {
+     return (this._revert ??= new Revert({ client: this.client }))
+   }
 diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
 --- a/packages/core/src/database/schema.gen.ts
 +++ b/packages/core/src/database/schema.gen.ts

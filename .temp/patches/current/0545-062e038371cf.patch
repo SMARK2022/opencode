@@ -368,45 +368,34 @@ index ee1fef1c1..c63d82a0a 100644
 diff --git a/packages/core/src/session/revert.ts b/packages/core/src/session/revert.ts
 --- a/packages/core/src/session/revert.ts
 +++ b/packages/core/src/session/revert.ts
-@@ -1,8 +1,10 @@
- export * as SessionRevert from "./revert"
- 
- import { and, asc, eq, gt } from "drizzle-orm"
--import { DateTime, Effect, Schema } from "effect"
-+import { DateTime, Effect, Option, Schema } from "effect"
-+import path from "path"
- import { Database } from "../database/database"
- import { EventV2 } from "../event"
-+import { Location } from "../location"
- import { RelativePath } from "../schema"
- import { Snapshot } from "../snapshot"
-@@ -48,11 +50,25 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
-     .pipe(Effect.orDie)
-   const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
-+  const location = yield* Location.Service
-   const files = new Map<RelativePath, Snapshot.ID>()
-   for (const row of rows) {
-     const message = yield* decode({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie)
-     if (message.type !== "assistant" || !message.snapshot?.start) continue
-+    // 整轮快照也包含外部改动；只消费已完成工具的持久化声明，不把input或正文当作写入证据。
-+    const declared = new Set(message.content.flatMap((part) => {
-+      if (part.type !== "tool" || part.state.status !== "completed") return []
-+      const output = part.state.structured
-+      if (part.name === "write") return typeof output.target === "string" ? [output.target] : []
-+      if (part.name !== "edit" && part.name !== "apply_patch") return []
-+      // 两种原生工具共用files[].file合同；未知旧输出不推断归属，也不退回整树恢复。
-+      const decoded = Schema.decodeUnknownOption(Schema.Array(Schema.Struct({ file: Schema.String })))(output.files)
-+      return Option.getOrElse(decoded, () => []).map((file) => file.file)
-+    }).map((file) =>
-+      // 工具resource相对Location、快照路径相对project，比较前转换到同一现有基准。
-+      path.relative(location.project.directory, path.resolve(location.directory, file)).replaceAll("\\", "/"),
-+    ))
-     for (const file of message.snapshot.files ?? [])
--      if (!files.has(file)) files.set(file, Snapshot.ID.make(message.snapshot.start))
-+      if (declared.has(file) && !files.has(file)) files.set(file, Snapshot.ID.make(message.snapshot.start))
-   }
-   return files
+@@ -64,6 +64,6 @@ const plan = Effect.fn("SessionRevert.plan")(function* (input: BoundaryInput) {
+   const location = yield* Location.Service
+   // Snapshot恢复键相对项目根，工具相对项属于当前Location，必须沿共享聚合器统一基准。
+   const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
+-  // 无工具证据的历史/纯Shell保留原快照恢复；有证据时不能撤回同目录其他会话的文件。
+-  return touched.size ? new Map([...files].filter(([file]) => touched.has(file))) : files
++  // 空声明只撤消息，不恢复快照窗口中的ambient文件；归属仍由两代共用的工具结果合同决定。
++  return new Map([...files].filter(([file]) => touched.has(file)))
  })
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -852,1 +852,1 @@
+-  it.effect("stages tool-owned native revert paths and preserves metadata-free history", () => {
++  it.effect("stages tool-owned native revert paths and keeps metadata-free history message-only", () => {
+@@ -892,3 +892,5 @@
+       const legacyRevert = yield* SessionRevert.stage({ session, messageID: later.id })
+-      expect(restores[3]).toEqual([[RelativePath.make("app/legacy.ts"), Snapshot.ID.make("tree_legacy")]])
+-      expect(legacyRevert.files?.map(file => file.path)).toEqual([RelativePath.make("app/legacy.ts")])
++      // 无声明时仍成功记录消息撤回，但不能恢复该时间窗混入的其他文件。
++      expect(restores).toHaveLength(3)
++      expect(legacyRevert.files).toEqual([])
++      expect(legacyRevert.messageID).toBe(later.id)
+@@ -897,3 +899,3 @@
+       expect(messageOnly.files).toEqual([])
+-      expect(restores).toHaveLength(4)
++      expect(restores).toHaveLength(3)
+       expect(yield* SessionRevert.stage({ session, messageID: SessionMessage.ID.make("msg_missing") }).pipe(Effect.flip)).toBeInstanceOf(SessionRevert.MessageNotFoundError)
 diff --git a/packages/core/test/session-revert.test.ts b/packages/core/test/session-revert.test.ts
 new file mode 100644
 --- /dev/null
@@ -456,7 +445,7 @@ new file mode 100644
 +    const location = Layer.mock(Location.Service, { directory, project: { id: projectID, directory: root } })
 +    const cases = [
 +      { name: "read", output: {} },
-+      { name: "write", output: { target: path.join(directory, "owned.txt") } },
++      { name: "write", output: { target: path.join(directory, "owned.txt"), diff: "+owned\n" } },
 +      { name: "edit", output: { files: [{ file: "owned.txt" }] } },
 +      { name: "apply_patch", output: { files: [{ file: "owned.txt" }] } },
 +      { name: "read", output: {} },

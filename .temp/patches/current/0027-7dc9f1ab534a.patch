@@ -1,6 +1,6 @@
-diff --git a/packages/opencode/src/session/prompt/codex.txt b/packages/opencode/src/session/prompt/codex.txt
---- a/packages/opencode/src/session/prompt/codex.txt
-+++ b/packages/opencode/src/session/prompt/codex.txt
+diff --git a/packages/core/src/system-context/prompt/codex.txt b/packages/core/src/system-context/prompt/codex.txt
+--- a/packages/core/src/system-context/prompt/codex.txt
++++ b/packages/core/src/system-context/prompt/codex.txt
 @@ -1,11 +1,12 @@
 -You are OpenCode, the best coding agent on the planet.
 +<!-- 编辑工具按实际可用定义选择；自动生成文件继续交给原生成流程。 -->
@@ -18,9 +18,9 @@ diff --git a/packages/opencode/src/session/prompt/codex.txt b/packages/opencode/
  - Prefer specialized tools over shell for file operations:
 
 
-diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencode/src/session/prompt/default.txt
---- a/packages/opencode/src/session/prompt/default.txt
-+++ b/packages/opencode/src/session/prompt/default.txt
+diff --git a/packages/core/src/system-context/prompt/default.txt b/packages/core/src/system-context/prompt/default.txt
+--- a/packages/core/src/system-context/prompt/default.txt
++++ b/packages/core/src/system-context/prompt/default.txt
 @@ -30,7 +30,8 @@
  
  <example>
@@ -42,9 +42,9 @@ diff --git a/packages/opencode/src/session/prompt/default.txt b/packages/opencod
  </example>
 
 
-diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode/src/session/prompt/gemini.txt
---- a/packages/opencode/src/session/prompt/gemini.txt
-+++ b/packages/opencode/src/session/prompt/gemini.txt
+diff --git a/packages/core/src/system-context/prompt/gemini.txt b/packages/core/src/system-context/prompt/gemini.txt
+--- a/packages/core/src/system-context/prompt/gemini.txt
++++ b/packages/core/src/system-context/prompt/gemini.txt
 @@ -55,6 +55,7 @@
  - **Parallelism:** Execute multiple independent tool calls in parallel when feasible, especially reads, searches, and status checks. Parallel writes are only appropriate when target files or edit ranges cannot conflict.
  - **Command Execution:** Use the 'bash' tool for running shell commands, remembering the safety rule to explain modifying commands first.
@@ -71,9 +71,9 @@ diff --git a/packages/opencode/src/session/prompt/gemini.txt b/packages/opencode
  <example>
 
 
-diff --git a/packages/opencode/src/session/prompt/trinity.txt b/packages/opencode/src/session/prompt/trinity.txt
---- a/packages/opencode/src/session/prompt/trinity.txt
-+++ b/packages/opencode/src/session/prompt/trinity.txt
+diff --git a/packages/core/src/system-context/prompt/trinity.txt b/packages/core/src/system-context/prompt/trinity.txt
+--- a/packages/core/src/system-context/prompt/trinity.txt
++++ b/packages/core/src/system-context/prompt/trinity.txt
 @@ -26,7 +26,8 @@
  
  <example>
@@ -266,9 +266,11 @@ diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/
        shell: name,
 
 
-diff --git a/packages/opencode/src/tool/task.txt b/packages/opencode/src/tool/task.txt
+diff --git a/packages/opencode/src/tool/task.txt b/packages/core/src/tool/task.txt
+rename from packages/opencode/src/tool/task.txt
+rename to packages/core/src/tool/task.txt
 --- a/packages/opencode/src/tool/task.txt
-+++ b/packages/opencode/src/tool/task.txt
++++ b/packages/core/src/tool/task.txt
 @@ -2,18 +2,33 @@
  
  When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
@@ -655,7 +657,7 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
        codec: Schema.toCodecJson(Schema.String),
        load: config.entries().pipe(Effect.map(selectedShell)),
 -      baseline: (shell) => `Shell: ${shell} (${Shell.ps(shell) ? "use PowerShell syntax; $null, not /dev/null" : Shell.name(shell) === "cmd" ? "use cmd.exe syntax; NUL, not /dev/null" : "use this shell's native syntax"})`,
-+      // cfg.shell 与默认值仍由 selectedShell 决定，不套用 legacy acceptable fallback。
++      // 与执行共用selectedShell，说明不再自行猜测POSIX或Windows默认值。
 +      baseline: (shell) => Shell.guidance(shell, process.platform),
        // 更新正文同样点名实际 shell，模型不能在换 shell 后继续使用旧的语法假设。
 -      update: (_previous, shell) => `The execution shell is now: ${shell}`,
@@ -671,7 +673,7 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
          [name]: Tool.make({
 -          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
 +          // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
-+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8 and may lose data at the process capture limit.`,
            input: Input,
            output: Output,
            structured: StructuredOutput,
@@ -709,16 +711,21 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
                  type: "tool" as const,
                  messageID: context.assistantMessageID,
                  callID: context.toolCallID,
-@@ -170,9 +198,8 @@
+@@ -170,9 +198,11 @@
                if ((yield* fs.stat(target.canonical)).type !== "Directory")
                  return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
  
 -              const entries = yield* config.entries()
 -              const shell = selectedShell(entries)
 +              // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
-               const command = ChildProcess.make(input.command, [], {
++              const powershell = process.platform === "win32" && Shell.ps(shell)
++              // 与V1同样禁用PowerShell profile和交互；仍只创建一个命令并调用一次AppProcess.run。
+-              const command = ChildProcess.make(input.command, [], {
++              const command = ChildProcess.make(powershell ? shell : input.command,
++                powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", input.command] : [], {
                  cwd: target.canonical,
-                 shell,
+-                shell,
++                shell: powershell ? false : shell,
                  stdin: "ignore",
 @@ -210,7 +237,9 @@
 +                  // capture 损失由真实进程结果报告，不能把内存窗口当作完整输出文件承诺。
@@ -758,7 +765,22 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
  import { location } from "./fixture/location"
  import { tmpdir } from "./fixture/tmpdir"
  import { testEffect } from "./lib/effect"
-@@ -100,6 +102,7 @@
+@@ -30,4 +32,5 @@
+   readonly cwd?: string
+   readonly shell?: string | boolean
++  readonly args?: readonly string[]
+   readonly options?: AppProcess.RunOptions
+ }> = []
+@@ -71,6 +74,7 @@
+       Effect.suspend(() => {
+         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
+-        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
++        // 显式PowerShell argv也记录原命令和实际可执行文件，同时保留完整argv供启动边界断言。
++        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell, args: command.args, options })
+         return runFailure ? Effect.fail(runFailure) : Effect.succeed(result)
+       }),
+     } as unknown as AppProcess.Interface),
+@@ -100,6 +104,7 @@
  const withTool = <A, E, R>(
    directory: string,
    body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>,
@@ -798,7 +820,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 -            expect(yield* settleTool(registry, call({ command: "pwd" }))).toEqual({
 +            // 真实 settlement 接纳说明字段，但授权与进程仍只收到原始 pwd 命令。
 +            expect(yield* settleTool(registry, call({ command: "pwd", description: "Shows the current working directory" }))).toEqual({
-@@ -173,9 +183,75 @@
+@@ -173,9 +185,82 @@
                maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
              })
              expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
@@ -810,6 +832,9 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +            // 同一配置 refresh 不重复注入，保留既有 Context Epoch 的比较边界。
 +            expect(yield* SystemContext.reconcile(yield* contexts.load(), initialized.snapshot)).toEqual({ _tag: "Unchanged" })
 +            expect(definitions[0]?.description).toContain("Use workdir instead of changing directories")
++            // 防止通用shell选项重新启用用户profile，直接检查实际单次命令的argv。
++            if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
++              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "pwd"])
            }),
          )
 +          .pipe(Effect.andThen(() => Effect.gen(function* () {
@@ -857,24 +882,478 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
 +                  reset()
 +                  expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
 +                  expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
-+                  expect(runs).toMatchObject([{ command, shell }])
++                  expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
 +                }
 +              }), appProcess, shell)
 +            }
 +            // 配置 Git Bash 仍执行原 Unix 命令，不能把 Windows OS 当成 Windows shell。
 +            reset()
++            // Shell选择器验证路径存在；使用临时文件和既有进程替身，不依赖主机Git安装位置或启动该文件。
++            const gitBash = path.join(tmp.path, "Git with spaces", "bin", "bash.exe")
++            yield* Effect.promise(() => fs.mkdir(path.dirname(gitBash), { recursive: true }))
++            yield* Effect.promise(() => fs.writeFile(gitBash, "fixture executable is never invoked"))
 +            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
 +              const command = "head input | grep needle; ls; find ."
 +              expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
 +              expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
-+              expect(runs).toMatchObject([{ command, shell: "C:\\Program Files\\Git\\bin\\bash.exe" }])
-+            }), appProcess, "C:\\Program Files\\Git\\bin\\bash.exe")
++              expect(runs).toMatchObject([{ command, shell: gitBash }])
++            }), appProcess, gitBash)
 +          })))
        },
        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
      ),
    )
 
+diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
+--- a/packages/opencode/src/tool/task.ts
++++ b/packages/opencode/src/tool/task.ts
+@@ -2,1 +2,1 @@
+-import DESCRIPTION from "./task.txt"
++import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
+@@ -363,2 +363,2 @@
+-        ? [DESCRIPTION, BACKGROUND_DESCRIPTION].join("\n\n")
+-        : DESCRIPTION,
++        ? [TaskPrompt.description, BACKGROUND_DESCRIPTION].join("\n\n")
++        : TaskPrompt.description,
+diff --git a/packages/core/src/config.ts b/packages/core/src/config.ts
+--- a/packages/core/src/config.ts
++++ b/packages/core/src/config.ts
+@@ -33,3 +33,7 @@
+   shell: Schema.String.pipe(Schema.optional).annotate({
+     description: "Default shell to use for terminal and shell tool execution",
+   }),
++  // 与V1相同的深度配置归运行时消费者，不借工具广告绕过父子Session约束。
++  subagent_depth: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.optional).annotate({
++    description: "Maximum subagent nesting depth; defaults to one level",
++  }),
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -40,2 +40,3 @@
+     default_agent: info.default_agent,
++    subagent_depth: info.subagent_depth,
+     autoupdate: info.autoupdate,
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -39,1 +39,2 @@
+ import { SessionDurable } from "@opencode-ai/schema/durable-event-manifest"
++import type { PermissionV2 } from "./permission"
+@@ -79,6 +80,10 @@
+ type CreateInput = {
+   id?: SessionSchema.ID
+   agent?: AgentV2.ID
+   model?: ModelV2.Ref
++  // 子会话沿现有Created投影持久化归属和权限，不构造第二种会话记录。
++  parentID?: SessionSchema.ID
++  title?: string
++  permissions?: PermissionV2.Ruleset
+   location: Location.Ref
+ }
+@@ -225,6 +230,9 @@
+           directory: input.location.directory,
+           path: path.relative(project.directory, input.location.directory).replaceAll("\\", "/"),
+           workspaceID: input.location.workspaceID ? WorkspaceV2.ID.make(input.location.workspaceID) : undefined,
+-          title: `New session - ${new Date(now).toISOString()}`,
++          parentID: input.parentID,
++          title: input.title ?? `New session - ${new Date(now).toISOString()}`,
++          // 复用既有持久permission列的wire形状，Core消费者仍使用当前Rule。
++          permission: input.permissions?.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect })),
+           agent: input.agent,
+           model: input.model
+diff --git a/packages/core/src/session/store.ts b/packages/core/src/session/store.ts
+--- a/packages/core/src/session/store.ts
++++ b/packages/core/src/session/store.ts
+@@ -12,4 +12,6 @@
+ import { fromRow, selection } from "./info"
++import type { PermissionV2 } from "../permission"
+ 
+ export interface Interface {
++  readonly permissions: (sessionID: SessionSchema.ID) => Effect.Effect<PermissionV2.Ruleset>
+   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info | undefined>
+@@ -34,2 +36,7 @@
+     return Service.of({
++      permissions: Effect.fn("SessionStore.permissions")(function* (sessionID) {
++        const row = yield* db.select({ rules: SessionTable.permission }).from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
++        // 旧wire只在存储边界转换，权限执行与广告复用同一持久子会话范围。
++        return row?.rules?.map(rule => ({ action: rule.permission, resource: rule.pattern, effect: rule.action })) ?? []
++      }),
+       get: Effect.fn("SessionStore.get")(function* (sessionID) {
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -143,2 +143,3 @@
+       const agent = yield* agents.resolve(agentID ?? session.agent)
+-      return agent?.permissions ?? missingAgentPermissions
++      // 子会话限制位于代理规则之后；审批和实际执行不能只看代理默认allow。
++      return merge(agent?.permissions ?? missingAgentPermissions, yield* sessions.permissions(sessionID))
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -252,3 +252,5 @@
+       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
+-      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
++      // 委派Session的持久范围也决定本轮广告，防止正文可见工具与实际权限分裂。
++      const sessionPermissions = yield* store.permissions(session.id)
++      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions])
+       // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
+diff --git a/packages/core/src/tool/builtins.ts b/packages/core/src/tool/builtins.ts
+--- a/packages/core/src/tool/builtins.ts
++++ b/packages/core/src/tool/builtins.ts
+@@ -13,2 +13,3 @@
+ import { TodoWriteTool } from "./todowrite"
++import { TaskTool } from "./task"
+ import { WebFetchTool } from "./webfetch"
+@@ -26,3 +27,3 @@
+   * TODO: Port the remaining launch-follow-up leaves deliberately: edit fuzzy
+- * parity, task, LSP,
++ * parity, LSP,
+   * repo_clone, repo_overview, plan_exit, and Rune/code mode. Keep MCP and plugin
+@@ -43,2 +44,3 @@
+     TodoWriteTool.node,
++    TaskTool.node,
+     WebFetchTool.node,
+diff --git a/packages/core/src/tool/task-prompt.ts b/packages/core/src/tool/task-prompt.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/task-prompt.ts
+@@ -0,0 +1,4 @@
++export * as TaskPrompt from "./task-prompt"
++import DESCRIPTION from "./task.txt"
++// 共享说明保持纯资产入口，V1只读文案时不加载V2会话和调度服务。
++export const description = DESCRIPTION
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/task.ts
+@@ -0,0 +1,153 @@
++export * as TaskTool from "./task"
++
++import { ToolFailure } from "@opencode-ai/llm"
++import { ConfigProvider, Effect, Layer, Schema, Scope } from "effect"
++import { AgentV2 } from "../agent"
++import { BackgroundJob } from "../background-job"
++import { Config } from "../config"
++import { makeLocationNode } from "../effect/app-node"
++import type { LocationNode } from "../effect/app-node"
++import { PermissionV2 } from "../permission"
++import { SessionV2 } from "../session"
++import { SessionStore } from "../session/store"
++import { Location } from "../location"
++import { SystemContext } from "../system-context"
++import { SystemContextRegistry } from "../system-context/registry"
++import { Tools } from "./tools"
++import { ToolRegistry } from "./registry"
++import { Tool } from "./tool"
++import { TaskPrompt } from "./task-prompt"
++
++export const name = "task"
++export const description = TaskPrompt.description
++export const Input = Schema.Struct({
++  description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
++  prompt: Schema.String.annotate({ description: "The complete task for the agent to perform" }),
++  subagent_type: Schema.String.annotate({ description: "Agent type from the available agents in system context" }),
++  task_id: Schema.String.pipe(Schema.optional).annotate({ description: "Resume this returned task_id only when continuing the same subagent conversation" }),
++  command: Schema.String.pipe(Schema.optional),
++  background: Schema.Boolean.pipe(Schema.optional).annotate({ description: "Run independent work in the background; completion is delivered automatically. Requires experimental background subagents." }),
++})
++export const Output = Schema.Struct({ task_id: Schema.String, state: Schema.Literals(["running", "completed"]), output: Schema.String })
++
++export const layer = Layer.effectDiscard(Effect.gen(function* () {
++  const tools = yield* Tools.Service
++  const agents = yield* AgentV2.Service
++  const sessions = yield* SessionV2.Service
++  const store = yield* SessionStore.Service
++  const permission = yield* PermissionV2.Service
++  const background = yield* BackgroundJob.Service
++  const config = yield* Config.Service
++  const location = yield* Location.Service
++  const contexts = yield* SystemContextRegistry.Service
++  const scope = yield* Scope.Scope
++  const environment = yield* ConfigProvider.ConfigProvider
++  // 使用进程环境provider的同一值，测试和嵌入调用可局部提供而不改全局环境。
++  const enabled = environment.load(["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"]).pipe(Effect.flatMap(value =>
++    value === undefined ? environment.load(["OPENCODE_EXPERIMENTAL"]) : Effect.succeed(value)),
++    Effect.map(value => value?._tag === "Value" && ["1", "true"].includes(value.value.toLowerCase())))
++
++  // Agent配置可重载；列表作为现有Context Source逐轮观察，不冻结在工具初始化时。
++  const available = agents.all().pipe(Effect.map(items => items.filter(item => !item.hidden && item.mode !== "primary")))
++  yield* contexts.register({
++    key: SystemContext.Key.make("core/task-agents"),
++    load: Effect.succeed(SystemContext.make({
++      key: SystemContext.Key.make("core/task-agents"), codec: Schema.toCodecJson(Schema.String),
++      load: available.pipe(Effect.map(items => ["Available task agents:", ...items.map(item => `- ${item.id}: ${item.description ?? ""}`)].join("\n"))),
++      baseline: String, update: (_previous, current) => current,
++      removed: () => "Task agent guidance removed",
++    })),
++  })
++  yield* tools.register({ [name]: Tool.make({
++    description: `${description}\n\nBackground mode returns immediately and delivers completion automatically. Do not sleep or poll; continue non-overlapping work.`,
++    input: Input, output: Output,
++    toModelOutput: ({ output }) => [{ type: "text", text: `task_id: ${output.task_id}\n<task_${output.state === "running" ? "status" : "result"}>\n${output.output}\n</task_${output.state === "running" ? "status" : "result"}>` }],
++    execute: (input, context) => Effect.gen(function* () {
++      const agent = (yield* available).find(item => item.id === input.subagent_type)
++      if (!agent) return yield* new ToolFailure({ message: `Unknown agent type: ${input.subagent_type} is not a valid agent type` })
++      yield* permission.assert({
++        action: name, resources: [agent.id], save: ["*"], sessionID: context.sessionID, agent: context.agent,
++        metadata: { description: input.description, subagent_type: agent.id },
++        source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
++      })
++      if (input.background && !(yield* enabled)) return yield* new ToolFailure({ message: "Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true" })
++      const parent = yield* sessions.get(context.sessionID)
++      const cfg = yield* config.entries()
++      const maxDepth = Config.latest(cfg, "subagent_depth") ?? 1
++      let current = parent
++      let depth = 0
++      while (current.parentID) {
++        depth++
++        current = yield* sessions.get(current.parentID)
++      }
++      if (depth >= maxDepth) return yield* new ToolFailure({ message: `Subagent depth limit reached (${maxDepth}). Increase "subagent_depth" to allow nested subagents.` })
++      const existing = input.task_id ? yield* store.get(SessionV2.ID.make(input.task_id)) : undefined
++      // 恢复必须仍属于本父会话与Location，不把任意其他Session当作委派目标。
++      if (input.task_id && (!existing || existing.parentID !== parent.id || existing.location.directory !== location.directory || existing.location.workspaceID !== location.workspaceID))
++        return yield* new ToolFailure({ message: `Unknown task_id: ${input.task_id}` })
++      const history = yield* sessions.context(parent.id)
++      const assistant = history.findLast(item => item.type === "assistant" && item.id === context.assistantMessageID)
++      const model = agent.model ?? (assistant?.type === "assistant" ? assistant.model : parent.model)
++      const parentPermission = yield* store.permissions(parent.id)
++      const childPermission: PermissionV2.Ruleset = [
++        // source此时只继承Session拒绝/外部目录规则；父代理non-allow由后续67按原序扩展。
++        ...parentPermission.filter(rule => rule.action === "external_directory" || rule.effect === "deny"),
++        ...["todowrite", "task"].flatMap(action => agent.permissions.some(rule => rule.action === action) ? [] : [{ action, resource: "*", effect: "deny" as const }]),
++      ]
++      const child = existing ?? (yield* sessions.create({
++        parentID: parent.id, title: `${input.description} (@${agent.id} subagent)`,
++        location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
++        agent: agent.id, model, permissions: childPermission,
++      }))
++      const runTask = Effect.gen(function* () {
++        const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
++        // extension在旧段结束后才执行；本次审批身份不能提前改变仍活跃的旧provider轮。
++        if (existing) {
++          const current = yield* sessions.get(child.id)
++          if (current.agent !== agent.id) yield* sessions.switchAgent({ sessionID: child.id, agent: agent.id })
++          if (model) yield* sessions.switchModel({ sessionID: child.id, model })
++        }
++        yield* sessions.prompt({ sessionID: child.id, prompt: { text: input.prompt }, resume: false })
++        // 只复用durable runner，退出中断沿现有SessionExecution所有权链传递。
++        yield* sessions.resume(child.id).pipe(Effect.onInterrupt(() => sessions.interrupt(child.id)))
++        const latest = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")
++        // 本轮没有助手输出时不能误返回恢复前的旧结果。
++        if (latest?.type !== "assistant" || latest.id === before) return ""
++        if (latest.error) return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${latest.error.message}` })
++        const failed = latest.content.findLast(item => item.type === "tool" && item.state.status === "error")
++        if (failed?.type === "tool" && failed.state.status === "error")
++          return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${failed.state.error.message}` })
++        return latest.content.filter(item => item.type === "text").map(item => item.text).join("\n")
++      }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Subagent failed (task_id: ${child.id})`, error })))
++      const notify = () => background.wait({ id: child.id }).pipe(Effect.flatMap(result => {
++        if (!result.info || result.info.status === "running" || result.info.status === "cancelled") return Effect.void
++        // 完成消息走父Session的durable admission与advisory wake，不递归运行V1或轮询进度。
++        return sessions.prompt({ sessionID: parent.id, prompt: { text: `<task id="${child.id}" state="${result.info.status}">\n${result.info.output ?? result.info.error ?? ""}\n</task>` } }).pipe(Effect.asVoid)
++      }), Effect.catch(error => Effect.logError("Failed to deliver background task result", error)), Effect.forkIn(scope, { startImmediately: true }), Effect.asVoid)
++      const running = { task_id: child.id, state: "running" as const, output: "The task is working in the background. You will be notified automatically when it finishes. DO NOT sleep, poll, or duplicate this task's work. Continue non-overlapping work." }
++      // 子任务可能在start返回前运行；先保证挂接取消责任，再恢复前台等待的可中断性。
++      return yield* Effect.uninterruptibleMask(restore => Effect.gen(function* () {
++      if (yield* background.extend({ id: child.id, run: restore(runTask) })) return running
++      const info = yield* background.start({ id: child.id, type: name, title: input.description,
++        metadata: { parentSessionId: parent.id, sessionId: child.id, ...(input.background ? { background: true } : {}) },
++        run: restore(runTask), onPromote: notify(),
++      })
++      if (input.background) { yield* notify(); return running }
++      // 前台与既有promotion复用同一个job；取消父调用只取消其实际拥有的子任务。
++      return yield* restore(Effect.raceFirst(background.wait({ id: info.id }).pipe(Effect.map(result => result.info)), background.waitForPromotion(info.id))).pipe(
++        Effect.flatMap((result): Effect.Effect<typeof Output.Type, ToolFailure> => {
++          if (result?.metadata?.background === true) return Effect.succeed(running)
++          if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: result.error ?? "Task cancelled" })
++          return Effect.succeed({ task_id: child.id, state: "completed" as const, output: result?.output ?? "" })
++        }),
++        Effect.onInterrupt(() => background.cancel(child.id).pipe(Effect.andThen(sessions.interrupt(child.id)))),
++      )
++      }))
++    }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute task: ${input.description}`, error }))),
++  }) }).pipe(Effect.orDie)
++}))
++
++export const node: LocationNode<never> = makeLocationNode({
++  name: "tool/task", layer,
++  deps: [ToolRegistry.node, AgentV2.node, SessionV2.node, SessionStore.node, PermissionV2.node, BackgroundJob.node, Config.node, Location.node, SystemContextRegistry.node],
++})
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -64,1 +64,3 @@
+ import PROMPT_DEFAULT from "../src/system-context/prompt/default.txt"
++import { TaskTool } from "@opencode-ai/core/tool/task"
++import { BackgroundJob } from "@opencode-ai/core/background-job"
+@@ -897,1 +899,129 @@
++  it.live("executes and resumes canonical task sessions with durable results and scoped permissions", () => Effect.gen(function* () {
++    yield* setup
++    const registry = yield* ToolRegistry.Service
++    const sessions = yield* SessionV2.Service
++    const store = yield* SessionStore.Service
++    const agents = yield* AgentV2.Service
++    const db = (yield* Database.Service).db
++    const taskAssertions: PermissionV2.AssertInput[] = []
++    yield* agents.transform(draft => draft.update(AgentV2.ID.make("research"), agent => {
++      agent.mode = "subagent"
++      agent.description = "Research with the registered echo tool"
++      agent.system = "Research identity"
++      agent.permissions.push({ action: "*", resource: "*", effect: "allow" })
++    }))
++    const parentModel = { providerID: ProviderV2.ID.make("fake"), id: ModelV2.ID.make("fake-model") }
++    yield* sessions.switchModel({ sessionID, model: parentModel })
++    yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer"), agent => {
++      agent.mode = "subagent"
++      agent.system = "Reviewer identity"
++      agent.model = { providerID: ProviderV2.ID.make("fake"), id: ModelV2.ID.make("replacement") }
++      agent.permissions.push({ action: "*", resource: "*", effect: "allow" })
++    }))
++    // 在真实Session/registry/runner图中注册leaf；fake模型只替代provider边界，不替代子会话执行。
++    yield* Layer.build(TaskTool.layer.pipe(Layer.provide(Layer.mock(PermissionV2.Service, {
++      assert: input => Effect.sync(() => { taskAssertions.push(input) }),
++    })), Layer.provide(Layer.succeed(Location.Service, {
++      directory: AbsolutePath.make("/project"), project: { id: Project.ID.global, directory: AbsolutePath.make("/project") },
++    }))))
++    const definitions = (yield* registry.materialize()).definitions
++    expect(definitions.map(tool => tool.name)).toContain("task")
++    expect(definitions.find(tool => tool.name === "task")?.description).toContain("Prompting rules")
++    response = fragmentFixture("text", "task-first", ["Research result"]).completeEvents
++    const invoke = (task_id?: string, subagent_type = "research") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
++      sessionID, agent: AgentV2.ID.make("build"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
++      call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
++        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}) } },
++    })))
++    const first = yield* invoke()
++    expect(first.result.type).toBe("text")
++    expect(taskAssertions).toMatchObject([{ action: "task", resources: ["research"], sessionID,
++      agent: "build", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
++    const output = Schema.decodeUnknownSync(TaskTool.Output)(first.output?.structured)
++    const childID = output.task_id
++    if (typeof childID !== "string") throw new Error("expected durable child task ID")
++    const child = yield* sessions.get(SessionV2.ID.make(childID))
++    expect(child.parentID).toBe(sessionID)
++    expect(child.agent).toBe(AgentV2.ID.make("research"))
++    expect(child.title).toBe("Research scoped implementation (@research subagent)")
++    expect(first.output?.content).toEqual([{ type: "text", text: `task_id: ${childID}\n<task_result>\nResearch result\n</task_result>` }])
++    expect(yield* store.permissions(child.id)).toEqual([
++      { action: "todowrite", resource: "*", effect: "deny" },
++      { action: "task", resource: "*", effect: "deny" },
++    ])
++    const actual = requests.at(-1)
++    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
++    expect(userTexts(actual!)).toContain("Inspect the requested module")
++    // 同一task_id恢复同一durable子会话；第一次正文与第二次结果均保留在真实历史中。
++    response = fragmentFixture("text", "task-second", ["Continued result"]).completeEvents
++    const resumed = yield* invoke(childID)
++    expect(resumed.output?.structured).toMatchObject({ task_id: childID, state: "completed" })
++    expect(resumed.output?.content[0]).toEqual({ type: "text", text: `task_id: ${childID}\n<task_result>\nContinued result\n</task_result>` })
++    expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
++    const rows = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.parent_id, sessionID)).all().pipe(Effect.orDie)
++    expect(rows).toEqual([{ id: child.id }])
++    // 另一个父会话不能恢复这个任务，失败不会创建或推进子会话。
++    yield* insertSession(otherSessionID)
++    const foreign = yield* registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
++      sessionID: otherSessionID, agent: AgentV2.ID.make("build"), assistantMessageID: SessionMessage.ID.make("msg_foreign"),
++      call: { type: "tool-call", id: "call-foreign-task", name: "task", input: { description: "Foreign resume", prompt: "Continue", subagent_type: "research", task_id: childID } },
++    })))
++    expect(foreign.result.type).toBe("error")
++    expect(foreign.result).toMatchObject({ value: `Unknown task_id: ${childID}` })
++    expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
++    // 提升现有前台job触发同一后台通知入口，不修改全局实验开关。
++    const jobs = yield* BackgroundJob.Service
++    const events = yield* EventV2.Service
++    const notified = yield* Deferred.make<void>()
++    const unsubscribe = yield* events.listen(event => {
++      if (event.type !== SessionEvent.PromptAdmitted.type || !Schema.is(Schema.Struct({ sessionID: Schema.String, prompt: Prompt }))(event.data)) return Effect.void
++      return event.data.sessionID === sessionID && event.data.prompt.text.includes(`<task id="${childID}"`)
++        ? Deferred.succeed(notified, undefined).pipe(Effect.asVoid) : Effect.void
++    })
++    yield* Effect.addFinalizer(() => unsubscribe)
++    streamGate = yield* Deferred.make<void>()
++    streamStarted = yield* Deferred.make<void>()
++    response = fragmentFixture("text", "task-background", ["Background result"]).completeEvents
++    const requestStart = requests.length
++    const waiting = yield* invoke(childID).pipe(Effect.forkChild)
++    yield* Deferred.await(streamStarted)
++    yield* jobs.promote(childID)
++    const promoted = yield* Fiber.join(waiting)
++    expect(promoted.output?.structured).toMatchObject({ task_id: childID, state: "running" })
++    expect(promoted.output?.content[0]).toMatchObject({ text: expect.stringContaining("DO NOT sleep, poll") })
++    // A尚在provider中时排入B再A；审批立即发生，持久身份只能在各段实际开始时更新。
++    expect((yield* invoke(childID, "reviewer")).output?.structured).toMatchObject({ task_id: childID, state: "running" })
++    expect((yield* invoke(childID, "research")).output?.structured).toMatchObject({ task_id: childID, state: "running" })
++    expect(taskAssertions.slice(-2).map(item => item.resources)).toEqual([["reviewer"], ["research"]])
++    expect((yield* sessions.get(child.id)).agent).toBe(AgentV2.ID.make("research"))
++    expect((yield* sessions.get(child.id)).model).toMatchObject(parentModel)
++    const release = streamGate
++    streamGate = undefined
++    streamStarted = undefined
++    yield* Deferred.succeed(release, undefined)
++    yield* Deferred.await(notified).pipe(Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.die("background result was not admitted") }))
++    const admitted = yield* db.select({ prompt: SessionInputTable.prompt }).from(SessionInputTable).where(eq(SessionInputTable.session_id, sessionID)).all().pipe(Effect.orDie)
++    expect(admitted.some(row => row.prompt.text.includes("Background result"))).toBe(true)
++    // 等待已排入父Session的完成通知实际drain结束，避免下一次门控接管上一轮provider。
++    yield* sessions.resume(sessionID)
++    const delegated = requests.slice(requestStart).filter(request => request.system.some(part => /Research identity|Reviewer identity/.test(part.text)))
++    expect(delegated.map(request => request.system.some(part => part.text.includes("Reviewer identity")) ? "reviewer" : "research")).toEqual(["research", "reviewer", "research"])
++    expect(delegated.map(request => request.model.id)).toEqual([model.id, replacementModel.id, model.id])
++    const final = yield* sessions.get(child.id)
++    expect(final.agent).toBe(AgentV2.ID.make("research"))
++    expect(final.model).toMatchObject(parentModel)
++    const assistants = (yield* sessions.context(child.id)).filter(message => message.type === "assistant")
++    expect(assistants.slice(-3).map(message => message.agent)).toEqual(["research", "reviewer", "research"].map(value => AgentV2.ID.make(value)))
++    // 取消另一次前台等待使原job和子Session停止，不把旧完成结果返回为新成功。
++    streamGate = yield* Deferred.make<void>()
++    streamStarted = yield* Deferred.make<void>()
++    const cancelled = yield* invoke(childID).pipe(Effect.forkChild)
++    yield* Deferred.await(streamStarted)
++    yield* Fiber.interrupt(cancelled)
++    expect((yield* jobs.get(childID))?.status).toBe("cancelled")
++    expect(yield* sessions.active).not.toContain(child.id)
++    streamGate = undefined
++    streamStarted = undefined
++  }).pipe(Effect.provide(Layer.effect(BackgroundJob.Service, BackgroundJob.make))))
++
+   it.live("includes the effective default agent system before durable context", () =>
+diff --git a/packages/core/src/location-services.ts b/packages/core/src/location-services.ts
+--- a/packages/core/src/location-services.ts
++++ b/packages/core/src/location-services.ts
+@@ -28,1 +28,3 @@
+ import { SessionRunnerModel } from "./session/runner/model"
++import { SessionExecution } from "./session/execution"
++import { SessionExecutionLocal } from "./session/execution/local"
+@@ -89,4 +91,6 @@
+-    LayerMap.make(
++    Effect.gen(function* () {
++      const locations: LayerMap.LayerMap<Location.Ref, LocationServices, LocationError> = yield* LayerMap.make(
+       (ref: Location.Ref) => {
+-        const allReplacements = replacements.concat([[Location.node, Location.boundNode(ref)]])
++        const defaults: LayerNode.Replacements = [[SessionExecution.node, SessionExecutionLocal.node]]
++        const allReplacements = defaults.concat(replacements, [[Location.node, Location.boundNode(ref)]])
+         // Apply replacements during hoist, not afterward: replacements can
+@@ -106,6 +110,9 @@
+-          Layer.provide(LayerNode.compile(location.hoisted)),
++          // lookup晚于map构造；绑定同一实例并保留共享memo，避免另建Session/Execution全局所有者。
++          Layer.provide(LayerNode.compile(location.hoisted, [[LocationServiceMap.node, Layer.succeed(LocationServiceMap.Service, locations)]])),
+         )
+       },
+       { idleTimeToLive: "60 minutes" },
+-    ),
++      )
++      return locations
++    }),
+   )
+diff --git a/packages/core/test/location-layer.test.ts b/packages/core/test/location-layer.test.ts
+--- a/packages/core/test/location-layer.test.ts
++++ b/packages/core/test/location-layer.test.ts
+@@ -116,1 +116,2 @@
+             "skill",
++            "task",
+@@ -132,1 +133,2 @@
+             "skill",
++            "task",
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts

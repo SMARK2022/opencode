@@ -458,24 +458,20 @@ index 0000000000000000000000000000000000000000..190f0be53e01be1fb0f12b4ca6e04226
 +| --- | --- | --- | --- | --- | --- | --- |
 +| 1 | R2 | yes | No blocking findings. | N-01 INV-07 pure helper not full failToolCall e2e; N-02 no explicit non-task negative case; N-03 E arithmetic soft; N-04 file budget soft vs user ≤4 | APPROVE | task `ses_076e600e6ffejodIvgIC9XYwqu` |
 
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
 index 39f61b437..7883bb4e0 100644
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
-@@ -140,6 +140,23 @@ export function formatTaskIdNotice(input: { provided: string }) {
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
+@@ -142,6 +142,19 @@ export function formatTaskIdNotice(input: { provided: string }) {
    })
  }
  
-+// #528：task 中断/失败投影与成功路径共用同一 resume 行。
-+// 放 util（而非 task.ts）：task 已 import message-v2，若投影再 import task 会形成加载环。
-+// 措辞与 task 工具的 task_id 参数描述对齐：模型靠 `task_id: <SessionID>` 前缀做 resume，禁止第二套方言。
++// 两代中断投影共用原始恢复提示；纯格式源不反向依赖Task或Session，避免加载环。
 +export function formatTaskResumeLine(sessionID: string) {
 +  return `task_id: ${sessionID} (for resuming to continue this task if needed)`
 +}
 +
-+// #528：仅在缺失时 prepend 一行；已含同一 session 的 task_id 子串则原样返回。
-+// 子串检测用裸 `task_id: <id>`：task.ts 的 non-abort 错误文案（Subagent failed (task_id: ...)）
-+// 已携带裸前缀，此时不得再叠一份完整行。空 text 只返回 resume 行，避免多余空段落。
++// 已有错误正文也可能包含裸task_id；不重复前缀，空正文不生成多余段落。
 +export function ensureTaskResumeVisible(text: string, sessionID: string) {
 +  const line = formatTaskResumeLine(sessionID)
 +  if (text.includes(`task_id: ${sessionID}`)) return text
@@ -483,9 +479,16 @@ index 39f61b437..7883bb4e0 100644
 +  return `${line}\n\n${text}`
 +}
 +
- function formatNotice(input: Notice) {
-   // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
-   return `<opencode_notice ${Object.entries(input)
+ // 只截模型交付文本；旧单边零上限禁用截断，显式双向预算保留source的零端退化语义。
+ export function truncateForCompaction(text: string, maxChars?: number, tailChars?: number) {
+   if (tailChars === undefined) {
+
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -1 +1 @@
+-export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, formatTaskIdNotice, truncateForCompaction, formatLongExecutionNotice, formatShellExecutionNotice, LONG_EXECUTION_NOTICE_MS } from "@opencode-ai/core/util/output-notice"
++export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, formatTaskIdNotice, formatTaskResumeLine, ensureTaskResumeVisible, truncateForCompaction, formatLongExecutionNotice, formatShellExecutionNotice, LONG_EXECUTION_NOTICE_MS } from "@opencode-ai/core/util/output-notice"
 
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 index ce90ef6e7..dae3efabd 100644
@@ -494,19 +497,17 @@ index ce90ef6e7..dae3efabd 100644
 @@ -36,6 +36,6 @@ import { iife } from "@/util/iife"
  import { errorMessage } from "@/util/error"
  import { isMedia } from "@/util/media"
--import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
-+import { ensureTaskResumeVisible, formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
+-import { formatCompactionClearedNotice, formatExecutionNotice, truncateForCompaction } from "@/util/output-notice"
++import { ensureTaskResumeVisible, formatCompactionClearedNotice, formatExecutionNotice, truncateForCompaction } from "@/util/output-notice"
  import type { SystemError } from "bun"
  import type { Provider } from "@/provider/provider"
  import { Effect, Schema } from "effect"
-@@ -584,24 +584,33 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -584,24 +584,31 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
                : undefined
              const partialOutput = interrupted ? part.state.metadata?.output : undefined
-+            // #528：task 在 create 后把 child id 写入 metadata.sessionId；中断路径无 state.output。
-+            // 投影必须 ensure resume 行，否则模型无法续跑（INV-01 投影 first divergence）。
-+            // 顺序：先 ensure 基文，再挂既有 abort notice，避免 notice 插在 task_id 之前。
-+            // 仅 tool===task 且 sessionId 为 string 时生效；其它工具保持原合同（INV-03）。
++            // Task创建后已保存真实子会话身份；即使没有partial也须交付恢复行，其他工具不变。
++            // 恢复行先于既有abort notice，不把中断伪装为完成。
 +            const taskSessionId =
 +              part.tool === "task" && typeof part.state.metadata?.sessionId === "string" ? part.state.metadata.sessionId : undefined
              if (typeof partialOutput === "string") {
@@ -535,7 +536,7 @@ index ce90ef6e7..dae3efabd 100644
                  ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
                  ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
                })
-@@ -609,16 +618,25 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
+@@ -609,16 +616,25 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
            }
            // Handle pending/running tool calls to prevent dangling tool_use blocks
            // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
@@ -793,3 +794,153 @@ index 82a52c0ae..6822972f5 100644
    // [local-smark] 旧记录无 executionElapsedMs：保持原样，不追溯伪造 elapsed
    test("old interrupted without marker stays unchanged", async () => {
      const userID = "m-user"
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -22,7 +22,7 @@
+ import { ToolRegistry } from "./registry"
+ import { Tool } from "./tool"
+ import { TaskPrompt } from "./task-prompt"
+-import { formatTaskIdNotice } from "../util/output-notice"
++import { ensureTaskResumeVisible, formatTaskIdNotice } from "../util/output-notice"
+ 
+ export const name = "task"
+ export const description = TaskPrompt.description
+@@ -117,9 +117,18 @@
+       ]
+-      const child = existing ?? (yield* sessions.create({
+-        parentID: parent.id, title: `${input.description} (@${agent.id} subagent)`,
+-        location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
+-        agent: agent.id, model, permissions: childPermission,
+-      }))
++      const child = yield* Effect.uninterruptible(Effect.gen(function* () {
++        const child = existing ?? (yield* sessions.create({
++          parentID: parent.id, title: `${input.description} (@${agent.id} subagent)`,
++          location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
++          agent: agent.id, model, permissions: childPermission,
++        }))
++        // 身份在分配后立即持久交付，取消不能落在create与父工具快照之间。
++        yield* events.publish(SessionEvent.Tool.Progress, {
++          sessionID: parent.id, timestamp: yield* DateTime.now,
++          assistantMessageID: context.assistantMessageID, callID: context.toolCallID,
++          structured: { task_id: child.id }, content: [],
++        })
++        return child
++      }))
+       // 摘录冻结于本次父历史，排队的extension不能改采稍后的其他调用上下文。
+       // 默认跟实际恢复结果，非法ID导致新建仍须带父已读摘要。
+       const parentContext = (input.inspected_files ?? (existing ? "none" : "summary")) === "summary"
+@@ -180,7 +189,7 @@
+       return yield* restore(Effect.raceFirst(background.wait({ id: info.id }).pipe(Effect.map(result => result.info)), background.waitForPromotion(info.id))).pipe(
+         Effect.flatMap((result): Effect.Effect<typeof Output.Type, ToolFailure> => {
+           if (result?.metadata?.background === true) return Effect.succeed(running)
+-          if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: result.error ?? "Task cancelled" })
++          if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: ensureTaskResumeVisible(result.error ?? "Task cancelled", child.id) })
+           return Effect.succeed({ task_id: child.id, state: "completed" as const, notice, output: result?.output ?? "" })
+         }),
+         Effect.onInterrupt(() => background.cancel(child.id).pipe(Effect.andThen(sessions.interrupt(child.id)))),
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -336,8 +336,11 @@
+           if (match && match.state.status === "running") {
+             // 普通工具进度不能擦掉已完成的权限审查；reviewer自己的新状态仍可覆盖旧状态。
+             match.state.structured = { ...event.data.structured,
+               ...(event.data.structured.autoReview === undefined && match.state.structured.autoReview !== undefined
+                 ? { autoReview: match.state.structured.autoReview } : {}),
++              // 通用取消进度没有Task身份，须保留leaf在创建后写入的真实恢复ID。
++              ...(match.name === "task" && typeof match.state.structured.task_id === "string" && event.data.structured.task_id === undefined
++                ? { task_id: match.state.structured.task_id } : {}),
+             }
+             match.state.content = [...event.data.content]
+           }
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -10,7 +10,8 @@
+ import { ReadPresentation } from "../../tool/read-presentation"
+ import { SessionMessage } from "../message"
+ import type { FileAttachment } from "../prompt"
+ import { Token } from "../../util/token"
+ import { SessionMemento } from "../compaction-memento"
+ import { SessionOverflowV1 } from "../../v1/session/overflow"
++import { ensureTaskResumeVisible } from "../../util/output-notice"
+ 
+@@ -59,16 +60,30 @@
+   if (tool.state.status === "error") {
++    // Failed沿用既有structured快照；只向Task错误添加真实恢复行，不改partial或错误类型。
++    const taskID = tool.name === "task" && typeof tool.state.structured.task_id === "string" ? tool.state.structured.task_id : undefined
++    const error = taskID ? { ...tool.state.error, message: ensureTaskResumeVisible(tool.state.error.message, taskID) } : tool.state.error
+     return ToolResultPart.make({
+       id: tool.id,
+       name: tool.name,
+       result:
+         tool.provider?.executed === true && tool.state.result !== undefined
+           ? tool.state.result
+-          : { error: tool.state.error, content: tool.state.content, structured: tool.state.structured },
++          : { error, content: tool.state.content, structured: tool.state.structured },
+       resultType: "error",
+       providerExecuted: tool.provider?.executed,
+       providerMetadata,
+     })
+   }
++  // 未终态化的Task也必须闭合tool-result；没有已分配身份时仍保持原投影。
++  if (tool.name === "task" && tool.state.status === "running" && typeof tool.state.structured.task_id === "string") {
++    return ToolResultPart.make({
++      id: tool.id,
++      name: tool.name,
++      result: { error: { type: "unknown", message: ensureTaskResumeVisible("Tool execution interrupted", tool.state.structured.task_id) }, content: tool.state.content, structured: tool.state.structured },
++      resultType: "error",
++      providerExecuted: tool.provider?.executed,
++      providerMetadata,
++    })
++  }
+ }
+ 
+ const assistant = (message: SessionMessage.Assistant, model: Model) => {
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -52,7 +52,7 @@
+-import { toDecideMessages } from "../src/session/runner/to-llm-message"
++import { toDecideMessages, toLLMMessages } from "../src/session/runner/to-llm-message"
+ import { SessionHistory } from "@opencode-ai/core/session/history"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+ import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
+ import { AgentV2 } from "@opencode-ai/core/agent"
+ import { Config } from "@opencode-ai/core/config"
+ import { ConfigCompaction } from "@opencode-ai/core/config/compaction"
+@@ -1683,15 +1683,32 @@
+       streamGate = firstGate
+       streamStarted = firstStarted
+       responses = [blank, answer]
+-      const waiting = yield* invoke(childID, "research", "none").pipe(Effect.forkChild)
++      const callID = `call-task-interrupted-${round}`
++      // 真实父工具先进入running，再让leaf分配恢复身份；取消回调复用registry的限幅结果。
++      yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID, name: "task" })
++      yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID, tool: "task", input: {}, provider: { executed: false } })
++      const waiting = yield* registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
++        sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: parentRead.assistantMessageID,
++        call: { type: "tool-call", id: callID, name: "task", input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type: "research", task_id: childID, inspected_files: "none" } },
++      }, bounded => parentEvents.publish(SessionEvent.Tool.Progress, { ...parentRead, callID, structured: {}, content: bounded.output.content }, { finalizer: true }).pipe(Effect.asVoid))), Effect.forkChild)
+       yield* Deferred.await(firstStarted)
+       if (round === 1) {
+         streamGate = secondGate
+         streamStarted = secondStarted
+         yield* Deferred.succeed(firstGate, undefined)
+         yield* Deferred.await(secondStarted)
+       }
+       yield* Fiber.interrupt(waiting)
+       const exit = yield* Fiber.await(waiting)
+       expect(Exit.isFailure(exit)).toBe(true)
+       if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
++      const projected = () => sessions.context(sessionID).pipe(Effect.map(messages => JSON.stringify(toLLMMessages(messages, model).flatMap(message => message.content.filter(part => part.type === "tool-result" && part.id === callID)))))
++      expect(yield* projected()).toContain(`task_id: ${childID} (for resuming to continue this task if needed)`)
++      expect(yield* projected()).toContain("user_abort")
++      // 终态化后仍交付同一ID一次；structured与取消正文都来自真实进度事件。
++      yield* parentEvents.publish(SessionEvent.Tool.Failed, { ...parentRead, callID, error: { type: "unknown", message: "Tool execution interrupted" }, provider: { executed: false } })
++      const failedProjection = yield* projected()
++      expect(failedProjection).toContain("Tool execution interrupted")
++      expect(failedProjection.split(`task_id: ${childID}`).length - 1).toBe(1)
++      const parentTools = (yield* sessions.context(sessionID)).flatMap(message => message.type === "assistant" ? message.content.filter(part => part.type === "tool" && part.id === callID) : [])
++      expect(parentTools).toMatchObject([{ state: { status: "error", structured: { task_id: childID } } }])

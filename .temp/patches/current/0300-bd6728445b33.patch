@@ -1,3 +1,112 @@
+diff --git a/packages/app/src/pages/session/timeline/timeline-row.ts b/packages/app/src/pages/session/timeline/timeline-row.ts
+--- a/packages/app/src/pages/session/timeline/timeline-row.ts
++++ b/packages/app/src/pages/session/timeline/timeline-row.ts
+@@ -18,4 +18,5 @@
+   export class TurnDivider extends Data.TaggedClass("TurnDivider")<{
+     userMessageID: string
+     label: "compaction" | "interrupted"
++    auto?: boolean
+   }> {}
+diff --git a/packages/app/src/pages/session/timeline/rows.ts b/packages/app/src/pages/session/timeline/rows.ts
+--- a/packages/app/src/pages/session/timeline/rows.ts
++++ b/packages/app/src/pages/session/timeline/rows.ts
+@@ -20,4 +20,5 @@
+   TurnDivider: {
+     userMessageID: string
+     label: "compaction" | "interrupted"
++    auto?: boolean
+   }
+@@ -115,4 +116,5 @@
+     const userParts = getMessageParts(userMessage.id)
+     const comments = userParts.flatMap((p) => MessageComment.fromPart(p) ?? [])
+-    const compaction = userParts.some((p) => p.type === "compaction")
++    // 保留真实压缩边界的auto，不能只剩一个布尔值而使Native丢失自动标题。
++    const compaction = userParts.find((p) => p.type === "compaction")
+     const interruptedMessageIndex = assistantMessages.findIndex((m) => m.error?.name === "MessageAbortedError")
+@@ -164,4 +166,5 @@
+         new TimelineRow.TurnDivider({
+           userMessageID: userMessage.id,
+           label: "compaction",
++          auto: compaction.auto,
+         }),
+diff --git a/packages/app/src/pages/session/timeline/message-timeline.tsx b/packages/app/src/pages/session/timeline/message-timeline.tsx
+--- a/packages/app/src/pages/session/timeline/message-timeline.tsx
++++ b/packages/app/src/pages/session/timeline/message-timeline.tsx
+@@ -1157,3 +1157,7 @@
+                   label={language.t(
+-                    turnDividerRow().label === "compaction" ? "ui.messagePart.compaction" : "ui.message.interrupted",
++                    turnDividerRow().label === "compaction"
++                      ? turnDividerRow().auto
++                        ? "ui.messagePart.compaction.auto"
++                        : "ui.messagePart.compaction"
++                      : "ui.message.interrupted",
+                   )}
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -1653,4 +1653,5 @@
+-PART_MAPPING["compaction"] = function CompactionPartDisplay() {
++PART_MAPPING["compaction"] = function CompactionPartDisplay(props) {
+   const i18n = useI18n()
+-  return <MessageDivider label={i18n.t("ui.messagePart.compaction")} />
++  // 通用part入口与Native时间线读取同一持久标记和共享词典。
++  return <MessageDivider label={i18n.t(props.part.type === "compaction" && props.part.auto ? "ui.messagePart.compaction.auto" : "ui.messagePart.compaction")} />
+ }
+diff --git a/packages/session-ui/src/components/session-turn.tsx b/packages/session-ui/src/components/session-turn.tsx
+--- a/packages/session-ui/src/components/session-turn.tsx
++++ b/packages/session-ui/src/components/session-turn.tsx
+@@ -294,4 +294,4 @@
+   const divider = createMemo(() => {
+-    if (compaction()) return i18n.t("ui.messagePart.compaction")
++    if (compaction()) return i18n.t(compaction()?.auto ? "ui.messagePart.compaction.auto" : "ui.messagePart.compaction")
+     if (interrupted()) return i18n.t("ui.message.interrupted")
+     return ""
+diff --git a/packages/ui/src/i18n/en.ts b/packages/ui/src/i18n/en.ts
+--- a/packages/ui/src/i18n/en.ts
++++ b/packages/ui/src/i18n/en.ts
+@@ -104,2 +104,3 @@
+   "ui.messagePart.compaction": "Session compacted",
++  "ui.messagePart.compaction.auto": "Auto Compaction",
+   "ui.messagePart.context.read.one": "{{count}} read",
+diff --git a/packages/ui/src/i18n/zh.ts b/packages/ui/src/i18n/zh.ts
+--- a/packages/ui/src/i18n/zh.ts
++++ b/packages/ui/src/i18n/zh.ts
+@@ -99,2 +99,3 @@
+   "ui.messagePart.compaction": "会话已压缩",
++  "ui.messagePart.compaction.auto": "自动压缩",
+   "ui.messagePart.context.read.one": "{{count}} 次读取",
+diff --git a/packages/app/src/pages/session/timeline/rows-current.test.ts b/packages/app/src/pages/session/timeline/rows-current.test.ts
+--- a/packages/app/src/pages/session/timeline/rows-current.test.ts
++++ b/packages/app/src/pages/session/timeline/rows-current.test.ts
+@@ -15,3 +15,28 @@
+ const { Timeline, TimelineRow } = await import("./rows")
+ 
+ describe("current session timeline rows", () => {
++  test.each(["auto", "manual"] as const)("preserves %s compaction without ordinary prompt text", (reason) => {
++    const source = [
++      { id: "msg_user", type: "user", text: "", time: { created: 1 } },
++      { id: "msg_compaction", type: "compaction", status: "completed", reason, summary: "summary", recent: "", time: { created: 2 } },
++    ] satisfies SessionMessageInfo[]
++    // 使用真实当前消息转换和Timeline构造，防止只给字段加类型却仍在consumer丢失。
++    const normalized = normalizeSessionMessages("ses_1", source)
++    const result = Timeline.constructSessionMessageRows(
++      source,
++      (id) => normalized.messages.find((message) => message.id === id),
++      (id) => normalized.parts.get(id) ?? [],
++      true, "idle", true,
++      normalized.messages.filter((message) => message.role === "user"),
++    )
++    const divider = result.rows.find((row) => row._tag === "TurnDivider")
++    expect(divider).toEqual(new TimelineRow.TurnDivider({
++      userMessageID: "msg_user", label: "compaction", auto: reason === "auto",
++    }))
++    // 自动/手动只改变可见文案，不改变虚拟时间线key或制造额外用户轮次。
++    expect(result.rows.map(TimelineRow.key)).toEqual([
++      "user-message:msg_user", "turn-divider:msg_user:compaction",
++    ])
++    expect(normalized.messages.filter((message) => message.role === "user")).toHaveLength(1)
++  })
++
 diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/packages/tui/test/routes/session/auto-review-render.test.tsx
 --- a/packages/tui/test/routes/session/auto-review-render.test.tsx
 +++ b/packages/tui/test/routes/session/auto-review-render.test.tsx

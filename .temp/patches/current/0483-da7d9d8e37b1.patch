@@ -799,9 +799,10 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 @@ -2,1 +2,1 @@
 -import { Effect, Schema } from "effect"
 +import { DateTime, Effect, Schema } from "effect"
-@@ -14,13 +14,30 @@ import { eq, sql, gte } from "drizzle-orm"
+@@ -14,14 +14,31 @@ import { eq, sql, gte } from "drizzle-orm"
  // #174：SessionTable 只用于枚举，不在此写用量
- import { SessionTable } from "@opencode-ai/core/session/sql"
+ import { SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
  import type { Project } from "@/project/project"
 +// #483：Project 身份读取——project group 的 label/path 来自存储行，不再用裸 ID 展示
 +import { ProjectTable } from "@opencode-ai/core/project/sql"
@@ -1754,19 +1755,19 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
 @@ -91,1 +94,1 @@
 -  const metric = options.metric ?? "tokens"
 +  const metric = options.metric ?? (by === "provider" ? "cost" : "tokens")
-@@ -119,17 +119,31 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
+@@ -128,13 +128,31 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
                    }))
                  : report.models
  
 +  // #483：ranking 行同时携带绝对值与全局占比，读者不再需要心算 share
 +  // #483：占比分母用完整分组集合而非可见行——limit 只裁剪展示，不改变份额语义
 +  const grandTotal = groups.reduce((sum, g) => sum + (metric === "cost" ? g.cost : g.tokens.total), 0)
-   // #177：显式 cost 先排序再限行，避免 tokens-first 漏掉高成本分组
-   const rows = limitRows(
--    options.sort === "cost" ? [...groups].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...groups].sort((a, b) => b.assistantCalls - a.assistantCalls) : groups,
-+    (options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : "tokens")) === "cost" ? [...groups].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...groups].sort((a, b) => by === "tool" ? b.requests - a.requests : b.assistantCalls - a.assistantCalls) : groups,
-     options.limit,
-   ).map((group) => {
+-  const rows = (by === "tool" ? limitRows(groups, options.limit) : topGroups(groups, options)).map((group) => {
++  // 保留目标统一排序器；provider仅在未指定指标/排序时用费用，tool调用数不冒充assistant次数。
++  const rows = (by === "tool"
++    ? limitRows(options.sort === "calls" ? groups.toSorted((a, b) => b.requests - a.requests) : groups, options.limit)
++    : topGroups(groups, { ...options, sort: options.sort ?? (by === "provider" && options.metric === undefined ? "cost" : undefined) })
++  ).map((group) => {
      const value = metric === "cost" ? group.cost : group.tokens.total
 -    return { label: group.label || group.id, value }
 +    // share 紧跟绝对值：空数据集合不输出 0%，避免与真实零用量混淆
@@ -1905,32 +1906,24 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
    ].join("\n")
  
  // #174：models 页按 metric 选 cost 或 tokens
-@@ -485,13 +540,2 @@
+@@ -490,9 +540,2 @@
 -export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
 -  [
 -    ...header(report, "stats models", options.color),
 -    ...renderRankBars({
--      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
--      rows: limitRows(
--        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
--        options.limit,
--      ).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
+-      rows: topGroups(report.models, options).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
 -    }),
 -    ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
 -    ...renderGroupDetails(report.models, options),
 -  ].join("\n")
 +export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
 +  [...header(report, "stats models", options.color), renderBreakdown(report, { ...options, by: "model" })].join("\n")
-@@ -500,13 +544,2 @@
+@@ -501,9 +544,2 @@
 -export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
 -  [
 -    ...header(report, "stats providers", options.color),
 -    ...renderRankBars({
--      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
--      rows: limitRows(
--        options.sort === "cost" ? [...report.providers].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers,
--        options.limit,
--      ).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
+-      rows: topGroups(report.providers, options).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
 -    }),
 -    ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
 -    ...renderGroupDetails(report.providers, options),
@@ -3037,6 +3030,15 @@ diff --git a/packages/opencode/test/cli/stats-money.test.ts b/packages/opencode/
 @@ -22,1 +26,1 @@
 -  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[^\n]*cost=0\.25/)
 +  expect(renderSessions(report, { color: "never" })).toMatch(/sample-session[\s\S]*\$0\.2500/)
+@@ -42,3 +45,6 @@
+-      // 排名条与明细必须各出现一次，同一 limit 不能在两处选择不同对象。
+-      expect(text.split(first)).toHaveLength(3)
++      // 新定量面板会再次显示实体；分别锁定排名和原明细各一次，不能用整页次数限制完整信息。
++      const detailAt = text.indexOf(`${first} cost=`)
++      expect(detailAt).toBeGreaterThanOrEqual(0)
++      expect(text.slice(0, detailAt).split(first)).toHaveLength(2)
++      expect(text.split(`${first} cost=`)).toHaveLength(2)
+       expect(text).not.toContain(sort === "cost" ? "token-top" : "cost-top")
 
 diff --git a/packages/web/src/content/docs/cli.mdx b/packages/web/src/content/docs/cli.mdx
 --- a/packages/web/src/content/docs/cli.mdx

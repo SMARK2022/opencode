@@ -12,6 +12,212 @@ Content-Transfer-Encoding: 8bit
 
 复用现有用户卡片和 Revert 路径，保持 Agent 颜色、普通消息动作与旧记录兼容。
 
+diff --git a/packages/tui/src/routes/session/goal-continuation.ts b/packages/tui/src/routes/session/goal-continuation.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/routes/session/goal-continuation.ts
+@@ -0,0 +1,50 @@
++import type { Part } from "@opencode-ai/sdk/v2"
++
++const GOAL_CONTINUATION_LABEL = {
++  continue: "CONTINUE",
++  replan: "REPLAN",
++  "block-check": "BLOCK CHECK",
++} as const
++
++// exact 根标签只服务已经落库的 pre-marker 记录，正文片段和普通用户 XML 不属于 Goal 卡片。
++const GOAL_CONTINUATION_ENVELOPE = /^<session-goal-continuation>\n[\s\S]*\n<\/session-goal-continuation>$/
++
++function goalObjective(text: string) {
++  const match = text.match(/<objective>([\s\S]*?)<\/objective>/)
++  if (!match) return
++  // producer 只转义这三种实体；amp 最后还原，避免用户原文 &lt; 被二次解码。
++  return match[1].trim().replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&")
++}
++
++export function goalContinuation(parts: Part[]) {
++  const part = parts.find(
++    item => item.type === "text" && item.synthetic &&
++      (item.metadata?.goal_continuation === true || GOAL_CONTINUATION_ENVELOPE.test(item.text)),
++  )
++  if (!part || part.type !== "text") return
++  const objective = goalObjective(part.text)
++  const storedMode = part.metadata?.goal_continuation_mode
++  // 只为 shipped 历史推断缺失 mode；未知的已存值不能退回 CONTINUE 隐藏契约漂移。
++  const mode =
++    storedMode === "continue" || storedMode === "replan" || storedMode === "block-check"
++      ? storedMode
++      : storedMode === undefined
++        ? part.text.includes('<strategy-switch mode="breadth-first-replan">')
++          ? "replan"
++          : "continue"
++        : undefined
++  if (!objective || !mode) return
++  const turn = part.metadata?.goal_continuation_turn
++  const maxTurns = part.metadata?.goal_continuation_max_turns
++  // turn/max 必须是同一条消息的成对正整数，不读取当前 Goal 或按历史索引制造计数。
++  const count =
++    typeof turn === "number" &&
++    Number.isSafeInteger(turn) &&
++    turn > 0 &&
++    typeof maxTurns === "number" &&
++    Number.isSafeInteger(maxTurns) &&
++    maxTurns > 0
++      ? `${turn} / ${maxTurns}`
++      : undefined
++  return { objective, label: GOAL_CONTINUATION_LABEL[mode], count }
++}
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -133,4 +133,6 @@
+     ...Base,
+     messageID: SessionMessage.ID,
+     text: Schema.String,
++    // 消息展示快照属于 durable data；envelope metadata 不参与事件重放。
++    metadata: SessionMessage.Synthetic.fields.metadata,
+   },
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -172,3 +172,3 @@
+             // 与其他消息同样保存既有事件metadata，展示标记不改变synthetic授权身份。
+-            metadata: event.metadata,
++            metadata: event.data.metadata ? { ...event.metadata, ...event.data.metadata } : event.metadata,
+             time: { created: event.data.timestamp },
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -182,4 +182,5 @@
+               type: "synthetic",
+               sessionID: event.data.sessionID,
+               text: event.data.text,
++              metadata: event.data.metadata ? { ...event.metadata, ...event.data.metadata } : event.metadata,
+               time: { created: event.data.timestamp },
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -214,1 +214,1 @@
+-      goal?: SessionGoal.Goal; turns: number
++      goal?: SessionGoal.Goal & { viewMode: "continue" | "replan" | "block-check"; maxTurns: number }; turns: number
+@@ -257,8 +257,16 @@
+           if (continuation.goal) {
++            const pending = continuation.goal
+             const goal = yield* goals.get(session.id)
+             continuation.goal = undefined
+             if (Option.isSome(goal) && goal.value.status === "active") {
+               yield* events.publish(SessionEvent.Synthetic, {
+                 sessionID: session.id, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now,
+                 text: SessionGoal.continuationPrompt(goal.value, continuation.mode),
++                // 候选模式和额度在 admission 时采样，发布成功后才递增本 drain 的计数。
++                metadata: {
++                  goal_continuation: true,
++                  goal_continuation_mode: pending.viewMode,
++                  goal_continuation_turn: continuation.turns + 1,
++                  goal_continuation_max_turns: pending.maxTurns,
++                },
+               })
+@@ -759,8 +767,14 @@
+                 // 只在既有 eligible completion 边界计一次，provider step 或 compaction 不另计轮。
++                const messages = yield* SessionHistory.goalTurnMessages(db, input.sessionID)
+                 const signal = SessionGoalProgress.absorbGoalTurnEvidence(
+-                  SessionGoalProgress.nativeEvidence(yield* SessionHistory.goalTurnMessages(db, input.sessionID)), location.directory, continuation.progressLedger,
++                  SessionGoalProgress.nativeEvidence(messages), location.directory, continuation.progressLedger,
+                 )
+                 SessionGoalProgress.updateGoalProgressGate(continuation.progressGate, signal)
+                 continuation.mode = continuation.progressGate.replanRequired ? "replan" : "ordinary"
+-                continuation.goal = goal.value
++                continuation.goal = {
++                  ...goal.value, maxTurns: maxGoalTurns,
++                  // blockedAttempt 已由真实 GoalTool 校验并保存，不从 prose 或可变状态反推。
++                  viewMode: messages.some(message => message.type === "assistant" && message.content.some(part => part.type === "tool" && part.name === "goal" && part.state.status === "completed" && part.state.structured.blockedAttempt !== undefined))
++                    ? "block-check" : continuation.mode === "replan" ? "replan" : "continue",
++                }
+                 needsContinuation = true
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -39,1 +39,2 @@
+ import { SessionMessage } from "@opencode-ai/core/session/message"
++import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater"
+@@ -768,2 +769,7 @@
+     expect(userTexts(requests[3]!).at(-1)).toContain('mode="breadth-first-replan"')
++    const continuations = (yield* session.context(sessionID)).filter(message => message.type === "synthetic")
++    expect(continuations.map(message => message.metadata)).toEqual([
++      { goal_continuation: true, goal_continuation_mode: "continue", goal_continuation_turn: 1, goal_continuation_max_turns: 2 },
++      { goal_continuation: true, goal_continuation_mode: "replan", goal_continuation_turn: 2, goal_continuation_max_turns: 2 },
++    ])
+     expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
+@@ -837,2 +843,13 @@
+     const goalDatabase = yield* Database.Service
++    // 验证真正存入事件 data 的快照；重放不能依赖只存在于实时 envelope 的字段。
++    const recorded = yield* goalDatabase.db.select().from(EventTable).where(eq(EventTable.aggregate_id, sessionID)).all().pipe(Effect.orDie)
++    expect(recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1)).map(event => event.data.metadata))
++      .toEqual(continuations.map(message => message.metadata))
++    const replayed: SessionMessageUpdater.MemoryState = { messages: [] }
++    for (const event of recorded.filter(event => event.type === EventV2.versionedType(SessionEvent.Synthetic.type, 1))) {
++      yield* SessionMessageUpdater.update(SessionMessageUpdater.memory(replayed), Schema.decodeUnknownSync(SessionEvent.Synthetic)({
++        id: event.id, type: SessionEvent.Synthetic.type, data: event.data,
++      }))
++    }
++    expect(replayed.messages.map(message => message.metadata)).toEqual(continuations.map(message => message.metadata))
+     const beforeReminder = yield* SessionHistory.goalTurn(goalDatabase.db, sessionID)
+@@ -853,2 +870,5 @@
+     expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ status: "blocked", reason: "persistent blocker" })
++    expect((yield* session.context(sessionID)).filter(message => message.type === "synthetic").at(-1)?.metadata).toEqual({
++      goal_continuation: true, goal_continuation_mode: "block-check", goal_continuation_turn: 1, goal_continuation_max_turns: 2,
++    })
+ 
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -1159,6 +1159,7 @@ export type SessionsHistoryOutput = {
+           readonly sessionID: string
+           readonly messageID: string
+           readonly text: string
++          readonly metadata?: { readonly [x: string]: JsonValue }
+         }
+       }
+     | {
+@@ -1790,6 +1791,7 @@ export type SessionsEventsOutput =
+         readonly sessionID: string
+         readonly messageID: string
+         readonly text: string
++        readonly metadata?: { readonly [x: string]: unknown }
+       }
+     }
+   | {
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -1021,3 +1021,6 @@
+           messageID: string
+           text: string
++          metadata?: {
++            [key: string]: unknown
++          }
+         }
+@@ -3924,3 +3927,6 @@ export type SyncEventSessionNextSynthetic = {
+       messageID: string
+       text: string
++      metadata?: {
++        [key: string]: unknown
++      }
+     }
+@@ -4960,3 +4966,6 @@ export type SessionNextSynthetic = {
+     messageID: string
+     text: string
++    metadata?: {
++      [key: string]: unknown
++    }
+   }
+@@ -7239,3 +7248,6 @@ export type EventSessionNextSynthetic = {
+     messageID: string
+     text: string
++    metadata?: {
++      [key: string]: unknown
++    }
+   }
 diff --git a/docs/plans/goal-continuation-card-badges.md b/docs/plans/goal-continuation-card-badges.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..ce994b8f96c0865ae9289a6901b3b3fcfa50cc08
@@ -885,7 +1091,12 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
 index beb7585eb..5292a4e23 100644
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx
-@@ -1519,12 +1519,13 @@ export function Session() {
+@@ -17,3 +17,4 @@
+ } from "solid-js"
+ import { sessionMessageContentWidth } from "./layout"
++import { goalContinuation } from "./goal-continuation"
+ 
+@@ -1494,12 +1495,13 @@ export function Session() {
                        <Match when={message.role === "user"}>
                          <UserMessage
                            index={index()}
@@ -900,70 +1111,10 @@ index beb7585eb..5292a4e23 100644
                                  setPrompt={(promptInfo) => prompt?.set(promptInfo)}
                                  submit={() => promptRef.current?.submit()}
                                />
-@@ -1630,34 +1631,92 @@ export function Session() {
+@@ -1606,34 +1608,32 @@ export function Session() {
    )
  }
  
-+const GOAL_CONTINUATION_LABEL = {
-+  continue: "CONTINUE",
-+  replan: "REPLAN",
-+  "block-check": "BLOCK CHECK",
-+} as const
-+
-+// #520：exact 根标签把 pre-marker 历史限定在真实 shipped producer，普通 synthetic XML 不进入 Goal 卡片。
-+// 首尾锚定要求整个 TextPart 就是 continuation envelope，避免正文片段偶然命中。
-+const GOAL_CONTINUATION_ENVELOPE = /^<session-goal-continuation>\n[\s\S]*\n<\/session-goal-continuation>$/
-+
-+function goalObjective(text: string) {
-+  // #520：objective 标签是 shipped envelope 的稳定字段；这里只提取显示正文，不解释其余模型指令。
-+  const match = text.match(/<objective>([\s\S]*?)<\/objective>/)
-+  if (!match) return
-+  // continuationPrompt 只转义这三种 XML 实体；ampersand 最后还原，避免把用户原文 `&lt;` 二次解码。
-+  return match[1].trim().replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&")
-+}
-+
-+// #520：view model 只携带卡片真正需要的事实，避免让 JSX 接触原始 metadata 或 XML。
-+// 导出供 packages/tui 行为测试直接锁定 mode 推断与计数配对规则（源仓在 session-render harness 中覆盖）。
-+export function goalContinuation(parts: Part[]) {
-+  // 新记录优先依赖结构化 marker；exact envelope 仅服务已经落库的 pre-marker Message。
-+  // synthetic 要求阻止真实用户恰好输入同样 XML 时被降级成 Revert-only 卡片。
-+  const part = parts.find(
-+    (item) =>
-+      item.type === "text" &&
-+      item.synthetic &&
-+      (item.metadata?.goal_continuation === true || GOAL_CONTINUATION_ENVELOPE.test(item.text)),
-+  )
-+  if (!part || part.type !== "text") return
-+  const objective = goalObjective(part.text)
-+  const storedMode = part.metadata?.goal_continuation_mode
-+  // detail metadata 上线前已经持久化的 Message 只拥有 marker/XML；兼容分支严格绑定 shipped tag，
-+  // 不从英文 Tool prose、当前 Goal 状态或 Message 序号猜测历史展示事实。
-+  // 已存在但未知的 mode 表示契约不匹配，不能再退回 CONTINUE 掩盖 producer 错误。
-+  const mode =
-+    storedMode === "continue" || storedMode === "replan" || storedMode === "block-check"
-+      ? storedMode
-+      : storedMode === undefined
-+        ? part.text.includes('<strategy-switch mode="breadth-first-replan">')
-+          ? "replan"
-+          : "continue"
-+        : undefined
-+  if (!objective || !mode) return
-+  const turn = part.metadata?.goal_continuation_turn
-+  const maxTurns = part.metadata?.goal_continuation_max_turns
-+  // SDK metadata 是 unknown；只接收内部 producer 承诺的正整数，不在 TUI 构造第二套计数语义。
-+  // turn 与 max 必须成对有效；历史 Message 缺少任一值时宁可整体省略计数。
-+  const count =
-+    typeof turn === "number" &&
-+    Number.isSafeInteger(turn) &&
-+    turn > 0 &&
-+    typeof maxTurns === "number" &&
-+    Number.isSafeInteger(maxTurns) &&
-+    maxTurns > 0
-+      ? `${turn} / ${maxTurns}`
-+      : undefined
-+  return { objective, label: GOAL_CONTINUATION_LABEL[mode], count }
-+}
-+
  function UserMessage(props: {
    message: UserMessage
    parts: Part[]
@@ -1004,7 +1155,7 @@ index beb7585eb..5292a4e23 100644
    const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
    const { theme } = useTheme()
    const [hover, setHover] = createSignal(false)
-@@ -1670,7 +1729,7 @@ function UserMessage(props: {
+@@ -1646,7 +1646,7 @@ function UserMessage(props: {
  
    return (
      <>
@@ -1013,7 +1164,7 @@ index beb7585eb..5292a4e23 100644
          <box
            id={props.message.id}
            ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
-@@ -1686,14 +1745,31 @@ function UserMessage(props: {
+@@ -1662,14 +1662,31 @@ function UserMessage(props: {
              onMouseOut={() => {
                setHover(false)
              }}
@@ -1047,7 +1198,7 @@ index beb7585eb..5292a4e23 100644
              <Show when={files().length}>
                <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                  <For each={files()}>
-@@ -1732,7 +1808,7 @@ function UserMessage(props: {
+@@ -1708,7 +1725,7 @@ function UserMessage(props: {
        </Show>
        <Show when={compaction()}>
          <box
@@ -1061,7 +1212,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 index 1bcf67bff..9a0d3178f 100644
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
-@@ -58,7 +58,7 @@ import { InstanceState } from "@/effect/instance-state"
+@@ -51,7 +51,7 @@ import { InstanceState } from "@/effect/instance-state"
  import { TaskTool, type TaskPromptOps } from "@/tool/task"
  import { SessionRunState } from "./run-state"
  import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -1070,7 +1221,7 @@ index 1bcf67bff..9a0d3178f 100644
  import { EventV2Bridge } from "@/event-v2-bridge"
  import { Database } from "@opencode-ai/core/database/database"
  import { ModelV2 } from "@opencode-ai/core/model"
-@@ -2009,6 +2009,30 @@ const layer = Layer.effect(
+@@ -1678,6 +1678,30 @@ const layer = Layer.effect(
                    const continuationMode: SessionGoal.ContinuationMode = goalProgressGate.replanRequired
                      ? "replan"
                      : "ordinary"
@@ -1101,7 +1252,7 @@ index 1bcf67bff..9a0d3178f 100644
                    // 注入 synthetic user message 作为续跑 prompt；ordinary/replan 只是同一操作的文本模式。
                    // noReply=true 避免递归触发 loop；source="system_continue" 供 request usage 追踪
                    // orDie 将 Image.Error 转为 defect，保持 runLoop 的 error 类型为 never
-@@ -2018,15 +2042,26 @@ const layer = Layer.effect(
+@@ -1687,15 +1711,26 @@ const layer = Layer.effect(
                      source: "system_continue",
                      agent: lastUser.agent,
                      model: { providerID: lastUser.model.providerID, modelID: lastUser.model.modelID },
@@ -1180,19 +1331,15 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3f9aa809d230dced627e7377b9d472fe79dbeadd
 --- /dev/null
 +++ b/packages/tui/test/routes/session/goal-continuation-card.test.tsx
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,169 @@
 +/** @jsxImportSource @opentui/solid */
 +import { describe, expect, test } from "bun:test"
 +import { readFileSync } from "node:fs"
 +import path from "node:path"
-+import { goalContinuation } from "../../../src/routes/session"
++import { goalContinuation } from "../../../src/routes/session/goal-continuation"
 +
-+// #520：Goal 续跑卡片 view-model 契约测试。
-+// 源仓在 session-message-render harness（opencode 包内 1000+ 行全 Session frame 渲染）中
-+// 锁定同样的规则；目标 v1.18.32 TUI 独立成包且无该 harness，故按 reasoning-disclosure 先例
-+// 将纯派生层导出为 seam，在这里锁定 mode 推断、legacy 兼容、计数配对与拒绝边界。
-+// JSX 集成（badge 布局、dialog 过滤）是 view model 上的声明式粘合，由 typecheck 与
-+// prompt.test 的 producer 契约共同覆盖。
++// 直接执行路由使用的纯派生函数，覆盖持久快照与历史数据，不加载 Session JSX 或 renderer。
++// 颜色、间距和动作绑定另由下方模板合同核对；这不冒充完整 frame/hitbox 认证。
 +
 +type PartLike = Parameters<typeof goalContinuation>[0][number]
 +
@@ -1359,7 +1506,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 index 12a61a3a0..1ed5bde6f 100644
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts
-@@ -4116,10 +4116,63 @@ it.instance(
+@@ -4464,10 +4464,63 @@ it.instance(
        expect(continuations.length).toBe(1)
  
        // 续跑 prompt 不包含错误消息内容
@@ -1425,9 +1572,8 @@ index 12a61a3a0..1ed5bde6f 100644
      }),
    { git: true },
    30_000,
-@@ -4860,18 +4913,21 @@ it.instance(
+@@ -5203,17 +5256,20 @@ it.instance(
  )
- 
  // #517：只提取持久化 synthetic user Part，避免把 provider 的普通 user/tool 文本误当续跑结果。
 -function continuationTexts(msgs: MessageV2.WithParts[]) {
 +// #520：返回完整 TextPart 让行为测试读取公开 metadata，同时保留旧 helper 对正文的既有断言。
@@ -1451,7 +1597,7 @@ index 12a61a3a0..1ed5bde6f 100644
  // #517：progress gate——两轮无 structured 证据后，下一条 continuation 必须进入 BFS replan。
  it.instance(
    "goal progress gate switches to replan after two no-evidence completions",
-@@ -4902,6 +4958,21 @@ it.instance(
+@@ -5244,6 +5300,21 @@ it.instance(
        expect(texts[0]).not.toContain("<strategy-switch")
        expect(texts[1]).toContain('mode="breadth-first-replan"')
        expect(texts[1]).toContain("Explore breadth-first")

@@ -340,7 +340,7 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index 35a903a63..4a61d4905 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
-@@ -311,20 +311,349 @@ async function spawnEnsureLauncher(lockPath: string) {
+@@ -311,17 +311,346 @@ async function spawnEnsureLauncher(lockPath: string) {
    return { proc, lock }
  }
  
@@ -693,9 +693,6 @@ index 35a903a63..4a61d4905 100644
 +    DAEMON_START_TIMEOUT_MS + 60_000,
 +  )
 +
-   // #532：独立 lock/XDG/DB 保证该查询不可能观察或停止开发者真实 daemon。
-   // running=false 是公开 expected literal，测试不读取 private lock parser 返回类型。
-   // lock 仍不存在证明 status 没有把 read 操作偷偷升级为 ensure。
 @@ -1855,64 +2184,9 @@ test(
          )
        }

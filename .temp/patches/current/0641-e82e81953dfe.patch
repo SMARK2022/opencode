@@ -16,7 +16,7 @@ Content-Transfer-Encoding: 8bit
 1. 位置参数、PowerShell编码传输与Python改写归Core Shell；在同一owner修正eval与最终状态，删除猜测改写，并同步V1/V2实际消费者。普通执行、压缩、捕获、取消及历史可选输出字段保持原样。
 2. 预检与AST事实迁至Core permission/precheck和shell/parse；引用兼容仍由既有Shell.parse统一入口完成，保留WASM惰性加载、cmd兼容、bind值池和五级风险，不恢复旧parser。
 3. V1环境已每轮读取cfg.shell，V2由selectedShell统一配置与执行，无需恢复旧getEnvExtras。配置变化回归沿真实Session Context Epoch、私有持久行和updates合同验证。
-4. 原生引用、多行及5.1 native binder指导落共享Shell.guidance，V1/V2都可消费；V1 profile保留调用路径和流合并说明。notice沿既有formatter透传shell名，不增加运行时分支。
+4. 原生引用、多行及5.1 native binder指导落共享Shell.guidance，V1/V2都可消费；V1 profile保留调用路径说明，stderr原话由共享guidance提供。notice沿既有formatter透传shell名，不增加运行时分支。
 5. parameterSchema随实际shell描述原生脚本，目标description仍为可选第五字段、仅command必填。预算基线由未改的640渲染结果冻结，包含已有共享Shell/Git指导，不用旧计数删减这些规则。
 6. opt-in评测器保留固定fixture、模型授权、预算、账本与审批。装配使用目标LayerNode、Core Database和现有Session表，恢复source的会话身份与Clock冻结；工具广告复用实际生产formatter，不改变生产API迎合评测器。
 7. 原测试按现有owner和真实前像适配；旧Python改写用例改为原生正文、码点、stdin、两门禁与拒绝后零执行的可观测合同。评测器及真实模型调用不属于默认测试入口。
@@ -755,13 +755,15 @@ index 2908910..8bb2afa 100644
      ]
    }
    if (n === "cmd") return ["/c", command]
-@@ -549,9 +557,17 @@ export function guidance(file: string, platform: NodeJS.Platform) {
+@@ -549,11 +557,19 @@ export function guidance(file: string, platform: NodeJS.Platform) {
    return [
      `Shell: ${file}`,
 +    "JSON decoding happens once; execute native quoting and newlines without extra escaping. Native multiline scripts are allowed.",
      // PowerShell 跨平台仍使用自身语法，不能根据 OS 把它误判为 Bash。
      ...(ps(file) ? [
        "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
+       // stderr已由同一个进程handle采集，保留源提示原话而非另行合并流。
+       "Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.",
 +      // 引用合同随实际Shell source共享给V1/V2，不在两个工具入口各造一份解释器说明。
 +      '- PowerShell expands $name and evaluates $(...) inside double quotes; use "..." when you want those local values.',
 +      "- In single-quoted strings, PowerShell leaves $name and $(...) unevaluated; backslash is ordinary. Write '' for a single quote.",
@@ -777,15 +779,6 @@ diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
 index b20df20..5f6cadf 100644
 --- a/packages/core/test/shell.test.ts
 +++ b/packages/core/test/shell.test.ts
-@@ -3,7 +3,8 @@ import path from "path"
- import { Shell } from "@opencode-ai/core/shell"
- import { ShellRemote } from "@opencode-ai/core/shell-remote"
- import { FSUtil } from "@opencode-ai/core/fs-util"
- import { which } from "@opencode-ai/core/util/which"
-+import { tmpdir } from "./fixture/tmpdir"
- 
- const withShell = async (shell: string | undefined, fn: () => void | Promise<void>) => {
-   const prev = process.env.SHELL
 @@ -22,6 +23,43 @@ const withShell = async (shell: string | undefined, fn: () => void | Promise<voi
  }
  
@@ -1515,7 +1508,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
            truncated: cut,
 -          // [local-smark] 规范化生效时记录 adaptation tag，便于数据库度量和后续诊断
 -          ...(input.adaptation ? { commandAdaptation: input.adaptation } : {}),
-           ...((cut || compressed.text !== raw || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
+           ...((transformed || cut || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || diagnostic.discardedChars > 0) && file ? { outputPath: file } : {}),
            // truncated 只表示窗口损失，compressed 的收益针对本次可见捕获计算。
            ...bashCompressionMetadata(compressed.stats),
            durationMs: Date.now() - started,
@@ -1568,52 +1561,57 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
    // description 是调用意图，不参与命令拼接，也不替代原始命令授权资源。
    description: Schema.String.pipe(Schema.optional).annotate({
      description: "Clear, concise description of what this command does in 5-10 words. Example: git status -> Shows working tree status.",
-@@ -193,9 +193,7 @@ const layer = Layer.effectDiscard(
+@@ -201,9 +201,7 @@ const layer = Layer.effectDiscard(
                // 配置只采样一次，兼容检查和最终 spawn 必须使用同一个实际 shell。
                const entries = yield* config.entries()
                const shell = selectedShell(entries)
 -              const normalization = Shell.normalizePowerShellInlinePython(input.command, shell)
 -              // 两道权限门共享最终源码；原始command仍是授权与保存资源，audit只用于拒绝。
--              const evidence = normalization ? { inline_scripts: [normalization.source], raw_patterns: [normalization.audit] } : {}
+-              const evidence = normalization ? { inline_scripts: [normalization.source] } : {}
 +              // 两道门禁与实际进程共享原生正文；源码事实由Core解析层提取，不再猜测改写Python。
                const remote = ShellRemote.ranges(input.command, Shell.name(shell))
                // Windows PowerShell 递归检查命令节点；解析失败不能退回浅层扫描，Tree 在检查后释放。
-               const heads = process.platform === "win32" && Shell.ps(shell)
-@@ -237,6 +235,6 @@ const layer = Layer.effectDiscard(
+               const scan = Shell.name(shell) === "cmd" ? { patterns: [], raw: [], heads: [] } : yield* Effect.gen(function* () {
+@@ -263,5 +261,5 @@
                    sessionID: context.sessionID,
                    agent: context.agent,
 -                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
 +                  metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
                    source,
                  })
-               // 路径提示只看宿主片段；掩去客体载荷时保持偏移和后续本地命令。
-@@ -252,6 +250,6 @@ const layer = Layer.effectDiscard(
-                 sessionID: context.sessionID,
+@@ -279,10 +277,9 @@
                  agent: context.agent,
--                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent, ...evidence },
-+                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
+                 metadata: {
+                   action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent,
+-                  ...evidence,
+                   // 只有leaf产生的AST证据参与规则匹配；原资源与save继续表示整条原始调用。
+                   ...(scan.patterns.length && (scan.patterns.length !== 1 || scan.patterns[0] !== input.command) ? { canonical_patterns: scan.patterns } : {}),
+-                  // 规范化audit补充同一AST的拒绝证据，不能覆盖env等原始差异。
+-                  ...(scan.raw.length || normalization ? { raw_patterns: [...scan.raw, ...(normalization ? [normalization.audit] : [])] } : {}),
++                  // 原始拒绝证据仍来自同一AST，不再引入猜测改写后的audit正文。
++                  ...(scan.raw.length ? { raw_patterns: scan.raw } : {}),
+                 },
                  source,
-               })
- 
-@@ -271,7 +269,7 @@ const layer = Layer.effectDiscard(
+@@ -337,7 +334,7 @@
+               const started = yield* Clock.currentTimeMillis
                const limits = yield* outputStore.limits()
                // 目录参数由 Location 解析并授权，实际进程只能使用已经确认的 canonical 目录。
-               // Core 使用同一实际 shell 生产 argv，授权资源仍是上方的 input.command。
+               // 共用无profile的UTF-8 argv，原始命令仍是授权资源，执行与capture各只有一次。
 -              const invocation = Shell.cmd(shell, normalization?.command ?? input.command)
 +              const invocation = Shell.cmd(shell, input.command)
                const command = ChildProcess.make(invocation.command, invocation.args, {
                  cwd: target.canonical,
-                 shell: invocation.shell,
-@@ -323,7 +321,6 @@ const layer = Layer.effectDiscard(
-                   timeout: true,
-                   ...(warnings.length ? { warnings } : {}),
-                   durationMs,
--                  ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
-                   // 超时正文未展示原始流，诊断快照全部来自隐藏输出。
-                   contextOutput: [ `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`, renderDiagnosticAppendix(diagnostic, { durationMs, exitCode: null, config: { enabled } }) ].filter(Boolean).join("\n\n"),
-                   diagnosticErrorLikeLines: diagnostic.errorLikeLines,
-@@ -358,7 +355,6 @@ const layer = Layer.effectDiscard(
-                 truncated: result.outputTruncated === true,
+@@ -371,7 +368,8 @@
+               const outcome = interrupted ? { interrupted: true } : result ? { exit: result.exitCode } : { timeout: true }
+               // 两代共用唯一outcome policy；READY和原文仍由原capture/finish保存。
+               const executionNotice = formatShellExecutionNotice({
++                shell: Shell.name(shell),
+                 aborted: interrupted, expired: !result && !interrupted,
+                 exitCode: result?.exitCode ?? null, emptyOutput: text.length === 0,
+                 timeoutMs: timeout, elapsedMs: durationMs,
+               })
+@@ -402,7 +400,6 @@
+                 truncated,
                  compression: bashCompressionMetadata(compressed.stats),
                  durationMs,
 -                ...(normalization ? { commandAdaptation: Shell.INLINE_PYTHON_TAG } : {}),
@@ -1623,7 +1621,24 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -346,17 +346,21 @@ describe("BashTool", () => {
+@@ -87,7 +87,8 @@
+         // 只观察外层脚本块中的原始命令；偏好行数和末尾流重定向不属于用户输入。
+         const script = command.args.includes("-EncodedCommand") && argument !== undefined ? Buffer.from(argument, "base64").toString("utf16le") : undefined
++        // 固定三行完成postlude属于传输包装，观察原命令时剥除，完整argv另有独立字节预期。
+         const original = script === undefined
+           ? command.options.shell === false && Shell.name(command.command) === "cmd" ? (argument ?? "").slice(1, -1) : argument ?? command.command
+-          : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} "))
++          : script.slice(script.indexOf("& {\n") + 4, script.lastIndexOf("\n} ")).split("\n").slice(0, -3).join("\n")
+         runs.push({ command: original, executable: command.command, spawnShell: command.options.shell, cwd: command.options.cwd,
+           shell: command.options.shell === false ? command.command : command.options.shell,
+@@ -318,5 +319,5 @@
+             // 独立字节预期同时约束无profile、UTF-8前导与原命令，不能只检查编码标志。
+             if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
+               expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand",
+-                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'SilentlyContinue'", "$DebugPreference = 'SilentlyContinue'", "& {", "pwd", "} 3>&1 4>&1 5>&1 6>&1", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
++                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "$ProgressPreference = 'SilentlyContinue'", "$InformationPreference = 'Continue'", "$WarningPreference = 'Continue'", "$VerbosePreference = 'SilentlyContinue'", "$DebugPreference = 'SilentlyContinue'", "& {", "pwd", "if ($?) { exit 0 }", "if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", "exit 1", "} 3>&1 4>&1 5>&1 6>&1"].join("\n"), "utf16le").toString("base64")])
+           }),
+@@ -413,17 +414,21 @@ describe("BashTool", () => {
                    // 真实leaf/registry配已有process替身，验证双门、执行串和typed输出而不运行Python。
                    const settled = yield* settleTool(registry, call(input))
                    expect(settled.result.type).toBe("content")
@@ -1639,7 +1654,7 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
                    expect(assertions[1]?.resources).toEqual([command])
                    expect(assertions[1]?.save).toEqual([command])
                    expect(runs).toHaveLength(1)
-                   const encoded = runs[0]?.args.at(-1)
+                   const encoded = runs[0]?.args?.at(-1)
                    if (!encoded) throw new Error("expected captured transport")
                    const script = Buffer.from(encoded, "base64").toString("utf16le")
 -                  expect(script).toContain("$PSNativeCommandArgumentPassing = 'Legacy'")
@@ -1672,7 +1687,7 @@ index 5cf84f5..a4e252b 100644
      timeout: Schema.optional(PositiveInt).annotate({ description: "Optional timeout in milliseconds" }),
      workdir: Schema.optional(Schema.String).annotate({
        description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
-@@ -51,36 +54,20 @@ function shellDisplayName(name: string) {
+@@ -51,36 +54,19 @@ function shellDisplayName(name: string) {
  }
  
  function powershellNotes(name: string) {
@@ -1682,9 +1697,10 @@ index 5cf84f5..a4e252b 100644
 -- Use double quotes for interpolated strings (\`"Hello $name"\`), single quotes for verbatim strings.
 -- Prefer full cmdlet names like \`Get-ChildItem\`, \`Set-Content\`, \`Remove-Item\`, and \`New-Item\` over aliases.
 -- Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
-+  // 引用与native参数规则由Shell.guidance共享；profile保留本工具的调用路径和流合并说明。
++  // 引用、native参数与stderr原话由Shell.guidance共享；profile只保留本工具的调用路径说明。
 +  return `# ${shellDisplayName(name)} shell notes
- - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
+-- To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
++- To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.`
 -- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.
 -- Escape special characters with the PowerShell backtick character.`
 -  }
@@ -1699,7 +1715,6 @@ index 5cf84f5..a4e252b 100644
 -- Escape special characters with the PowerShell backtick character.`
 -  }
 -  return ""
-+- Do not append \`2>&1\` to PowerShell commands; the shell tool already captures stderr.`
  }
  
  function chainGuidance(name: string) {
@@ -1807,10 +1822,10 @@ index 5cf84f5..a4e252b 100644
    }
  }
  
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
 index 7883bb4..81b0b04 100644
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
 @@ -16,7 +16,7 @@ type OutputTruncatedNotice = {
  
  type ExecutionNotice = {

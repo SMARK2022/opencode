@@ -15,13 +15,18 @@ diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
 +import { PermissionV1 } from "./v1/permission"
 +import { SessionID } from "@opencode-ai/schema/session-id"
 +import { SessionMessage } from "./session/message"
-@@ -66,3 +71,6 @@
+@@ -66,3 +71,11 @@
  export class BlockedError extends Schema.TaggedErrorClass<BlockedError>()("PermissionV2.BlockedError", {
    rules: Permission.Ruleset,
 -}) {}
 +  reason: Schema.String.pipe(Schema.optional),
 +}) {
 +  override get message() { return this.reason ?? "This tool call was blocked by configured permissions." }
++}
++
++// 只交付自动审查的明确理由；静态拒绝仍保留各工具既有的错误契约。
++export function autoDeniedMessage(error: unknown) {
++  return error instanceof BlockedError && error.reason !== undefined ? error.message : undefined
 +}
 @@ -117,1 +125,5 @@
      const pending = new Map<ID, Pending>()
@@ -80,7 +85,7 @@ diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
 +            yield* events.publish(PermissionV1.Event.CircuitBroken, { sessionID, consecutive: state.consecutive, recent })
 +          }
 +        }
-+        return { effect: "deny" as const, rules: all, reason: `Auto permission preflight rejected this tool call: ${decision.reason}. Do not retry the same outcome through shell indirection, generated scripts, alternative tools, MCP tools, or other policy workarounds.` }
++        return { effect: "deny" as const, rules: all, reason: new PermissionV1.AutoDeniedError({ reason: decision.reason }).message }
 +      }
 +      if (decision.action === "ask") return { effect: "ask" as const, rules: all }
 +      record(false)
@@ -114,9 +119,19 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
                  agent: context.agent,
 +                metadata: { command: input.command, cwd: target.canonical, shell },
                  source,
+@@ -358,3 +360,3 @@
+               // 兼容错误保留可纠正的具体文字，其余既有执行错误映射不变。
+-            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute command: ${input.command}`, error }))),
++            }).pipe(Effect.mapError((error) => error instanceof ToolFailure ? error : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to execute command: ${input.command}`, error }))),
+         }),
 diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
 --- a/packages/core/src/tool/edit.ts
 +++ b/packages/core/src/tool/edit.ts
+@@ -107,3 +107,3 @@
+                         })
+-                      : new ToolFailure({ message: `Unable to edit ${input.path}` }),
++                      : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to edit ${input.path}` }),
+                   ),
 @@ -144,4 +144,5 @@
                        sessionID: context.sessionID,
                        agent: context.agent,
@@ -129,6 +144,167 @@ diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
 +                    metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
                      source: permissionSource,
                    }),
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -98,3 +98,3 @@
+                 return yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
+-              }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to write ${input.path}` }))),
++              }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to write ${input.path}` }))),
+           }),
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -86,7 +86,7 @@
+-              const fail = (path: string) => {
++              const fail = (path: string, error?: unknown) => {
+                 const prefix =
+                   applied.length === 0
+                     ? `Unable to apply patch at ${path}`
+                     : `Patch partially applied before failing at ${path}. Applied: ${applied.map((item) => item.resource).join(", ")}`
+-                return new ToolFailure({ message: prefix })
++                return new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? prefix })
+               }
+@@ -201,3 +201,3 @@
+                 return { applied, files: patchFiles }
+-              }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch"))))
++              }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch", error))))
+             },
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -154,3 +154,3 @@
+                     ? error.message
+-                    : `Unable to read ${input.path}`
++                    : PermissionV2.autoDeniedMessage(error) ?? `Unable to read ${input.path}`
+                 return new ToolFailure({ message })
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -80,3 +80,3 @@
+     source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
+-  }).pipe(Effect.mapError(error => new ToolFailure({ message: `Permission denied: ${action}`, error })))
++  }).pipe(Effect.mapError(error => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Permission denied: ${action}`, error })))
+   // 模型继续接收原生summary正文，完整响应同时经统一settlement保存在structured。
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -148,3 +148,3 @@
+       }))
+-    }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: `Unable to execute task: ${input.description}`, error }))),
++    }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to execute task: ${input.description}`, error }))),
+   }) }).pipe(Effect.orDie)
+diff --git a/packages/core/src/tool/webfetch.ts b/packages/core/src/tool/webfetch.ts
+--- a/packages/core/src/tool/webfetch.ts
++++ b/packages/core/src/tool/webfetch.ts
+@@ -175,3 +175,3 @@
+               }
+-            }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to fetch ${input.url}` }))),
++            }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to fetch ${input.url}` }))),
+         }),
+diff --git a/packages/core/src/tool/websearch.ts b/packages/core/src/tool/websearch.ts
+--- a/packages/core/src/tool/websearch.ts
++++ b/packages/core/src/tool/websearch.ts
+@@ -247,3 +247,3 @@
+               }
+-            }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to search the web for ${input.query}` })))
++            }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to search the web for ${input.query}` })))
+           },
+diff --git a/packages/core/src/tool/glob.ts b/packages/core/src/tool/glob.ts
+--- a/packages/core/src/tool/glob.ts
++++ b/packages/core/src/tool/glob.ts
+@@ -92,3 +92,3 @@
+             }).pipe(
+-              Effect.mapError(() => new ToolFailure({ message: `Unable to find files matching ${input.pattern}` })),
++              Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to find files matching ${input.pattern}` })),
+             ),
+diff --git a/packages/core/src/tool/grep.ts b/packages/core/src/tool/grep.ts
+--- a/packages/core/src/tool/grep.ts
++++ b/packages/core/src/tool/grep.ts
+@@ -141,3 +141,3 @@
+                   ? cause.message
+-                  : `Unable to grep for ${input.pattern}`,
++                  : PermissionV2.autoDeniedMessage(cause) ?? `Unable to grep for ${input.pattern}`,
+             }))),
+diff --git a/packages/core/src/tool/skill.ts b/packages/core/src/tool/skill.ts
+--- a/packages/core/src/tool/skill.ts
++++ b/packages/core/src/tool/skill.ts
+@@ -54,3 +54,3 @@
+ const unableToLoad = (name: string, error?: unknown) =>
+-  new ToolFailure({ message: `Unable to load skill ${name}`, error })
++  new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to load skill ${name}`, error })
+ 
+diff --git a/packages/core/src/tool/question.ts b/packages/core/src/tool/question.ts
+--- a/packages/core/src/tool/question.ts
++++ b/packages/core/src/tool/question.ts
+@@ -71,3 +71,3 @@
+               .pipe(
+-                Effect.mapError(() => new ToolFailure({ message: "Permission denied: question" })),
++                Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? "Permission denied: question" })),
+                 Effect.andThen(
+diff --git a/packages/core/src/tool/todowrite.ts b/packages/core/src/tool/todowrite.ts
+--- a/packages/core/src/tool/todowrite.ts
++++ b/packages/core/src/tool/todowrite.ts
+@@ -52,3 +52,3 @@
+               return { todos: input.todos }
+-            }).pipe(Effect.mapError(() => new ToolFailure({ message: "Unable to update todos" }))),
++            }).pipe(Effect.mapError((error) => new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? "Unable to update todos" }))),
+         }),
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -43,2 +43,3 @@
+ let denyAction: string | undefined
++let denyReason: string | undefined
+ let result: AppProcess.RunResult = {
+@@ -63,3 +64,3 @@
+         Effect.andThen(
+-          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void,
++          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [], reason: denyReason })) : Effect.void,
+         ),
+@@ -104,3 +105,4 @@
+   denyAction = undefined
++  denyReason = undefined
+   runFailure = undefined
+   afterPermission = () => Effect.void
+@@ -625,3 +627,10 @@
+           expect(assertions.map((item) => item.action)).toEqual(["bash"])
+           expect(runs).toEqual([])
++
++          // 拒绝正文必须进入真实结算的模型结果，且不能因此执行进程。
++          denyReason = "Automatic review rejected this operation. Do not retry through another tool."
++          expect(yield* withTool(active.path, (registry) => executeTool(registry, call({ command: "pwd" })))).toEqual({ type: "error", value: denyReason })
++          denyAction = "external_directory"
++          expect(yield* withTool(active.path, (registry) => executeTool(registry, call({ command: "pwd", workdir: outside.path })))).toEqual({ type: "error", value: denyReason })
++          expect(runs).toEqual([])
+         }),
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -27,2 +27,3 @@
+ let denyAction: string | undefined
++let denyReason: string | undefined
+ let afterRead = (_target: string, _content: Uint8Array): Effect.Effect<void> => Effect.void
+@@ -35,3 +36,3 @@
+         Effect.andThen(
+-          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void,
++          input.action === denyAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [], reason: denyReason })) : Effect.void,
+         ),
+@@ -51,3 +52,4 @@
+   denyAction = undefined
++  denyReason = undefined
+   afterRead = () => Effect.void
+ }
+@@ -284,3 +286,9 @@
+                 expect(reads).toBe(0)
+                 expect(writes).toEqual([])
++
++                // 自动拒绝保留审查反馈，但同样不能先探测文件内容。
++                denyReason = "Automatic review rejected this edit. Ask the user before attempting it again."
++                expect(yield* executeTool(registry, call({ path: "secret.txt", oldString: "secret content", newString: "replacement" }))).toEqual({ type: "error", value: denyReason })
++                expect(reads).toBe(0)
++                expect(writes).toEqual([])
+               }),
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
@@ -170,7 +346,7 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 +      // 只替换模型与运输边界；Permission、reviewer、Schema 和事件仍使用真实实现。
 +      [SessionRunnerModel.node, reviewModel], [LayerNodePlatform.llmClient, reviewClient],
 +    ],
-@@ -315,1 +346,72 @@
+@@ -315,1 +346,74 @@
 +  it.effect("routes native auto permissions through the isolated reviewer", () => Effect.gen(function* () {
 +    reviewSettings = new Config.Info({})
 +    reviewRequests.length = 0
@@ -192,6 +368,8 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 +    const denied = yield* service.assert(assertion({ action: "bash", resources: ["git status", "rm -rf /"], metadata: { command: "git status && rm -rf /" } })).pipe(Effect.flip)
 +    expect(denied).toBeInstanceOf(PermissionV2.BlockedError)
 +    expect(denied.message).toContain("Do not retry the same outcome")
++    expect(denied.message).toContain("Use a materially safer approach, or ask the user for explicit confirmation before attempting a risky operation.")
++    expect(PermissionV2.autoDeniedMessage(denied)).toBe(denied.message)
 +    expect(reviewRequests).toHaveLength(0)
 +    const edit = assertion({ action: "edit", resources: ["src/a.ts"], metadata: { filepath: "/project/src/a.ts", diff: "-old\n+new" } })
 +    expect(yield* service.ask(edit)).toMatchObject({ effect: "allow" })

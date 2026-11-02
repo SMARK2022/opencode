@@ -877,7 +877,7 @@ index da0f80cee..6efc21e90 100644
      expect(EventManifest.Durable).toBe(SchemaEventManifest.Durable)
 -    expect(EventManifest.Latest.size).toBe(88)
 +    // PartProgress 注册为 V1-only 纯广播事件后 manifest 集合 +1。
-+    expect(EventManifest.Latest.size).toBe(99)
++    expect(EventManifest.Latest.size).toBe(100)
      expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
      expect(EventManifest.Latest.get("todo.updated")).toBe(Todo.Event.Updated)
      expect(EventManifest.Latest.has("ide.installed")).toBe(false)
@@ -1272,10 +1272,10 @@ index 5694afdd3..9d1b24bcd 100644
  
  describe("public event manifest", () => {
    test("owns the complete public event surface", () => {
--    expect(EventManifest.ServerDefinitions.length).toBe(55)
--    expect(EventManifest.Definitions.length).toBe(85)
-+    expect(EventManifest.ServerDefinitions.length).toBe(68)
-+    expect(EventManifest.Definitions.length).toBe(99)
+-    expect(EventManifest.ServerDefinitions.length).toBe(67)
+-    expect(EventManifest.Definitions.length).toBe(97)
++    expect(EventManifest.ServerDefinitions.length).toBe(69)
++    expect(EventManifest.Definitions.length).toBe(100)
      expect(SessionV1.Event.Definitions).toEqual([
        SessionV1.Event.Created,
        SessionV1.Event.Updated,
@@ -1287,10 +1287,10 @@ index 5694afdd3..9d1b24bcd 100644
        SessionV1.Event.Diff,
        SessionV1.Event.Error,
      ])
--    expect(EventManifest.Latest.size).toBe(85)
--    expect(EventManifest.Durable.size).toBe(32)
-+    expect(EventManifest.Latest.size).toBe(99)
-+    expect(EventManifest.Durable.size).toBe(39)
+-    expect(EventManifest.Latest.size).toBe(97)
+-    expect(EventManifest.Durable.size).toBe(40)
++    expect(EventManifest.Latest.size).toBe(100)
++    expect(EventManifest.Durable.size).toBe(40)
 +    // V1 展示事件只扩展兼容通道，不能进入当前协议或变成逐 tick 的持久事件。
 +    expect(EventManifest.ServerDefinitions.some((event) => event.type === "message.part.progress")).toBe(false)
 +    expect(EventManifest.Durable.has("message.part.progress")).toBe(false)
@@ -1301,8 +1301,8 @@ index 5694afdd3..9d1b24bcd 100644
      expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
      expect(EventManifest.Latest.has("ide.installed")).toBe(false)
      expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
--    expect(EventManifest.Definitions.slice(40, 43)).toEqual([
-+    expect(EventManifest.Definitions.slice(47, 51)).toEqual([
+-    expect(EventManifest.Definitions.slice(48, 51)).toEqual([
++    expect(EventManifest.Definitions.slice(48, 52)).toEqual([
        SessionV1.Event.PartDelta,
 +      SessionV1.Event.PartProgress,
        SessionV1.Event.Diff,
@@ -1404,7 +1404,11 @@ diff --git a/packages/sdk/openapi.json b/packages/sdk/openapi.json
            {
              "$ref": "#/components/schemas/EventSessionDiff"
            },
-@@ -21779,6 +21782,39 @@
+@@ -22297,10 +22300,43 @@
+                     "required": ["sessionID", "messageID", "partID", "field", "delta"],
+                     "additionalProperties": false
+                   }
+                 },
                  "required": ["id", "type", "properties"],
                  "additionalProperties": false
                },

@@ -3291,6 +3291,19 @@ diff --git a/packages/opencode/test/permission/auto.test.ts b/packages/opencode/
    })
  
 
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -170,5 +170,7 @@
+           const request = assertions[0]
+           if (!request?.metadata) return yield* Effect.die("Missing edit precheck metadata")
+           expect(request.metadata.files).toEqual([{ type: "update", relativePath: "update.txt" }, { type: "delete", relativePath: "remove.txt" }])
+-          expect(PermissionPrecheck.evaluate({ permission: request.action, patterns: request.resources, metadata: request.metadata })).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
++          // 共享grammar异步化后仍消费实际工具请求，不能把Promise当已完成的分类结果。
++          const input = { permission: request.action, patterns: request.resources, metadata: request.metadata }
++          expect(yield* Effect.promise(() => PermissionPrecheck.evaluate(input))).toMatchObject({ level: "cautious", reason: "file deletion requires explicit approval" })
+         }
+
 diff --git a/packages/opencode/test/permission/precheck.test.ts b/packages/opencode/test/permission/precheck.test.ts
 --- a/packages/opencode/test/permission/precheck.test.ts
 +++ b/packages/opencode/test/permission/precheck.test.ts

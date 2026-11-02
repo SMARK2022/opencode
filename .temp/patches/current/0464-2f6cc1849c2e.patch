@@ -96,19 +96,31 @@ diff --git a/docs/opencode-deepseek--agent-workflow-forensic-report.md b/docs/op
 diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
 --- a/packages/opencode/src/session/file-evidence.ts
 +++ b/packages/opencode/src/session/file-evidence.ts
-@@ -8,1 +8,2 @@
+@@ -5,1 +5,2 @@
  import type { SessionV1 } from "@opencode-ai/core/v1/session"
 +import type { Todo } from "./todo"
-@@ -25,4 +26,5 @@
-   messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string,
-   compactionCount = 1,
-   directory = worktree,
-+  todos: readonly Todo.Info[] = [],
- ) {
-@@ -77,1 +79,1 @@
+@@ -9,5 +10,5 @@
+-export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1, directory = worktree) =>
++export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1, directory = worktree, todos: readonly Todo.Info[] = []) =>
+   FileEvidence.render(messages.flatMap((message) => message.parts.flatMap((part) =>
+     part.type === "tool" && part.tool === "read" && part.state.status === "completed"
+       ? [part.state.metadata.read] : [],
+-  )), fs, worktree, { compactionCount, searches: messages.flatMap(message => message.parts.flatMap(part => {
++  )), fs, worktree, { todos, compactionCount, searches: messages.flatMap(message => message.parts.flatMap(part => {
+diff --git a/packages/core/src/session/file-evidence.ts b/packages/core/src/session/file-evidence.ts
+--- a/packages/core/src/session/file-evidence.ts
++++ b/packages/core/src/session/file-evidence.ts
+@@ -7,1 +7,2 @@
+ import { FSUtil } from "../fs-util"
++import type { SessionTodo } from "@opencode-ai/schema/session-todo"
+@@ -40,1 +41,1 @@
+-  context: { readonly searches?: readonly SearchReceipt[]; readonly commands?: readonly CommandReceipt[]; readonly directory?: string; readonly compactionCount?: number } = {},
++  context: { readonly searches?: readonly SearchReceipt[]; readonly commands?: readonly CommandReceipt[]; readonly todos?: readonly SessionTodo.Info[]; readonly directory?: string; readonly compactionCount?: number } = {},
+@@ -79,1 +80,2 @@
 -  if (files.size === 0 && searches.size === 0 && commands.size === 0) return undefined
++  const todos = context.todos ?? []
 +  if (files.size === 0 && searches.size === 0 && commands.size === 0 && todos.length === 0) return undefined
-@@ -114,2 +116,14 @@
+@@ -117,2 +119,14 @@
 -    "", "### Lost Context Notice", "- Use current evidence before repeating reads or commands.",
 +    // Todo 使用持久化原序及四种状态，不能从工具调用历史重建另一份任务表。
 +    ...(todos.length ? [
@@ -124,6 +136,65 @@ diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/
 +    ...(todos.length > 100 ? [`Omitted: ${todos.length - 100} todos due to evidence budget.`] : []),
 +    "", "### Lost Context Notice", "- Older raw tool outputs were compacted.", "- Use current evidence before repeating reads or commands.",
      "- Treat stale evidence as advisory only.",
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -22,1 +22,2 @@
+ import type { FSUtil } from "../fs-util"
++import type { SessionTodo } from "./todo"
+@@ -105,2 +106,4 @@
+   readonly directory?: string
++  // 读取同一Location的持久Todo，不从历史工具输出反推或创建第二份状态。
++  readonly todos: SessionTodo.Interface["get"]
+ }
+@@ -333,1 +336,3 @@
+-    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, directory: dependencies.directory })
++    // 成功摘要才读取当前任务；失败和取消仍保留原交接快照。
++    const todos = yield* dependencies.todos(input.sessionID)
++    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, todos, directory: dependencies.directory })
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -36,1 +36,2 @@
+ import { SessionCompaction } from "../compaction"
++import { SessionTodo } from "../todo"
+@@ -136,1 +137,2 @@
+-    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
++    const todos = yield* SessionTodo.Service
++    const compaction = SessionCompaction.make({ events, llm, db, todos: todos.get, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
+@@ -785,1 +787,2 @@
+     SessionGoal.node,
++    SessionTodo.node,
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -63,2 +63,3 @@
+   SessionTable,
++  TodoTable,
+ } from "@opencode-ai/core/session/sql"
+@@ -2261,3 +2262,10 @@
+       responses = undefined
+       response = fragmentFixture("text", "manual-summary", ["Summary"]).completeEvents
++      // 持久任务不来自transcript；真实Native压缩必须将四态原序写入公开交接。
++      yield* Database.Service.use(({ db }) => db.insert(TodoTable).values([
++        { session_id: sessionID, position: 0, content: "Read forensic report", status: "completed", priority: "high" },
++        { session_id: sessionID, position: 1, content: "Design P0 evidence handoff", status: "in_progress", priority: "high" },
++        { session_id: sessionID, position: 2, content: "Add compaction tests", status: "pending", priority: "high" },
++        { session_id: sessionID, position: 3, content: "Discard obsolete sketch", status: "cancelled", priority: "high" },
++      ]).run().pipe(Effect.orDie))
+       yield* session.compact({ sessionID })
+@@ -2269,1 +2277,5 @@
+       if (context[0].type !== "compaction") return yield* Effect.die("Missing manual summary")
++      // 检查Ended的真实读投影；附录不会替换LLM summary，回放仍应逐字段相等。
++      for (const [status, content] of [["completed", "Read forensic report"], ["in_progress", "Design P0 evidence handoff"], ["pending", "Add compaction tests"], ["cancelled", "Discard obsolete sketch"]]) {
++        expect(context[0].file_evidence).toContain(`| ${status} | high | ${content} |`)
++      }
+@@ -2582,1 +2594,1 @@
+-          db: database.db, events, fs: fileSystem, worktree: "/project",
++          db: database.db, events, fs: fileSystem, worktree: "/project", todos: () => Effect.succeed([]),
+@@ -2635,1 +2647,1 @@
+-        const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project",
++        const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project", todos: () => Effect.succeed([]),
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts

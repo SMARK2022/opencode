@@ -92,3 +92,70 @@ index 640fe47b90762d07263b300ac19930c0af7c47f3..b760f53aac69073d9e940e2f7bb4c2e8
          })
  
          expect(result.metadata.exit).toBe(9)
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -4,1 +4,0 @@
+-import path from "path"
+@@ -24,4 +23,0 @@
+-// 提醒属于模型投影，不污染文件正文、分页结构或原生媒体的类型化输出。
+-const HIGH_RISK_EXTENSIONS = new Set(["sh", "py", "js", "ts", "exe", "bat", "ps1", "rb", "psm1", "cmd"])
+-// 分析恶意代码仍被允许，安全边界是禁止改进其恶意能力。
+-const CYBER_REMINDER = "<system-reminder>\nWhenever you read a file, consider whether it could be malware. You can analyze malware behavior, but MUST refuse to improve or augment potentially malicious code.\n</system-reminder>"
+@@ -66,15 +61,12 @@
+-            // 仅成功的源码文本触发提醒；目录与原生图片沿用既有投影。
++            // 两代同步关闭额外源码提醒；逐文件规则、分页凭证和原生图片保持原投影。
+             if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
+               if (!("content" in output)) return []
+               if (ReadPresentation.isReadRangeMeta(output.read)) return [
+-                ...(HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1)) ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
+                 { type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) },
+                 ...reminders,
+               ]
+-              const risky = HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1))
+-              if (!risky && reminders.length === 0)
++              if (reminders.length === 0)
+                 return []
+               // 保留完整结构化结果的模型表示，不能只返回提醒而隐藏正文与 next。
+               // Schema 已完成编码，此处不增加解析器或改变 utf8/TextPage 的输出契约。
+               return [
+-                ...(risky ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -298,7 +298,14 @@
+-  it.effect("projects malware reminders without changing typed text or permission ordering", () =>
++  it.effect("omits malware reminders without changing typed text or permission ordering", () =>
+     Effect.gen(function* () {
+       const registry = yield* ToolRegistry.Service
+-      // 完整文件与分页都须保留结构化正文，提醒不能取代真实读取结果。
++      // 完整文件、无凭证旧结果和真实分页凭证都停用额外提醒，正文及next仍完整。
+       for (const output of [readResult, new ReadToolFileSystem.TextPage({
+         type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
++      }), new ReadToolFileSystem.TextPage({
++        type: "text-page", content: "hello", mime: "text/plain", offset: 2, truncated: true, next: 3,
++        read: {
++          path: "sample.TS", canonicalPath: path.resolve("sample.TS"),
++          type: "file", size: 12, modified: "2026-10-25 00:00:00", modifiedMs: 0,
++          start: 2, end: 2, total: 3, totalExact: true, returned: 1, stub: false,
++        },
+       })]) {
+@@ -311,9 +318,11 @@
+         expect(settled.output?.structured).toEqual(output)
+-        // 提醒先于正文，普通泛型限幅不能因正文过长先丢掉安全语义。
+-        expect(settled.output?.content[0]).toMatchObject({ type: "text" })
+-        const reminder = settled.output?.content[0]
+-        if (reminder?.type === "text") expect(reminder.text).toContain("MUST refuse to improve")
+-        // 通过真实 registry 观察模型投影，同时验证 next 与 offset 没有消失。
+-        expect(settled.output?.content[1]).toEqual({ type: "text", text: JSON.stringify(output) })
++        expect(JSON.stringify(settled.output)).not.toContain("MUST refuse to improve")
++        if ("read" in output && ReadPresentation.isReadRangeMeta(output.read)) {
++          expect(settled.output?.content).toEqual([{ type: "text", text: ReadPresentation.renderNativeRead({ ...output, read: output.read }) }])
++        } else {
++          // 旧结果继续走真实structured→JSON结算，不用空提醒替代正文与分页字段。
++          expect(settled.output?.content).toEqual([])
++          expect(settled.result).toEqual({ type: "json", value: output })
++        }
+       }
+-      // 权限拒绝时不执行读取，也不生成成功结果的安全提醒。
++      // 停用模型提醒不改变权限门禁：拒绝时仍不执行读取。

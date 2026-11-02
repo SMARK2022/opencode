@@ -1,5 +1,46 @@
 # 0621-aede70fbccdd Record
 
+## 当前共享编辑反馈接续（2026-11-01）
+- 完整621–625新正审`ses_e69763852ffeEeCp1p0T3u0E4Z`、新逆审`ses_e69763803ffeRQwvAubGBuSVxT`均十份patch至EOF，本项及全批一致PASS/B0/G0；共享真实匹配/反馈、两代提交与formatter真值、原预算门经独立核对。整批保留Native无身份SSE冗余、既有冷页恢复及禁启动态/历史材料N，不为N返工；独立闭合625。
+- 修后最终`typecheck-0621-2026-11-01T08-29-54-392Z.md`复用620应用1项，621/621、30workspace全passed、c5de1515…安装复用/两侧unchanged；本项必要26 pass/0 fail/271 expects。未新增测试文件，保全部source切片和原1000ms性能断言；独立结论留原621–625完整双审，不将单项自验当独立PASS。
+- 三条检查cwd均为唯一宿主`packages/core`，各进程完整隔离环境采用0620本版模板（先清继承凭据/OPENCODE变量，再私有HOME/四XDG/config、内存DB、缓存临时目录、禁LSP下载/Watcher/模型fetch、关录音/E2E及hooks）。Core/V1两组生产输入与最终一致，最后仅修Native断言API，不重复跑或累加旧失败。
+```text
+bun test --timeout 10000 ../opencode/test/tool/edit.test.ts ../opencode/test/tool/apply_patch.test.ts ../opencode/test/tool/write.test.ts -t 'reports candidate lines and verified unique extension|notes own-write-after-read staleness|echoes the post-formatter diff|reflects formatter results in the echoed|description carries staleness|reports candidate lines and minimal unique extension|degrades to candidate lines|omits staleness note|lists previously read line ranges|does not count compacted reads|notes a same-named read|truncates the Changed diff|echoes the formatted delta|keeps output and metadata unchanged|keeps the abort path sub-second'
+Isolated scope: D:/Temp/opencode/621-legacy-ce4268bdb7264df2b538142908ed4d5e
+bun test v1.3.14 (0d9b296a)
+ 17 pass
+ 181 filtered out
+ 0 fail
+ 48 expect() calls
+Ran 17 tests across 3 files. [6.25s]
+
+bun test --timeout 10000 test/patch.test.ts
+Isolated scope: D:/Temp/opencode/621-patch-15455bbe55484dcf82e87e24bd9b1f9d
+bun test v1.3.14 (0d9b296a)
+ 7 pass
+ 0 fail
+ 40 expect() calls
+Ran 7 tests across 1 file. [151.00ms]
+
+bun test --timeout 10000 test/tool-edit.test.ts test/tool-apply-patch.test.ts -t 'diagnoses the failed Native edit from the shared DP span|applies valid files while reporting a failed later update'
+Isolated scope: D:/Temp/opencode/621-native-final-2a49dac635d94affbd7ef8bb381539be
+bun test v1.3.14 (0d9b296a)
+ 2 pass
+ 23 filtered out
+ 0 fail
+ 183 expect() calls
+Ran 2 tests across 2 files. [2.61s]
+```
+- matcher副作用探针只用内存对象：`import { expect } from "bun:test"; const result = { type: "error", value: "Closest match at line 2\n\nown-write-note" }; console.log("before", typeof result.value, JSON.stringify(result)); expect(result).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2") }); console.log("after", typeof result.value, JSON.stringify(result));`，实际输出before string含完整note、after object且value={}。该事实解释首轮Native178断言中的旧matcher污染，不为此升级依赖或修改registry。
+
+- 08:22:11正式621/621与30workspace全passed；V1新增切片及原1000ms事故门17/0/48、共享Patch7/0/40，Native Edit六组实际反馈通过。Native ApplyPatch旧`toMatchObject`会在Bun1.3.14把实际字符串改成asymmetric matcher，导致后续新断言读不到原文；纯内存探针确认before=string、after=object/{}。仅将该处旧断言改为等强的类型/原字符串检查，保候选、时效、原文隐私与零落盘断言，不修改生产路径或Bun依赖；待官方刷新重跑。
+- 已扩既有Native Edit真实失败用例六组历史（区间融合/同名、pruned、stub、限幅、新读覆盖、自写ApplyPatch），均保零写盘断言；原生ApplyPatch既有部分失败用例补自写事实断言，未新增测试文件或删断言。手工嵌套hunk计数由只读numstat定位，已修59→48的长度笔误；该次仅结构失败，尚未进入物化或测试，不冒称运行结果。
+- Native两工具现已接真实SessionStore历史与共享原话格式；Core85行纯模块只适配正式时钟/structured/applied目标及实际Read可见边界。既有Native成功formatter/diff及registry唯一结算保持，ApplyPatch单元fixture仅补调用方历史边界，不构造真实产品。`git apply --numstat`结构通过；正在扩既有Native错误用例覆盖真实leaf反馈，未新增测试文件、未启动程序。
+- 已手改失败的六类真实前像并保全source行为：matcher/歧义诊断迁Core、boundMergedPatch原位保留、Read复用共享路径与可见性、ApplyPatch不退回旧无重写接口、两组历史fixture补totalExact。共享事实类型/原话格式迁Core供两代消费；V1扫描仍适配自己的metadata，不改变匹配、提交或权限顺序。尚未重新物化，正在完成Native历史接线与相邻fixture。
+- 616–620已由全新正反审计闭合。官方`materialize-0625-2026-11-01T07-46-43-354Z.md`完整115行确认复用620、新增0、621首错、无625成态；五项只读预研已全部收齐，未提前实施622。
+- 首次编辑前核对：Core仍是唯一matcher/diff owner，V1为facade；旧edit-apply路径、closestWindow导入、canonicalReadPath本地定义均已迁走，ApplyPatch仍保Delete+Add/Move与BOM/EOL/锁内formatter。修订重锚这些真实前像，保boundMergedPatch及全部source测试；Read fixture补现存totalExact合同。
+- Native最终formatter回写及成功diff已有完整实现，不重复构建；缺口是两工具失败历史的时效/区间/同名异路径与source文案。将共享事实格式放Core、两代只适配各自真实消息形状；不新增历史缓存/回退数据源，不重建matcher或LSP。预算预过滤只在同一2000编辑距离下界严格超限时触发，原性能断言保持。
+
 ## 本轮复查（2026-10-20）
 - 前批616–620已完整独立正反双审PASS。官方预应用625报告 `materialize-0625-2026-10-20T09-12-19-359Z.md` 实际620/625、reused620/applied0、停621、无625state；下文旧PASS和测试数字不用于本轮。
 - 五项只读预研已完成，621完整反馈与预过滤意图已按实际620 owner核对：matcher/derive与renderFileDiff都已在Core，V1为facade。歧义候选及共享扩展计算下沉现有Core patch-match，V1 edit保留自己的计数域并复用计算/格式，不反向依赖应用包。

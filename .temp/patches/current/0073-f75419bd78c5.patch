@@ -389,8 +389,8 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
 @@ -66,3 +66,4 @@
--import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
-+import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
+-import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
++import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
 +import { TestClock } from "effect/testing"
  import { asc, eq } from "drizzle-orm"
  import { testEffect } from "./lib/effect"

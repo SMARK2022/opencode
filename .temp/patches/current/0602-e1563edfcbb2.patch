@@ -504,13 +504,14 @@ diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-d
 diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/tool/file-diff.ts
 --- a/packages/opencode/src/tool/file-diff.ts
 +++ b/packages/opencode/src/tool/file-diff.ts
-@@ -2,5 +2,6 @@
+@@ -2,6 +2,7 @@
  export {
    BINARY_SCAN_CHARS,
 -  MAX_DIFF_MIDDLE_CHARS,
 +  MAX_DIFF_EDIT_LINES,
 +  MAX_DIFF_PATCH_CHARS,
    MAX_MERGED_PATCH_CHARS,
+   boundMergedPatch,
    countPatchStats,
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 --- a/packages/opencode/test/tool/apply_patch.test.ts

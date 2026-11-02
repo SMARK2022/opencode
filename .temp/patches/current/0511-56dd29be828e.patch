@@ -572,114 +572,93 @@ index 0000000000000000000000000000000000000000..c9802ebd836b9873adce7118d1017eac
 +No production code is modified by this plan revision.
 
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index eb5313c9d..236719829 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -1,6 +1,8 @@
- // #188：成功 edit/write/apply_patch 后禁止再 read 确认，工具自身会报错
+@@ -1,6 +1,7 @@
+ // 成功后的确认性复读可省略；失败恢复和未读范围仍可正常读取。
  import { Effect, Option, Schema, Scope, Stream } from "effect"
  import { NonNegativeInt } from "@opencode-ai/core/schema"
-+// #511：头采样指纹用于同版本判定，复用既有 4096B sample，零额外 I/O
 +import { Hash } from "@opencode-ai/core/util/hash"
  import * as path from "path"
  import * as Tool from "./tool"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -180,6 +182,9 @@ type ReadRangeMeta = {
-   size: number
-   modified: string
-   modifiedMs: number
-+  // #511：可选内容指纹（头部采样 sha1）。仅前向写入：新读必带；历史缺失即证明不足，
-+  // 同版本判定 fail-open 返回内容，禁止回退 size+mtime 弱键。
-+  fp?: string
-   start: number
-   end: number
-   total: number
-@@ -274,11 +279,25 @@ function collectVisibleReads(messages: Array<{ info: { role: string }; parts: an
-   return reads
- }
- 
-+// #511：同版本判定 = size 相等 ∧ modifiedMs 相等 ∧ 双侧 fp 均为非空字符串 ∧ fp 相等。
-+// 任一侧缺 fp 即不抑制（fail-open）——等长改写可用 utimes 还原 mtime，弱键不足以证明内容未变。
-+function isSameFileVersion(a: ReadRangeMeta, b: ReadRangeMeta) {
-+  return (
-+    a.size === b.size &&
-+    a.modifiedMs === b.modifiedMs &&
-+    typeof a.fp === "string" &&
-+    a.fp !== "" &&
-+    typeof b.fp === "string" &&
-+    b.fp !== "" &&
-+    a.fp === b.fp
-+  )
-+}
-+
- // #142：决定是否 stub
- function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
-   // #142：仅当同文件版本已在上下文可见时抑制输出
--  // #142：仅同 size+mtime 视为同文件版本
--  const sameVersion = visibleReads.filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
-+  // #511：三处过滤共用 isSameFileVersion（size+mtime+fp），缺 fp 一律不命中
-+  const sameVersion = visibleReads.filter((item) => isSameFileVersion(item, current))
-   // #142：完全相同 start-end 优先 stub_same_range
-   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
-   if (sameRange) return { status: "stub_same_range_visible" as const }
-@@ -292,7 +311,7 @@ function findReadStub(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
- // #142：计算 overlap note
- function findOverlapNote(visibleReads: ReadRangeMeta[], current: ReadRangeMeta) {
-   const overlaps = visibleReads
--    .filter((item) => item.modifiedMs === current.modifiedMs && item.size === current.size)
-+    .filter((item) => isSameFileVersion(item, current))
-     .map((item) => {
-       const start = Math.max(item.start, current.start)
-       const end = Math.min(item.end, current.end)
-@@ -317,9 +336,9 @@ function computeUnreadRanges(
-   visibleReads: ReadRangeMeta[],
-   current: ReadRangeMeta,
- ): Array<{ start: number; end: number }> {
--  // 收集同版本 visible reads 的区间
-+  // 收集同版本 visible reads 的区间（#511：与 findReadStub/findOverlapNote 共用 isSameFileVersion）
-   const covered = visibleReads
--    .filter((r) => r.size === current.size && r.modifiedMs === current.modifiedMs)
-+    .filter((r) => isSameFileVersion(r, current))
-     .map((r) => ({ start: r.start, end: r.end }))
-   if (covered.length === 0) return [{ start: current.start, end: current.end }]
-   // 合并已覆盖区间，再做减法得到未覆盖部分
-@@ -415,7 +434,7 @@ function renderReadStub(input: {
-   const offsetExit = reachedEof
-     ? "No unread lines remain (end of file reached); use grep to locate symbols."
-     : `Use offset=${nextOffset} for unread lines, or grep to locate symbols.`
--  // 两行高信息量文案。findReadStub 已经过 size+modifiedMs 同版本门控，故可断言
-+  // 两行高信息量文案。isSameFileVersion（#511：size+mtime+fp）已门控同版本，故可断言
-   // "上下文里的内容是最新版本"——这直接消除模型对"是否过期需重读"的疑虑，避免它
-   // 把 stub 误读为"内容陈旧、需刷新"而重复请求同一范围（诊断：连续 13 次 stub 死循环）。
-   // coveredBy 在 stub_covered_range_visible 分支恒非空（findReadStub 仅此时赋值），
-@@ -866,6 +885,8 @@ export const ReadTool = Tool.define<
-       }
- 
-       // #142：构造当前读区间元数据供 stub/overlap
-+      // #511：fp 由既有头部采样计算——sha1 完整 40 位 hex，不截断；sample 读取已付费，零额外 I/O。
-+      const fp = Hash.fast(Buffer.from(sample))
-       // #142：当前文件 size
- const size = fileSizeOf(stat)
-       // #142：当前 mtime
-@@ -888,6 +909,8 @@ const current: ReadRangeMeta = {
+@@ -609,6 +610,8 @@ const current: ReadRangeMeta = {
          size,
          modified,
          modifiedMs: mtimeMs,
-+        // #511：仅前向写入：新非 stub 读必带 fp；不回填历史 part（旧记录缺 fp 即 fail-open）
-+        fp,
++        // 复用已读的 4096B 原始头样本，不新增 I/O，也不回填旧 part。
++        fp: Hash.fast(Buffer.from(sample)),
          start,
          end,
          total: file.count,
-@@ -932,7 +955,7 @@ const stub = findReadStub(visibleReads, current)
+diff --git a/packages/core/src/tool/read-presentation.ts b/packages/core/src/tool/read-presentation.ts
+--- a/packages/core/src/tool/read-presentation.ts
++++ b/packages/core/src/tool/read-presentation.ts
+@@ -17,6 +17,8 @@ export const ReadRangeMeta = Schema.Struct({
+   size: Schema.Number,
+   modified: Schema.String,
+   modifiedMs: Schema.optional(Schema.Number),
++  // 历史缺指纹仍可展示正文，但不能证明已见内容属于当前版本。
++  fp: Schema.optional(Schema.String),
+   start: Schema.Number,
+   end: Schema.Number,
+   total: Schema.Number,
+@@ -48,8 +50,15 @@ export function formatModified(ms: number) {
+   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+ }
  
-       // [local-smark] 高重叠 suppress：当已可见读取与当前请求的重叠率 >= 80% 时，
-       // 直接返回 stub 而非仅 note。这减少了大量部分重叠的重复读取（如偏移微调的重复读）。
--      // 仍走 size+modifiedMs 同版本门控（findOverlapNote 内部已检查）。
-+      // 版本门控统一走 isSameFileVersion（#511：findOverlapNote 内部已检查，缺 fp 不命中）。
-       // stub 文案复用 renderReadStub 的 nextOffset 逻辑，告诉模型哪段已可见、往哪读。
-       const overlapRange = findOverlapNote(visibleReads, current)
-       if (overlapRange) {
-
++// 两代的 stub、重叠和未读指引共用此门控；同 size/mtime 的改写不能仅凭弱键命中。
++function isSameFileVersion(a: ReadRangeMeta, b: ReadRangeMeta) {
++  if (a.modifiedMs === undefined || a.size !== b.size || a.modifiedMs !== b.modifiedMs) return false
++  if (typeof a.fp !== "string" || a.fp.length === 0) return false
++  if (typeof b.fp !== "string" || b.fp.length === 0) return false
++  return a.fp === b.fp
++}
++
+ export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta, contentLength: number) {
+-  if (current.modifiedMs === undefined) return undefined
+-  const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
++  const sameVersion = visibleReads.filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current))
+   const sameRange = sameVersion.find((item) => item.start === current.start && item.end === current.end)
+   if (sameRange) return { status: "stub_same_range_visible" as const }
+@@ -67,8 +76,7 @@ export function findReadStub(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta, contentLength: number) {
+ }
+ 
+ export function findOverlapNote(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
+-  if (current.modifiedMs === undefined) return undefined
+   const best = visibleReads
+-    .filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && item.modifiedMs === current.modifiedMs && item.size === current.size)
++    .filter((item) => item.canonicalPath === current.canonicalPath && !item.stub && isSameFileVersion(item, current))
+     .map((item) => ({ start: Math.max(item.start, current.start), end: Math.min(item.end, current.end) }))
+     .filter((item) => item.end >= item.start)
+@@ -83,6 +91,6 @@ export function computeUnreadRanges(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
+ export function computeUnreadRanges(visibleReads: readonly ReadRangeMeta[], current: ReadRangeMeta) {
+   // 联合范围仅计算指引；路径、版本与实际交付正文仍先过滤，不能改变80%触发口径。
+-  const covered = mergeRanges(visibleReads.filter(read => read.canonicalPath === current.canonicalPath && !read.stub && read.size === current.size && read.modifiedMs === current.modifiedMs)
++  const covered = mergeRanges(visibleReads.filter(read => read.canonicalPath === current.canonicalPath && !read.stub && isSameFileVersion(read, current))
+     .map(read => ({ start: read.start, end: read.end })))
+   const unread: { start: number; end: number }[] = []
+   let pos = current.start
+diff --git a/packages/core/src/tool/read-filesystem.ts b/packages/core/src/tool/read-filesystem.ts
+--- a/packages/core/src/tool/read-filesystem.ts
++++ b/packages/core/src/tool/read-filesystem.ts
+@@ -8,6 +8,7 @@ import { FSUtil } from "../fs-util"
+ import { makeLocationNode } from "../effect/app-node"
+ import { AbsolutePath, PositiveInt, RelativePath } from "../schema"
+ import { ReadPresentation } from "./read-presentation"
++import { Hash } from "../util/hash"
+ import { readOutlineCached } from "./read-outline"
+ 
+ // 默认页与可接受上限分离，过去合法的显式 limit=1500 不能因降低默认值而被 schema 拒绝。
+@@ -304,6 +305,8 @@ export const read = Effect.fn("ReadTool.read")(function* (
+             size: Number(info.size),
+             modified: modified === undefined ? "unknown" : ReadPresentation.formatModified(modified),
+             ...(stable ? { modifiedMs: Math.floor(modified) } : {}),
++            // 与 V1 使用同一原始头部窗口；保留 Native 的稳定 mtime 门控。
++            fp: Hash.fast(Buffer.from(first.subarray(0, 4096))),
+             start: offset,
+             end: Math.max(offset - 1, offset + returned - 1),
+             total,
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
 index dab2fc3ae..c7c3a9d92 100644
 --- a/packages/opencode/test/tool/read.test.ts
@@ -760,3 +739,91 @@ index dab2fc3ae..c7c3a9d92 100644
    // #142：显著重叠时返回全文并附 short overlap note
    it.instance("returns full content with a short note for significant overlap", () =>
      Effect.gen(function* () {
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -16,7 +16,7 @@ const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.route })
+ 
+ describe("toLLMMessages", () => {
+   test("deduplicates complete Read versions only within the supplied visible history", () => {
+-    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
++    const metadata = { path: "/note.txt", canonicalPath: "/note.txt", type: "file" as const, size: 2, modified: "version1", modifiedMs: 1, fp: "head-v1", start: 1, end: 1, returned: 1, total: 1, totalExact: true, stub: false }
+     const output = { uri: "file:///note.txt", encoding: "utf8", mime: "text/plain", content: "v1", read: metadata }
+     const read = (value: string, structured: Record<string, unknown> = output,
+       input: SessionMessage.ToolStateCompleted["input"] = { path: "note.txt" },
+@@ -44,6 +44,10 @@ describe("toLLMMessages", () => {
+     expect(second.content[0]).toMatchObject({ state: { structured: output, content: [] } })
+     // 新版本或请求范围变化必须重新呈现正文，不能从路径相同推断版本。
+     expect(results(first, read("v2", { ...output, content: "v2", read: { ...metadata, modifiedMs: 2 } }))[1]).toMatchObject({ type: "json" })
++    // 指纹变化或任一侧缺失都返回正文，不能回退到相同 size/mtime。
++    for (const fp of [undefined, "", "head-v2"]) {
++      expect(results(first, read("fp-change", { ...output, read: { ...metadata, fp } }))[1]).toMatchObject({ type: "json" })
++    }
+     expect(results(first, read("range", { ...output, read: { ...metadata, end: 2, returned: 2 } }))[1]).toMatchObject({ type: "json" })
+     expect(results(first, read("path", { ...output, read: { ...metadata, canonicalPath: "/other.txt" } }, { path: "other.txt" }))[1]).toMatchObject({ type: "json" })
+     // 没有先前可见完整结果的新 batch/Session 不继承上一调用的证明。
+@@ -106,7 +110,7 @@ describe("toLLMMessages", () => {
+     const tailSeen = { ...defaultPage, content: "line\n".repeat(39) + "line", read: { ...defaultPage.read, start: 161, end: 200, returned: 40 } }
+     const fullyCovered = JSON.stringify(results(read("seen", seen), read("seen-tail", tailSeen), read("full", defaultPage))[2])
+     expect(fullyCovered).toContain("no new content to read")
+-    const changedTail = { ...tailSeen, read: { ...tailSeen.read, modifiedMs: 2 } }
++    const changedTail = { ...tailSeen, read: { ...tailSeen.read, fp: "head-v2" } }
+     const stillUnread = JSON.stringify(results(read("seen2", seen), read("changed-tail", changedTail), read("full2", defaultPage))[2])
+     expect(stillUnread).toContain("New unread lines: 161-200")
+     expect(stillUnread).toContain("Read offset=161 limit=40")
+diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
+--- a/packages/core/test/tool-read-filesystem.test.ts
++++ b/packages/core/test/tool-read-filesystem.test.ts
+@@ -5,6 +5,8 @@ import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { ReadToolFileSystem } from "@opencode-ai/core/tool/read-filesystem"
++import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
++import { utimes } from "fs/promises"
+ import { testEffect } from "./lib/effect"
+ 
+ const it = testEffect(LayerNode.compile(LayerNode.group([FSUtil.node, LayerNodePlatform.filesystem])))
+@@ -16,6 +18,43 @@ const fixture = Effect.gen(function* () {
+ })
+ 
+ describe("ReadToolFileSystem", () => {
++  it.live("preserves head fingerprints across pages and invalidates equal-size equal-mtime rewrites", () =>
++    Effect.gen(function* () {
++      const data = yield* fixture
++      const file = path.join(data.directory, "fingerprint.txt")
++      const stamp = new Date("2026-01-01T00:00:00Z")
++      const before = `AAA\n${"x".repeat(5000)}`
++      yield* data.files.writeFileString(file, before)
++      yield* Effect.promise(() => utimes(file, stamp, stamp))
++      const first = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
++      const next = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { offset: 2 })
++      if (!("read" in first) || !first.read || !("read" in next) || !next.read) throw new Error("Expected text Read metadata")
++      expect(first.read.fp).toHaveLength(40)
++      expect(next.read.fp).toBe(first.read.fp)
++      const unchanged = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
++      if (!("read" in unchanged) || !unchanged.read) throw new Error("Expected unchanged Read metadata")
++      expect(ReadPresentation.findReadStub([first.read], unchanged.read, 3)?.status).toBe("stub_same_range_visible")
++      // 缺失或空指纹的旧 part 只能交付正文；双侧都须有证明。
++      for (const fp of [undefined, ""]) {
++        expect(ReadPresentation.findReadStub([{ ...first.read, fp }], unchanged.read, 3)).toBeUndefined()
++        expect(ReadPresentation.findReadStub([first.read], { ...unchanged.read, fp }, 3)).toBeUndefined()
++      }
++      // 固定精确时间戳排除文件系统精度差异，验证内容指纹而非 mtime 漂移。
++      yield* data.files.writeFileString(file, `XXX\n${"x".repeat(5000)}`)
++      yield* Effect.promise(() => utimes(file, stamp, stamp))
++      const changed = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt", { limit: 1 })
++      if (!("read" in changed) || !changed.read) throw new Error("Expected changed Read metadata")
++      expect(changed.read.size).toBe(first.read.size)
++      expect(changed.read.modifiedMs).toBe(first.read.modifiedMs)
++      expect(changed.content).toBe("XXX")
++      expect(changed.read.fp).not.toBe(first.read.fp)
++      expect(ReadPresentation.findReadStub([first.read], changed.read, 3)).toBeUndefined()
++      yield* data.files.writeFileString(file, "")
++      const empty = yield* ReadToolFileSystem.read(data.fs, file, "fingerprint.txt")
++      expect("read" in empty ? empty.read?.fp : undefined).toHaveLength(40)
++    }),
++  )
++
+   it.live("separates default pages from accepted limits and preserves byte and next boundaries", () =>
+     Effect.gen(function* () {
+       const fixtureData = yield* fixture

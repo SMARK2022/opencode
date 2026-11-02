@@ -14,6 +14,928 @@ Content-Transfer-Encoding: 8bit
 - Refactor test utilities to support user messages and improve readability.
 - Ensure that the permission reviewer prompt correctly displays the rationale and decision before the decision tool is invoked.
 
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -4,2 +4,2 @@
+-import { LLM, LLMClient, LLMEvent } from "@opencode-ai/llm"
+-import { Context, DateTime, Effect, FileSystem, Layer, Schema, Semaphore } from "effect"
++import { LLM, LLMClient, LLMEvent, Tool } from "@opencode-ai/llm"
++import { Cause, Context, DateTime, Effect, FileSystem, Layer, Schema, Semaphore, Stream } from "effect"
+@@ -53,2 +53,3 @@
+       .reduce<NonNullable<ConstructorParameters<typeof ConfigAutoReview.Info>[0]>>((value, next) => ({ ...value, ...next }), {})
++    const timedOut = new Failed({ reason: "auto reviewer timed out" })
+     const run = Effect.gen(function* () {
+@@ -95,1 +96,1 @@
+-      })
++      }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
+@@ -96,28 +97,52 @@
+-      yield* markToolReviewing(input, reviewerSession)
+-      // 本项仍只生成结构化裁决，不唤醒子会话runner，也不执行合成决策工具。
+-      const result = yield* LLM.generateObject({
+-        model: selected.model, schema: PermissionReviewerSchema.Assessment,
+-        system, prompt,
+-      }).pipe(
+-        Effect.provideService(LLMClient.Service, client),
+-        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
+-      )
++      yield* updateToolAutoReview(input, { status: "reviewing", sessionID: reviewerSession })
+       const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
+         permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
+       })
+-      const callID = `permission-review-${input.reviewID}`
+-      // 原生助手/工具事件保留完整Assessment，复用已有投影而非另建审计表。
+-      yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "permission_review_decision", input: result.object }))
+-      yield* publisher.publish(LLMEvent.toolResult({
+-        id: callID, name: "permission_review_decision", result: { type: "text", value: JSON.stringify(result.object) },
+-        output: { structured: result.object, content: [{ type: "text", text: JSON.stringify(result.object) }] },
+-      }))
+-      // 与源208一样记录裁决，不把审计助手的零用量冒充父请求的模型用量。
+-      yield* events.publish(SessionEvent.Step.Ended, {
+-        sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.assistantMessageID(callID),
+-        finish: "tool-calls", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+-      })
++      let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
++      // 只声明裁决协议：一次真实provider流，不接业务工具registry或会话执行循环。
++      const result = yield* client.stream(LLM.request({
++        model: selected.model, system, prompt,
++        tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
++          description: "Submit the structured allow/deny decision for this permission review.",
++          parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
++        }) }),
++      })).pipe(
++        Stream.runForEach((event) => Effect.gen(function* () {
++          yield* publisher.publish(event)
++          if (event.type === "provider-error" || event.type === "tool-error") return yield* new Failed({ reason: event.message })
++          if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
++          // 真实reasoning/text在裁决前已经落盘；同一Schema验证最终输入，绝不执行该工具。
++          assessment = yield* Schema.decodeUnknownEffect(PermissionReviewerSchema.Assessment)(event.input).pipe(Effect.mapError((error) => new Failed({ reason: error.message })))
++          yield* publisher.publish(LLMEvent.toolResult({
++            id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
++            output: { structured: { ...assessment, reviewID: input.reviewID }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
++          }))
++        })),
++        Effect.flatMap(() => assessment ? Effect.succeed(assessment) : Effect.fail(new Failed({ reason: "reviewer did not call permission_review_decision" }))),
++        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
++        Effect.onExit((exit) => Effect.gen(function* () {
++          const finalizer = exit._tag === "Failure"
++          yield* publisher.flush(finalizer)
++          if (exit._tag === "Failure") {
++            const failure = Cause.squash(exit.cause)
++            const reason = failure instanceof Error ? failure.message : "Review cancelled"
++            // 失败/取消闭合真实残片和工具，沿退出安全通知模式，不伪造成功助手。
++            yield* publisher.failUnsettledTools(reason, false, true)
++            yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
++          }
++          const settlement = publisher.stepSettlement()
++          if (exit._tag === "Success" || settlement) {
++            const usage = settlement?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
++            // 已确认消耗留在审查子会话；失败不能退款，也不能算进父请求的账本。
++            yield* events.publish(SessionEvent.Step.Ended, {
++              sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.startAssistant(finalizer),
++              finish: settlement?.finish ?? "tool-calls", cost: SessionRunnerModel.cost(selected.pricing, usage), tokens: usage,
++            }, { finalizer })
++          }
++        })),
++      )
++      yield* updateToolAutoReview(input, { status: result.outcome === "allow" ? "allowed" : "denied", result })
+       return {
+-        action: result.object.outcome, reason: result.object.rationale, reviewID: input.reviewID,
+-        risk_level: result.object.risk_level, user_authorization: result.object.user_authorization,
++        action: result.outcome, reason: result.rationale, reviewID: input.reviewID,
++        risk_level: result.risk_level, user_authorization: result.user_authorization,
+       } satisfies PermissionAuto.ReviewDecision
+@@ -124,4 +149,14 @@
+-    }).pipe(Effect.mapError((error) => new Failed({ reason: error instanceof Error ? error.message : String(error) })))
++    }).pipe(Effect.mapError((error) => error instanceof Failed ? error : new Failed({ reason: error instanceof Error ? error.message : String(error) })))
+     // 用户审批回退是显式配置；其他失败由共享 auto 路由拒绝，绝不转换成成功。
+-    return yield* run.pipe(Effect.catch((error) => Effect.fail(options.fallback === "user"
+-      ? new FallbackToUser({ reason: error.reason }) : error)))
++    return yield* run.pipe(
++      Effect.onExit((exit) => {
++        if (exit._tag === "Success") return Effect.void
++        const error = Cause.squash(exit.cause)
++        // 期限身份来自本次timeout错误对象；取消不靠英文文案猜测，也不变成用户批准。
++        return updateToolAutoReview(input, {
++          status: options.fallback === "user" && !Cause.hasInterrupts(exit.cause) ? "fallback_user" : error === timedOut ? "timed_out" : "failed",
++          error: error instanceof Error ? error.message : "Review cancelled",
++        }, true)
++      }),
++      Effect.catch((error) => Effect.fail(options.fallback === "user" ? new FallbackToUser({ reason: error.reason }) : error)),
++    )
+@@ -153,1 +188,1 @@
+-  function markToolReviewing(input: PermissionAuto.ReviewInput, reviewerSession: SessionSchema.ID) {
++  function updateToolAutoReview(input: PermissionAuto.ReviewInput, patch: Record<string, unknown>, finalizer = false) {
+@@ -161,9 +196,13 @@
+       // 已结算或过期引用不重启工具；仅在现有running投影记录关联，不泄漏审查正文。
++      const current = part.state.structured.autoReview
+       yield* events.publish(SessionEvent.Tool.Progress, {
+         sessionID: recorded.sessionID, assistantMessageID: recorded.message.id, callID: binding.callID, timestamp: yield* DateTime.now,
+-        structured: { ...part.state.structured, autoReview: { reviewID: input.reviewID, sessionID: reviewerSession, precheck: input.precheck } },
++        structured: { ...part.state.structured, autoReview: {
++          ...(typeof current === "object" && current !== null && !Array.isArray(current) ? current : {}),
++          reviewID: input.reviewID, precheck: input.precheck, ...patch,
++        } },
+         content: part.state.content,
+-      })
++      }, { finalizer })
+     })
+   }
+ }))
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -159,3 +159,5 @@
+             id: event.data.messageID,
+             type: "synthetic",
++            // 与其他消息同样保存既有事件metadata，展示标记不改变synthetic授权身份。
++            metadata: event.metadata,
+             time: { created: event.data.timestamp },
+@@ -306,1 +308,5 @@
+-            match.state.structured = event.data.structured
++            // 普通工具进度不能擦掉已完成的权限审查；reviewer自己的新状态仍可覆盖旧状态。
++            match.state.structured = { ...event.data.structured,
++              ...(event.data.structured.autoReview === undefined && match.state.structured.autoReview !== undefined
++                ? { autoReview: match.state.structured.autoReview } : {}),
++            }
+@@ -329,2 +335,6 @@
+                 // 完成投影后去掉临时整文，避免在 input 与 structured 重复保存。
+-                structured: formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent")),
++                structured: {
++                  ...(formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent"))),
++                  // 终态继续保留本轮reviewID/导航/裁决，不由工具返回值抹去或替换审批事实。
++                  ...(match.state.structured.autoReview === undefined ? {} : { autoReview: match.state.structured.autoReview }),
++                },
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -2,1 +2,1 @@
+-import { Cause, Deferred, Effect, Fiber, Layer, Schema } from "effect"
++import { Cause, DateTime, Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
+@@ -15,1 +15,1 @@
+-import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
++import { LLMClient, LLMEvent, LLMRequest, Model } from "@opencode-ai/llm"
+@@ -26,1 +26,5 @@
+ import { SessionStore } from "@opencode-ai/core/session/store"
++import { SessionEvent } from "@opencode-ai/core/session/event"
++import { createLLMEventPublisher } from "@opencode-ai/core/session/runner/publish-llm-event"
++import { ModelV2 } from "@opencode-ai/core/model"
++import { ProviderV2 } from "@opencode-ai/core/provider"
+@@ -36,1 +40,3 @@
+ let malformed = false
++let reviewBeforeStream: Deferred.Deferred<void> | undefined
++let reviewArrivals: Deferred.Deferred<void> | undefined
+@@ -37,12 +43,28 @@
+ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
+   prepare: () => Effect.die("unused"),
+-  stream: () => { throw new Error("review must not start a Session stream") },
+-  generate: (request) => Effect.gen(function* () {
++  generate: () => Effect.die("reviewer must consume the actual provider stream"),
++  stream: (request) => Stream.unwrap(Effect.gen(function* () {
+     reviewRequests.push(request)
+-    if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
+-    if (reviewGate) yield* Deferred.await(reviewGate)
+-    return new LLMResponse({ message: Message.assistant([]), finishReason: "tool-calls", events: malformed ? [] : [
+-      LLMEvent.toolCall({ id: "review", name: "generate_object", input: assessment }),
+-    ] })
+-  }),
++    if (reviewBeforeStream) {
++      if (reviewArrivals && reviewRequests.length === 2) yield* Deferred.succeed(reviewArrivals, undefined)
++      yield* Deferred.await(reviewBeforeStream)
++    }
++    // 在决策gate之前交付真实事件，断言中途投影而不是伪造最终助手对象。
++    return Stream.make(
++      LLMEvent.reasoningStart({ id: "review-reason" }),
++      LLMEvent.reasoningDelta({ id: "review-reason", text: "Actual reviewer reasoning before decision." }),
++      LLMEvent.reasoningEnd({ id: "review-reason" }),
++      LLMEvent.textStart({ id: "review-text" }),
++      LLMEvent.textDelta({ id: "review-text", text: "Checking the requested change." }),
++      LLMEvent.textEnd({ id: "review-text" }),
++    ).pipe(Stream.concat(Stream.unwrap(Effect.gen(function* () {
++      if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
++      if (reviewGate) yield* Deferred.await(reviewGate)
++      return malformed ? Stream.empty : Stream.make(
++        LLMEvent.toolCall({ id: "review", name: "permission_review_decision", input: assessment }),
++        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++        LLMEvent.finish({ reason: "tool-calls" }),
++      )
++    }))))
++  })),
+ }))
+@@ -428,1 +450,1 @@
+-    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("generate_object")
++    expect(JSON.stringify(reviewRequests[0]?.tools)).toContain("permission_review_decision")
+@@ -475,2 +497,106 @@
+   }))
++
++  // 真实事件驱动审查、原工具和终态投影，验证收益在模型返回前后都可观察。
++  it.effect("persists live native review traces and keeps outcomes through tool settlement", () => Effect.gen(function* () {
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
++    assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
++    reviewRequests.length = 0
++    reviewGate = yield* Deferred.make<void>()
++    reviewStarted = yield* Deferred.make<void>()
++    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
++    const service = yield* PermissionV2.Service
++    const sessions = yield* SessionStore.Service
++    const events = yield* EventV2.Service
++    const database = yield* Database.Service
++    const publisher = createLLMEventPublisher(events, { sessionID: SessionV2.ID.make("ses_test"), agent: "test", model: { id: ModelV2.ID.make("review"), providerID: ProviderV2.ID.make("test") } })
++    // 父工具来自真实publisher，审批引用与后续结果引用同一assistant/call身份。
++    yield* publisher.publish(LLMEvent.toolCall({ id: "parent", name: "bash", input: { command: "git add ." } }))
++    const assistantMessageID = yield* publisher.assistantMessageID("parent")
++    const request = assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." }, source: { type: "tool", messageID: assistantMessageID, callID: "parent" } })
++    const fiber = yield* service.ask(request).pipe(Effect.forkScoped)
++    yield* Deferred.await(reviewStarted)
++    const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, request.sessionID)).get().pipe(Effect.orDie)
++    expect(child).toBeDefined()
++    if (!child) return yield* Effect.die("Expected durable reviewer child")
++    const context = yield* sessions.context(SessionV2.ID.make(child.id))
++    expect(context.some((message) => message.type === "synthetic" && message.metadata?.permissionReviewerRequest === true)).toBe(true)
++    const parts = context.flatMap((message) => message.type === "assistant" ? message.content : [])
++    expect(parts).toEqual(expect.arrayContaining([
++      expect.objectContaining({ type: "reasoning", text: "Actual reviewer reasoning before decision." }),
++      expect.objectContaining({ type: "text", text: "Checking the requested change." }),
++    ]))
++    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "running", structured: { autoReview: { status: "reviewing", sessionID: child.id } } } }] })
++    // 中途普通工具进度和最终结果都不得擦除审批，审批本身不等于工具执行结果。
++    yield* Deferred.succeed(reviewGate, undefined)
++    expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
++    yield* events.publish(SessionEvent.Tool.Progress, {
++      sessionID: request.sessionID, assistantMessageID, callID: "parent", timestamp: yield* DateTime.now,
++      structured: { progress: "after-review" }, content: [],
++    })
++    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { structured: { autoReview: { status: "allowed", result: assessment } } } }] })
++    yield* publisher.publish(LLMEvent.toolResult({
++      id: "parent", name: "bash", result: { type: "text", value: "completed" },
++      output: { structured: { actualOutput: true }, content: [{ type: "text", text: "completed" }] },
++    }))
++    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed", structured: { actualOutput: true, autoReview: { status: "allowed", sessionID: child.id } } } }] })
++    // 取消第二次审查保留真实残片和失败身份，不留永久reviewing或假成功。
++    reviewGate = yield* Deferred.make<void>()
++    reviewStarted = yield* Deferred.make<void>()
++    yield* publisher.publish(LLMEvent.toolCall({ id: "parent-cancel", name: "bash", input: { command: "git commit -m test" } }))
++    const cancel = yield* service.assert({ ...request, id: PermissionV2.ID.create(), resources: ["git commit -m test"], metadata: { command: "git commit -m test" }, source: { type: "tool", messageID: assistantMessageID, callID: "parent-cancel" } }).pipe(Effect.forkScoped)
++    yield* Deferred.await(reviewStarted)
++    yield* Fiber.interrupt(cancel)
++    expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
++    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "failed", sessionID: child.id } } } }] })
++    yield* publisher.failUnsettledTools("Tool execution interrupted", false, true)
++    expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "error", structured: { autoReview: { status: "failed" } } } }] })
++    // 两个请求先写入，再同时交付解释，固定复现共享child下的交错。
++    reviewRequests.length = 0
++    reviewBeforeStream = yield* Deferred.make<void>()
++    reviewArrivals = yield* Deferred.make<void>()
++    reviewGate = yield* Deferred.make<void>()
++    const visible = new Set<string>()
++    const bothVisible = yield* Deferred.make<void>()
++    const stop = yield* events.listen((event) => Effect.gen(function* () {
++      if (!Schema.is(SessionEvent.Text.Ended)(event) || event.data.sessionID !== child.id) return
++      visible.add(event.data.assistantMessageID)
++      if (visible.size === 2) yield* Deferred.succeed(bothVisible, undefined)
++    }))
++    yield* Effect.addFinalizer(() => stop)
++    for (const callID of ["parallel-a", "parallel-b"]) {
++      yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "bash", input: { command: `git add ${callID}` } }))
++    }
++    const concurrentA = yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add parallel-a"], metadata: { command: "git add parallel-a" }, source: { type: "tool", messageID: assistantMessageID, callID: "parallel-a" } }).pipe(Effect.forkScoped)
++    const concurrentB = yield* service.ask({ ...request, id: PermissionV2.ID.create(), resources: ["git add parallel-b"], metadata: { command: "git add parallel-b" }, source: { type: "tool", messageID: assistantMessageID, callID: "parallel-b" } }).pipe(Effect.forkScoped)
++    yield* Deferred.await(reviewArrivals)
++    const requests = (yield* sessions.context(SessionV2.ID.make(child.id))).filter((message) => message.type === "synthetic").slice(-2)
++    expect(requests).toHaveLength(2)
++    yield* Deferred.succeed(reviewBeforeStream, undefined)
++    yield* Deferred.await(bothVisible)
++    const active = (yield* sessions.context(SessionV2.ID.make(child.id))).filter((message) => message.type === "assistant" && !message.time.completed)
++    expect(active).toHaveLength(2)
++    expect(active.map((message) => message.metadata?.permissionReviewerRequestID).sort()).toEqual(requests.map((message) => message.id).sort())
++    const requestA = requests.find((message) => message.text.includes('"callID":"parallel-a"'))
++    const answerA = active.find((message) => message.metadata?.permissionReviewerRequestID === requestA?.id)
++    const answerB = active.find((message) => message.id !== answerA?.id)
++    expect(answerA).toBeDefined()
++    expect(answerB).toBeDefined()
++    // 取消A不关闭B；两者的终态都必须写回各自助手。
++    yield* Fiber.interrupt(concurrentA)
++    const cancelled = yield* sessions.context(SessionV2.ID.make(child.id))
++    expect(cancelled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
++    expect(cancelled.some((message) => message.type === "assistant" && message.id === answerB?.id && message.time.completed === undefined)).toBe(true)
++    yield* Deferred.succeed(reviewGate, undefined)
++    expect(yield* Fiber.join(concurrentB)).toMatchObject({ effect: "allow" })
++    const settled = yield* sessions.context(SessionV2.ID.make(child.id))
++    expect(settled.find((message) => message.id === answerA?.id)).toMatchObject({ finish: "error" })
++    expect(settled.find((message) => message.id === answerB?.id)).toMatchObject({ finish: "tool-calls" })
++    expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, request.sessionID)).all().pipe(Effect.orDie)).toHaveLength(1)
++    yield* publisher.failUnsettledTools("Test parent execution finished")
++    reviewBeforeStream = undefined
++    reviewArrivals = undefined
++    reviewGate = undefined
++    reviewStarted = undefined
++    reviewSettings = new Config.Info({})
++  }))
+ })
+diff --git a/packages/app/src/utils/session-message.ts b/packages/app/src/utils/session-message.ts
+--- a/packages/app/src/utils/session-message.ts
++++ b/packages/app/src/utils/session-message.ts
+@@ -48,1 +48,17 @@
++export function reviewerRequestID(message: SessionMessageInfo) {
++  if (message.type !== "assistant" || message.agent !== "permission-reviewer") return
++  const id = message.metadata?.permissionReviewerRequestID
++  // 并发审查共享child，助手归属以请求ID为准而非最近一条synthetic。
++  return typeof id === "string" ? id : undefined
++}
++
++export function syntheticTurn(message: SessionMessageInfo) {
++  if (message.type !== "synthetic") return
++  const reviewer = "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
++  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text : message.description
++  if (!text?.trim()) return
++  // 只展示明确标记的审查协议原文；普通synthetic仍遵循原有description展示约定。
++  return { text, reviewer }
++}
++
+ export function normalizeSessionMessages(sessionID: string, source: readonly SessionMessageInfo[]) {
+@@ -70,2 +86,4 @@
+-    if (message.type === "synthetic" && message.description?.trim()) {
++    // 显示轮次不改变服务端synthetic身份；分页和增量也共用同一根识别。
++    const synthetic = syntheticTurn(message)
++    if (synthetic) {
+       parentID = message.id
+@@ -80,1 +98,3 @@
+-      parts.set(message.id, [textPart(sessionID, message.id, 0, message.description, true)])
++      parts.set(message.id, [{
++        ...textPart(sessionID, message.id, 0, synthetic.text, synthetic.reviewer ? false : true), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
++      }])
+@@ -93,2 +113,3 @@
+-      if (!parentID) return
+-      const parent = messages.findLast((item) => item.id === parentID)
++      const rootID = reviewerRequestID(message) ?? parentID
++      if (!rootID) return
++      const parent = messages.findLast((item) => item.id === rootID)
+@@ -103,1 +124,1 @@
+-      messages.push(assistantMessage(sessionID, parentID, message))
++      messages.push(assistantMessage(sessionID, rootID, message))
+@@ -292,1 +313,1 @@
+-function textPart(sessionID: string, messageID: string, ordinal: number, text: string, synthetic?: boolean): Part {
++function textPart(sessionID: string, messageID: string, ordinal: number, text: string, synthetic?: boolean): Extract<Part, { type: "text" }> {
+@@ -303,2 +324,9 @@
++export function toolMetadata(tool: SessionMessageAssistantTool) {
++  // 当前原生wire使用structured，仍保留实际在用的vendor客户端metadata快照兼容。
++  return "structured" in tool.state && record(tool.state.structured)
++    ? tool.state.structured : tool.state.status === "streaming" ? {} : tool.state.metadata ?? {}
++}
++
+ function toolPart(sessionID: string, messageID: string, tool: SessionMessageAssistantTool): ToolPart {
++  const metadata = toolMetadata(tool)
+   const start = tool.time.ran ?? tool.time.created
+@@ -306,1 +334,1 @@
+-    if (tool.state.status === "streaming") {
++    if (tool.state.status === "streaming" || typeof tool.state.input === "string") {
+@@ -309,1 +337,1 @@
+-      return { status: "pending" as const, input, raw: tool.state.input }
++      return { status: "pending" as const, input, raw: String(tool.state.input) }
+@@ -315,2 +343,1 @@
+-        // metadata: normalizeToolMetadata(tool.name, tool.state.structured),
+-        metadata: normalizeToolMetadata(tool.name, tool.state.metadata ?? {}),
++        metadata: normalizeToolMetadata(tool.name, metadata),
+@@ -325,2 +352,1 @@
+-        // metadata: normalizeToolMetadata(tool.name, tool.state.structured),
+-        metadata: normalizeToolMetadata(tool.name, tool.state.metadata ?? {}),
++        metadata: normalizeToolMetadata(tool.name, metadata),
+@@ -350,2 +376,1 @@
+-      // metadata: normalizeToolMetadata(tool.name, tool.state.structured),
+-      metadata: normalizeToolMetadata(tool.name, tool.state.metadata ?? {}),
++      metadata: normalizeToolMetadata(tool.name, metadata),
+diff --git a/packages/app/src/context/server-session.ts b/packages/app/src/context/server-session.ts
+--- a/packages/app/src/context/server-session.ts
++++ b/packages/app/src/context/server-session.ts
+@@ -21,1 +21,2 @@
+-import { compareMessages, messageKey, normalizeSessionMessages } from "@/utils/session-message"
++import { compareMessages, messageKey, normalizeSessionMessages, reviewerRequestID, syntheticTurn } from "@/utils/session-message"
++import type { NativeSessionEvent } from "./native-session-event"
+@@ -35,1 +36,6 @@
+ function needsOlderTurnRoot(source: readonly SessionMessageInfo[]) {
++  // 页内已有较新的请求也不代表包含并发助手实际引用的较旧请求。
++  if (source.some((message) => {
++    const id = reviewerRequestID(message)
++    return id !== undefined && !source.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
++  })) return true
+@@ -41,1 +47,1 @@
+-      (message.type === "synthetic" && message.description?.trim()),
++      syntheticTurn(message) !== undefined,
+@@ -891,1 +897,1 @@
+-      if (message.type === "user" || (message.type === "synthetic" && message.description?.trim()))
++      if (message.type === "user" || syntheticTurn(message) !== undefined)
+@@ -897,1 +903,4 @@
+-      if (message.type === "assistant" && touched.has(message.id) && parentID) touched.add(parentID)
++      if (message.type === "assistant" && touched.has(message.id)) {
++        const rootID = reviewerRequestID(message) ?? parentID
++        if (rootID) touched.add(rootID)
++      }
+@@ -936,1 +945,1 @@
+-  const applyV2 = (event: OpenCodeEvent) => {
++  const applyV2 = (event: OpenCodeEvent | NativeSessionEvent) => {
+diff --git a/packages/app/src/utils/session-message.test.ts b/packages/app/src/utils/session-message.test.ts
+--- a/packages/app/src/utils/session-message.test.ts
++++ b/packages/app/src/utils/session-message.test.ts
+@@ -69,3 +69,24 @@
+         time: { created: 8 },
+       },
++      { id: "msg_internal", type: "synthetic", time: { created: 8 }, ...{ sessionID: "ses_1", text: "INTERNAL CONTEXT" } },
++      {
++        id: "msg_review_request", type: "synthetic", time: { created: 9 },
++        ...{ sessionID: "ses_1", text: "system: exact policy\nuser: exact evidence", metadata: { permissionReviewerRequest: true, reviewID: "review_1" } },
++      },
++      {
++        id: "msg_review_answer", type: "assistant", agent: "permission-reviewer", model: { id: "review", providerID: "test" }, time: { created: 10, completed: 11 },
++        content: [
++          { type: "reasoning", text: "Actual reviewer reasoning" },
++          { type: "text", text: "Actual reviewer explanation" },
++          {
++            type: "tool", id: "decision", name: "permission_review_decision",
++            state: {
++              status: "completed", input: { outcome: "deny" },
++              content: [{ type: "text", text: "Exact decision" }],
++              ...{ structured: { reviewID: "review_1", outcome: "deny", risk_level: "high", user_authorization: "unknown", rationale: "Exact rationale" } },
++            },
++            time: { created: 10, ran: 10, completed: 11 },
++          },
++        ],
++      },
+     ] satisfies SessionMessageInfo[]
+@@ -75,1 +96,1 @@
+-    expect(result.messages).toHaveLength(2)
++    expect(result.messages).toHaveLength(4)
+@@ -104,1 +125,6 @@
++    expect(result.messages.map((message) => message.id)).toEqual(["msg_3", "msg_4", "msg_review_request", "msg_review_answer"])
++    expect(result.parts.get("msg_review_request")?.[0]).toMatchObject({ text: "system: exact policy\nuser: exact evidence", synthetic: false, metadata: { permissionReviewerRequest: true } })
++    expect(result.messages[3]).toMatchObject({ role: "assistant", parentID: "msg_review_request" })
++    expect(result.parts.get("msg_review_answer")?.map((part) => part.type)).toEqual(["reasoning", "text", "tool"])
++    expect(result.parts.get("msg_review_answer")?.[2]).toMatchObject({ state: { status: "completed", metadata: { reviewID: "review_1", outcome: "deny", rationale: "Exact rationale" } } })
+   })
+diff --git a/packages/session-ui/src/components/auto-review.ts b/packages/session-ui/src/components/auto-review.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/session-ui/src/components/auto-review.ts
+@@ -0,0 +1,31 @@
++import type { UiI18n } from "@opencode-ai/ui/context/i18n"
++
++function record(value: unknown): value is Record<string, unknown> {
++  return typeof value === "object" && value !== null && !Array.isArray(value)
++}
++
++export function autoReviewMetadata(value: unknown) {
++  if (!record(value) || typeof value.reviewID !== "string") return
++  const precheck = record(value.precheck) ? value.precheck : {}
++  const result = record(value.result) ? value.result : {}
++  // 只投影已有审查信封；展示默认值不产生批准或替代真实工具状态。
++  return {
++    reviewID: value.reviewID, sessionID: typeof value.sessionID === "string" ? value.sessionID : undefined,
++    status: typeof value.status === "string" ? value.status : "reviewing",
++    level: typeof precheck.level === "string" ? precheck.level : undefined,
++    risk: typeof result.risk_level === "string" ? result.risk_level : undefined, authorization: typeof result.user_authorization === "string" ? result.user_authorization : undefined,
++  }
++}
++
++export function autoReviewLabel(review: NonNullable<ReturnType<typeof autoReviewMetadata>>, i18n: Pick<UiI18n, "t">) {
++  // 源状态文案由i18n整句承载，不能从是否执行成功反推reviewer的裁决。
++  const unknown = i18n.t("ui.permission.review.unknown")
++  switch (review.status) {
++    case "allowed": return i18n.t("ui.permission.review.allowed", { authorization: review.authorization ?? unknown })
++    case "denied": return i18n.t("ui.permission.review.denied", { risk: review.risk ?? unknown, authorization: review.authorization ?? unknown })
++    case "timed_out": return i18n.t("ui.permission.review.timedOut")
++    case "failed": return i18n.t("ui.permission.review.failed")
++    case "fallback_user": return i18n.t("ui.permission.review.fallbackUser")
++    default: return i18n.t("ui.permission.review.reviewing", { level: review.level ?? i18n.t("ui.permission.review.pending") })
++  }
++}
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -68,1 +68,2 @@
+ import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
++import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
+@@ -1549,1 +1550,2 @@
+   const partMetadata = () => part().state?.metadata ?? emptyMetadata
++  const review = createMemo(() => autoReviewMetadata(partMetadata().autoReview))
+@@ -1629,2 +1631,5 @@
+         </Switch>
++        <Show when={review()}>
++          {(value) => <AutoReviewLine review={value()} />}
++        </Show>
+       </div>
+@@ -2085,3 +2090,59 @@
++function AutoReviewLine(props: { review: NonNullable<ReturnType<typeof autoReviewMetadata>> }) {
++  const data = useData()
++  const i18n = useI18n()
++  const href = createMemo(() => sessionLink(props.review.sessionID, data.sessionHref))
++  const clickable = () => !!(props.review.sessionID && (data.navigateToSession || href()))
++  // 使用已有会话导航口；位于工具wrapper，拒绝/失败卡和折叠态也能保留审查入口。
++  return (
++    <a
++      data-component="auto-review-line"
++      href={href()}
++      role={!href() && clickable() ? "button" : undefined}
++      tabIndex={!href() && clickable() ? 0 : undefined}
++      class="text-12-regular text-text-weak"
++      onClick={(event) => {
++        const id = props.review.sessionID
++        if (!id || !data.navigateToSession || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
++        event.preventDefault()
++        data.navigateToSession(id)
++      }}
++      onKeyDown={(event) => {
++        const id = props.review.sessionID
++        if (!id || !data.navigateToSession || href() || (event.key !== "Enter" && event.key !== " ")) return
++        event.preventDefault()
++        data.navigateToSession(id)
++      }}
++    >
++      {autoReviewLabel(props.review, i18n)}
++    </a>
++  )
++}
++
++ToolRegistry.register({
++  name: "permission_review_decision",
++  render(props) {
++    const i18n = useI18n()
++    const decision = createMemo(() => ({ ...props.input, ...props.metadata }))
++    const fields = [
++      ["outcome", "ui.permission.review.outcome"],
++      ["risk_level", "ui.permission.review.risk"],
++      ["user_authorization", "ui.permission.review.authorization"],
++      ["rationale", "ui.permission.review.rationale"],
++    ] as const
++    // 四个必需裁决字段完整显示，不经过GenericTool的三参数预览或正文截短。
++    return (
++      <BasicTool {...props} icon="task" defaultOpen trigger={{ title: i18n.t("ui.permission.review.title") }}>
++        <dl data-component="permission-review-decision" class="text-13-regular">
++          <For each={fields}>{([field, label]) => <>
++            <dt>{i18n.t(label)}</dt>
++            <dd style={{ "white-space": "pre-wrap" }}>{String(decision()[field] ?? i18n.t("ui.permission.review.unknown"))}</dd>
++          </>}</For>
++        </dl>
++      </BasicTool>
++    )
++  },
++})
++
+ ToolRegistry.register({
+   name: "shell",
+   render(props) {
+diff --git a/packages/session-ui/src/components/message-part.test.ts b/packages/session-ui/src/components/message-part.test.ts
+--- a/packages/session-ui/src/components/message-part.test.ts
++++ b/packages/session-ui/src/components/message-part.test.ts
+@@ -2,1 +2,2 @@
+ import { readPartText } from "./message-part-text"
++import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
+@@ -28,1 +29,22 @@
+ })
++
++test("projects actual review states and navigation identity without rendering an app", () => {
++  const calls: unknown[] = []
++  const i18n = { t: (key: string, params?: unknown) => { calls.push([key, params]); return key } }
++  const base = { reviewID: "review", sessionID: "ses_child", precheck: { level: "cautious", reason: "bounded review" }, result: { risk_level: "high", user_authorization: "low", rationale: "Exact rationale" } }
++  // 状态来自同一真实信封，取消/拒绝不能因为原工具已有输出而显示为allowed。
++  for (const [status, key] of [["reviewing", "reviewing"], ["allowed", "allowed"], ["denied", "denied"], ["timed_out", "timedOut"], ["failed", "failed"], ["fallback_user", "fallbackUser"]]) {
++    const review = autoReviewMetadata({ ...base, status })
++    expect(review).toBeDefined()
++    if (!review) throw new Error("Expected review projection")
++    expect(review.sessionID).toBe("ses_child")
++    expect(autoReviewLabel(review, i18n)).toBe(`ui.permission.review.${key}`)
++  }
++  expect(calls).toContainEqual(["ui.permission.review.denied", { risk: "high", authorization: "low" }])
++  expect(calls).toContainEqual(["ui.permission.review.reviewing", { level: "cautious" }])
++  expect(autoReviewMetadata(undefined)).toBeUndefined()
++  expect(autoReviewMetadata({ reviewID: 1 })).toBeUndefined()
++  const pending = autoReviewMetadata({ reviewID: "pending" })
++  expect(pending?.status).toBe("reviewing")
++  expect(pending?.sessionID).toBeUndefined()
++})
+diff --git a/packages/ui/src/i18n/en.ts b/packages/ui/src/i18n/en.ts
+--- a/packages/ui/src/i18n/en.ts
++++ b/packages/ui/src/i18n/en.ts
+@@ -191,3 +191,16 @@
+   "ui.permission.deny": "Deny",
+   "ui.permission.allowAlways": "Allow always",
+   "ui.permission.allowOnce": "Allow once",
++  "ui.permission.review.title": "Permission review decision",
++  "ui.permission.review.reviewing": "◌ auto review · {{level}} · @permission-reviewer",
++  "ui.permission.review.allowed": "✓ auto review · allowed · auth {{authorization}} · @permission-reviewer",
++  "ui.permission.review.denied": "! auto review · denied · {{risk}} risk · auth {{authorization}} · @permission-reviewer",
++  "ui.permission.review.timedOut": "! auto review · timed out · failed closed · @permission-reviewer",
++  "ui.permission.review.failed": "! auto review · failed · failed closed · @permission-reviewer",
++  "ui.permission.review.fallbackUser": "! auto review · unavailable · asking user · @permission-reviewer",
++  "ui.permission.review.pending": "reviewing",
++  "ui.permission.review.unknown": "unknown",
++  "ui.permission.review.outcome": "outcome",
++  "ui.permission.review.risk": "risk",
++  "ui.permission.review.authorization": "auth",
++  "ui.permission.review.rationale": "rationale",
+diff --git a/packages/app/src/context/native-session-event.ts b/packages/app/src/context/native-session-event.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/app/src/context/native-session-event.ts
+@@ -0,0 +1,90 @@
++import type { OpenCodeEvent, SessionMessageInfo, SessionPendingMessage } from "@opencode-ai/client/promise"
++import type { SessionEvent } from "@opencode-ai/schema/session-event"
++import { Schema } from "effect"
++import { toolMetadata } from "../utils/session-message"
++
++export type NativeSessionEvent = typeof SessionEvent.All.Encoded
++type DisplayEvent<E = OpenCodeEvent> = E extends OpenCodeEvent ? Omit<E, "durable" | "location"> : never
++type Missing = { sessionID: string; messages: SessionMessageInfo[]; touched: string[]; missing: string }
++const metadata = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.MutableJson))
++
++export function nativeSessionEvent(source: readonly SessionMessageInfo[], event: OpenCodeEvent | NativeSessionEvent, pending: Map<string, SessionPendingMessage>): DisplayEvent | Missing | undefined {
++  if (!native(event)) return event
++  const base = { id: event.id, created: event.data.timestamp, metadata: event.metadata }
++  const sessionID = event.data.sessionID
++  const missing = (id: string): Missing => ({ sessionID, messages: [...source], touched: [], missing: id })
++  // 事件身份不变；只下沉到在用vendor展示DTO，不伪造durable版本或重新执行模型。
++  const assistantID = "assistantMessageID" in event.data ? event.data.assistantMessageID : undefined
++  if (assistantID && event.type !== "session.next.step.started" && !source.some((item) => item.id === assistantID && item.type === "assistant")) return missing(assistantID)
++  switch (event.type) {
++    case "session.next.prompted":
++      // canonical promotion自带完整prompt，不能再依赖先收到旧版admission缓存。
++      pending.set(`${sessionID}:${event.data.messageID}`, { type: "user", delivery: event.data.delivery, data: {
++        text: event.data.prompt.text, metadata: event.metadata ? metadata(event.metadata) : undefined,
++        files: event.data.prompt.files?.map((file) => ({ mime: file.mime, name: file.name, data: "", source: { type: "uri" as const, uri: file.uri }, mention: file.source })),
++        agents: event.data.prompt.agents?.map((agent) => ({ name: agent.name, mention: agent.source })),
++      } })
++      return { ...base, type: "session.input.promoted", data: { sessionID, inputID: event.data.messageID } }
++    case "session.next.synthetic": return { ...base, type: "session.synthetic", data: { ...event.data, metadata: event.metadata } }
++    case "session.next.agent.switched": return { ...base, type: "session.agent.selected", data: event.data }
++    case "session.next.model.switched": return { ...base, type: "session.model.selected", data: event.data }
++    case "session.next.step.started": return { ...base, type: "session.step.started", data: event.data }
++    case "session.next.step.ended": {
++      const finish = event.data.finish
++      const failed = source.some((item) => item.id === event.data.assistantMessageID && item.type === "assistant" && item.error)
++      return { ...base, type: "session.step.ended", data: { ...event.data, finish: failed ? "error" : finish === "stop" || finish === "length" || finish === "tool-calls" || finish === "content-filter" || finish === "error" ? finish : "unknown", files: event.data.files ? [...event.data.files] : undefined } }
++    }
++    case "session.next.step.failed": return { ...base, type: "session.step.failed", data: { ...event.data, error: { ...event.data.error, type: event.data.aborted ? "MessageAbortedError" : event.data.error.type } } }
++    case "session.next.text.started":
++    case "session.next.text.delta":
++    case "session.next.text.ended":
++    case "session.next.reasoning.started":
++    case "session.next.reasoning.delta":
++    case "session.next.reasoning.ended": {
++      const kind = "textID" in event.data ? "text" : "reasoning"
++      const id = "textID" in event.data ? event.data.textID : event.data.reasoningID
++      const assistant = source.find((item) => item.id === event.data.assistantMessageID)
++      const parts = assistant?.type === "assistant" ? assistant.content.filter((part) => part.type === kind) : []
++      const existing = parts.findIndex((part) => "id" in part && part.id === id)
++      const ordinal = existing >= 0 ? existing : event.type.endsWith(".started") ? parts.length : -1
++      // 接续流缺少起始片段时交回既有hydration，不把delta猜写到另一段reasoning/text。
++      if (ordinal < 0) return missing(event.data.assistantMessageID)
++      switch (event.type) {
++        case "session.next.text.started": return { ...base, type: "session.text.started", data: { ...event.data, ordinal } }
++        case "session.next.text.delta": return { ...base, type: "session.text.delta", data: { ...event.data, ordinal } }
++        case "session.next.text.ended": return { ...base, type: "session.text.ended", data: { ...event.data, ordinal } }
++        case "session.next.reasoning.started": return { ...base, type: "session.reasoning.started", data: { ...event.data, ordinal, state: event.data.providerMetadata ? metadata(event.data.providerMetadata) : undefined } }
++        case "session.next.reasoning.delta": return { ...base, type: "session.reasoning.delta", data: { ...event.data, ordinal } }
++        case "session.next.reasoning.ended": return { ...base, type: "session.reasoning.ended", data: { ...event.data, ordinal, state: event.data.providerMetadata ? metadata(event.data.providerMetadata) : undefined } }
++      }
++    }
++    case "session.next.tool.input.started": return { ...base, type: "session.tool.input.started", data: event.data }
++    case "session.next.tool.input.delta": return { ...base, type: "session.tool.input.delta", data: event.data }
++    case "session.next.tool.input.ended": return { ...base, type: "session.tool.input.ended", data: event.data }
++    case "session.next.tool.called": return { ...base, type: "session.tool.called", data: { ...event.data, input: metadata(event.data.input), executed: event.data.provider.executed, state: event.data.provider.metadata ? metadata(event.data.provider.metadata) : undefined } }
++    case "session.next.tool.progress":
++    case "session.next.tool.success": {
++      const assistant = source.find((item) => item.id === event.data.assistantMessageID)
++      const tool = assistant?.type === "assistant" ? assistant.content.find((part) => part.type === "tool" && part.id === event.data.callID) : undefined
++      const owned = tool?.type === "tool" ? toolMetadata(tool).autoReview : undefined
++      // 与持久投影相同：普通进度不能抹掉review，成功结果不能改写已有批准事实。
++      const value = metadata({ ...event.data.structured, ...(owned !== undefined && (event.type === "session.next.tool.success" || event.data.structured.autoReview === undefined) ? { autoReview: owned } : {}) })
++      const data = { ...event.data, structured: value, metadata: value }
++      if (event.type === "session.next.tool.progress") return { ...base, type: "session.tool.progress", data }
++      // vendor成功DTO要求非空content；仅展示侧将零正文等价表示为空文本，不改变实际工具结果。
++      return { ...base, type: "session.tool.success", data: { ...event.data, metadata: value, content: [event.data.content[0] ?? { type: "text", text: "" }, ...event.data.content.slice(1)], executed: event.data.provider.executed, resultState: event.data.provider.metadata ? metadata(event.data.provider.metadata) : undefined } }
++    }
++    case "session.next.tool.failed": {
++      const assistant = source.find((item) => item.id === event.data.assistantMessageID)
++      const tool = assistant?.type === "assistant" ? assistant.content.find((part) => part.type === "tool" && part.id === event.data.callID) : undefined
++      const value = tool?.type === "tool" ? toolMetadata(tool) : {}
++      const content = tool?.type === "tool" && "content" in tool.state && Array.isArray(tool.state.content) ? tool.state.content : []
++      return { ...base, type: "session.tool.failed", data: { ...event.data, metadata: metadata(value), content: content.length ? [content[0], ...content.slice(1)] : undefined, executed: event.data.provider.executed, resultState: event.data.provider.metadata ? metadata(event.data.provider.metadata) : undefined } }
++    }
++    default: return
++  }
++}
++
++function native(event: OpenCodeEvent | NativeSessionEvent): event is NativeSessionEvent {
++  return event.type.startsWith("session.next.")
++}
+diff --git a/packages/app/src/context/server-session-v2-reducer.ts b/packages/app/src/context/server-session-v2-reducer.ts
+--- a/packages/app/src/context/server-session-v2-reducer.ts
++++ b/packages/app/src/context/server-session-v2-reducer.ts
+@@ -1,1 +1,2 @@
+ import type { OpenCodeEvent, SessionMessageInfo, SessionPendingMessage } from "@opencode-ai/client/promise"
++import { nativeSessionEvent, type NativeSessionEvent } from "./native-session-event"
+@@ -17,1 +18,4 @@
+-  const reduce = (source: readonly SessionMessageInfo[], event: OpenCodeEvent): V2SessionReduction | undefined => {
++  const reduce = (source: readonly SessionMessageInfo[], input: OpenCodeEvent | NativeSessionEvent): V2SessionReduction | undefined => {
++    const event = input.type.startsWith("session.next.") ? nativeSessionEvent(source, input, pending) : input
++    if (!event) return
++    if ("messages" in event) return event
+@@ -57,1 +61,1 @@
+-          id: messageID(event.id),
++          id: messageID(event.id, event.data),
+@@ -65,1 +69,1 @@
+-          id: messageID(event.id),
++          id: messageID(event.id, event.data),
+@@ -77,1 +81,1 @@
+-          id: messageID(event.id),
++          id: messageID(event.id, event.data),
+@@ -119,1 +123,4 @@
+-        const current = source.findLast((item): item is Assistant => item.type === "assistant" && !item.time.completed)
++        // 已绑定请求的审查助手并行运行；普通会话仍自动关闭上一串行步骤。
++        const current = event.data.agent === "permission-reviewer" && typeof event.metadata?.permissionReviewerRequestID === "string"
++          ? undefined
++          : source.findLast((item): item is Assistant => item.type === "assistant" && !item.time.completed)
+@@ -135,2 +142,3 @@
+                     agent: event.data.agent,
++                    metadata: event.metadata ?? item.metadata,
+                     model: event.data.model,
+@@ -193,1 +201,1 @@
+-          content: insertOrdinal(item.content, "text", event.data.ordinal, { type: "text", text: "" }),
++          content: insertOrdinal(item.content, "text", event.data.ordinal, { type: "text", text: "", ...("textID" in event.data ? { id: event.data.textID } : {}) }),
+@@ -209,2 +217,3 @@
+             type: "reasoning",
++            ...("reasoningID" in event.data ? { id: event.data.reasoningID } : {}),
+             text: "",
+@@ -281,2 +290,2 @@
+-                // state: { ...tool.state, structured: event.data.structured, content: event.data.content },
+-                state: { ...tool.state, metadata: event.data.metadata },
++                // 实时视图保留canonical进度正文；快照和实时帧混合时structured不能停留在旧值。
++                state: { ...tool.state, metadata: event.data.metadata, ...("structured" in event.data ? { structured: event.data.structured } : {}), ...("content" in event.data ? { content: event.data.content } : {}) },
+@@ -423,2 +432,4 @@
+-function messageID(eventID: string) {
++function messageID(eventID: string, data?: unknown) {
++  // canonical事件明确携带消息ID；仅旧vendor协议才沿用event ID派生约定。
++  if (data && typeof data === "object" && "messageID" in data && typeof data.messageID === "string") return data.messageID
+   return eventID.replace(/^evt_/, "msg_")
+diff --git a/packages/app/src/context/server-session-v2-reducer.test.ts b/packages/app/src/context/server-session-v2-reducer.test.ts
+--- a/packages/app/src/context/server-session-v2-reducer.test.ts
++++ b/packages/app/src/context/server-session-v2-reducer.test.ts
+@@ -1,3 +1,7 @@
+ import { describe, expect, test } from "bun:test"
+ import type { OpenCodeEvent, SessionMessageInfo } from "@opencode-ai/client/promise"
+ import { createV2SessionReducer } from "./server-session-v2-reducer"
++import { Schema } from "effect"
++import { SessionEvent } from "@opencode-ai/schema/session-event"
++import type { NativeSessionEvent } from "./native-session-event"
++import { normalizeSessionMessages } from "../utils/session-message"
+@@ -156,1 +160,90 @@
+ })
++
++test("projects canonical live reviewer events into the same visible turns and terminal envelopes", () => {
++  const reducer = createV2SessionReducer()
++  const store = new Map<string, SessionMessageInfo[]>()
++  const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
++  let seq = 0
++  // 用真实wire Schema校验事件，不再用旧client类型断言掩盖类型名/身份/字段错位。
++  const wire = (sessionID: string, type: NativeSessionEvent["type"], data: Record<string, unknown>, metadata?: Record<string, unknown>) => decode({
++    id: `evt_native_${++seq}`, type, ...(metadata ? { metadata } : {}), data: { sessionID, timestamp: seq, ...data },
++    ...(type.endsWith(".delta") ? {} : { durable: { aggregateID: sessionID, seq, version: type === "session.next.step.ended" || type === "session.next.step.failed" ? 2 : 1 } }),
++  })
++  const apply = (sessionID: string, type: NativeSessionEvent["type"], data: Record<string, unknown>, metadata?: Record<string, unknown>) => {
++    const result = reducer.reduce(store.get(sessionID) ?? [], wire(sessionID, type, data, metadata))
++    expect(result?.missing).toBeUndefined()
++    if (result) store.set(sessionID, result.messages)
++  }
++  const model = { id: "review", providerID: "test" }
++  const assessment = { outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "Exact final rationale" }
++  const review = { reviewID: "review_1", sessionID: "ses_child", status: "reviewing", precheck: { level: "cautious", reason: "bounded action" } }
++  apply("ses_parent", "session.next.prompted", { messageID: "msg_user", prompt: { text: "git add ." }, delivery: "steer" })
++  apply("ses_parent", "session.next.step.started", { assistantMessageID: "msg_parent", agent: "build", model })
++  const parent = { assistantMessageID: "msg_parent", callID: "command" }
++  apply("ses_parent", "session.next.tool.input.started", { ...parent, name: "bash" })
++  apply("ses_parent", "session.next.tool.called", { ...parent, tool: "bash", input: { command: "git add ." }, provider: { executed: false } })
++  apply("ses_parent", "session.next.tool.progress", { ...parent, structured: { autoReview: review }, content: [] })
++  apply("ses_child", "session.next.synthetic", { messageID: "msg_request", text: "system: exact policy\nuser: exact evidence" }, { permissionReviewerRequest: true, reviewID: "review_1" })
++  // 两请求先到，助手后到；不能按最近请求分组或互相提前结束。
++  apply("ses_child", "session.next.synthetic", { messageID: "msg_request_b", text: "system: review B" }, { permissionReviewerRequest: true, reviewID: "review_b" })
++  const child = { assistantMessageID: "msg_answer" }
++  apply("ses_child", "session.next.step.started", { ...child, agent: "permission-reviewer", model }, { permissionReviewerRequestID: "msg_request", reviewID: "review_1" })
++  apply("ses_child", "session.next.step.started", { assistantMessageID: "msg_answer_b", agent: "permission-reviewer", model }, { permissionReviewerRequestID: "msg_request_b", reviewID: "review_b" })
++  apply("ses_child", "session.next.reasoning.started", { ...child, reasoningID: "thought_1" })
++  apply("ses_child", "session.next.reasoning.delta", { ...child, reasoningID: "thought_1", delta: "First real reasoning" })
++  apply("ses_child", "session.next.reasoning.ended", { ...child, reasoningID: "thought_1", text: "First real reasoning" })
++  apply("ses_child", "session.next.text.started", { ...child, textID: "text_1" })
++  apply("ses_child", "session.next.text.delta", { ...child, textID: "text_1", delta: "Actual explanation" })
++  apply("ses_child", "session.next.text.ended", { ...child, textID: "text_1", text: "Actual explanation" })
++  // 决策尚未返回时，原工具状态、请求原文和真实解释已经能被实际normalizer消费。
++  const live = normalizeSessionMessages("ses_child", store.get("ses_child") ?? [])
++  expect(live.messages.map((message) => message.id)).toEqual(["msg_request", "msg_request_b", "msg_answer", "msg_answer_b"])
++  expect(live.messages.find((message) => message.id === "msg_answer")).toMatchObject({ parentID: "msg_request" })
++  expect(live.messages.filter((message) => message.role === "assistant").every((message) => message.time.completed === undefined)).toBe(true)
++  expect(live.parts.get("msg_request")?.[0]).toMatchObject({ text: "system: exact policy\nuser: exact evidence", synthetic: false })
++  expect(live.parts.get("msg_answer")?.map((part) => part.type)).toEqual(["reasoning", "text"])
++  expect(normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? []).parts.get("msg_parent")?.[0]).toMatchObject({ state: { metadata: { autoReview: review } } })
++  apply("ses_child", "session.next.reasoning.started", { ...child, reasoningID: "thought_2" })
++  apply("ses_child", "session.next.reasoning.delta", { ...child, reasoningID: "thought_2", delta: "Second real reasoning" })
++  const decision = { ...child, callID: "decision" }
++  apply("ses_child", "session.next.tool.input.started", { ...decision, name: "permission_review_decision" })
++  apply("ses_child", "session.next.tool.input.delta", { ...decision, delta: JSON.stringify(assessment) })
++  apply("ses_child", "session.next.tool.input.ended", { ...decision, text: JSON.stringify(assessment) })
++  apply("ses_child", "session.next.tool.called", { ...decision, tool: "permission_review_decision", input: assessment, provider: { executed: false } })
++  apply("ses_child", "session.next.tool.success", { ...decision, structured: { ...assessment, reviewID: "review_1" }, content: [{ type: "text", text: JSON.stringify(assessment) }], provider: { executed: false } })
++  apply("ses_child", "session.next.step.ended", { ...child, finish: "tool-calls", cost: 0, tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 0, write: 0 } } })
++  apply("ses_parent", "session.next.tool.progress", { ...parent, structured: { autoReview: { ...review, status: "allowed", result: assessment } }, content: [] })
++  apply("ses_parent", "session.next.tool.progress", { ...parent, structured: { output: "real output" }, content: [{ type: "text", text: "real output" }] })
++  apply("ses_parent", "session.next.tool.success", { ...parent, structured: {}, content: [{ type: "text", text: "real output" }], provider: { executed: false } })
++  const complete = normalizeSessionMessages("ses_child", store.get("ses_child") ?? [])
++  expect(complete.parts.get("msg_answer")?.[2]).toMatchObject({ type: "reasoning", text: "Second real reasoning" })
++  expect(complete.parts.get("msg_answer")?.[3]).toMatchObject({ type: "tool", state: { status: "completed", metadata: { ...assessment, reviewID: "review_1" } } })
++  expect(complete.messages.some((message) => message.role === "assistant" && message.id === "msg_answer_b" && message.time.completed === undefined)).toBe(true)
++  expect(normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? []).parts.get("msg_parent")?.[0]).toMatchObject({ state: { status: "completed", output: "real output", metadata: { autoReview: { status: "allowed", sessionID: "ses_child" } } } })
++  // 空正文仍是零输出；失败保留此前进度和审查，迟到用量不能把取消改成成功。
++  const empty = { assistantMessageID: "msg_parent", callID: "empty" }
++  apply("ses_parent", "session.next.tool.input.started", { ...empty, name: "bash" })
++  apply("ses_parent", "session.next.tool.called", { ...empty, tool: "bash", input: {}, provider: { executed: false } })
++  apply("ses_parent", "session.next.tool.success", { ...empty, structured: { empty: true }, content: [], provider: { executed: false } })
++  expect(normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? []).parts.get("msg_parent")?.[1]).toMatchObject({ state: { status: "completed", output: "", metadata: { empty: true } } })
++  const denied = { assistantMessageID: "msg_parent", callID: "denied" }
++  apply("ses_parent", "session.next.tool.input.started", { ...denied, name: "bash" })
++  apply("ses_parent", "session.next.tool.called", { ...denied, tool: "bash", input: {}, provider: { executed: false } })
++  apply("ses_parent", "session.next.tool.progress", { ...denied, structured: { autoReview: { ...review, status: "denied" } }, content: [{ type: "text", text: "partial result" }] })
++  apply("ses_parent", "session.next.tool.failed", { ...denied, error: { type: "unknown", message: "review denied" }, provider: { executed: false } })
++  const failed = normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? [])
++  expect(failed.parts.get("msg_parent")?.[2]).toMatchObject({ state: { status: "error", metadata: { autoReview: { status: "denied", sessionID: "ses_child" } } } })
++  expect(store.get("ses_parent")?.find((message) => message.type === "assistant")).toMatchObject({ content: [{}, {}, { state: { content: [{ type: "text", text: "partial result" }] } }] })
++  apply("ses_parent", "session.next.step.failed", { assistantMessageID: "msg_parent", aborted: true, error: { type: "unknown", message: "cancelled" } })
++  apply("ses_parent", "session.next.step.ended", { assistantMessageID: "msg_parent", finish: "stop", cost: 1, tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 0, write: 0 } } })
++  expect(normalizeSessionMessages("ses_parent", store.get("ses_parent") ?? []).messages.find((message) => message.id === "msg_parent")).toMatchObject({ finish: "error", error: { name: "MessageAbortedError" }, cost: 1 })
++  // 重新打开的源快照仍按实际片段ID更新；缺失身份只请求原有hydration，不猜ordinal。
++  const restored = createV2SessionReducer()
++  const amended = restored.reduce(store.get("ses_child") ?? [], wire("ses_child", "session.next.reasoning.ended", { ...child, reasoningID: "thought_2", text: "Complete second reasoning" }))
++  expect(amended?.missing).toBeUndefined()
++  expect(normalizeSessionMessages("ses_child", amended?.messages ?? []).parts.get("msg_answer")?.[2]).toMatchObject({ text: "Complete second reasoning" })
++  expect(restored.reduce([], wire("ses_missing", "session.next.text.delta", { assistantMessageID: "msg_absent", textID: "text_missing", delta: "never misplaced" }))).toMatchObject({ missing: "msg_absent", touched: [] })
++  apply("ses_child", "session.next.step.failed", { assistantMessageID: "msg_answer_b", aborted: true, error: { type: "unknown", message: "cancel B" } })
++  expect(normalizeSessionMessages("ses_child", store.get("ses_child") ?? []).messages.find((message) => message.id === "msg_answer_b")).toMatchObject({ parentID: "msg_request_b", finish: "error", error: { name: "MessageAbortedError" } })
++  expect(normalizeSessionMessages("ses_child", store.get("ses_child") ?? []).messages.find((message) => message.id === "msg_answer")).toMatchObject({ parentID: "msg_request", finish: "tool-calls" })
++})
+diff --git a/packages/app/src/context/server-session.test.ts b/packages/app/src/context/server-session.test.ts
+--- a/packages/app/src/context/server-session.test.ts
++++ b/packages/app/src/context/server-session.test.ts
+@@ -6,1 +6,3 @@
+ import type { ServerApi } from "@/utils/server"
++import { Schema } from "effect"
++import { SessionEvent } from "@opencode-ai/schema/session-event"
+@@ -213,2 +215,25 @@
+     expect(ctx.store.data.part.msg_2_assistant).toMatchObject([{ type: "text", text: "world" }])
++    const target = "ses_review"
++    ctx.store.remember(session(target))
++    const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
++    let nativeSeq = 0
++    const applyNative = (type: string, data: Record<string, unknown>, metadata?: Record<string, unknown>) => ctx.store.applyV2(decode({
++      id: `evt_store_${++nativeSeq}`, type, data: { sessionID: target, timestamp: nativeSeq, ...data },
++      ...(metadata ? { metadata } : type === "session.next.synthetic" ? { metadata: { permissionReviewerRequest: true, reviewID: "review" } } : {}),
++    }))
++    // 检查真正applyV2→projectV2→界面store，而不只在独立reducer里得到正确对象。
++    applyNative("session.next.synthetic", { messageID: "msg_native_request", text: "system: exact reviewer policy" })
++    applyNative("session.next.synthetic", { messageID: "msg_native_request_b", text: "system: review B" }, { permissionReviewerRequest: true, reviewID: "review_b" })
++    applyNative("session.next.step.started", { assistantMessageID: "msg_native_answer", agent: "permission-reviewer", model: { id: "review", providerID: "test" } }, { permissionReviewerRequestID: "msg_native_request", reviewID: "review" })
++    applyNative("session.next.step.started", { assistantMessageID: "msg_native_answer_b", agent: "permission-reviewer", model: { id: "review_b", providerID: "test" } }, { permissionReviewerRequestID: "msg_native_request_b", reviewID: "review_b" })
++    applyNative("session.next.text.started", { assistantMessageID: "msg_native_answer", textID: "explanation" })
++    applyNative("session.next.text.delta", { assistantMessageID: "msg_native_answer", textID: "explanation", delta: "Actual live explanation" })
++    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request", "msg_native_request_b", "msg_native_answer", "msg_native_answer_b"])
++    expect(ctx.store.data.part.msg_native_request).toMatchObject([{ type: "text", text: "system: exact reviewer policy", synthetic: false }])
++    expect(ctx.store.data.part.msg_native_answer).toMatchObject([{ type: "text", text: "Actual live explanation" }])
++    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ parentID: "msg_native_request" })
++    expect(ctx.store.data.message[target]?.filter((message) => message.role === "assistant").every((message) => message.time.completed === undefined)).toBe(true)
++    expect(ctx.store.data.message[target]?.find((message) => message.id === "msg_native_request")).toMatchObject({ agent: "permission-reviewer", model: { modelID: "review" } })
++    applyNative("session.next.step.failed", { assistantMessageID: "msg_native_answer", aborted: true, error: { type: "unknown", message: "cancel A" } })
++    expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
+   })
+@@ -309,2 +334,25 @@
+     expect(assistants.map((item) => store.data.part[item.id]?.[0]?.type)).toEqual(["text", "text", "text"])
++    // 最新页包含请求B但缺少助手A实际关联的请求A，仍须沿原cursor补齐根。
++    const requestA = { id: "msg_review_request_a", type: "synthetic" as const, text: "Review A", time: { created: 1 }, metadata: { permissionReviewerRequest: true } }
++    const requestB = { ...requestA, id: "msg_review_request_b", time: { created: 2 } }
++    const reviewA = { ...assistant("msg_review_answer_a", 3), agent: "permission-reviewer", metadata: { permissionReviewerRequestID: requestA.id } }
++    const reviewPages = [
++      { data: [reviewA, requestB], cursor: { previous: null, next: "review-older" } },
++      { data: [requestA], cursor: { previous: null, next: null } },
++    ]
++    const calls: unknown[] = []
++    const reviewApi = {
++      list: async (input: unknown) => {
++        calls.push(input)
++        const page = reviewPages.shift()
++        if (!page) throw new Error("Unexpected extra review page")
++        return page
++      },
++    } as unknown as MessageApi
++    const reviews = createServerSession({} as OpencodeClient, {} as SessionApi, reviewApi)
++    reviews.remember(session("review"))
++    await reviews.sync("review")
++    expect(calls).toEqual([{ sessionID: "review", limit: 20, order: "desc" }, { sessionID: "review", limit: 20, cursor: "review-older" }])
++    expect(reviews.data.message.review.map((message) => message.id)).toEqual([requestA.id, requestB.id, reviewA.id])
++    expect(reviews.data.message.review.find((message) => message.id === reviewA.id)).toMatchObject({ parentID: requestA.id })
+   })
 diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permission/precheck.ts
 index dcb5102a66..b6b3688ffd 100644
 --- a/packages/core/src/permission/precheck.ts

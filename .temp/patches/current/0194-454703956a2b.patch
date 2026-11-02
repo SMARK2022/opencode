@@ -88,7 +88,19 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
 --- a/packages/core/src/util/token.ts
 +++ b/packages/core/src/util/token.ts
-@@ -22,5 +22,8 @@
+@@ -19,1 +19,11 @@
++export function inputHistory(messages: ReadonlyArray<SessionMessage.Message>, model: { provider: string; id: string }) {
++  // 三类请求预算共用runner已有的同API确认样本，不能用未结算估计或catalog别名校准。
++  return messages.toReversed().flatMap((message) => {
++    if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
++      || !message.inputEstimate?.confirmed || !message.tokens) return []
++    return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
++      input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
++  })
++}
++
+ export function charsPerTokenFromHistory(history: ReadonlyArray<{ bodyChars: number; input: number; inputBreakdown?: SessionMessage.InputBreakdown }>) {
+@@ -22,5 +32,8 @@
      // 媒体样本用占位字符替换 raw；文本密度不能把 base64 当普通正文。
      const media = item.inputBreakdown?.media
 +    // #194：只有已知媒体 token 才能从确认输入中分离；旧附件样本不能校准文本密度。
@@ -98,10 +110,161 @@ diff --git a/packages/core/src/util/token.ts b/packages/core/src/util/token.ts
        ? item.bodyChars - media.rawChars + media.textChars
 -      : item.bodyChars - (item.inputBreakdown?.messages.attachments ?? 0)), input: sum.input + item.input }
 +      : item.bodyChars), input: sum.input + textInput }
-@@ -28,1 +31,2 @@
+@@ -28,1 +41,2 @@
 -  return sample.bodyChars > 500 && sample.input > 0 ? sample.bodyChars / sample.input : CHARS_PER_TOKEN
 +  // #194：实际上传可达到六字符以上的密度，统一2..8边界而不退回旧3..4。
 +  return sample.bodyChars > 500 && sample.input > 0 ? Math.min(8, Math.max(2, sample.bodyChars / sample.input)) : CHARS_PER_TOKEN
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -306,7 +306,1 @@
+-      const samples = context.toReversed().flatMap((message) => {
+-        // publisher 保存实际 provider/API model ID；边界只去除品牌，不换成 Session 的 catalog 别名。
+-        if (message.type !== "assistant" || String(message.model.providerID) !== String(model.provider) || String(message.model.id) !== String(model.id)
+-          || !message.inputEstimate?.confirmed || !message.tokens) return []
+-        return [{ bodyChars: message.inputEstimate.bodyChars, inputBreakdown: message.inputEstimate.inputBreakdown,
+-          input: message.tokens.input + message.tokens.cache.read + message.tokens.cache.write }]
+-      })
++      const samples = Token.inputHistory(context, model)
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -93,1 +93,1 @@
+-    readonly stream: (request: LLMRequest) => Stream.Stream<LLMEvent, LLMError>
++    readonly stream: (request: LLMRequest, onPrepared?: (body: unknown) => Effect.Effect<void>) => Stream.Stream<LLMEvent, LLMError>
+@@ -218,3 +218,5 @@
+     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
+-    // 摘要也发送到同一模型，独立 input 上限不能只约束普通 turn 而放过摘要请求。
+-    if (context !== undefined && context > 0 && Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
++    const samples = Token.inputHistory(input.entries.map((entry) => entry.message), input.model)
++    // 摘要上传也用同模型确认密度；tail选择仍保留原来的粗略大小启发式。
++    if (context !== undefined && context > 0 && Token.estimateRequest({ messages: [Message.user(summaryPrompt)] }, samples).input >
++      Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
+@@ -242,8 +244,9 @@
++    const modelRef = { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
++      ...(input.variant === undefined ? {} : { variant: input.variant }) }
+     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
+       sessionID: input.sessionID,
+       messageID,
+       timestamp: yield* DateTime.now,
+       reason,
+       // Started 冻结真实调用的 variant；未选择时仍省略，不在 finish 时查询会话或猜默认值。
+-      model: { id: ModelV2.ID.make(input.model.id), providerID: ProviderV2.ID.make(input.model.provider),
+-        ...(input.variant === undefined ? {} : { variant: input.variant }) },
++      model: modelRef,
+@@ -263,1 +266,9 @@
++        // 与普通上传复用真实compile回调，估算归压缩独立身份而不是当前用户输入。
++        (body) => Effect.gen(function* () {
++          yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
++            sessionID: input.sessionID, messageID, timestamp: yield* DateTime.now, model: modelRef,
++            inputEstimate: { ...Token.estimateRequest(body, samples, []),
++              contextLimit: input.model.defaults?.limits?.context ?? input.model.route.defaults.limits?.context ?? 0 },
++          })
++        }),
+       )
+@@ -307,5 +318,6 @@
+     if (
+       // 媒体预算必须在压缩判定前生效，不能等 provider 准备完成才纠正 base64 的文本估值。
+-      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }, []).input <=
++      Token.estimateRequest({ system: input.request.system, messages: input.request.messages, tools: input.request.tools },
++        Token.inputHistory(input.entries.map((entry) => entry.message), input.model)).input <=
+       Math.min(usable, inputUsable)
+     )
+diff --git a/packages/core/src/session/info.ts b/packages/core/src/session/info.ts
+--- a/packages/core/src/session/info.ts
++++ b/packages/core/src/session/info.ts
+@@ -33,1 +33,11 @@
+-    ), current_request AS (
++    ), active_compaction AS (
++      -- 复用压缩独立身份，仅在其真实生命周期内显示prepared估算，不冒用用户admission。
++      SELECT json_extract(e.data, '$.messageID') AS id, json_extract(e.data, '$.timestamp') AS time_created,
++        NULL AS promoted_seq, 'compaction' AS kind, e.seq AS position
++      FROM event e WHERE e.aggregate_id = "session"."id" AND e.type = 'session.next.compaction.started.1'
++        AND NOT EXISTS (
++          SELECT 1 FROM event terminal WHERE terminal.aggregate_id = e.aggregate_id
++            AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = json_extract(e.data, '$.messageID')
++            AND terminal.type IN ('session.next.compaction.ended.1', 'session.next.compaction.failed.1'))
++      ORDER BY e.seq DESC LIMIT 1
++    ), current_request AS (
+@@ -42,1 +52,1 @@
+-        UNION ALL SELECT * FROM native_request)
++        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction)
+@@ -77,1 +87,1 @@
+-      SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind = 'native'
++      SELECT e.seq, e.data FROM event e JOIN current_request r ON r.kind IN ('native', 'compaction')
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -236,3 +236,5 @@
+   for (const [position, start] of starts.entries()) {
+-    const candidate = toLLMMessages(sanitized.slice(start), model)
+-    const ratio = Token.estimate([system, JSON.stringify(candidate)].join("\n")) / limit
++    const window = sanitized.slice(start)
++    const candidate = toLLMMessages(window, model)
++    // decide的工具/媒体投影与窗口历史一同估算，不能在最后发送时才学习密度。
++    const ratio = Token.estimateRequest({ system, messages: candidate }, Token.inputHistory(window, model)).input / limit
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -43,2 +43,3 @@
+ import { Catalog } from "@opencode-ai/core/catalog"
+ import { SessionCompaction } from "@opencode-ai/core/session/compaction"
++import { toDecideMessages } from "../src/session/runner/to-llm-message"
+@@ -1385,4 +1386,15 @@
+       const history = yield* session.context(sessionID)
+       expect(history.some((message) => message.type === "user" && message.text.startsWith("old-marker"))).toBe(true)
+       expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "tool"))).toBe(true)
+       expect(history.some((message) => message.type === "assistant" && message.content.some((part) => part.type === "reasoning" && part.text === reasoning))).toBe(true)
++      const budgetModel = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 100_000, input: 80_000, output: 0 } }) })
++      const learned = history.map((message) => message.type === "user" && message.text.startsWith("old-marker")
++        ? { ...message, text: "old-marker " + "x".repeat(400_000) }
++        : message.type !== "assistant" ? message : {
++          ...message, inputEstimate: { bodyChars: 827_111, input: 128_159, confirmed: true },
++          tokens: { input: 128_159, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++        })
++      // 同一400k历史在学习密度下可保留；清掉确认标记后才按默认/4收缩。
++      expect(JSON.stringify(toDecideMessages(learned, budgetModel, "system", 0))).toContain("old-marker")
++      expect(JSON.stringify(toDecideMessages(learned.map((message) => message.type !== "assistant" ? message
++        : { ...message, inputEstimate: undefined }), budgetModel, "system", 0))).not.toContain("old-marker")
+@@ -2005,8 +2017,18 @@
+         let streams = 0
++        let estimated: SessionMessage.InputEstimate | undefined
++        let compactRequestID: string | undefined
+         const compaction = SessionCompaction.make({
+           db: database.db, events,
+           // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
+-          llm: { stream: () => {
++          llm: { stream: (summaryRequest, onPrepared) => {
+             streams++
+-            return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
++            return Stream.unwrap(Effect.gen(function* () {
++              yield* (onPrepared?.({ messages: summaryRequest.messages }) ?? Effect.void)
++              const pending = yield* store.get(sessionID)
++              estimated = pending?.request?.inputEstimate
++              compactRequestID = pending?.request?.messageID
++              expect(estimated?.bodyChars).toBeGreaterThan(0)
++              expect(estimated?.confirmed).toBe(false)
++              return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
++            }))
+           } },
+@@ -2026,3 +2048,17 @@
+           expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: mediaRequest })).toBe(false)
++          const learnedEntries = entries.map((entry) => entry.message.type !== "assistant" ? entry : { ...entry, message: {
++            ...entry.message, model: { id: modelID, providerID },
++            inputEstimate: { bodyChars: 827_111, input: 128_159, confirmed: true },
++            tokens: { input: 128_159, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
++          } })
++          const learnedRequest = LLM.request({ model: resolved, messages: [Message.user("x".repeat(400_000))] })
++          // 实际压缩owner应在读取provider前使用确认密度；缺样本对照则触发一次摘要。
++          expect(yield* compaction.compactIfNeeded({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(false)
++          expect(streams).toBe(0)
++          expect(yield* compaction.compactIfNeeded({ sessionID, entries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
++          expect(streams).toBe(1)
++          expect(yield* compaction.compact({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
++          expect(estimated?.charsPerToken).toBeCloseTo(6.45, 1)
++          expect((yield* store.get(sessionID))?.request?.messageID).not.toBe(compactRequestID)
+         }
+         yield* registration.dispose
 diff --git a/packages/core/test/util-token.test.ts b/packages/core/test/util-token.test.ts
 --- a/packages/core/test/util-token.test.ts
 +++ b/packages/core/test/util-token.test.ts

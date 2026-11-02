@@ -142,3 +142,89 @@ index 633b4aeb7..d7f4ca5ea 100644
        }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 20 }) }))
      },
      { git: true },
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -1,4 +1,4 @@
+-import { and, asc, desc, eq, gt, gte, ne, or } from "drizzle-orm"
++import { and, asc, desc, eq, gt, gte, lte, ne, or } from "drizzle-orm"
+ import { Effect, Schema } from "effect"
+ import { Database } from "../database/database"
+ import { MessageDecodeError } from "./error"
+@@ -100,4 +100,18 @@
+   )).filter((entry) => !hidden(entry.message.metadata?.hidden))
+ })
+ 
++// memento只读本次边界内的原始user行，不经过latestCompaction，也不从旧摘要反推原话。
++export const rawUserMessages = Effect.fn("SessionHistory.rawUserMessages")(function* (
++  db: DatabaseService,
++  sessionID: SessionSchema.ID,
++  throughSeq: number,
++) {
++  const rows = yield* db.select().from(SessionMessageTable).where(and(
++    eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "user"), lte(SessionMessageTable.seq, throughSeq),
++  )).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
++  const messages = yield* Effect.forEach(rows, decodeMessageRow)
++  // 使用同一合法hidden合同；synthetic、助手和未promote的inbox本来就不属于user行。
++  return messages.flatMap(message => message.type === "user" && !hidden(message.metadata?.hidden) ? [message] : [])
++})
++
+ export * as SessionHistory from "./history"
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -16,6 +16,7 @@
+ import { ProviderV2 } from "../provider"
+ import { SessionRunnerModel } from "./runner/model"
+ import { SessionMemento } from "./compaction-memento"
++import { SessionHistory } from "./history"
+ 
+ const DEFAULT_BUFFER = 20_000
+ const DEFAULT_BUFFER_MIN = 5_000
+@@ -230,8 +231,10 @@
+     const usable = inputLimit
+       ? inputLimit - (config.buffer ?? Math.max(DEFAULT_BUFFER_MIN, DEFAULT_BUFFER - Math.max(0, (context ?? 0) - inputLimit)))
+       : (context ?? 0) - output
++    // 普通模型仍只读活动窗；原话单独读取真实历史，截止本次快照以免吞入并发新输入。
++    const rawUsers = yield* SessionHistory.rawUserMessages(dependencies.db, input.sessionID, input.entries.reduce((seq, entry) => Math.max(seq, entry.seq), 0))
+     const recentUserMessages = SessionMemento.collect(
+-      input.entries.flatMap(entry => entry.message.type === "user" ? [{ id: entry.message.id, text: entry.message.text }] : []), Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
++      rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
+     const summaryPrompt = buildPrompt({
+       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
+       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1808,13 +1808,30 @@
+       yield* session.resume(sessionID)
+       expect(requests).toHaveLength(2)
+       expect(userTexts(requests[1]).join("\n")).toContain("<summary>\nSummary\n</summary>")
+       expect(executions).toHaveLength(0)
++      const events = yield* EventV2.Service
++      yield* events.publish(SessionEvent.MessagesHidden, {
++        sessionID, timestamp: yield* DateTime.now, messageIDs: [SessionMessage.ID.make(pending.id)],
++        hidden: { time: Date.now(), reason: "permission-reviewer-protocol-retry" },
++      })
++      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Synthetic context must not enter memento" })
++      requests.length = 0
++      response = fragmentFixture("text", "manual-summary-2", ["Second summary"]).completeEvents
++      yield* session.compact({ sessionID })
++      const second = yield* session.context(sessionID)
++      const checkpoint = second.find(message => message.type === "compaction")
++      if (!checkpoint || checkpoint.type !== "compaction") return yield* Effect.die("Missing second compaction")
++      // 第二次摘要故意不含旧原话；只能由真实raw-user查询跨越首次边界保存，hidden与synthetic不得混入。
++      expect(checkpoint.recent_user_messages?.map(message => message.text)).toEqual(["Earlier question", "Keep recent tool turn"])
++      yield* replaySessionProjection(sessionID)
++      expect(yield* session.context(sessionID)).toEqual(second)
++      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Continue after replay" })
+       requests.length = 0
+       const failure = providerUnavailable()
+       streamFailure = failure
+       expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBe(failure)
+       expect(requests).toHaveLength(1)
+-      expect((yield* session.context(sessionID)).some(message => message.type === "compaction" && message.summary === "Summary")).toBe(true)
++      expect((yield* session.context(sessionID)).some(message => message.type === "compaction" && message.summary === "Second summary")).toBe(true)
+     }),
+   )
+ 

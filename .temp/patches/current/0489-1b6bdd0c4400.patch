@@ -1879,7 +1879,7 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 +// #489：evidence 链需要 realpath 与 stat；Bun API 覆盖不了的 fs 语义在此显式引入。
 +import fs from "node:fs"
  import path from "path"
- import { createRequire } from "module"
+ import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
  import { fileURLToPath } from "url"
 @@ -198,6 +200,70 @@ function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
  
