@@ -2770,12 +2770,11 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
 index 1df6f56a149d2e0634bc8c8e14d524167d3ed5fe..e22dff55bbd907406fb582579437bf1bb1b62bed 100644
 --- a/packages/tui/test/prompt/prompt-voice-input.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
-@@ -1,4 +1,5 @@
+@@ -1,3 +1,4 @@
  import { describe, expect, test } from "bun:test"
 +import fs from "node:fs/promises"
  import path from "path"
  import { createRoot, createSignal } from "solid-js"
- import { tmpdir } from "../fixture/fixture"
 @@ -18,4 +19,35 @@ const nodeJson = (script: string): VoiceTranscriber => ({
    args: ["-e", script, "{file}"],
  })

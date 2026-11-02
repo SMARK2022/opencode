@@ -1,3 +1,198 @@
+diff --git a/packages/opencode/test/lsp/lifecycle.test.ts b/packages/opencode/test/lsp/lifecycle.test.ts
+--- a/packages/opencode/test/lsp/lifecycle.test.ts
++++ b/packages/opencode/test/lsp/lifecycle.test.ts
+@@ -55,1 +55,1 @@
+-    "hasClients() returns true for .ts files in instance when lsp is true",
++    "hasClients() stays false even when lsp is true",
+@@ -59,2 +59,5 @@
+           const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
+-          expect(result).toBe(true)
++          // 配置不能重启产品已停用的能力，Read warming 也不能偷偷启动服务。
++          expect(result).toBe(false)
++          yield* lsp.touchFile(path.join((yield* TestInstance).directory, "test.ts"))
++          expect(spawnSpy).toHaveBeenCalledTimes(0)
+@@ -67,1 +70,1 @@
+-    "hasClients() keeps built-in LSPs when config object is provided",
++    "hasClients() stays false when a config object is provided",
+@@ -71,2 +74,4 @@
+           const result = yield* lsp.hasClients(path.join((yield* TestInstance).directory, "test.ts"))
+-          expect(result).toBe(true)
++          expect(result).toBe(false)
++          yield* lsp.touchFile(path.join((yield* TestInstance).directory, "test.ts"))
++          expect(spawnSpy).toHaveBeenCalledTimes(0)
+diff --git a/packages/opencode/test/lsp/index.test.ts b/packages/opencode/test/lsp/index.test.ts
+--- a/packages/opencode/test/lsp/index.test.ts
++++ b/packages/opencode/test/lsp/index.test.ts
+@@ -4,1 +4,1 @@
+-import { Deferred, Effect, Layer } from "effect"
++import { Effect, Layer } from "effect"
+@@ -12,1 +12,1 @@
+-import { awaitWithTimeout, testEffect } from "../lib/effect"
++import { testEffect } from "../lib/effect"
+@@ -74,1 +74,1 @@
+-    "would spawn builtin LSP for files inside instance when lsp is true",
++    "does not spawn builtin LSP inside the instance even when lsp is true",
+@@ -87,1 +87,1 @@
+-            expect(spy).toHaveBeenCalledTimes(1)
++            expect(spy).toHaveBeenCalledTimes(0)
+@@ -97,1 +97,1 @@
+-    "publishes lsp.updated after custom LSP initialization",
++    "custom LSP config cannot initialize a server or publish lsp.updated",
+@@ -102,1 +102,1 @@
+-        const updated = yield* Deferred.make<void>()
++        const updated: string[] = []
+@@ -105,1 +105,1 @@
+-          if (event.type === LSP.Event.Updated.type) Deferred.doneUnsafe(updated, Effect.void)
++          if (event.type === LSP.Event.Updated.type) updated.push(event.type)
+@@ -113,1 +113,3 @@
+-        yield* awaitWithTimeout(Deferred.await(updated), "lsp.updated event was not published")
++        // 自定义命令也不能被执行，空状态不能误报成已连接或诊断通过。
++        expect(updated).toEqual([])
++        expect(yield* lsp.status()).toEqual([])
+@@ -128,1 +130,1 @@
+-    "would spawn builtin LSP for files inside instance when config object is provided",
++    "does not spawn builtin LSP when a config object is provided",
+@@ -141,1 +143,1 @@
+-            expect(spy).toHaveBeenCalledTimes(1)
++            expect(spy).toHaveBeenCalledTimes(0)
+@@ -157,1 +159,1 @@
+-    "uses pyright instead of ty by default",
++    "keeps pyright and ty disabled by default",
+@@ -172,1 +174,1 @@
+-            expect(pyright).toHaveBeenCalledTimes(1)
++            expect(pyright).toHaveBeenCalledTimes(0)
+@@ -183,1 +185,1 @@
+-    "uses ty instead of pyright when experimentalLspTy is enabled",
++    "experimentalLspTy cannot enable ty or pyright",
+@@ -197,1 +199,1 @@
+-            expect(ty).toHaveBeenCalledTimes(1)
++            expect(ty).toHaveBeenCalledTimes(0)
+@@ -209,1 +211,1 @@
+-    "passes disableLspDownload to builtin LSP spawn",
++    "keeps LSP unavailable regardless of the download flag",
+@@ -222,2 +224,2 @@
+-            expect(pyright).toHaveBeenCalledTimes(1)
+-            expect(pyright.mock.calls[0]?.[2]).toMatchObject({ disableLspDownload: true })
++            expect(pyright).toHaveBeenCalledTimes(0)
++            expect(yield* lsp.hasClients(path.join(dir, "src", "inside.py"))).toBe(false)
+diff --git a/packages/opencode/test/tool/lsp.test.ts b/packages/opencode/test/tool/lsp.test.ts
+--- a/packages/opencode/test/tool/lsp.test.ts
++++ b/packages/opencode/test/tool/lsp.test.ts
+@@ -4,1 +4,1 @@
+-import { Effect, Layer } from "effect"
++import { Cause, Effect, Layer } from "effect"
+@@ -97,2 +97,17 @@
+ describe("tool.lsp", () => {
++  it.instance("reports unavailable before file access or permission approval", () =>
++    Effect.gen(function* () {
++      const service = yield* LSP.Service
++      const { items, next } = asks()
++      const result = yield* Effect.exit(run({ operation: "hover", filePath: "not-read.ts", line: 1, character: 1 }, next).pipe(
++        Effect.provideService(LSP.Service, { ...service, hasClients: () => Effect.succeed(false) }),
++      ))
++      expect(result._tag).toBe("Failure")
++      if (result._tag !== "Failure") throw new Error("expected unavailable LSP")
++      // 只注入不可用的假Service，不启动LSP；错误必须先于不存在文件和审批。
++      expect(String(Cause.squash(result.cause))).toContain("LSP diagnostics unavailable")
++      expect(items).toEqual([])
++    }),
++  )
++
+   describe("permission metadata", () => {
+
+diff --git a/packages/opencode/src/lsp/lsp.ts b/packages/opencode/src/lsp/lsp.ts
+--- a/packages/opencode/src/lsp/lsp.ts
++++ b/packages/opencode/src/lsp/lsp.ts
+@@ -8,4 +8,3 @@
+ import { Config } from "@/config/config"
+ import { Process } from "@/util/process"
+-import { spawn as lspspawn } from "./launch"
+ import { Effect, Layer, Context, Schema } from "effect"
+@@ -98,12 +97,0 @@
+-const filterExperimentalServers = (servers: Record<string, LSPServer.Info>, flags: RuntimeFlags.Info) => {
+-  if (flags.experimentalLspTy) {
+-    if (servers["pyright"]) {
+-      delete servers["pyright"]
+-    }
+-  } else {
+-    if (servers["ty"]) {
+-      delete servers["ty"]
+-    }
+-  }
+-}
+-
+@@ -140,3 +127,2 @@
+   Effect.gen(function* () {
+-    const config = yield* Config.Service
+     const flags = yield* RuntimeFlags.Service
+@@ -147,45 +133,5 @@
+-        const cfg = yield* config.get()
+-
++        // 产品固定停用 LSP；true 或自定义 server 配置也不能恢复子进程。
+         const servers: Record<string, LSPServer.Info> = {}
+-
+-        if (!cfg.lsp) {
+-          yield* Effect.logInfo("all LSPs are disabled")
+-        } else {
+-          for (const server of Object.values(LSPServer)) {
+-            servers[server.id] = server
+-          }
+-
+-          filterExperimentalServers(servers, flags)
+-
+-          if (cfg.lsp !== true) {
+-            for (const [name, item] of Object.entries(cfg.lsp)) {
+-              const existing = servers[name]
+-              if (item.disabled) {
+-                yield* Effect.logInfo(`LSP server ${name} is disabled`)
+-                delete servers[name]
+-                continue
+-              }
+-              servers[name] = {
+-                ...existing,
+-                id: name,
+-                root: existing?.root ?? (async (_file, ctx) => ctx.directory),
+-                extensions: item.extensions ?? existing?.extensions ?? [],
+-                spawn: async (root) => ({
+-                  process: lspspawn(item.command[0], item.command.slice(1), {
+-                    cwd: root,
+-                    env: { ...process.env, ...item.env },
+-                  }),
+-                  initialization: item.initialization,
+-                }),
+-              }
+-            }
+-          }
+-
+-          yield* Effect.logInfo("enabled LSP servers", {
+-            serverIds: Object.values(servers)
+-              .map((server) => server.id)
+-              .join(", "),
+-          })
+-        }
++        yield* Effect.logInfo("all LSPs are disabled")
+ 
+         const s: State = {
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -252,4 +252,4 @@
+             tool.permission_review_decision,
+             ...(tool.execute ? [tool.execute] : []),
+-            ...(flags.experimentalLspTool ? [tool.lsp] : []),
++            // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
+             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+diff --git a/packages/opencode/src/tool/lsp.ts b/packages/opencode/src/tool/lsp.ts
+--- a/packages/opencode/src/tool/lsp.ts
++++ b/packages/opencode/src/tool/lsp.ts
+@@ -45,4 +45,6 @@
+       execute: (args: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+         Effect.gen(function* () {
++          // 直接调用也先报告停用，避免文件读取、审批和后台启动成为另一入口。
++          if (!(yield* lsp.hasClients(args.filePath))) throw new Error("LSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.")
+           const instance = yield* InstanceState.context
+           const file = path.isAbsolute(args.filePath) ? args.filePath : path.join(instance.directory, args.filePath)
+
 diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
 --- a/packages/core/test/tool-write.test.ts
 +++ b/packages/core/test/tool-write.test.ts
@@ -16,49 +211,53 @@ diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-wri
 diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
 --- a/packages/core/test/tool-edit.test.ts
 +++ b/packages/core/test/tool-edit.test.ts
-@@ -136,1 +136,1 @@
--                  value: "Edited file successfully: hello.txt\nReplacements: 1\n```diff\n-before\n+after\n```",
-+                  value: "Edited file successfully: hello.txt\nReplacements: 1\n```diff\n-before\n+after\n```\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+@@ -154,2 +154,3 @@
+                 expect(shown).toContain("-before\n+after\n rest")
++                expect(shown).toEndWith("\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.")
+                 expect(assertions).toMatchObject([{ sessionID, action: "edit", resources: ["hello.txt"], save: ["*"] }])
 diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
 --- a/packages/core/test/tool-apply-patch.test.ts
 +++ b/packages/core/test/tool-apply-patch.test.ts
-@@ -155,1 +155,1 @@
--                  value: "Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt",
-+                  value: "Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+@@ -194,3 +194,4 @@
+                   value: expect.stringContaining("Applied patch sequentially:\nA nested/new.txt\nM update.txt\nD remove.txt\n\nChanged:\n```diff"),
+                 })
++                expect(shown).toEndWith("\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.")
+                 expect(settled.output?.structured).toMatchObject({
 diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
 --- a/packages/core/src/tool/write.ts
 +++ b/packages/core/src/tool/write.ts
-@@ -38,2 +38,4 @@
- export const toModelOutput = (output: Output) =>
--  `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`
-+  // 原生工具尚未接入 LSP，写入成功不能被误读为类型检查通过。
-+  `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}\n\n` +
-+  "LSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety."
+@@ -45,3 +45,5 @@ export const toModelOutput = (output: Output) =>
+     `${output.existed ? "Wrote" : "Created"} file successfully: ${output.resource}`,
+     ...(output.formattedDiff ? ["", "Formatted changes (auto-format adjusted the file):", "```diff", output.formattedDiff, "```"] : []),
++    // 保留格式化后的真实变化，并明确写入成功不等于类型检查通过。
++    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
+   ].join("\n")
 diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
 --- a/packages/core/src/tool/edit.ts
 +++ b/packages/core/src/tool/edit.ts
-@@ -79,3 +79,5 @@ export const toModelOutput = (output: Output, oldString: string, newString: string) =>
-     ...previewLines(newString, "+"),
+@@ -69,4 +69,6 @@ export const toModelOutput = (output: Output) =>
+     // 展示真实文件 diff，第七行以后的修改和 formatter 变化同样可见。
+     ...output.files.map((file) => file.patch),
      "```",
-+    // 保留原生精确编辑的输出，只明确尚未执行 LSP 检查。
++    // 最终文件 diff 保持完整；LSP 固定停用，不能把成功当作诊断通过。
 +    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
    ].join("\n")
 diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
 --- a/packages/core/src/tool/apply-patch.ts
 +++ b/packages/core/src/tool/apply-patch.ts
-@@ -40,4 +40,6 @@ export const toModelOutput = (output: Output) =>
-     ...output.applied.map(
-       (item) => `${item.type === "add" ? "A" : item.type === "delete" ? "D" : "M"} ${item.resource}`,
-     ),
-+    // 原生批量修改同样尚无 LSP 结果，不能把操作成功作为诊断通过。
+@@ -47,4 +47,6 @@ export const toModelOutput = (output: Output) =>
+     "```diff",
+     ...output.files.map((file) => file.patch),
+     "```",
++    // 批次最终 diff 与诊断状态独立，不用不可用提示替代真实改动。
 +    "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
    ].join("\n")
 diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
 --- a/packages/core/src/session/runner/llm.ts
 +++ b/packages/core/src/session/runner/llm.ts
-@@ -260,4 +260,11 @@
-       // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
-       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
+@@ -283,4 +283,11 @@
+       // 指引只引用本轮真实可见工具；内部修复定义不算用户能力，空列表明确提示无工具。
+       const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name).filter(ToolSelection.isUserConfigurable) ?? [])
 +      // 根据本轮实际工具表提示历史调用的可用性，不另建权限判断或持久化提醒。
 +      const available = new Set(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
 +      const disabled = toolMaterialization ? [...new Set(context.flatMap(message => message.type === "assistant" ? message.content.flatMap(part => part.type === "tool" && part.provider?.executed !== true ? [part.name] : []) : []))].filter(name => !available.has(name)) : []
@@ -68,9 +267,8 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 +      }).join("\n")
        // 模型身份随当前选择变化，不能固定进 default-agent baseline 或首次 Environment 快照。
        const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
-@@ -265,3 +272,4 @@
-       const systemParts = [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
-         toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
+@@ -290,2 +297,3 @@
+       const systemParts = [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
 +        ...(notice ? [`<system-reminder>${notice}</system-reminder>`] : []),
          ...(decide ? [DECIDE_PROMPT] : []),
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
@@ -86,7 +284,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 +            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
 +            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
 +            // 原始 input 不保留——format 后的内容才是真实落盘内容。
-+            input: output.metadata?._formattedContent
++            input: typeof output.metadata?._formattedContent === "string"
 +              ? { ...match.part.state.input, content: output.metadata._formattedContent }
 +              : match.part.state.input,
              output: output.output,
@@ -307,13 +505,11 @@ diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/te
 diff --git a/packages/opencode/test/tool/bash-compress.test.ts b/packages/opencode/test/tool/bash-compress.test.ts
 --- a/packages/opencode/test/tool/bash-compress.test.ts
 +++ b/packages/opencode/test/tool/bash-compress.test.ts
-@@ -1,5 +1,5 @@
+@@ -1,3 +1,3 @@
  import { describe, expect, test } from "bun:test"
--import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput } from "@opencode-ai/core/tool/bash-compress"
-+import { compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern } from "@opencode-ai/core/tool/bash-compress"
- 
- // #129：CLIXML 纯块解码与混合块保留
- describe("tool.bash-compress", () => {
+-import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
++import { BashDiagnosticCollector, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, quotePattern, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
+ import { formatExitNotice } from "@opencode-ai/core/util/output-notice"
 @@ -139,4 +139,19 @@ describe("tool.bash-compress", () => {
      expect(result.text).toBe('[repeated "abc" ×6000]')
      expect(result.stats.inlinePatternGroups).toBe(1)

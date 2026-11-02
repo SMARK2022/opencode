@@ -291,7 +291,7 @@ diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.tes
 index 3abce1c02d..5b47b8e2c0 100644
 --- a/packages/core/test/ripgrep.test.ts
 +++ b/packages/core/test/ripgrep.test.ts
-@@ -62,4 +62,38 @@ describe("Ripgrep", () => {
+@@ -82,4 +82,52 @@ describe("Ripgrep", () => {
        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
      ),
    )
@@ -304,8 +304,16 @@ index 3abce1c02d..5b47b8e2c0 100644
 +        Effect.gen(function* () {
 +          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "one.txt"), "needle\nneedle\nneedle\n"))
 +          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "two.txt"), "needle\nneedle\nneedle\n"))
-+          const matches = yield* (yield* Ripgrep.Service).grep({ cwd: tmp.path, pattern: "needle", limit: 3 })
-+          expect(matches.length).toBe(3)
++          const ripgrep = yield* Ripgrep.Service
++          const result = yield* ripgrep.search({ cwd: tmp.path, pattern: "needle", limit: 3 })
++          expect(result.items).toHaveLength(3)
++          expect(result.truncated).toBe(true)
++          const full = yield* ripgrep.search({ cwd: tmp.path, pattern: "needle", limit: 10, maxFiles: false })
++          expect(full.items).toHaveLength(6)
++          expect(full.truncated).toBe(false)
++          expect(full.partial).toBe(false)
++          const invalid = yield* ripgrep.search({ cwd: tmp.path, file: "one.txt", pattern: "needle", include: "[", limit: 3 }).pipe(Effect.flip)
++          expect(invalid.message).toContain("error parsing glob")
 +        }),
 +      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
 +    ),
@@ -320,10 +328,16 @@ index 3abce1c02d..5b47b8e2c0 100644
 +        Effect.gen(function* () {
 +          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "one.txt"), "needle\n"))
 +          yield* Effect.promise(() => Bun.write(path.join(tmp.path, "two.txt"), "needle\n"))
-+          const exit = yield* (yield* Ripgrep.Service)
++          const ripgrep = yield* Ripgrep.Service
++          const exit = yield* ripgrep
 +            .grep({ cwd: tmp.path, pattern: "needle", limit: 10, maxFiles: 1 })
 +            .pipe(Effect.exit)
 +          expect(exit._tag).toBe("Failure")
++          const directory = yield* ripgrep.search({ cwd: tmp.path, file: ".", pattern: "needle", limit: 10, maxFiles: 1 }).pipe(Effect.flip)
++          expect(directory).toBeInstanceOf(Ripgrep.SearchTooBroadError)
++          const single = yield* ripgrep.search({ cwd: tmp.path, file: "one.txt", pattern: "needle", limit: 10, maxFiles: 1 })
++          expect(single.items).toHaveLength(1)
++          expect(single.truncated).toBe(false)
 +        }),
 +      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
 +    ),
@@ -405,3 +419,237 @@ index 81b74aa8ba..a1208bde58 100644
 +  )
 +
  })
+diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
+--- a/packages/core/src/ripgrep.ts
++++ b/packages/core/src/ripgrep.ts
+@@ -9,1 +9,3 @@
+ import { RipgrepBinary } from "./ripgrep/binary"
++import { FSUtil } from "./fs-util"
++import path from "path"
+@@ -92,1 +94,7 @@
++export interface SearchResult {
++  readonly items: readonly Match[]
++  readonly truncated: boolean
++  readonly partial: boolean
++}
++
+ export interface Interface {
+@@ -95,1 +103,2 @@
+   readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
++  readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
+@@ -109,1 +118,2 @@
+     const binary = yield* RipgrepBinary.Service
++    const fs = yield* FSUtil.Service
+@@ -171,1 +181,1 @@
+-    return Service.of({
++    const service: Interface = {
+@@ -235,1 +245,3 @@
+-      grep: (input) =>
++      // 既有 V1/HTTP 调用保留数组契约，原生工具消费同一次搜索的完整状态。
++      grep: (input) => service.search(input).pipe(Effect.map((result) => result.items)),
++      search: (input) =>
+@@ -240,4 +252,6 @@
+-            // #138：显式单文件目标不走目录候选计数
+-            if (input.file) {
+-              // single file target is always within bound
+-            } else {
++            // 单文件豁免不能扩大为目录豁免；显式目录沿用相同候选预算。
++            const directory = input.file === undefined || (yield* fs.stat(path.resolve(input.cwd, input.file)).pipe(
++              Effect.map((info) => info.type === "Directory"),
++              Effect.mapError((cause) => failure("Unable to inspect search target", cause)),
++            ))
++            if (directory) {
+@@ -253,4 +267,4 @@
+                   ...(input.include ? [`--glob=${input.include}`] : []),
+                   "--glob=!**/.git/**",
+-                  ".",
++                  input.file ?? ".",
+                 ],
+@@ -309,2 +323,3 @@
+-          Effect.map((result) =>
+-            result.items.map((match) => {
++          Effect.map((result) => ({
++            ...result,
++            items: result.items.map((match) => {
+@@ -332,2 +347,2 @@
+             }),
+-          ),
++          })),
+@@ -336,1 +351,2 @@
+-    })
++    }
++    return Service.of(service)
+@@ -340,1 +356,1 @@
+-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node] })
++export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node, FSUtil.node] })
+diff --git a/packages/core/src/tool/grep.ts b/packages/core/src/tool/grep.ts
+--- a/packages/core/src/tool/grep.ts
++++ b/packages/core/src/tool/grep.ts
+@@ -17,1 +17,3 @@
+ export const name = "grep"
++
++const RESULT_LIMIT = 64
+@@ -30,1 +32,1 @@
+-    description: "Maximum matches to return",
++    description: `Maximum matches to return (default ${RESULT_LIMIT})`,
+@@ -34,1 +36,5 @@
+-export const Output = Schema.Array(FileSystem.Match)
++export const Output = Schema.Struct({
++  items: Schema.Array(FileSystem.Match),
++  partial: Schema.Boolean,
++  truncated: Schema.Boolean,
++})
+@@ -39,1 +45,2 @@
+-  const lines = output.length === 0 ? ["No files found"] : [`Found ${output.length} matches`]
++  // 截断来自真实 producer 状态，不能仅因条数恰好等于预算就猜测有更多结果。
++  const lines = output.items.length === 0 ? ["No files found"] : [`Found ${output.items.length}${output.truncated ? "+" : ""} matches${output.truncated ? ` (showing first ${output.items.length})` : ""}`]
+@@ -41,1 +48,1 @@
+-  for (const match of output) {
++  for (const match of output.items) {
+@@ -49,1 +56,3 @@
++  if (output.truncated) lines.push("", `(Results truncated: showing first ${output.items.length} matches. Consider using a more specific path or pattern.)`)
++  if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
+   return lines.join("\n")
+@@ -72,4 +81,4 @@
+-                output.map((match) => ({
++                { ...output, items: output.items.map((match) => ({
+                   ...match,
+                   entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
+-                })),
++                })) },
+@@ -98,1 +107,1 @@
+-                .grep({
++                .search({
+@@ -103,1 +112,2 @@
+-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
++                  // 默认预算进入流式收集之前；显式正数 limit 不被默认值夹紧。
++                  limit: input.limit ?? RESULT_LIMIT,
+@@ -106,2 +116,3 @@
+-                  Effect.map((result) =>
+-                    result.map((match) =>
++                  Effect.map((result) => ({
++                    ...result,
++                    items: result.items.map((match) =>
+@@ -123,2 +134,2 @@
+                     ),
+-                  ),
++                  })),
+@@ -126,1 +137,7 @@
+-            }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to grep for ${input.pattern}` }))),
++            }).pipe(Effect.mapError((cause) => new ToolFailure({
++              message: cause instanceof Ripgrep.SearchTooBroadError
++                ? `${cause.message}\nUse a narrower path or include pattern before searching file contents.`
++                : cause instanceof Ripgrep.InvalidPatternError || cause instanceof Ripgrep.Error
++                  ? cause.message
++                  : `Unable to grep for ${input.pattern}`,
++            }))),
+diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
+--- a/packages/core/test/ripgrep.test.ts
++++ b/packages/core/test/ripgrep.test.ts
+@@ -4,1 +4,1 @@
+-import { Effect } from "effect"
++import { Effect, Layer, Schema } from "effect"
+@@ -7,1 +7,11 @@
+-import { RelativePath } from "@opencode-ai/core/schema"
++import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { AppProcess } from "@opencode-ai/core/process"
++import { Location } from "@opencode-ai/core/location"
++import { PermissionV2 } from "@opencode-ai/core/permission"
++import { SessionSchema } from "@opencode-ai/core/session/schema"
++import { GrepTool } from "@opencode-ai/core/tool/grep"
++import { ToolRegistry } from "@opencode-ai/core/tool/registry"
++import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
++import { location } from "./fixture/location"
++import { settleTool, toolIdentity } from "./lib/tool"
+@@ -13,1 +23,83 @@
+ describe("Ripgrep", () => {
++  testEffect(Layer.empty).live("bounds native grep at its producer and preserves exact truncation evidence", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      (tmp) => Effect.gen(function* () {
++        yield* Effect.promise(() => Bun.write(path.join(tmp.path, "matches.txt"), Array.from({ length: 130 }, (_, index) => `needle ${index}`).join("\n")))
++        yield* Effect.promise(() => Bun.write(path.join(tmp.path, "exact.txt"), "needle\n".repeat(64)))
++        const limits: number[] = []
++        const sizes: number[] = []
++        const assertions: PermissionV2.AssertInput[] = []
++        let kills = 0
++        // 只观察实际 handle.kill 的执行，stdout、退出码和作用域清理仍由真实进程提供。
++        const processLayer = Layer.effect(AppProcess.Service, Effect.gen(function* () {
++          const native = yield* AppProcess.Service
++          return AppProcess.Service.of({
++            ...native,
++            spawn: (command) => native.spawn(command).pipe(
++              Effect.map((handle) => new Proxy(handle, {
++                get(target, key) {
++                  if (key === "kill") return (...args: Parameters<typeof target.kill>) =>
++                    Effect.sync(() => { kills++ }).pipe(Effect.andThen(target.kill(...args)))
++                  return Reflect.get(target, key, target)
++                },
++              })),
++            ),
++          })
++        })).pipe(Layer.provide(LayerNode.compile(AppProcess.node)))
++        const observed = Layer.effect(Ripgrep.Service, Effect.gen(function* () {
++          const native = yield* Ripgrep.Service
++          return Ripgrep.Service.of({
++            ...native,
++            // 单文件保留正式默认预算；目录用小候选门限验证真实拒绝和模型纠正提示。
++            search: (input) => Effect.sync(() => limits.push(input.limit)).pipe(
++              Effect.andThen(native.search({ ...input, maxFiles: input.file ? input.maxFiles : 1 })),
++              Effect.tap((result) => Effect.sync(() => sizes.push(result.items.length))),
++            ),
++          })
++        })).pipe(Layer.provide(AppNodeBuilder.build(Ripgrep.node, [[AppProcess.node, processLayer]])))
++        const graph = AppNodeBuilder.build(
++          LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, GrepTool.node]),
++          [
++            [Ripgrep.node, observed],
++            [Location.node, Layer.succeed(Location.Service, Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })))],
++            [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: (input) => Effect.sync(() => { assertions.push(input) }) })],
++            [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
++          ],
++        )
++        yield* Effect.gen(function* () {
++          const registry = yield* ToolRegistry.Service
++          const sessionID = SessionSchema.ID.make("ses_native_grep_budget")
++          for (const [index, limit] of [undefined, 3, 80].entries()) {
++            const budget = limit ?? 64
++            const settled = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: `grep-${index}`, name: "grep", input: { pattern: "needle", path: "matches.txt", ...(limit === undefined ? {} : { limit }) } } })
++            const output = Schema.decodeUnknownSync(GrepTool.Output)(settled.output?.structured)
++            expect(output.items).toHaveLength(budget)
++            expect(output.truncated).toBe(true)
++            expect(output.partial).toBe(false)
++            expect(output.items[0]?.text).toContain("needle 0")
++            expect(settled.result.type === "text" ? settled.result.value : "").toContain(`Found ${budget}+ matches`)
++            expect(limits.at(-1)).toBe(budget)
++            expect(sizes.at(-1)).toBe(budget)
++            expect(kills).toBe(index + 1)
++          }
++          const whole = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "grep-exact", name: "grep", input: { pattern: "needle", path: "exact.txt" } } })
++          const exact = Schema.decodeUnknownSync(GrepTool.Output)(whole.output?.structured)
++          expect(exact.items).toHaveLength(64)
++          expect(exact.truncated).toBe(false)
++          expect(whole.result.type === "text" ? whole.result.value : "").not.toContain("truncated")
++          expect(kills).toBe(3)
++          expect(limits).toEqual([64, 3, 80, 64])
++          expect(sizes).toEqual([64, 3, 80, 64])
++          const broad = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "grep-broad", name: "grep", input: { pattern: "needle", path: "." } } })
++          const failure = broad.result.type === "error" ? String(broad.result.value) : ""
++          expect(failure).toContain("more than 1 candidate files")
++          expect(failure).toContain("Use a narrower path or include pattern before searching file contents.")
++          expect(assertions).toHaveLength(5)
++          expect(assertions.every((input) => input.action === "grep" && input.source?.type === "tool")).toBe(true)
++        }).pipe(Effect.provide(graph))
++      }),
++      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
+--- a/packages/core/src/ripgrep.ts
++++ b/packages/core/src/ripgrep.ts
+@@ -135,1 +135,3 @@
++          // 原 source 对无匹配且带诊断的 exit2 判为失败，不能伪装成 partial 空结果。
++          if (code === 2 && rows.length === 0 && stderr.trim()) return yield* failure(stderr.trim())
+           if (code !== 0 && code !== 1 && code !== 2) {

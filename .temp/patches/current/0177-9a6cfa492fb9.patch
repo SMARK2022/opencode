@@ -90,7 +90,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
    const sessionsWithUsage: SessionUsage[] = []
    const sessionTokenTotals: number[] = []
    let totalMessages = 0
-@@ -976,7 +981,17 @@ const filteredAggregates =
+@@ -976,7 +981,16 @@ const filteredAggregates =
      // #176：上下文 token 由 toolEvents 叠加，避免与 count 双计字符
      aggregate.toolEvents
        .filter((event) => toolEventMatches(event, input))
@@ -103,8 +103,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +        // #177：日点 tokens.total 承载 context
 +        point.tokens.total += event.contextTokens
 +        point.tokens.input += event.contextTokens
-+        // #177：请求次数随工具事件递增
-+        point.requests += 1
++        // 工具上下文不是新的提供者请求，保持 source 的零请求/零费用口径。
 +      })
  
      for (const event of aggregate.totalEvents.filter((event) => eventMatches(event, input))) {
@@ -127,19 +126,18 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/src/cli/cmd/stats-render.ts
 --- a/packages/opencode/src/cli/cmd/stats-render.ts
 +++ b/packages/opencode/src/cli/cmd/stats-render.ts
-@@ -111,7 +111,11 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
-                   }))
-                 : report.models
- 
--  const rows = limitRows(groups, options.limit).map((group) => {
-+  // #177：显式 cost 先排序再限行，避免 tokens-first 漏掉高成本分组
-+  const rows = limitRows(
-+    options.sort === "cost" ? [...groups].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...groups].sort((a, b) => b.assistantCalls - a.assistantCalls) : groups,
-+    options.limit,
-+  ).map((group) => {
-     const value = metric === "cost" ? group.cost : group.tokens.total
-     return { label: group.label || group.id, value }
-   })
+@@ -76,7 +76,8 @@
+ // 排名和明细先按同一指标排序再限行，不能从默认费用榜截出 token/calls 的 Top N。
+ const topGroups = (groups: StatsReport["models"], options: StatsRenderOptions) =>
+   limitRows(groups.toSorted((a, b) => {
+-    if (options.sort === "tokens") return b.tokens.total - a.tokens.total
+-    if (options.sort === "calls") return b.assistantCalls - a.assistantCalls
+-    return b.cost - a.cost || b.tokens.total - a.tokens.total
++    // 默认 token 与显式 cost/calls 共用选择器，所有榜单和台账在限行前取得同一排序。
++    if (options.sort === "cost") return b.cost - a.cost || b.tokens.total - a.tokens.total
++    if (options.sort === "calls") return b.assistantCalls - a.assistantCalls || b.tokens.total - a.tokens.total
++    return b.tokens.total - a.tokens.total || b.cost - a.cost
+   }), options.limit)
 @@ -121,6 +125,21 @@ export const renderBreakdown = (report: StatsReport, options: StatsRenderOptions
    ]
      // #176：tool 维附加 context/count/IO 明细
@@ -162,36 +160,6 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      lines.push("")
      lines.push("Tool context tokens / counts")
      for (const tool of limitRows(report.toolUsage ?? [], options.limit)) {
-@@ -159,9 +178,13 @@ export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
-   [
-     ...header(report, "stats models"),
-     ...renderRankBars({
--      rows: limitRows(options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models, options.limit).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
-+      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
-+      rows: limitRows(
-+        options.sort === "cost" ? [...report.models].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.models].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.models,
-+        options.limit,
-+      ).map((m) => ({ label: m.label || m.id, value: (options.metric ?? "cost") === "cost" ? m.cost : m.tokens.total })),
-     }),
-     ...renderUsageSeries(report.modelSeries, options, "Model usage over time"),
-     ...renderGroupDetails(report.models, options),
-   ].join("\n")
- 
-@@ -168,9 +191,13 @@ export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
-   [
-     ...header(report, "stats providers"),
-     ...renderRankBars({
--      rows: limitRows(options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers, options.limit).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
-+      // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
-+      rows: limitRows(
-+        options.sort === "cost" ? [...report.providers].sort((a, b) => b.cost - a.cost || b.tokens.total - a.tokens.total) : options.sort === "calls" ? [...report.providers].sort((a, b) => b.assistantCalls - a.assistantCalls) : report.providers,
-+        options.limit,
-+      ).map((p) => ({ label: p.label || p.id, value: (options.metric ?? "cost") === "cost" ? p.cost : p.tokens.total })),
-     }),
-     ...renderUsageSeries(report.providerSeries, options, "Provider usage over time"),
-     ...renderGroupDetails(report.providers, options),
-   ].join("\n")
- 
 @@ -184,8 +211,9 @@ export const renderTimeline = (report: StatsReport, options: StatsRenderOptions
    ].join("\n")
  

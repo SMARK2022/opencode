@@ -471,6 +471,27 @@ diff --git a/packages/core/test/plugin/provider-anthropic.test.ts b/packages/cor
 +        "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14,redact-thinking-2026-02-12",
        )
 
+diff --git a/packages/core/test/config/config.test.ts b/packages/core/test/config/config.test.ts
+--- a/packages/core/test/config/config.test.ts
++++ b/packages/core/test/config/config.test.ts
+@@ -606,11 +606,14 @@
+             expect(documents[0]?.info.attachments).toEqual({ image: { auto_resize: false, max_width: 1200 } })
++            // API 未决时保留原选项；真正转换后的字段另由 Catalog 用例核对。
+             expect(documents[0]?.info.providers?.custom).toMatchObject({
+-              request: { body: { apiKey: "secret" } },
++              v1: { options: { apiKey: "secret" } },
+               models: {
+                 model: {
+-                  request: { body: { reasoningEffort: "high" } },
+-                  variants: [{ id: "fast", body: { temperature: 0.2 } }],
++                  v1: { options: { reasoningEffort: "high" }, variants: { fast: { temperature: 0.2 } } },
+                 },
+               },
+             })
++            expect(documents[0]?.info.providers?.custom?.request).toBeUndefined()
++            expect(documents[0]?.info.providers?.custom?.models?.model?.request).toBeUndefined()
++            expect(documents[0]?.info.providers?.custom?.models?.model?.variants).toBeUndefined()
+             expect(documents[0]?.info.providers?.openai).toMatchObject({
 diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/config/provider.test.ts
 --- a/packages/core/test/config/provider.test.ts
 +++ b/packages/core/test/config/provider.test.ts
@@ -579,7 +600,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
                    },
                  }),
                }),
-@@ -220,6 +296,34 @@
+@@ -220,6 +296,36 @@
                            ],
                          },
                        },
@@ -604,6 +625,8 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +                    } })).providers,
 +                    // 未使用的普通 native V1 配置必须保留 raw options/variants，不能阻断整个 catalog。
 +                    ...ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({ provider: {
++                      // 同时覆盖文档延迟保留的凭据、模型选项与变体，检查最终消费者而非仅中间形状。
++                      "unresolved-key": { options: { apiKey: "secret" }, models: { model: { options: { reasoningEffort: "high" }, variants: { fast: { temperature: 0.2 } } } } },
 +                      "ordinary-native": { models: {
 +                        empty: { options: {} },
 +                        raw: { options: { metadata: { userId: "ordinary-user" } }, variants: { high: { metadata: { userId: "ordinary-variant" } } } },
@@ -614,7 +637,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +                    } })).providers,
                    },
                  }),
-@@ -230,4 +333,21 @@
+@@ -230,4 +335,21 @@
 +                  model: "switched/kept",
                    providers: {
                      custom: { name: "Renamed" },
@@ -636,12 +659,12 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +                    } })).providers,
                    },
                  }),
-@@ -242,3 +360,3 @@
+@@ -242,3 +362,3 @@
 -        expect((yield* catalog.model.default())?.id).toBe(ModelV2.ID.make("default"))
 +        expect((yield* catalog.model.default())?.id).toBe(ModelV2.ID.make("kept"))
          expect(provider.name).toBe("Renamed")
          expect((yield* integrations.get(Integration.ID.make("custom")))?.methods).toContainEqual({
-@@ -265,4 +383,113 @@
+@@ -265,4 +385,118 @@
          expect(model.variants[1]?.headers).toEqual({ slow: "slow" })
 +        const mirror = required(yield* catalog.model.get(ProviderV2.ID.make("mirror"), modelID))
 +        // 独立预期同时覆盖重绑、实际 API ID、npm/URL 和保留的基础 variant。
@@ -704,6 +727,11 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +        expect(ordinary.api.type).toBe("native")
 +        expect(ordinary.request.body).toEqual({ metadata: { userId: "ordinary-user" } })
 +        expect(ordinary.variants[0]?.body).toEqual({ metadata: { userId: "ordinary-variant" } })
++        // 未知 SDK 的 raw 字段仍完整进入 Catalog，不把文档形状调整当成功能通过。
++        expect((yield* catalog.provider.get(ProviderV2.ID.make("unresolved-key")))?.request.body).toEqual({ apiKey: "secret" })
++        const deferred = required(yield* catalog.model.get(ProviderV2.ID.make("unresolved-key"), ModelV2.ID.make("model")))
++        expect(deferred.request.body).toEqual({ apiKey: "secret", reasoningEffort: "high" })
++        expect(deferred.variants.map(variant => ({ id: variant.id, body: variant.body }))).toEqual([{ id: ModelV2.VariantID.make("fast"), body: { temperature: 0.2 } }])
 +        const native = required(yield* catalog.model.get(ProviderV2.ID.make("native-copy"), ModelV2.ID.make("raw")))
 +        expect(native.api.type).toBe("native")
 +        expect(native.request.body).toEqual({ metadata: { userId: "native-user" } })

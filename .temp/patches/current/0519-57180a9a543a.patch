@@ -11,6 +11,389 @@ Content-Transfer-Encoding: 8bit
 
 覆盖 partial text、reasoning-only 和 Step Ended 顺序，保持 Tool 与 retry 策略不变。
 
+diff --git a/packages/opencode/src/session/retry-constants.ts b/packages/core/src/session/retry-constants.ts
+similarity index 100%
+rename from packages/opencode/src/session/retry-constants.ts
+rename to packages/core/src/session/retry-constants.ts
+diff --git a/packages/opencode/src/session/retry.ts b/packages/core/src/session/retry.ts
+similarity index 96%
+rename from packages/opencode/src/session/retry.ts
+rename to packages/core/src/session/retry.ts
+--- a/packages/opencode/src/session/retry.ts
++++ b/packages/core/src/session/retry.ts
+@@ -1,10 +1,10 @@
+-import type { NamedError } from "@opencode-ai/core/util/error"
+-import { SessionV1 } from "@opencode-ai/core/v1/session"
++import type { NamedError } from "../util/error"
++import { SessionV1 } from "../v1/session"
+ import { Cause, Clock, Duration, Effect, Schedule } from "effect"
+-import { MessageV2 } from "./message-v2"
+-import { iife } from "@/util/iife"
+-import { isRecord } from "@/util/record"
++import { iife } from "../util/iife"
+ import { GO_UPSELL_MESSAGE, GO_UPSELL_URL } from "./retry-constants"
+ export { GO_UPSELL_MESSAGE, GO_UPSELL_URL }
+ 
++const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
++
+ export type Err = ReturnType<NamedError["toObject"]>
+diff --git a/packages/opencode/src/session/retry-constants.ts b/packages/opencode/src/session/retry-constants.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/session/retry-constants.ts
+@@ -0,0 +1,2 @@
++// 两代共用同一重试文案，既有 V1 consumer 保持原导入路径。
++export * from "@opencode-ai/core/session/retry-constants"
+diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/session/retry.ts
+@@ -0,0 +1,2 @@
++// 策略只归 Core 所有；V1 processor/reviewer 继续消费原有公开导出。
++export * from "@opencode-ai/core/session/retry"
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -218,1 +218,1 @@
+-  const failAssistant = Effect.fnUntraced(function* (message: string, aborted = false, finalizer = false) {
++  const failAssistant = Effect.fnUntraced(function* (message: string, aborted = false, finalizer = false, discardIncompleteAttempt = false) {
+@@ -229,6 +229,20 @@
+       aborted,
+-    }, { finalizer })
++      ...(discardIncompleteAttempt ? { discardIncompleteAttempt: true } : {}),
++    }, { finalizer })
+   })
+ 
++  const retry = Effect.fn("SessionRunner.retryIncompleteAttempt")(function* (attempt: number, error: SessionEvent.RetryError) {
++    const messageID = yield* startAssistant()
++    yield* events.publish(SessionEvent.Retried, {
++      sessionID: input.sessionID, assistantMessageID: messageID, timestamp: yield* timestamp, attempt, error,
++    })
++    // 同一请求和助手继续；不重新 Started、不退款，也不让旧 fragments 在取消后复活。
++    assistantActive = true
++    assistantFailed = false
++    providerFailed = false
++    stepSettlement = undefined
++    tools.clear()
++  })
++
+   const failUnsettledTools = Effect.fn("SessionRunner.failUnsettledTools")(function* (
+     message: string,
+@@ -452,3 +466,4 @@
+     flush,
+     failAssistant,
++    retry,
+     failUnsettledTools,
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -267,4 +267,6 @@
+         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
++          // producer 已确认本 attempt 无实际 Tool，撤回前缀而不更改其他失败的 partial 保留。
++          if (event.data.discardIncompleteAttempt === true) draft.content = []
+           draft.time.completed = event.data.timestamp
+           draft.finish = "error"
+           draft.error = event.data.error
+@@ -436,1 +438,11 @@
+-      "session.next.retried": () => Effect.void,
++      "session.next.retried": event => {
++        const messageID = event.data.assistantMessageID
++        if (messageID === undefined) return Effect.void
++        return updateOwnedAssistant(SessionMessage.ID.make(messageID), draft => {
++          // 只重置此重试拥有的助手，后到的输入和其它错误不能被跨轮清空。
++          draft.content = []
++          delete draft.time.completed
++          delete draft.finish
++          delete draft.error
++        })
++      },
+diff --git a/packages/core/src/session/projector.ts b/packages/core/src/session/projector.ts
+--- a/packages/core/src/session/projector.ts
++++ b/packages/core/src/session/projector.ts
+@@ -325,2 +325,5 @@
+-    if (event.type !== "session.next.step.started" && event.type !== "session.next.step.ended" && event.type !== "session.next.step.failed") return
+-    const assistant = yield* adapter.getAssistant(event.data.assistantMessageID)
++    const messageID = event.type === "session.next.step.started" || event.type === "session.next.step.ended" || event.type === "session.next.step.failed" || event.type === "session.next.retried"
++      ? event.data.assistantMessageID : undefined
++    if (messageID === undefined) return
++    // 重试覆写同一助手快照，不能让已恢复请求继续聚合上一 attempt 的错误。
++    const assistant = yield* adapter.getAssistant(messageID)
+@@ -659,1 +662,1 @@
+-    // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
++    yield* events.project(SessionEvent.Retried, (event) => run(db, event))
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -40,2 +40,3 @@
+ import { SessionGoal } from "../goal"
++import { SessionRetry } from "../retry"
+ import { SessionGoalProgress } from "../goal-progress"
+@@ -429,5 +430,11 @@
+       let terminalError = false
++      let hasToolCall = false
++      const incomplete = new LLMError({ module: "SessionRunner", method: "stream", reason: new InvalidProviderOutputReason({
++        message: "Provider returned incomplete completion (finish_reason: unknown)",
++      }) })
++      const retryError = new SessionV1.APIError({ message: incomplete.reason.message, isRetryable: true, metadata: { finishReason: "unknown" } })
+       // 请求归属与工具读取门寿命不同：dispatch固定代际，终态后的同代最终消耗仍结算。
+       const dispatchedGoal = yield* goals.get(session.id)
+       const expectedUsage = Option.isSome(dispatchedGoal) && dispatchedGoal.value.status === "active" ? { goalID: dispatchedGoal.value.id, generation: dispatchedGoal.value.generation } : undefined
+-      const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
++      // 每个获准 retry 才重新调用唯一 stream；不能反复消费同一个已构造响应。
++      const providerStream = Effect.suspend(() => llm.stream(request, (body) => Effect.gen(function* () {
+@@ -469,2 +476,8 @@
++            if (event.type === "tool-call") hasToolCall = true
++            if (event.type === "step-finish" && event.reason === "unknown" && !hasToolCall && !publisher.stepSettlement()) {
++              // 成功事件和用量确认前清理；tool-bearing attempt 从不重放。
++              yield* withPublication(publisher.failAssistant(incomplete.reason.message, false, false, true))
++              return yield* incomplete
++            }
+             yield* publish(event)
+             if (event.type !== "tool-call" || event.providerExecuted) return
+@@ -517,2 +530,11 @@
+         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
+-      )
++      )).pipe(Effect.retry({
++        while: error => error === incomplete,
++        schedule: SessionRetry.policy({
++          provider: String(model.provider), parse: () => retryError.toObject(),
++          set: ({ attempt }) => Effect.gen(function* () {
++            hasToolCall = false
++            yield* withPublication(publisher.retry(attempt, retryError.data))
++          }),
++        }),
++      }))
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -240,3 +240,4 @@
+             if (!currentAssistant) return
++            if (event.data.discardIncompleteAttempt === true) currentAssistant.content = []
+             currentAssistant.time.completed = event.data.timestamp
+             currentAssistant.finish = "error"
+@@ -246,1 +247,14 @@
++        case "session.next.retried": {
++          const messageID = event.data.assistantMessageID
++          if (messageID === undefined) break
++          message.update(event.data.sessionID, draft => {
++            const assistant = message.assistant(draft, messageID)
++            if (!assistant) return
++            assistant.content = []
++            delete assistant.time.completed
++            delete assistant.finish
++            delete assistant.error
++          })
++          break
++        }
+         case "session.next.text.started":
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -961,8 +961,15 @@
+-    // 活跃Goal也不能把未知/错误的空结算当正常完成，避免不断注入续跑。
++    // 已执行工具的未知完成不重放，也不能当作普通 Goal 完成；无工具 unknown 由独立重试用例覆盖。
+     for (const reason of ["unknown", "error"] as const) {
+       yield* goals.set(sessionID, { status: "active" })
+       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: `Handle empty ${reason}` }), resume: false })
+-      responses = [[LLMEvent.stepStart({ index: 0 }), LLMEvent.stepFinish({ index: 0, reason }), LLMEvent.finish({ reason })]]
++      responses = [[
++        LLMEvent.stepStart({ index: 0 }),
++        ...(reason === "unknown" ? [
++          LLMEvent.toolCall({ id: "hosted-unknown", name: "echo", input: { text: "hosted" }, providerExecuted: true }),
++          LLMEvent.toolResult({ id: "hosted-unknown", name: "echo", result: { type: "text", value: "hosted" }, providerExecuted: true }),
++        ] : []),
++        LLMEvent.stepFinish({ index: 0, reason }), LLMEvent.finish({ reason }),
++      ]]
+       requests.length = 0
+       yield* session.resume(sessionID)
+       // 异常停止不是正常额度耗尽，不应把仍活跃的目标误改成paused。
+@@ -975,1 +982,85 @@
+ describe("SessionRunnerLLM", () => {
++  it.effect("retries incomplete Native completions without replaying tools or retaining failed prefixes", () =>
++    Effect.gen(function* () {
++      yield* setup
++      const session = yield* SessionV2.Service
++      const runner = yield* SessionRunner.Service
++      const db = (yield* Database.Service).db
++      const usage = SessionRequestUsage.make(db)
++      const events = yield* EventV2.Service
++      const retries = yield* Queue.unbounded<number>()
++      const ended: string[] = []
++      const off = yield* events.listen(event => {
++        if (Schema.is(SessionEvent.Step.Ended)(event)) ended.push(event.data.finish ?? "")
++        if (Schema.is(SessionEvent.Retried)(event)) return Queue.offer(retries, event.data.attempt).pipe(Effect.asVoid)
++        return Effect.void
++      })
++      yield* Effect.addFinalizer(() => off)
++      yield* Effect.addFinalizer(() => Effect.sync(() => { responses = undefined; responseStream = undefined; requests.length = 0; executions.length = 0 }))
++      const failed = (kind: "empty" | "text" | "reasoning"): LLMEvent[] => [
++        ...(kind === "empty" ? [LLMEvent.stepStart({ index: 0 })] : fragmentFixture(kind, "failed-prefix", ["partial"]).partialEvents),
++        LLMEvent.stepFinish({ index: 0, reason: "unknown", usage: { inputTokens: 777, nonCachedInputTokens: 777, outputTokens: 888 } }),
++        LLMEvent.finish({ reason: "unknown" }),
++      ]
++      const recovered = fragmentFixture("text", "recovered", ["recovered"]).completeEvents
++      for (const kind of ["empty", "text", "reasoning"] as const) {
++        const id = SessionV2.ID.make(`ses_incomplete_${kind}`)
++        yield* insertSession(id)
++        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Complete the task" }), resume: false })
++        responses = [failed(kind), recovered]
++        requests.length = 0
++        ended.length = 0
++        const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.forkChild)
++        expect(yield* Queue.take(retries)).toBe(1)
++        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ content: [] }])
++        // 等真实重试通知后推进虚拟时钟；不缩短生产退避，也不调用真实provider。
++        yield* TestClock.adjust("3 seconds")
++        yield* Fiber.join(fiber)
++        expect(requests).toHaveLength(2)
++        expect(requests[1]?.messages).toEqual(requests[0]?.messages)
++        const context = yield* session.context(id)
++        expect(context.filter(message => message.type === "assistant")).toMatchObject([{ finish: "stop", content: [{ type: "text", text: "recovered" }] }])
++        expect(JSON.stringify(context)).not.toContain("partial")
++        expect(ended).toEqual(["stop"])
++        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: "completed", assistantCount: 1, stepCount: 1, tokens: { total: 0 } })
++        yield* replaySessionProjection(id)
++        expect(yield* session.context(id)).toEqual(context)
++      }
++      for (const cancel of [false, true]) {
++        const id = SessionV2.ID.make(`ses_incomplete_exit_${cancel}`)
++        yield* insertSession(id)
++        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Handle incomplete output" }), resume: false })
++        responses = Array.from({ length: 6 }, () => failed("reasoning"))
++        requests.length = 0
++        const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit, Effect.forkChild)
++        for (let attempt = 1; attempt <= (cancel ? 1 : 5); attempt++) {
++          expect(yield* Queue.take(retries)).toBe(attempt)
++          if (!cancel) yield* TestClock.adjust("40 seconds")
++        }
++        if (cancel) yield* Fiber.interrupt(fiber)
++        const result = yield* Fiber.await(fiber)
++        expect(cancel ? Exit.isFailure(result) : Exit.isSuccess(result) && Exit.isFailure(result.value)).toBe(true)
++        expect(requests).toHaveLength(cancel ? 1 : 6)
++        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ finish: "error", content: [] }])
++        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: cancel ? "aborted" : "error", assistantCount: 1, stepCount: 0, tokens: { total: 0 } })
++      }
++      for (const hosted of [false, true]) {
++        const id = SessionV2.ID.make(`ses_incomplete_tool_${hosted}`)
++        yield* insertSession(id)
++        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Use the tool once" }), resume: false })
++        requests.length = 0
++        executions.length = 0
++        responses = [[
++          LLMEvent.stepStart({ index: 0 }),
++          LLMEvent.toolCall({ id: "once", name: "echo", input: { text: "once" }, providerExecuted: hosted }),
++          ...(hosted ? [LLMEvent.toolResult({ id: "once", name: "echo", result: { type: "text", value: "once" }, providerExecuted: true })] : []),
++          LLMEvent.stepFinish({ index: 0, reason: "unknown" }), LLMEvent.finish({ reason: "unknown" }),
++        ], recovered]
++        yield* runner.run({ sessionID: id, force: true })
++        expect(requests).toHaveLength(hosted ? 1 : 2)
++        expect(executions).toHaveLength(hosted ? 0 : 1)
++        expect(yield* Queue.size(retries)).toBe(0)
++      }
++    }),
++    30000,
++  )
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -221,3 +221,5 @@
+       // 旧失败事件缺少此属性仍按 error；新中断使用明确标志，不解析错误文案。
+       aborted: Schema.Boolean.pipe(optional),
++      // 仅无 Tool 的不完整 attempt 撤回前缀；必须随 durable data 保存，不能放实时 envelope。
++      discardIncompleteAttempt: Schema.Boolean.pipe(optional),
+     },
+@@ -422,3 +424,5 @@
+     ...Base,
++    // 旧重试无助手身份不改变投影；Native 重试明确复用已绑定请求的同一助手。
++    assistantMessageID: SessionMessage.ID.pipe(optional),
+     attempt: Schema.Finite,
+     error: RetryError,
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -1292,6 +1292,7 @@ export type SessionsHistoryOutput = {
+           readonly assistantMessageID: string
+           readonly error: { readonly type: "unknown"; readonly message: string }
+           readonly aborted?: boolean
++          readonly discardIncompleteAttempt?: boolean
+         }
+       }
+     | {
+@@ -1467,6 +1468,7 @@ export type SessionsHistoryOutput = {
+         readonly data: {
+           readonly timestamp: number
+           readonly sessionID: string
++          readonly assistantMessageID?: string
+           readonly attempt: number
+           readonly error: {
+             readonly message: string
+@@ -1921,6 +1923,7 @@ export type SessionsEventsOutput =
+         readonly assistantMessageID: string
+         readonly error: { readonly type: "unknown"; readonly message: string }
+         readonly aborted?: boolean
++        readonly discardIncompleteAttempt?: boolean
+       }
+     }
+   | {
+@@ -2096,6 +2099,7 @@ export type SessionsEventsOutput =
+       readonly data: {
+         readonly timestamp: number
+         readonly sessionID: string
++        readonly assistantMessageID?: string
+         readonly attempt: number
+         readonly error: {
+           readonly message: string
+diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/gen/types.gen.ts
+--- a/packages/sdk/js/src/v2/gen/types.gen.ts
++++ b/packages/sdk/js/src/v2/gen/types.gen.ts
+@@ -1101,4 +1101,5 @@
+           assistantMessageID: string
+           error: SessionErrorUnknown
+           aborted?: boolean
++          discardIncompleteAttempt?: boolean
+         }
+@@ -1277,4 +1278,5 @@
+           timestamp: number
+           sessionID: string
++          assistantMessageID?: string
+           attempt: number
+           error: SessionNextRetryError
+@@ -4044,4 +4046,5 @@ export type SyncEventSessionNextStepFailed = {
+       assistantMessageID: string
+       error: SessionErrorUnknown
+       aborted?: boolean
++      discardIncompleteAttempt?: boolean
+     }
+@@ -4264,4 +4267,5 @@ export type SyncEventSessionNextRetried = {
+       timestamp: number
+       sessionID: string
++      assistantMessageID?: string
+       attempt: number
+       error: SessionNextRetryError
+@@ -5096,4 +5100,5 @@ export type SessionNextStepFailed = {
+     assistantMessageID: string
+     error: SessionErrorUnknown
+     aborted?: boolean
++    discardIncompleteAttempt?: boolean
+   }
+@@ -5349,4 +5354,5 @@ export type SessionNextRetried = {
+     timestamp: number
+     sessionID: string
++    assistantMessageID?: string
+     attempt: number
+     error: SessionNextRetryError
+@@ -7319,4 +7325,5 @@ export type EventSessionNextStepFailed = {
+     assistantMessageID: string
+     error: SessionErrorUnknown
+     aborted?: boolean
++    discardIncompleteAttempt?: boolean
+   }
+@@ -7509,4 +7516,5 @@ export type EventSessionNextRetried = {
+     timestamp: number
+     sessionID: string
++    assistantMessageID?: string
+     attempt: number
+     error: SessionNextRetryError
 diff --git a/docs/plans/grok-finish-other-retryable-repair.md b/docs/plans/grok-finish-other-retryable-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..ff5a6bcd7897c7a1018762859453a5de6a969dda

@@ -16,13 +16,12 @@ Content-Transfer-Encoding: 8bit
 适配说明（v1.18.32 重放）：
 H2 event.ts 落 packages/tui/src/context/event.ts（shouldDeliverScopedEvent 扩第三参
 activeSessionID，useEvent 经 useRoute 读取活动会话；与 #164/#165 global/project 分支、
-#499 lsp.updated 特判合并为单 admission owner）。H4/H5 测试随 owner 迁 tui 包并按目标
-事件 schema（envelope directory/project + payload.properties）重建。H3 project.ts 与 H6
-project.test 裁记：目标 v1.18.32 的 ProjectV2（remote??previous??root + commit 写回 +
-migrateProjectId 事务迁移）是互斥设计，保留其remote身份、缓存连续性与既有worktree。
-INV-01/05 的 copied-cache 严格性在目标未实现；同ID不会触发迁移，不声称后果已全消除；
---path-format=absolute 子修复已由 core git.ts resolvePath 等价覆盖。H7 落目标既有
-session-list.test（Project.ID 形态）。
+server.connected 特判合并为单 admission owner，不恢复退役LSP分支）。H4/H5 测试随owner
+迁tui包并补原fixture的Route依赖，保持源事件schema与投影断言。H3在共享Core resolver
+保留上游remote优先和previous迁移信息，但不再让cache覆盖当前root；无root保持global。
+H6以真实Core服务的隔离进程/文件替身验证同cache的不同仓库、clone/worktree与空仓库，
+不复制旧V1解析器。commit写回仍是上游迁移桥，不再作为新身份权威；对应源的无cache
+写入断言不机械反转。绝对common-dir由core git.ts resolvePath承载。H7保留原目录查询。
 
 diff --git a/docs/plans/project-id-canonical-local-identity-repair.md b/docs/plans/project-id-canonical-local-identity-repair.md
 new file mode 100644
@@ -1353,6 +1352,112 @@ new file mode 100644
 +>
 +> **APPROVE — exact approved R5 intended final implementation diff.**
 
+diff --git a/packages/core/src/project.ts b/packages/core/src/project.ts
+--- a/packages/core/src/project.ts
++++ b/packages/core/src/project.ts
+@@ -114,4 +114,6 @@
+       const previous = yield* cached(repo.commonDirectory)
+-      const id = (yield* remote(repo)) ?? previous ?? (yield* root(repo))
++      // 本地root纠正不授予复制cache迁移权；合法root到remote的上游迁移仍保留previous。
++      const origin = yield* remote(repo)
++      const id = origin ?? (yield* root(repo))
+       return {
+-        previous,
++        previous: origin ? previous : undefined,
+
+diff --git a/packages/opencode/test/project/project.test.ts b/packages/opencode/test/project/project.test.ts
+--- a/packages/opencode/test/project/project.test.ts
++++ b/packages/opencode/test/project/project.test.ts
+@@ -8,1 +8,1 @@
+-import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
+@@ -22,1 +22,4 @@
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { AppProcess } from "@opencode-ai/core/process"
++import { FSUtil } from "@opencode-ai/core/fs-util"
++import { AbsolutePath } from "@opencode-ai/core/schema"
+@@ -29,1 +32,80 @@
++const identityState = { remote: false, cache: new Map<string, string>() }
++const identityIt = testEffect(AppNodeBuilder.build(projectTestNode, [
++  [Database.node, Database.layerFromPath(":memory:")],
++  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalIconDiscovery: false })],
++  // 只替换文件/进程边界；Core/Git解析、V1持久化和合法迁移均执行真实实现。
++  [FSUtil.node, Layer.effect(FSUtil.Service, Effect.gen(function* () {
++    const fs = yield* FSUtil.Service
++    return FSUtil.Service.of({ ...fs,
++      up: ({ start }) => Effect.succeed(path.basename(start) === "plain" ? [] : [AbsolutePath.make(path.join(start, ".git"))]),
++      readFileString: file => Effect.succeed(identityState.cache.get(file) ?? ""),
++      writeFileString: (file, value) => Effect.sync(() => { identityState.cache.set(file, value) }),
++      exists: () => Effect.succeed(true),
++    })
++  })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))],
++  [AppProcess.node, Layer.mock(AppProcess.Service, { run: command => Effect.sync(() => {
++    if (command._tag !== "StandardCommand" || command.command !== "git") throw new Error("Expected Git argv")
++    const cwd = String(command.options.cwd)
++    const name = path.basename(cwd)
++    const args = command.args.join(" ")
++    const text = args === "rev-parse --show-toplevel" ? cwd
++      : args === "rev-parse --git-dir" ? ".git"
++      : args === "rev-parse --git-common-dir" ? (name === "linked" ? path.resolve("identity-fixture", "first", ".git") : ".git")
++      : args === "remote get-url origin" ? (identityState.remote ? "git@github.com:owner/repo.git" : "")
++      : args === "rev-list --max-parents=0 HEAD" ? (name === "empty" ? "" : (name === "second" ? "b" : "a").repeat(40))
++      : undefined
++    if (text === undefined) throw new Error(`Unexpected Git command: ${args}`)
++    return { command: "git", exitCode: 0, stdout: Buffer.from(text), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false }
++  }) })],
++]))
++
++identityIt.effect("isolates copied cache corrections while preserving legitimate project migration", () => Effect.gen(function* () {
++  identityState.cache.clear()
++  identityState.remote = false
++  yield* Effect.addFinalizer(() => Effect.sync(() => { identityState.cache.clear(); identityState.remote = false }))
++  const projects = yield* Project.Service
++  const db = (yield* Database.Service).db
++  const resolve = (name: string) => projects.fromDirectory(path.resolve("identity-fixture", name))
++  const first = yield* resolve("first")
++  const firstID = ProjectV2.ID.make("a".repeat(40))
++  expect(first.project.id).toBe(firstID)
++  const sessionID = SessionID.make("ses_570_existing")
++  const workspaceID = WorkspaceV2.ID.ascending()
++  yield* db.insert(SessionTable).values({ id: sessionID, project_id: firstID, slug: "existing",
++    directory: first.sandbox, title: "existing", version: "test", time_created: 1, time_updated: 2 }).run()
++  yield* db.insert(WorkspaceTable).values({ id: workspaceID, type: "local", name: "existing", project_id: firstID }).run()
++  const oldProject = yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()
++  const oldSession = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
++  const oldWorkspace = yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get()
++  const oldDirectories = yield* db.select().from(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, firstID)).all()
++  // 第二仓库故意复制第一仓库cache；必须创建自己的root身份，原持久行逐字段保持。
++  const secondDirectory = path.resolve("identity-fixture", "second")
++  identityState.cache.set(path.join(secondDirectory, ".git", "opencode"), firstID)
++  const second = yield* resolve("second")
++  expect(second.project.id).toBe(ProjectV2.ID.make("b".repeat(40)))
++  expect(second.project.worktree).toBe(secondDirectory)
++  expect(yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()).toEqual(oldProject)
++  expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()).toEqual(oldSession)
++  expect(yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get()).toEqual(oldWorkspace)
++  expect(yield* db.select().from(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, firstID)).all()).toEqual(oldDirectories)
++  // 空历史与非仓库也不能借cache把原项目迁到global；clone/worktree仍共享真实root。
++  for (const name of ["empty", "plain"]) {
++    identityState.cache.set(path.resolve("identity-fixture", name, ".git", "opencode"), firstID)
++    const resolved = yield* resolve(name)
++    expect(resolved.project.id).toBe(ProjectV2.ID.global)
++    expect(yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()).toEqual(oldProject)
++  }
++  expect((yield* resolve("clone")).project.id).toBe(firstID)
++  expect((yield* resolve("linked")).project.id).toBe(firstID)
++  // 同一仓库获得remote后的原合法迁移必须继续移动Session/Workspace，而非全面禁用迁移。
++  identityState.remote = true
++  const remoteID = remoteProjectID("github.com/owner/repo")
++  const migrated = yield* resolve("first")
++  expect(migrated.project.id).toBe(remoteID)
++  expect(migrated.project.worktree).toBe(first.project.worktree)
++  expect(yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, firstID)).get()).toBeUndefined()
++  expect((yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get())?.project_id).toBe(remoteID)
++  expect((yield* db.select().from(WorkspaceTable).where(eq(WorkspaceTable.id, workspaceID)).get())?.project_id).toBe(remoteID)
++}))
++
+ function remoteProjectID(remote: string) {
+
 diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.ts
 --- a/packages/tui/src/context/event.ts
 +++ b/packages/tui/src/context/event.ts
@@ -1399,9 +1504,8 @@ diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.
  
    function subscribe(handler: (event: Event, metadata: EventMetadata) => void) {
      return sdk.event.on("event", (event) => {
-@@ -65,6 +77,13 @@ export function useEvent() {
+@@ -65,5 +77,12 @@ export function useEvent() {
        // 重连通知始终投递，其余事件只在一次主分发前检查项目归属。
-       // LSP 通知只触发当前 route 重拉；跨项目投递不携带可直接渲染的状态。
 +      const activeSessionID = route.data.type === "session" ? route.data.sessionID : undefined
 +      // 每次投递读取route与顶层Session ID，不缓存订阅时身份或猜测第二身份源。
 +      const eventSessionID = "sessionID" in event.payload.properties
@@ -1409,12 +1513,73 @@ diff --git a/packages/tui/src/context/event.ts b/packages/tui/src/context/event.
 +          ? event.payload.properties.sessionID
 +          : undefined
 +        : undefined
-       if (event.payload.type !== "server.connected" && event.payload.type !== "lsp.updated" && !shouldDeliverScopedEvent(
+       if (event.payload.type !== "server.connected" && !shouldDeliverScopedEvent(
 -        { directory: event.directory, project: (event as { project?: string }).project },
 -        project.project(),
 +        { directory: event.directory, project: (event as { project?: string }).project, sessionID: eventSessionID },
 +        project.project(), activeSessionID,
        )) return
+
+diff --git a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+--- a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
++++ b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
+@@ -10,1 +10,2 @@
+ import { SyncProvider, useSync } from "../../../../src/context/sync"
++import { RouteProvider, useRoute, type Route } from "../../../../src/context/route"
+@@ -26,3 +27,3 @@
+-type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync> }
++type Ctx = { kv: ReturnType<typeof useKV>; project: ReturnType<typeof useProject>; sync: ReturnType<typeof useSync>; route: ReturnType<typeof useRoute> }
+ 
+-export async function mount(override?: FetchHandler, state?: string) {
++export async function mount(override?: FetchHandler, state?: string, initialRoute?: Route) {
+@@ -33,1 +34,2 @@
+   let kv!: ReturnType<typeof useKV>
++  let route!: ReturnType<typeof useRoute>
+@@ -40,1 +42,1 @@
+-    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync() }
++    const ctx: Ctx = { kv: useKV(), project: useProject(), sync: useSync(), route: useRoute() }
+@@ -45,1 +47,2 @@
++      route = ctx.route
+       done()
+@@ -55,11 +58,14 @@
+           <SDKProvider url="http://test" directory={directory} testTransport={{ fetch: calls.fetch, events: events.source }}>
+-            <PermissionProvider>
+-              <ProjectProvider>
+-                <ExitProvider exit={() => {}}>
+-                  <SyncProvider>
+-                    <Probe />
+-                  </SyncProvider>
+-                </ExitProvider>
+-              </ProjectProvider>
+-            </PermissionProvider>
++            {/* 活动Session资格由现有Route提供，fixture与生产同序，不添加可选context回退。 */}
++            <RouteProvider initialRoute={initialRoute}>
++              <PermissionProvider>
++                <ProjectProvider>
++                  <ExitProvider exit={() => {}}>
++                    <SyncProvider>
++                      <Probe />
++                    </SyncProvider>
++                  </ExitProvider>
++                </ProjectProvider>
++              </PermissionProvider>
++            </RouteProvider>
+           </SDKProvider>
+@@ -92,1 +98,1 @@
+-  return { app, emit: events.emit, kv, project, sync, session: calls.session }
++  return { app, emit: events.emit, kv, project, sync, route, session: calls.session }
+
+diff --git a/packages/tui/test/cli/tui/event-single-delivery.test.ts b/packages/tui/test/cli/tui/event-single-delivery.test.ts
+--- a/packages/tui/test/cli/tui/event-single-delivery.test.ts
++++ b/packages/tui/test/cli/tui/event-single-delivery.test.ts
+@@ -15,1 +15,7 @@
+     expect(shouldDeliverScopedEvent({ directory: "/x", project: "proj-b" }, "proj-a")).toBe(false)
++    // 仅活动Session突破Project隔离；切换活动身份后必须重新判定，无Session事件仍隔离。
++    expect(shouldDeliverScopedEvent({ project: "proj-b", sessionID: "ses-a" }, "proj-a", "ses-a")).toBe(true)
++    expect(shouldDeliverScopedEvent({ project: "proj-b", sessionID: "ses-a" }, "proj-a", "ses-b")).toBe(false)
++    expect(shouldDeliverScopedEvent({ project: "proj-b", sessionID: "ses-b" }, "proj-a", "ses-b")).toBe(true)
++    expect(shouldDeliverScopedEvent({ project: "proj-b" }, "proj-a", "ses-a")).toBe(false)
++    expect(shouldDeliverScopedEvent({ project: "proj-b" }, "proj-a", undefined)).toBe(false)
 
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx

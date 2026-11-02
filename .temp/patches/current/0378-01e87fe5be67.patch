@@ -24,9 +24,9 @@ Content-Transfer-Encoding: 8bit
 6. cell_not_found 错误信息通用化，消除 "edit response" 对 run/source/output
    的误导，建议调用 summary 获取当前 cell map
 
-diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
---- a/packages/opencode/src/ide/vscode-bridge.ts
-+++ b/packages/opencode/src/ide/vscode-bridge.ts
+diff --git a/packages/core/src/ide/vscode-bridge.ts b/packages/core/src/ide/vscode-bridge.ts
+--- a/packages/core/src/ide/vscode-bridge.ts
++++ b/packages/core/src/ide/vscode-bridge.ts
 @@ -98,8 +98,4 @@ let cachedRegistryBridge:
  
 -// 全局请求队列：序列化所有桥接 HTTP 请求，防止并发 notebook 工具调用竞争同一 VS Code 桥接

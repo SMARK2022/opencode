@@ -1,5 +1,14 @@
 # Record 0559 — fix(opentui): 升级子模块至 v0.4.3-smark.4 平滑流式 Markdown 高亮
 
+## 2026-10-29 Native 接续复查
+
+- 原完整556–560全新升序审计`ses_e7b16d2beffejWkwggOYV53bJe`、降序审计`ses_e7b16d289ffexkP6ry0SMdi5Np`一致本项PASS，无未关闭B/G；完整source pin与0560真实运行消费分开核实。未用历史registry结论代替本版，provenance覆盖边界按N保留。
+
+- 完整original/current仍为相同18行、单gitlink hunk，current未修改。`materialize-0560-2026-10-28T22-56-40-668Z.md`累计560/560、复用558并实际应用559–560，原始指针与顺序保持。
+- 在官方0560 canonical repo执行只读`git ls-files -s -- "thirdparty/opentui"`，exit0：`160000 df4bd31caaa1153944b28509ac13610b4a16ca85 0 thirdparty/opentui`；未读取、拉取或启动nested源码。
+- 本项只承担source身份，不以gitlink冒称运行时已切换；真实`.4`清单/锁、安装与12处consumer解析证据由0560承担。两代消费同一发布闭包，本项没有单独V1/V2业务owner；E=0/C=0，不为元数据增加注释。
+- 本版560同版本30包类型和安全回归通过；完整556–560仍待独立正反审计。下方旧registry0.4.5、创建第二provenance脚本和headless实测说法均为历史，不是本版实现或证据。
+
 ## 2026-10-19 本轮复查
 - original/current保持同一18行gitlink补丁，source身份93098b5189645cb3fa135360625190c10605f6bb→df4bd31caaa1153944b28509ac13610b4a16ca85，mode160000和既有注册不变，不读取或拉取nested源码。
 - 官方`materialize-0559-2026-10-19T14-16-41-338Z.md`累计559/559、复用557并应用558–559。本项仍只认证根gitlink身份；真实.4运行时消费由560完成，历史registry替代口径不适用于本轮前态。

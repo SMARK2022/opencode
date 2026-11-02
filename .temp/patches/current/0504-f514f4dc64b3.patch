@@ -1004,11 +1004,12 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 index e027cc15a..c215dd7da 100644
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -12,5 +12,5 @@
+@@ -12,6 +12,6 @@
  import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
 -import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
 +import { computeContextData, contextGrid, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput, type ContextCategory } from "../src/util/context-usage"
  import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
+ import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
  import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
  
 @@ -330,3 +330,3 @@ test("confirmed allocation composes input history and live output on the panel path", async () => {

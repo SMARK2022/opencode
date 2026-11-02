@@ -1,3 +1,83 @@
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -125,7 +125,8 @@
+     const config = yield* Config.Service
+     const permission = yield* PermissionV2.Service
+     // 同工具成功才重置错误；不同Session和不同工具互不冲掉计数。
+-    const errors = new Map<SessionSchema.ID, Map<string, number>>()
++    // 同一助手的并行失败共享一次机会，模型看过结果后的新消息才继续累加。
++    const errors = new Map<SessionSchema.ID, Map<string, { count: number; lastMessageID: string }>>()
+     const nearOverflowNotified = new Set<SessionSchema.ID>()
+     const snapshots = yield* Snapshot.Service
+     const db = (yield* Database.Service).db
+@@ -400,11 +401,17 @@
+-          const counts = errors.get(session.id) ?? new Map<string, number>()
++          const counts = errors.get(session.id) ?? new Map<string, { count: number; lastMessageID: string }>()
+           errors.set(session.id, counts)
+           if (!settled.failed) { counts.delete(settled.name); return }
+-          const count = (counts.get(settled.name) ?? 0) + 1
+-          counts.set(settled.name, count)
+-          if (count < 3) return
++          // 消息身份取已确认的终态凭证，不把各自callID当作模型已看到结果。
++          const entry = counts.get(settled.name) ?? { count: 0, lastMessageID: "" }
++          if (entry.lastMessageID !== settled.assistantMessageID) {
++            entry.count++
++            entry.lastMessageID = settled.assistantMessageID
++          }
++          counts.set(settled.name, entry)
++          if (entry.count < 3) return
+           yield* permission.assert({ action: "doom_loop", resources: [settled.name], save: [settled.name], sessionID: session.id, agent: agent.id,
+-            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: count },
++            metadata: { tool: settled.name, input: settled.input, consecutiveErrors: entry.count },
+             source: { type: "tool", messageID: settled.assistantMessageID, callID: settled.callID },
+           }).pipe(Effect.orDie)
+-          counts.delete(settled.name)
++          // 保留消息身份，阈值后的同批剩余失败不能再次消费下一轮计数。
++          entry.count = 0
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -4129,2 +4129,39 @@
+       expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
++      // 六个不同输入排除独立的同输入doom-loop，只核对同一助手的失败边界。
++      const failedBatch = (prefix: string) => [
++        LLMEvent.stepStart({ index: 0 }),
++        ...Array.from({ length: 6 }, (_, index) => LLMEvent.toolCall({ id: `${prefix}-${index}`, name: "missing", input: { prefix, index } })),
++        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++        LLMEvent.finish({ reason: "tool-calls" }),
++      ]
++      doomAssertions.length = 0
++      responses = [failedBatch("parallel-errors"), fragmentFixture("text", "parallel-recovered", ["Changed paths"]).completeEvents]
++      yield* session.resume(sessionID)
++      expect(doomAssertions).toEqual([])
++      const parallelErrors = (yield* session.context(sessionID)).flatMap(message =>
++        message.type === "assistant" ? message.content.filter(part => part.type === "tool" && part.id.startsWith("parallel-errors-")) : [],
++      )
++      expect(parallelErrors).toHaveLength(6)
++      expect(parallelErrors.every(part => part.type === "tool" && part.state.status === "error")).toBe(true)
++      // 新消息才递增；第三次触发后仍保留其身份，后面五个失败不能重复审批。
++      responses = [failedTurn("parallel-next", 4), failedBatch("threshold-errors"), fragmentFixture("text", "threshold-recovered", ["Changed strategy"]).completeEvents]
++      yield* session.resume(sessionID)
++      // 实际六个终态都已发布，断言一次审批也覆盖触发后同批剩余结算。
++      expect(doomAssertions).toHaveLength(1)
++      expect(doomAssertions).toMatchObject([{ action: "doom_loop", resources: ["missing"], metadata: { tool: "missing", consecutiveErrors: 3 } }])
++      doomAssertions.length = 0
++      responses = [
++        ...[1, 2].map(attempt => [
++          LLMEvent.stepStart({ index: 0 }),
++          LLMEvent.toolCall({ id: `echo-invalid-${attempt}`, name: "echo", input: { attempt } }),
++          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++          LLMEvent.finish({ reason: "tool-calls" }),
++        ]),
++        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-reset", name: "echo", input: { text: "reset" } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
++        [LLMEvent.stepStart({ index: 0 }), LLMEvent.toolCall({ id: "echo-after-reset", name: "echo", input: { attempt: 3 } }), LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })],
++        fragmentFixture("text", "reset-recovered", ["Recovered after reset"]).completeEvents,
++      ]
++      yield* session.resume(sessionID)
++      // 通过真实echo成功结算打断失败链，不靠改计数器fixture得到空审批。
++      expect(doomAssertions).toEqual([])
+       doomAssertions.length = 0
 diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/session/processor.ts
 --- a/packages/opencode/src/session/processor.ts
 +++ b/packages/opencode/src/session/processor.ts
@@ -98,15 +178,7 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -26,6 +26,7 @@
- import { ModelV2 } from "@opencode-ai/core/model"
- import { SessionProjector } from "@opencode-ai/core/session/projector"
- import { LLMEvent } from "@opencode-ai/llm"
-+import { tool as aiTool } from "ai"
- 
- const summary = Layer.succeed(
-   SessionSummary.Service,
-@@ -232,6 +234,61 @@
+@@ -232,6 +232,61 @@
    const provider = yield* Provider.Service
    return { processors, session, provider }
  })
@@ -120,7 +192,7 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 +// 内的所有并行 tool-error 共享同一 ctx.assistantMessage.id。
 +// 返回类型标注 Promise<{ output: string }> 满足 AI SDK v6 tool() 的类型推断：
 +// execute 总是 throw 时 OUTPUT 会被推断为 never，导致 inputSchema 类型不匹配。
-+const failingRead = aiTool({
++const failingRead = tool({
 +  description: "read",
 +  inputSchema: z.object({ path: z.string() }),
 +  execute: async (): Promise<{ output: string }> => {
@@ -168,7 +240,7 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
  
  // ---------------------------------------------------------------------------
  // Tests
-@@ -1065,3 +1122,119 @@
+@@ -1065,3 +1120,119 @@
      { config: cfg },
    ),
  )

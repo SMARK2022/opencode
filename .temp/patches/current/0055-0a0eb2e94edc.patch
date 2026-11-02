@@ -65,13 +65,16 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -232,6 +232,8 @@
--              const command = ChildProcess.make(input.command, [], {
-+              // Core 使用同一实际 shell 生产 argv，授权资源仍是上方的 input.command。
+@@ -267,9 +267,8 @@
+-              const powershell = process.platform === "win32" && Shell.ps(shell)
+-              // 与V1同样禁用PowerShell profile和交互；仍只创建一个命令并调用一次AppProcess.run。
+-              const command = ChildProcess.make(powershell ? shell : input.command,
+-                powershell ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", input.command] : [], {
++              // 共用无profile的UTF-8 argv，原始命令仍是授权资源，执行与capture各只有一次。
 +              const invocation = Shell.cmd(shell, input.command)
 +              const command = ChildProcess.make(invocation.command, invocation.args, {
                  cwd: target.canonical,
--                shell,
+-                shell: powershell ? false : shell,
 +                shell: invocation.shell,
                  // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
                  extendEnv: true,
@@ -79,7 +82,16 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
 --- a/packages/core/test/shell.test.ts
 +++ b/packages/core/test/shell.test.ts
-@@ -27,14 +27,13 @@
+@@ -1,6 +1,8 @@
+ import { describe, expect, test } from "bun:test"
++import fs from "fs/promises"
+ import path from "path"
+ import { Shell } from "@opencode-ai/core/shell"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { which } from "@opencode-ai/core/util/which"
++import { tmpdir } from "./fixture/tmpdir"
+ 
+@@ -27,14 +29,13 @@
 -    expect(Shell.utf8Environment(env, "linux")).toEqual({})
 -    expect(Shell.utf8Environment(env, "darwin")).toEqual({})
 -    expect(Shell.utf8Environment(env, "win32")).toEqual({
@@ -100,6 +112,19 @@ diff --git a/packages/core/test/shell.test.ts b/packages/core/test/shell.test.ts
      expect(env).toEqual({ PATH: "configured-path", JAVA_TOOL_OPTIONS: "-Xmx1g", RUBYOPT: "-w", PYTHONUTF8: "0" })
    })
  
+@@ -90,6 +91,11 @@
+     test("normalizes Git Bash shell paths from env", async () => {
+-      const shell = "/cygdrive/c/Program Files/Git/bin/bash.exe"
++      // 路径归一测试只需存在的可执行文件名，不依赖主机Git安装，也不启动该夹具。
++      await using tmp = await tmpdir()
++      const file = path.join(tmp.path, "Git with spaces", "bin", "bash.exe")
++      await fs.mkdir(path.dirname(file), { recursive: true })
++      await fs.writeFile(file, "fixture executable is never invoked")
++      const shell = file.replace(/^([A-Za-z]):/, (_, drive) => `/cygdrive/${drive.toLowerCase()}`).replaceAll("\\", "/")
+       await withShell(shell, async () => {
+         expect(Shell.preferred()).toBe(FSUtil.windowsPath(shell))
+       })
+     })
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
@@ -139,7 +164,18 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -211,11 +211,9 @@
+@@ -79,4 +79,7 @@
+-        // 显式PowerShell argv也记录原命令和实际可执行文件，同时保留完整argv供启动边界断言。
+-        // 在既有 process 观察边界记录真正交给 spawner 的环境，不重复执行命令。
+-        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
++        // 仅在测试观察边界解码传输包装；完整argv仍保留，真实编码由另一个实进程用例验证。
++        const argument = command.args.at(-1)
++        const original = command.args.includes("-EncodedCommand") && argument !== undefined
++          ? Buffer.from(argument, "base64").toString("utf16le").split("\n").slice(3, -1).join("\n")
++          : argument ?? command.command
++        runs.push({ command: original, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
+           args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
+@@ -215,11 +218,9 @@
 -            // 真实 leaf 的环境必须继承宿主，四项 Windows 覆盖与已有 options 精确对应。
 +            // extendEnv 保留用户显式 Java/Ruby 值，leaf 的两项覆盖不能重写它们。
              expect(runs[0]?.extendEnv).toBe(true)
@@ -152,22 +188,35 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
              expect(runs).toHaveLength(1)
              // 真正 BashTool 节点注册的 typed source 必须描述实际进程选择，不只测试 formatter。
              const contexts = yield* SystemContextRegistry.Service
-@@ -363,68 +361,116 @@
+@@ -274,3 +275,4 @@
+-            // 防止通用shell选项重新启用用户profile，直接检查实际单次命令的argv。
++            // 独立字节预期同时约束无profile、UTF-8前导与原命令，不能只检查编码标志。
+             if (process.platform === "win32" && Shell.ps(Shell.acceptable()))
+-              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "pwd"])
++              expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
++                Buffer.from(["[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)", "$OutputEncoding = [Console]::OutputEncoding", "pwd", "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }"].join("\n"), "utf16le").toString("base64")])
+@@ -322,72 +324,122 @@
                    expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
                    expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
--                  expect(runs).toMatchObject([{ command, shell }])
-+                  expect(runs).toMatchObject([{ command: cmd ? command : shell, shell: cmd ? shell : false }])
+-                  expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
++                  expect(runs).toMatchObject([{ command, shell: Shell.acceptable(shell) }])
++                  // 原命令观察不代替spawn契约；PowerShell必须实际使用非交互的编码argv。
++                  if (!cmd) expect(runs[0]?.args?.slice(0, 4)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"])
                  }
                }), appProcess, shell)
              }
              // 配置 Git Bash 仍执行原 Unix 命令，不能把 Windows OS 当成 Windows shell。
              reset()
+             // Shell选择器验证路径存在；使用临时文件和既有进程替身，不依赖主机Git安装位置或启动该文件。
+             const gitBash = path.join(tmp.path, "Git with spaces", "bin", "bash.exe")
+             yield* Effect.promise(() => fs.mkdir(path.dirname(gitBash), { recursive: true }))
+             yield* Effect.promise(() => fs.writeFile(gitBash, "fixture executable is never invoked"))
              yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
                const command = "head input | grep needle; ls; find ."
                expect((yield* settleTool(registry, call({ command }))).result.type).toBe("content")
                expect(assertions).toMatchObject([{ action: "bash", resources: [command] }])
-               expect(runs).toMatchObject([{ command, shell: "C:\\Program Files\\Git\\bin\\bash.exe" }])
-             }), appProcess, "C:\\Program Files\\Git\\bin\\bash.exe")
+               expect(runs).toMatchObject([{ command, shell: gitBash }])
+             }), appProcess, gitBash)
            })))
        },
        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

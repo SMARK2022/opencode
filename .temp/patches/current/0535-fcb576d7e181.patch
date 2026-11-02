@@ -2386,15 +2386,12 @@ index fa25bc63b..35a903a63 100644
  // #532：机器接口从真实 argv 入口执行，确保 yargs 参数、stdout 协议和 daemon owner 语义一起受测。
  // stdout 只允许一个 JSON value；日志和迁移信息必须留在 stderr，调用方无需解析人类文案。
  async function runDaemonMachine(
-@@ -264,6 +332,8 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
+@@ -255,3 +323,5 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
  }
  
  describe("daemon lifecycle", () => {
 +  // #535：ConPTY 下 Bun 子进程 stdin 不可回写（平台缺陷，探针见 record），runInteractiveDb 用例仅 POSIX 执行。
 +  const ptyInteractive = process.platform === "win32" ? test.skip : test
-   // #532：独立 lock/XDG/DB 保证该查询不可能观察或停止开发者真实 daemon。
-   // running=false 是公开 expected literal，测试不读取 private lock parser 返回类型。
-   // lock 仍不存在证明 status 没有把 read 操作偷偷升级为 ensure。
 @@ -1539,6 +1611,168 @@ test(
  
  

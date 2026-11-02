@@ -1367,16 +1367,16 @@ new file mode 100644
 +  )
 +}
 
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
---- a/packages/opencode/src/tool/edit-apply.ts
-+++ b/packages/opencode/src/tool/edit-apply.ts
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
+--- a/packages/core/src/tool/edit-apply.ts
++++ b/packages/core/src/tool/edit-apply.ts
 @@ -1,3 +1,5 @@
-+import { normalizeForMatch } from "@opencode-ai/core/util/normalize-for-match"
-+export { normalizeForMatch } from "@opencode-ai/core/util/normalize-for-match"
+ export * as EditApply from "./edit-apply"
++import { normalizeForMatch } from "../util/normalize-for-match"
++export { normalizeForMatch } from "../util/normalize-for-match"
+ 
  /**
-  * edit 文本替换的唯一语义所有者（单条与多条 edits 共用）。
-  *
-@@ -63,16 +65,0 @@
+@@ -65,16 +67,0 @@
 -export function normalizeForMatch(text: string): string {
 -  return (
 -    text
@@ -1482,52 +1482,80 @@ diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/appl
 +++ b/packages/core/src/tool/apply-patch.ts
 @@ -75,2 +75,2 @@
              description:
--              "Apply one patch containing add, update, and delete file operations. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
-+              "Apply one patch containing add, update, and delete file operations. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
-@@ -133,8 +133,30 @@
-+                // 同canonical源只有update时才聚合；mixed add/delete保持目标既有操作边界。
-+                const operationTypes = new Map<string, Set<Patch.Hunk["type"]>>()
-+                for (const { hunk, target } of targets) {
-+                  const types = operationTypes.get(target.canonical) ?? new Set<Patch.Hunk["type"]>()
-+                  types.add(hunk.type)
-+                  operationTypes.set(target.canonical, types)
-+                }
-+                // 克隆chunks而不改parser产物；授权仍使用上方完整原始targets。
+-              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
++              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
+@@ -164,12 +164,24 @@
+                 })
+ 
++                // 既有groups已拒绝冲突操作；仅合并update，保留mixed Delete/Add及跨文件顺序。
 +                const updates = new Map<string, Patch.UpdateFileChunk[]>()
 +                const grouped = targets.flatMap((entry): typeof targets => {
-+                  const key = entry.target.canonical
-+                  if (entry.hunk.type !== "update" || operationTypes.get(key)?.size !== 1) return [entry]
-+                  const chunks = updates.get(key)
-+                  if (chunks) {
-+                    // 首条proposal持有同一私有数组，后续entry追加后仍只读盘和派生一次。
-+                    chunks.push(...entry.hunk.chunks)
-+                    return []
-+                  }
++                  if (entry.hunk.type !== "update") return [entry]
++                  const chunks = updates.get(entry.target.canonical)
++                  if (chunks) { chunks.push(...entry.hunk.chunks); return [] }
 +                  const combined = [...entry.hunk.chunks]
-+                  updates.set(key, combined)
++                  updates.set(entry.target.canonical, combined)
 +                  return [{ ...entry, hunk: { ...entry.hunk, chunks: combined } }]
 +                })
                  // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
                  const errors: string[] = []
                  const prepared: Prepared[] = []
--                for (const { hunk, target } of targets) {
+                 const expected = new Map<string, { target: LocationMutation.Target; content: Uint8Array | undefined }>()
+                 const failed = new Set<string>()
+-                for (const { hunk, target, destination } of targets) {
 +                for (const { hunk, target } of grouped) {
+                   if (failed.has(target.canonical)) continue
                    yield* Effect.gen(function* () {
-                     if (hunk.type === "add") {
-                       prepared.push({
-                         ...hunk,
++                    // Move可在后entry才声明，两端仍沿原始完整targets授权并从既有group取最终目的地。
++                    const destination = groups.get(target.canonical)?.findLast(item => item.destination)?.destination
+                     const snapshot = expected.get(target.canonical) ?? { target, content: yield* fs.readFile(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) }
+                     expected.set(target.canonical, snapshot)
+@@ -186,9 +198,8 @@
+                     if ((yield* fs.stat(target.canonical)).type !== "File") yield* fail(hunk.path)
+                     const source = snapshot.content
+                     if (source === undefined) return yield* fail(hunk.path)
+-                    const previous = prepared.find(change => change.type === "update" && change.target.canonical === target.canonical)
+-                    const original = previous?.type === "update" ? previous.content : new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
+-                    const before = previous?.before ?? original.replace(/^\uFEFF/, "")
++                    const original = new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
++                    const before = original.replace(/^\uFEFF/, "")
+                     if (hunk.type === "delete") {
+                       prepared.push({ ...hunk, target, before, after: "" })
+                       return
+@@ -204,12 +215,11 @@
+-                    // 每个 parsed entry 重置 Patch cursor，只合并最终写盘，不重复提交同一前像。
++                    // 同源全部chunks已对同一原文派生，最后只提交一次并保留真实Move目标。
+                     const change = {
+                       ...hunk,
+                       target,
+                       source,
+-                      destination: destination ?? (previous?.type === "update" ? previous.destination : undefined),
++                      destination,
+                       content: Patch.joinBom(update.content, update.bom),
+                       before,
+                       after: update.content,
+                     }
+-                    if (previous) prepared.splice(prepared.indexOf(previous), 1, change)
+-                    else prepared.push(change)
++                    prepared.push(change)
 
 diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
 --- a/packages/core/test/patch.test.ts
 +++ b/packages/core/test/patch.test.ts
-@@ -32,3 +32,3 @@
+@@ -32,2 +32,2 @@
 -    // source明确移除规范化成功，BOM断言仍保留，不能靠fuzzy路径验证它。
 +    // 新PI规则仍不trimStart；BOM与缩进拒绝保持独立断言。
      expect(() => Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "old\n")).toThrow("Failed to find expected lines")
-   })
-@@ -49,4 +49,15 @@
+@@ -62,8 +62,19 @@
      // 提示只取失败chunk的磁盘候选，不能显示第一chunk已丢弃的replacement。
      expect(() => derive("alpha\nconst after = good()\n", [{ oldLines: ["alpha"], newLines: ["ALPHA"] }, { oldLines: ["const after = good(1)"], newLines: ["done"] }])).toThrow('Closest match at line 2:\nline 2 actual: "const after = good()"')
+-    // CRLF原文在比较空间等价，cursor之前的原始块只能报位置，不能再次输出requested。
+-    expect(() => derive("alpha\r\nbeta\r\nmiddle\r\nomega\r\n", [
++    // 跨chunk不再推进cursor；乱序唯一块成功后仍写回原CRLF。
++    expect(derive("alpha\r\nbeta\r\nmiddle\r\nomega\r\n", [
+       { oldLines: ["middle"], newLines: ["MIDDLE"] }, { oldLines: ["alpha", "beta"], newLines: ["ALPHA", "BETA"] },
+-    ])).toThrow("exists at this location in the original file")
++    ])).toBe("ALPHA\r\nBETA\r\nMIDDLE\r\nomega\r\n")
 -    expect(() => derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toThrow("Failed to find expected lines")
 +    expect(derive("“old”\n", [{ oldLines: ['"old"'], newLines: ["new"] }])).toBe("new\n")
 +    // 乱序chunk只看同一原文；生成依赖、重复span与EOF歧义不得进入成功路径。
@@ -1546,10 +1574,10 @@ diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
 diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
 --- a/packages/core/test/tool-apply-patch.test.ts
 +++ b/packages/core/test/tool-apply-patch.test.ts
-@@ -198,5 +198,18 @@
-                   "created\n",
-                 )
-                 expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("prefix after suffix\n")
+@@ -246,5 +246,18 @@
+                 expect(shown).toContain("+created")
+                 expect(shown).toContain("-prefix before suffix\n+prefix after suffix")
+                 expect(shown).toContain("-remove")
                  expect(yield* exists(remove)).toBe(false)
 +                // 两个alias entry按同一原文乱序派生，不能互相触发writeIfUnchanged失败。
 +                const repeatFile = path.join(tmp.path, "repeat.txt")
@@ -1564,6 +1592,21 @@ diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/to
 +                expect(yield* Effect.promise(() => fs.readFile(repeatFile, "utf8"))).toBe("FIRST\nSECOND\n")
 +                expect(readsBeforeEditApproval).toBe(0)
 +                expect(assertions.at(-1)?.metadata?.files).toEqual([{ type: "update", relativePath: "repeat.txt" }, { type: "update", relativePath: "repeat.txt" }])
+               }),
+@@ -288,4 +301,14 @@
+                 expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(fresh.output?.structured).files).toMatchObject([{ file: "moved.txt", status: "deleted", additions: 0, deletions: 1 }, { file: "nested/final.txt", status: "added", additions: 1, deletions: 0 }])
+                 expect(yield* exists(path.join(tmp.path, "moved.txt"))).toBe(false)
+                 expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/final.txt"), "utf8"))).toBe("\uFEFFfinal\n")
++                // 第二个alias entry才声明Move，聚合不能丢目的地或改用第一个entry的生成文本。
++                const repeatedSource = path.join(tmp.path, "repeat-move.txt")
++                yield* Effect.promise(() => fs.writeFile(repeatedSource, "\uFEFFtop\nbottom\n"))
++                editApproved = false
++                const repeatedMove = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: repeat-move.txt\n@@\n-bottom\n+BOTTOM\n*** Update File: ./repeat-move.txt\n*** Move to: repeated-final.txt\n@@\n-top\n+TOP\n*** End Patch", "repeated-move"))
++                expect(repeatedMove.result.type).toBe("text")
++                expect(repeatedMove.output?.structured).toMatchObject({ files: [{ file: "repeat-move.txt", status: "deleted" }, { file: "repeated-final.txt", status: "added" }] })
++                expect(yield* exists(repeatedSource)).toBe(false)
++                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "repeated-final.txt"), "utf8"))).toBe("\uFEFFTOP\nBOTTOM\n")
++                expect(readsBeforeEditApproval).toBe(0)
                }),
 
 diff --git a/packages/opencode/test/patch/patch.test.ts b/packages/opencode/test/patch/patch.test.ts

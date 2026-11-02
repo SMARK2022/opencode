@@ -212,18 +212,6 @@ diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permis
      return { level: "cautious", reason: "file deletion requires explicit approval" }
    }
  }
-diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
---- a/packages/core/src/tool/apply-patch.ts
-+++ b/packages/core/src/tool/apply-patch.ts
-@@ -118,6 +118,8 @@
-                 yield* permission.assert({
-                   action: "edit",
-                   resources: [...new Set(targets.map(({ target }) => target.resource))],
-+                  // 分类使用已解析的文件操作，普通更新允许时删除仍进入谨慎审查。
-+                  metadata: { files: targets.map(({ hunk, target }) => ({ type: hunk.type, relativePath: target.resource })) },
-                   save: ["*"],
-                   sessionID: context.sessionID,
-                   agent: context.agent,
 diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
 --- a/packages/core/test/tool-apply-patch.test.ts
 +++ b/packages/core/test/tool-apply-patch.test.ts
@@ -261,7 +249,7 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 -    yield* service.reply({ requestID: pathOnly.id, reply: "reject" })
 +    expect(pathOnly.effect).toBe("allow")
 +    expect(reviewRequests).toHaveLength(reviews + 3)
-     // 取消终止尚未完成的模型审查，不创建 pending，也不写入隐藏会话消息。
+     // 取消终止模型且不创建pending；审计请求留在子会话，不污染父会话历史。
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts

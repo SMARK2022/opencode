@@ -760,7 +760,7 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  import { useLocal } from "../../context/local"
  import { Locale } from "../../util/locale"
 +import { withinMarkdownBudget } from "../../util/text-budget"
- import { webSearchProviderLabel } from "../../util/tool-display"
+ import { toolDisplayMetadata, webSearchProviderLabel } from "../../util/tool-display"
  import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 @@ -2208,19 +2209,33 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
    const { theme, syntax } = useTheme()
@@ -843,10 +843,9 @@ new file mode 100644
 diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/opencode/test/session/processor-effect.test.ts
 --- a/packages/opencode/test/session/processor-effect.test.ts
 +++ b/packages/opencode/test/session/processor-effect.test.ts
-@@ -29,6 +29,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
+@@ -30,5 +30,6 @@ import { ModelV2 } from "@opencode-ai/core/model"
  import { SessionProjector } from "@opencode-ai/core/session/projector"
  import { LLMEvent } from "@opencode-ai/llm"
- import { tool as aiTool } from "ai"
 +import { Plugin } from "../../src/plugin"
  
  const summary = Layer.succeed(
@@ -1221,7 +1220,7 @@ diff --git a/packages/opencode/test/v2/session-message-updater.test.ts b/package
    })
  })
 +
-+test("retried keeps projection no-op and the next step.started completes the stale assistant", () => {
++test("legacy retry without an owner stays no-op and the next step.started completes the stale assistant", () => {
 +  // #582：memory adapter 是 SQLite projector 与 live store 的共同语义基准，此处锁定即两处共同合同。
 +  const state: SessionMessageUpdater.MemoryState = { messages: [] }
 +  const sessionID = SessionID.make("session")
@@ -1251,8 +1250,8 @@ diff --git a/packages/opencode/test/v2/session-message-updater.test.ts b/package
 +      data: { sessionID, assistantMessageID: firstID, textID: "txt-1", timestamp: DateTime.makeUnsafe(2) },
 +    } satisfies SessionEvent.Event),
 +  )
-+  // #582：retry 事件在投影层保持 no-op：残留 Assistant 的终结由下一次
-+  // Step.Started 承担。这是输出超限熔断复用的既有 dual-write 合同，锁定防漂移。
++  // Legacy无归属retry仍不猜测当前助手；Native带ID重试由runner回归独立覆盖。
++  // 下一次Step.Started继续承担旧dual-write残留助手的终结。
 +  Effect.runSync(
 +    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
 +      id: EventV2.ID.create(),
@@ -1268,8 +1267,8 @@ diff --git a/packages/opencode/test/v2/session-message-updater.test.ts b/package
 +    } satisfies SessionEvent.Event),
 +  )
 +  Effect.runSync(SessionMessageUpdater.update(SessionMessageUpdater.memory(state), stepStarted(secondID, 4)))
-+  // 第二次 Step.Started 是唯一终结点：retried 不携带 assistantMessageID，
-+  // 语义上它只能依赖 current 定位——这正是 no-op 合同存在的原因。
++  // 此处故意不带assistantMessageID，只锁定Legacy兼容事件，不代表Native重试为空操作。
++  // 新Step使用显式ID，仍不能把旧助手的错误归到新助手之外。
 +  Effect.runSync(
 +    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
 +      id: EventV2.ID.create(),
@@ -1297,3 +1296,184 @@ diff --git a/packages/opencode/test/v2/session-message-updater.test.ts b/package
 +  expect(fresh.finish).toBe("error")
 +  expect(fresh.error).toEqual({ type: "unknown", message: "terminal" })
 +})
+
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -477,5 +477,12 @@
+       const incomplete = new LLMError({ module: "SessionRunner", method: "stream", reason: new InvalidProviderOutputReason({
+         message: "Provider returned incomplete completion (finish_reason: unknown)",
+       }) })
+       const retryError = new SessionV1.APIError({ message: incomplete.reason.message, isRetryable: true, metadata: { finishReason: "unknown" } })
++      // 与V1共用65,536个UTF-16字符语义；只给无真实Tool的超限一次重试，不进入Goal错误续跑。
++      const outputLength = new LLMError({ module: "SessionRunner", method: "stream", reason: new InvalidProviderOutputReason({
++        message: "Provider output exceeded the 64 KiB text limit",
++      }) })
++      let outputLimitRetried = false
++      // policy的set不携带cause，在私有parse闭包交接准确错误，不修改公共重试接口。
++      let retryErrorForAttempt = retryError
+       // 请求归属与工具读取门寿命不同：dispatch固定代际，终态后的同代最终消耗仍结算。
+@@ -484,2 +491,5 @@
+       // 每个获准 retry 才重新调用唯一 stream；不能反复消费同一个已构造响应。
+-      const providerStream = Effect.suspend(() => llm.stream(request, (body) => Effect.gen(function* () {
++      const providerStream = Effect.suspend(() => {
++        // 每次订阅重置累计值，不能在text-start重置而放过多个独立正文块。
++        let attemptTextChars = 0
++        return llm.stream(request, (body) => Effect.gen(function* () {
+@@ -521,2 +531,10 @@
+             if (event.type === "tool-call") hasToolCall = true
++            if (event.type === "text-delta") {
++              // 拒绝越界delta后撤回已接受前缀，flush和durable/live清理仍走同一发布owner。
++              if (attemptTextChars + event.text.length > 64 * 1024) {
++                yield* withPublication(publisher.failAssistant(outputLength.reason.message, false, false, true))
++                return yield* outputLength
++              }
++              attemptTextChars += event.text.length
++            }
+             if (event.type === "step-finish" && event.reason === "unknown" && !hasToolCall && !publisher.stepSettlement()) {
+@@ -577,7 +595,16 @@
+-      )).pipe(Effect.retry({
+-        while: error => error === incomplete,
++        )
++      }).pipe(Effect.retry({
+         schedule: SessionRetry.policy({
+-          provider: String(model.provider), parse: () => retryError.toObject(),
++          provider: String(model.provider), parse: error => {
++            // 必须在set发布Retried之前拒绝终态；Effect v4的while会先执行内层schedule副作用。
++            if (error !== incomplete && error !== outputLength) return { name: "UnknownError", data: {} }
++            if (error === outputLength && (hasToolCall || outputLimitRetried)) return { name: "MessageOutputLengthError", data: {} }
++            if (error === outputLength) outputLimitRetried = true
++            retryErrorForAttempt = error === outputLength
++              ? new SessionV1.APIError({ message: outputLength.reason.message, isRetryable: true, metadata: { reason: "output-length" } })
++              : retryError
++            return retryErrorForAttempt.toObject()
++          },
+           set: ({ attempt }) => Effect.gen(function* () {
+             hasToolCall = false
+-            yield* withPublication(publisher.retry(attempt, retryError.data))
++            yield* withPublication(publisher.retry(attempt, retryErrorForAttempt.data))
+@@ -611,2 +638,5 @@
+           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
++          // 熔断不能重放或提前结算本地副作用；原fiber完成后才收尾剩余输入/托管工具。
++          if (failure === outputLength)
++            yield* withPublication(publisher.failUnsettledTools(outputLength.reason.message, false, true))
+           // 仅真正失败/中断退出隔离通知；普通工具错误仍沿用原 model-facing 路径。
+
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -271,6 +271,6 @@
+       "session.next.step.failed": (event) => {
+         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+-          // producer 已确认本 attempt 无实际 Tool，撤回前缀而不更改其他失败的 partial 保留。
+-          if (event.data.discardIncompleteAttempt === true) draft.content = []
++          // 只撤回失败正文和推理；实际Tool及其副作用结算仍须保留，普通失败不改partial。
++          if (event.data.discardIncompleteAttempt === true) draft.content = draft.content.filter(part => part.type === "tool")
+           draft.time.completed = event.data.timestamp
+           draft.finish = "error"
+
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -248,6 +248,7 @@
+           message.update(event.data.sessionID, (draft) => {
+             const currentAssistant = message.assistant(draft, event.data.assistantMessageID)
+             if (!currentAssistant) return
+-            if (event.data.discardIncompleteAttempt === true) currentAssistant.content = []
++            // 与durable updater同义：熔断撤回正文/推理，不擦除已发生的Tool结果。
++            if (event.data.discardIncompleteAttempt === true) currentAssistant.content = currentAssistant.content.filter(part => part.type === "tool")
+             currentAssistant.time.completed = event.data.timestamp
+             currentAssistant.finish = "error"
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1097,3 +1097,88 @@
+     }),
+     30000,
+   )
++  it.live("limits Native text per attempt without replaying tools or retaining rejected prefixes", () =>
++    Effect.gen(function* () {
++      yield* setup
++      const session = yield* SessionV2.Service
++      const runner = yield* SessionRunner.Service
++      const usage = SessionRequestUsage.make((yield* Database.Service).db)
++      const events = yield* EventV2.Service
++      const retries = yield* Queue.unbounded<string>()
++      const off = yield* events.listen(event => Schema.is(SessionEvent.Retried)(event)
++        ? Queue.offer(retries, event.data.error.message).pipe(Effect.asVoid) : Effect.void)
++      yield* Effect.addFinalizer(() => off)
++      yield* Effect.addFinalizer(() => Effect.sync(() => { responses = undefined; requests.length = 0; executions.length = 0 }))
++      // 两个独立Part各32Ki字符，恰好用满预算；不能把预算误设为单Part或严格小于。
++      const exact: LLMEvent[] = [
++        LLMEvent.stepStart({ index: 0 }),
++        LLMEvent.textStart({ id: "limit-a" }), LLMEvent.textDelta({ id: "limit-a", text: "a".repeat(32 * 1024) }), LLMEvent.textEnd({ id: "limit-a" }),
++        LLMEvent.textStart({ id: "limit-b" }), LLMEvent.textDelta({ id: "limit-b", text: "b".repeat(32 * 1024) }), LLMEvent.textEnd({ id: "limit-b" }),
++      ]
++      const oversized: LLMEvent[] = [
++        ...exact,
++        LLMEvent.reasoningStart({ id: "limit-reasoning" }), LLMEvent.reasoningDelta({ id: "limit-reasoning", text: "rejected-reasoning" }),
++        LLMEvent.textStart({ id: "limit-crossing" }), LLMEvent.textDelta({ id: "limit-crossing", text: "x" }),
++      ]
++      const id = SessionV2.ID.make("ses_output_limit_exact")
++      yield* insertSession(id)
++      yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Use the exact budget" }), resume: false })
++      responses = [[...exact, LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" })]]
++      requests.length = 0
++      yield* runner.run({ sessionID: id, force: true })
++      expect(requests).toHaveLength(1)
++      expect((yield* session.context(id)).flatMap(message => message.type === "assistant"
++        ? message.content.flatMap(part => part.type === "text" ? [part.text.length] : []) : [])).toEqual([32 * 1024, 32 * 1024])
++      for (const repeated of [false, true]) {
++        const id = SessionV2.ID.make(`ses_output_limit_retry_${repeated}`)
++        yield* insertSession(id)
++        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Handle excessive output" }), resume: false })
++        responses = [oversized, repeated ? oversized : fragmentFixture("text", "limit-recovered", ["recovered"]).completeEvents]
++        requests.length = 0
++        const fiber = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit, Effect.forkChild)
++        expect(yield* Queue.take(retries).pipe(Effect.timeout("5 seconds"))).toBe("Provider output exceeded the 64 KiB text limit")
++        // 观察真实重试通知；保留生产退避与同一助手，不靠推进虚拟时钟制造成功。
++        expect((yield* session.context(id)).filter(message => message.type === "assistant")).toMatchObject([{ content: [] }])
++        const result = yield* Fiber.join(fiber)
++        expect(Exit.isFailure(result)).toBe(repeated)
++        expect(requests).toHaveLength(2)
++        expect(requests[1]?.messages).toEqual(requests[0]?.messages)
++        const context = yield* session.context(id)
++        expect(context.filter(message => message.type === "assistant")).toMatchObject([
++          repeated ? { finish: "error", content: [] } : { finish: "stop", content: [{ type: "text", text: "recovered" }] },
++        ])
++        expect(JSON.stringify(context)).not.toContain("rejected-reasoning")
++        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: repeated ? "error" : "completed", assistantCount: 1 })
++        // 重放durable事件后同形，不能只清live显示而把失败正文留在历史。
++        yield* replaySessionProjection(id)
++        expect(yield* session.context(id)).toEqual(context)
++      }
++      for (const hosted of [false, true]) {
++        const id = SessionV2.ID.make(`ses_output_limit_tool_${hosted}`)
++        yield* insertSession(id)
++        yield* session.prompt({ sessionID: id, prompt: Prompt.make({ text: "Execute once before the limit" }), resume: false })
++        responses = [[
++          LLMEvent.stepStart({ index: 0 }),
++          LLMEvent.toolCall({ id: "limit-once", name: "echo", input: { text: "once" }, providerExecuted: hosted }),
++          ...(hosted ? [LLMEvent.toolResult({ id: "limit-once", name: "echo", result: { type: "text", value: "once" }, providerExecuted: true })] : []),
++          ...oversized.slice(1),
++        ]]
++        requests.length = 0
++        executions.length = 0
++        const result = yield* runner.run({ sessionID: id, force: true }).pipe(Effect.exit)
++        expect(Exit.isFailure(result)).toBe(true)
++        expect(requests).toHaveLength(1)
++        expect(executions).toHaveLength(hosted ? 0 : 1)
++        expect(yield* Queue.size(retries)).toBe(0)
++        const context = yield* session.context(id)
++        // 失败Text/Reasoning撤回，但已执行Tool仍结算为成功且不可被重试复演。
++        expect(context.filter(message => message.type === "assistant")).toMatchObject([
++          { finish: "error", content: [{ type: "tool", state: { status: "completed", input: { text: "once" } } }] },
++        ])
++        expect((yield* usage.list({ sessionID: id }))[0]).toMatchObject({ status: "error", assistantCount: 1 })
++        yield* replaySessionProjection(id)
++        expect(yield* session.context(id)).toEqual(context)
++      }
++    }),
++    30000,
++  )

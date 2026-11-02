@@ -1,3 +1,357 @@
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -3,3 +3,3 @@
+ import { makeLocationNode } from "../../effect/app-node"
+-import { type Model } from "@opencode-ai/llm"
++import { Model } from "@opencode-ai/llm"
+ import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-messages"
+@@ -11,4 +11,5 @@
+ import { Catalog } from "../../catalog"
++import { Config } from "../../config"
+ import { Credential } from "../../credential"
+ import { Integration } from "../../integration"
+ import { ModelV2 } from "../../model"
+@@ -75,4 +76,5 @@
+ export interface Interface {
+   // 期限仅在 Core resolver/runner 间携带，不进入公开 Model Schema 或 provider JSON。
+-  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model & { readonly timeout?: number | false }; readonly pricing: ModelV2.Info["cost"] }, Error>
++  // 资格绑定本次实际凭据，仅供内部审查使用，不把token或身份标记发给模型。
++  readonly resolve: (session: SessionSchema.Info) => Effect.Effect<{ readonly model: Model & { readonly timeout?: number | false }; readonly pricing: ModelV2.Info["cost"]; readonly openaiOAuth: boolean }, Error>
+ }
+@@ -85,4 +87,4 @@
+   pricing: ModelV2.Info["cost"] = [],
+ ) => Layer.succeed(Service, Service.of({
+-  resolve: session => resolve(session).pipe(Effect.map(model => ({ model, pricing: [...pricing] }))),
++  resolve: session => resolve(session).pipe(Effect.map(model => ({ model, pricing: [...pricing], openaiOAuth: false }))),
+ }))
+@@ -124,11 +126,13 @@
+   // 源补丁按 provider ID 或 SDK package 识别 OpenAI 系列，不扩大普通兼容服务默认值。
+   const parallel = model.providerID === "openai" || (model.api.type === "aisdk" &&
+     ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/github-copilot"].includes(model.api.package))
++  const responses = model.api.type === "aisdk" && model.api.package === "@ai-sdk/openai"
+   // model/variant 的并行参数进入 typed provider options，禁止 HTTP 后置 overlay 抢占协议字段。
+   // 能力标志只服务配置继承，不能混入 72 观察的 prepared JSON 或实际提供者请求。
+   // 推断的 thinking/effort 同样交给唯一 typed lowering，不能由 HTTP 后置覆盖协议字段。
++  // Responses配置指令也只交给typed lowering；请求级可信策略自然覆盖默认值。
+   const httpBody = Object.fromEntries(Object.entries(body).filter(([key]) => key !== "apiKey" && key !== "__opencodeReasoning" &&
+-    (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key)) && (!anthropic || !["thinking", "output_config"].includes(key)) && (!claudecode || !["system", "metadata"].includes(key))))
++    (!responses || key !== "instructions") && (!parallel || !["parallelToolCalls", "parallel_tool_calls"].includes(key)) && (!anthropic || !["thinking", "output_config"].includes(key)) && (!claudecode || !["system", "metadata"].includes(key))))
+   return route.with({
+     provider: model.providerID,
+     endpoint: model.api.url === undefined ? undefined : { baseURL: model.api.url },
+@@ -153,6 +158,7 @@
+       } } : {}),
+       // 两个命名空间独立合并，不能为 ClaudeCode 或 Anthropic 丢弃其他提供者的并行参数。
+       ...(parallel ? { openai: {
+         parallelToolCalls: body.parallelToolCalls ?? body.parallel_tool_calls ?? true,
++        ...(responses ? { instructions: body.instructions } : {}),
+       } } : {}),
+     } } : {}),
+@@ -261,5 +267,6 @@
+   Service,
+   Effect.gen(function* () {
+     const catalog = yield* Catalog.Service
+     const integrations = yield* Integration.Service
++    const config = yield* Config.Service
+     return Service.of({
+@@ -282,15 +288,28 @@
+         const provider = yield* catalog.provider.get(selected.providerID)
+         const connection = yield* integrations.connection.active(
+           provider?.integrationID ?? Integration.ID.make(selected.providerID),
+         )
++        // 认证与资格使用同一次active解析；别名不借用基础账号的凭据。
++        const credential = connection ? yield* integrations.connection.resolve(connection) : undefined
++        const base = credential?.type === "oauth" && selected.providerID !== ProviderV2.ID.openai
++          ? (yield* config.entries()).flatMap(entry => entry.type === "document" ? [entry.info.providers?.[selected.providerID]?.extends] : []).findLast(value => value !== undefined)
++          : undefined
++        const openaiOAuth = credential?.type === "oauth" && (selected.providerID === ProviderV2.ID.openai || base === "openai")
++        const model = yield* resolve(session, selected, credential)
++        // ChatGPT凭据属于Codex后端，不能仅加instructions后仍发往普通API。
++        const endpoint = openaiOAuth ? new URL(typeof selected.api.settings?.codexApiEndpoint === "string"
++          ? selected.api.settings.codexApiEndpoint : "https://chatgpt.com/backend-api/codex/responses") : undefined
++        const accountID = credential?.type === "oauth" && typeof credential.metadata?.accountID === "string" ? credential.metadata.accountID : undefined
+         return {
+-          model: yield* resolve(
+-            session,
+-            selected,
+-            connection ? yield* integrations.connection.resolve(connection) : undefined,
+-          ),
++          model: !endpoint ? model : Object.assign(Model.update(model, { route: model.route.with({
++            endpoint: { baseURL: endpoint.origin, path: endpoint.pathname, query: Object.fromEntries(endpoint.searchParams) },
++            headers: CodexHeaders.request({ ...model.route.defaults.headers, ...(accountID ? { "ChatGPT-Account-Id": accountID } : {}) }),
++            providerOptions: { openai: { store: false } },
++          }) }), { timeout: model.timeout }),
+           // 价格与执行模型来自同一个 Catalog 选择，完成时不重新解析已切换的 Session。
+           pricing: selected.cost,
++          // 仅直接OpenAI或最后明确的直接继承命中；SDK、URL和多级别名不证明身份。
++          openaiOAuth,
+         }
+       }),
+     })
+@@ -300,1 +319,1 @@
+-export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Catalog.node, Integration.node] })
++export const node = makeLocationNode({ service: Service, layer: locationLayer, deps: [Catalog.node, Integration.node, Config.node] })
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -291,9 +291,11 @@
+         providerOptions: { openai: { promptCacheKey,
++          // 普通turn与审查器共用真实OAuth资格，完整可信system原话只提升一次。
++          ...(selection.openaiOAuth ? { instructions: systemParts.map(part => part.text).join("\n") } : {}),
+           ...(agent.info?.request.body.parallelToolCalls !== undefined || agent.info?.request.body.parallel_tool_calls !== undefined
+             ? { parallelToolCalls: agent.info.request.body.parallelToolCalls ?? agent.info.request.body.parallel_tool_calls } : {}),
+         } },
+         // 模型族正文与V1共用；显式agent system仍替代默认正文，而非重复注入两份身份。
+-        system: systemParts,
++        system: selection.openaiOAuth ? undefined : systemParts,
+         messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+         tools: toolMaterialization?.definitions ?? [],
+         toolChoice: isLastStep || decide ? "none" : undefined,
+@@ -562,3 +564,7 @@
+           model: selection.model,
+           messages: [],
++          // 手动摘要没有普通turn request，仍从现有可信agent与epoch构造指令。
++          ...(selection.openaiOAuth ? { providerOptions: { openai: { instructions: [
++            agent.info?.system ?? SessionPrompts.provider(String(selection.model.id), String(selection.model.provider)), system.baseline,
++          ].filter(Boolean).join("\n") } } } : {}),
+           http: { headers: {
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -259,5 +259,7 @@
+         LLM.request({
+           model: input.model,
+           http: input.request.http,
++          // 摘要继承本次真实请求的可信指令；conversation仍留在user正文。
++          providerOptions: input.request.providerOptions,
+           messages: [Message.user(summaryPrompt)],
+           tools: [],
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -106,6 +106,8 @@
+         let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
+         let textOutput = ""
+         return yield* client.stream(LLM.request({
+-          model: selected.model, system, prompt: attemptPrompt,
++          model: selected.model, prompt: attemptPrompt,
++          // 两次尝试移动同一可信原话；证据与协议修复提示始终留在user通道。
++          ...(selected.openaiOAuth ? { providerOptions: { openai: { instructions: system } } } : { system }),
+           tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
+             description: "Submit the structured allow/deny decision for this permission review.",
+diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/config/provider.test.ts
+--- a/packages/core/test/config/provider.test.ts
++++ b/packages/core/test/config/provider.test.ts
+@@ -23,1 +23,17 @@
+ import { PluginTestLayer } from "../plugin/fixture"
++import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
++import { Database } from "@opencode-ai/core/database/database"
++import { Location } from "@opencode-ai/core/location"
++import { PermissionReviewer } from "@opencode-ai/core/permission/reviewer"
++import { PermissionReviewerPrompt } from "@opencode-ai/core/permission/reviewer/prompt"
++import { SessionStore } from "@opencode-ai/core/session/store"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
++import { ProjectTable } from "@opencode-ai/core/project/sql"
++import { HttpClient, HttpClientResponse } from "effect/unstable/http"
++import { node } from "@opencode-ai/core/session/runner/llm"
++import { SessionRunner } from "@opencode-ai/core/session/runner"
++import { Snapshot } from "@opencode-ai/core/snapshot"
++import { AgentV2 } from "@opencode-ai/core/agent"
+@@ -69,1 +85,170 @@
++  it.effect("binds native reviewer instructions to the selected OAuth identity and final wire body", () => withEnv({ NATIVE_REVIEW_KEY: undefined }, () =>
++    Effect.gen(function* () {
++      const catalog = yield* Catalog.Service
++      const integrations = yield* Integration.Service
++      const credentials = yield* Credential.Service
++      const location = yield* Location.Service
++      const agents = yield* AgentV2.Service
++      let selected = "openai"
++      let reviewing = true
++      const id = ModelV2.ID.make("review-model")
++      const methodID = Integration.MethodID.make("review-oauth")
++      const config = Config.Service.of({ entries: () => Effect.succeed([
++        new Config.Document({ type: "document", info: decode({ approvals_reviewer: "auto_review", auto_review: { model: `${selected}/${id}`, policy: "TRUSTED_TENANT_POLICY" }, providers: {
++          "review-direct": { extends: "openai" }, "review-late": { extends: "openai" },
++          "review-nested": { extends: "review-direct" }, "review-switch": { extends: "openai" },
++        } }) }),
++        // 后层只改名称不能清掉直接继承；明确换基础则必须改变资格。
++        new Config.Document({ type: "document", info: decode({ providers: { "review-late": { name: "Later", api: { settings: { codexApiEndpoint: "https://custom-codex.fixture.invalid/responses?tenant=fixture" } } }, "review-switch": { extends: "review-spoof" } } }) }),
++      ]) })
++      yield* integrations.transform((draft) => {
++        for (const provider of ["openai", "review-spoof"]) {
++          const integrationID = Integration.ID.make(provider)
++          draft.method.update({ integrationID, method: { type: "key", label: "Fixture key" } })
++          draft.method.update({ integrationID, method: { type: "env", names: ["NATIVE_REVIEW_KEY"] } })
++          draft.method.update({ integrationID, method: { type: "oauth", id: methodID, label: "Fixture OAuth" },
++            authorize: () => Effect.die("Fixture must not authorize"), refresh: () => Effect.die("Fixture must not refresh"),
++          })
++        }
++      })
++      yield* catalog.transform((draft) => {
++        for (const provider of ["openai", "review-spoof"]) {
++          const providerID = ProviderV2.ID.make(provider)
++          draft.provider.update(providerID, (value) => {
++            value.integrationID = Integration.ID.make(provider)
++            value.api = { type: "aisdk", package: "@ai-sdk/openai", url: "https://api.openai.com/v1", settings: {} }
++            value.request.body = { apiKey: "configured-key" }
++          })
++          draft.model.update(providerID, id, (value) => {
++            value.api.id = ModelV2.ID.make("gpt-5")
++            // 相同SDK、URL和身份头不能让自定义OAuth冒充OpenAI。
++            value.request.headers = { originator: "codex-tui" }
++            value.request.body = { instructions: "MODEL_RAW_POLICY", custom_extension: { kept: true } }
++            value.request.variant = ModelV2.VariantID.make("review-variant")
++            value.variants = [{ id: ModelV2.VariantID.make("review-variant"), headers: {}, body: { instructions: "VARIANT_RAW_POLICY" } }]
++            value.capabilities.tools = true
++            value.limit = { context: 128000, output: 4096 }
++          })
++        }
++      })
++      const plugin = yield* PluginV2.Service
++      const host = yield* PluginHost.make(plugin)
++      yield* ConfigProviderPlugin.Plugin.effect(host).pipe(Effect.provideService(Config.Service, config))
++      const Wire = Schema.Struct({ instructions: Schema.optional(Schema.String), input: Schema.Array(Schema.Struct({ role: Schema.optional(Schema.String), content: Schema.Unknown })), custom_extension: Schema.optional(Schema.Unknown) })
++      const bodies: (typeof Wire.Type)[] = []
++      const prepared: (typeof Wire.Type)[] = []
++      const texts: string[] = []
++      const auth: string[] = []
++      const urls: string[] = []
++      const accounts: (string | null)[] = []
++      const accepted = { outcome: "allow", rationale: "bounded fixture", risk_level: "low", user_authorization: "high" }
++      const http = Layer.succeed(HttpClient.HttpClient, HttpClient.make((request) => Effect.gen(function* () {
++        const web = yield* HttpClientRequest.toWeb(request).pipe(Effect.orDie)
++        const text = yield* Effect.promise(() => web.text())
++        bodies.push(Schema.decodeUnknownSync(Schema.fromJsonString(Wire))(text))
++        texts.push(text)
++        auth.push(web.headers.get("authorization") ?? "")
++        urls.push(web.url)
++        accounts.push(web.headers.get("chatgpt-account-id"))
++        // 第一轮缺少裁决触发真实一次修复；第二轮经Responses解析真实tool call。
++        const events = !reviewing ? [
++          { type: "response.created", response: { id: "resp_normal", created_at: 0, model: "gpt-5" } },
++          { type: "response.output_text.delta", item_id: "text", output_index: 0, content_index: 0, delta: "NORMAL_WIRE_RESPONSE" },
++          { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
++        ] : bodies.length === 1 ? [
++          { type: "response.created", response: { id: "resp_first", created_at: 0, model: "gpt-5" } },
++          { type: "response.output_text.delta", item_id: "text", output_index: 0, content_index: 0, delta: "Missing decision" },
++          { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
++        ] : [
++          { type: "response.created", response: { id: "resp_second", created_at: 0, model: "gpt-5" } },
++          { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: "" } },
++          { type: "response.function_call_arguments.delta", item_id: "fc_review", output_index: 0, delta: JSON.stringify(accepted) },
++          { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: JSON.stringify(accepted), status: "completed" } },
++          { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
++        ]
++        return HttpClientResponse.fromWeb(request, new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } }))
++      })))
++      const client = Layer.effect(LLMClient.Service, Effect.gen(function* () {
++        const actual = yield* LLMClient.Service
++        return LLMClient.Service.of({ ...actual, stream: (request) => actual.stream(request, body => Effect.sync(() => prepared.push(Schema.decodeUnknownSync(Wire)(body)))) })
++      })).pipe(Layer.provide(LLMClient.layer.pipe(Layer.provide(RequestExecutor.layer.pipe(Layer.provide(http))))))
++      const graph = AppNodeBuilder.build(LayerNode.group([Database.node, SessionStore.node, PermissionReviewer.node, node]), [
++        [Catalog.node, Layer.succeed(Catalog.Service, catalog)], [Integration.node, Layer.succeed(Integration.Service, integrations)],
++        [Config.node, Layer.succeed(Config.Service, config)], [Location.node, Layer.succeed(Location.Service, location)], [LayerNodePlatform.llmClient, client],
++        [AgentV2.node, Layer.succeed(AgentV2.Service, agents)], [Snapshot.node, Layer.mock(Snapshot.Service, { capture: () => Effect.succeed(undefined) })],
++      ])
++      yield* Effect.gen(function* () {
++        const database = yield* Database.Service
++        const reviewer = yield* PermissionReviewer.Service
++        const sessionID = SessionSchema.ID.make("ses_native_oauth_wire")
++        yield* database.db.insert(ProjectTable).values({ id: ProjectV2.ID.global, worktree: location.directory, sandboxes: [] }).onConflictDoNothing().run().pipe(Effect.orDie)
++        yield* database.db.insert(SessionTable).values({ id: sessionID, project_id: ProjectV2.ID.global, slug: "fixture", directory: location.directory, title: "Fixture", version: "test", agent: "build", model: { id, providerID: "openai" } }).run().pipe(Effect.orDie)
++        const evidence = { time: { created: 1 }, text: "TRANSCRIPT_EVIDENCE" }
++        yield* database.db.insert(SessionMessageTable).values({ id: SessionMessage.ID.make("msg_native_oauth_evidence"), session_id: sessionID, type: "user", seq: 1, data: evidence }).run().pipe(Effect.orDie)
++        const save = (provider: string, type: "key" | "oauth") => credentials.create({ integrationID: Integration.ID.make(provider), value: type === "key"
++          ? Credential.Key.make({ type: "key", key: `stored-key-${provider}` })
++          : Credential.OAuth.make({ type: "oauth", methodID, access: `access-${provider}`, refresh: "REFRESH_SECRET", expires: Number.MAX_SAFE_INTEGER, metadata: { accountID: `account-${provider}`, credential_marker: "OAUTH_METADATA" } }),
++        })
++        const expected = PermissionReviewerPrompt.buildSystemPrompt(`${PermissionReviewerPrompt.DEFAULT_TENANT_POLICY}\n\nTRUSTED_TENANT_POLICY`)
++        const cases = [
++          { provider: "openai", type: "oauth", promote: true }, { provider: "openai", type: "key", promote: false },
++          { provider: "openai", type: "env", promote: false }, { provider: "openai", type: "config", promote: false },
++          { provider: "review-spoof", type: "oauth", promote: false },
++          // 基础和别名的凭据交叉，锁定本次实际选择，不能偷用基础账号。
++          { provider: "review-direct", type: "oauth", base: "key", promote: true }, { provider: "review-direct", type: "key", base: "oauth", promote: false },
++          { provider: "review-late", type: "oauth", promote: true }, { provider: "review-nested", type: "oauth", promote: false },
++          { provider: "review-switch", type: "oauth", promote: false },
++        ] as const
++        for (const scenario of cases) {
++          selected = scenario.provider
++          if (scenario.type === "env") process.env.NATIVE_REVIEW_KEY = "environment-key"
++          else delete process.env.NATIVE_REVIEW_KEY
++          for (const value of yield* credentials.list(Integration.ID.make(selected))) yield* credentials.remove(value.id)
++          if ("base" in scenario) yield* save("openai", scenario.base)
++          if (scenario.type === "key" || scenario.type === "oauth") yield* save(selected, scenario.type)
++          bodies.length = prepared.length = texts.length = auth.length = urls.length = accounts.length = 0
++          expect(yield* reviewer.review({ sessionID, reviewID: `review_${selected}_${scenario.type}`, permission: "bash", patterns: ["PLANNED_ACTION"], metadata: { command: "COMMAND_EVIDENCE $HOME > out", cwd: location.directory }, precheck: { level: "cautious", reason: "PRECHECK_EVIDENCE" } })).toMatchObject({ action: "allow" })
++          expect(bodies).toHaveLength(2)
++          expect(prepared).toHaveLength(2)
++          for (const [index, body] of bodies.entries()) {
++            // 同时核对lowering与最终HTTP正文，禁止raw overlay重新抢回策略字段。
++            expect(body.instructions).toBe(scenario.promote ? expected : "VARIANT_RAW_POLICY")
++            expect(prepared[index]?.instructions).toBe(body.instructions)
++            expect(body.input.some(item => item.role === "system" || item.role === "developer")).toBe(!scenario.promote)
++            if (!scenario.promote) expect(body.input.filter(item => item.role === "system" || item.role === "developer").map(item => JSON.stringify(item.content)).join("\n")).toContain("TRUSTED_TENANT_POLICY")
++            const evidence = body.input.filter(item => item.role === "user").map(item => JSON.stringify(item.content)).join("\n")
++            for (const value of ["TRANSCRIPT_EVIDENCE", "PLANNED_ACTION", "COMMAND_EVIDENCE $HOME > out", "PRECHECK_EVIDENCE"]) {
++              expect(evidence).toContain(value)
++              expect(body.instructions).not.toContain(value)
++            }
++            expect(evidence.includes(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT)).toBe(index === 1)
++            expect(body.instructions).not.toContain(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT)
++            expect(body.custom_extension).toEqual({ kept: true })
++            expect(urls[index]).toBe(!scenario.promote ? "https://api.openai.com/v1/responses" : selected === "review-late" ? "https://custom-codex.fixture.invalid/responses?tenant=fixture" : "https://chatgpt.com/backend-api/codex/responses")
++            expect(accounts[index]).toBe(scenario.promote ? `account-${selected}` : null)
++            // token只进入真实认证头；OAuth metadata与refresh绝不混进模型JSON。
++            for (const secret of ["access-", "REFRESH_SECRET", "OAUTH_METADATA", "configured-key", "environment-key", "stored-key-"]) expect(texts[index]).not.toContain(secret)
++            expect(auth[index]).toBe(`Bearer ${scenario.type === "oauth" ? `access-${selected}` : scenario.type === "key" ? `stored-key-${selected}` : scenario.type === "env" ? "environment-key" : "configured-key"}`)
++          }
++        }
++        // 同一真实resolver还服务普通turn和手动摘要，不能只认证审查器的专属请求。
++        reviewing = false
++        selected = "openai"
++        yield* save(selected, "oauth")
++        yield* agents.transform(draft => draft.update(AgentV2.ID.make("build"), value => { value.system = "NORMAL_SYSTEM_POLICY" }))
++        const runner = yield* SessionRunner.Service
++        for (const maintenance of [undefined, "compact"] as const) {
++          bodies.length = prepared.length = texts.length = auth.length = urls.length = accounts.length = 0
++          yield* runner.run({ sessionID, force: true, ...(maintenance ? { maintenance } : {}) })
++          expect(bodies).toHaveLength(1)
++          expect(bodies[0]?.instructions).toContain("NORMAL_SYSTEM_POLICY")
++          expect(bodies[0]?.instructions).not.toContain("TRANSCRIPT_EVIDENCE")
++          expect(bodies[0]?.input.some(item => item.role === "system" || item.role === "developer")).toBe(false)
++          expect(urls[0]).toBe("https://chatgpt.com/backend-api/codex/responses")
++          expect(accounts[0]).toBe("account-openai")
++          expect(texts[0]).toContain(maintenance ? "NORMAL_WIRE_RESPONSE" : "TRANSCRIPT_EVIDENCE")
++        }
++      }).pipe(Effect.provide(graph))
++    }),
++  ))
+   it.effect("inherits alias authentication without sharing credentials or refresh ownership", () =>
+@@ -159,7 +308,8 @@
+-        const info = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({
++        const info = ConfigMigrateV1.migrate(Schema.decodeUnknownSync(ConfigV1.Info)({
+           provider: Object.fromEntries(providers.map((provider) => [provider, {
+             ...(provider.startsWith("explicit-") ? { extends: provider.slice("explicit-".length), npm: "@ai-sdk/anthropic" } : provider === "cubence" ? { extends: "claudecode" } : {}),
+             options: { apiKey: "configured-key", version },
+           }])),
+         }))
+-        yield* addPlugin(Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) }))
++        const config = Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: decode(info) })]) })
++        yield* addPlugin(config)
+@@ -167,1 +317,1 @@
+-        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
++        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer.pipe(Layer.provide(Layer.succeed(Config.Service, config)))))
+@@ -562,1 +712,1 @@
+-        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
++        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer.pipe(Layer.provide(Layer.succeed(Config.Service, config)))))
+@@ -673,1 +823,1 @@
+-        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer))
++        const resolver = yield* SessionRunnerModel.Service.pipe(Effect.provide(SessionRunnerModel.locationLayer.pipe(Layer.provide(Layer.succeed(Config.Service, config)))))
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts

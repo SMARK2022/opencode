@@ -236,7 +236,7 @@ diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/ev
 @@ -8,1 +8,2 @@
  import { SessionTable } from "@opencode-ai/core/session/sql"
 +import { selection } from "@opencode-ai/core/session/info"
-@@ -57,7 +58,16 @@
+@@ -57,7 +58,18 @@
            event.type === SessionV1.Event.MessageRemoved.type ||
 +          // 用户更新能引入新请求；助手更新能改变请求费用或最后一步身份。
 +          // 不把用户被显示窗口淘汰解释成新请求尚无回复。
@@ -249,6 +249,8 @@ diff --git a/packages/opencode/src/event-v2-bridge.ts b/packages/opencode/src/ev
            event.type === SessionEvent.Step.Ended.type ||
            event.type === SessionEvent.RevertEvent.Committed.type
          ) {
++          // 无兼容事件消费者时不扫描请求历史；Core提交与实时流已由原事件链完成。
++          if (GlobalBus.listenerCount("event") === 0) return
            const data = Schema.decodeUnknownSync(Schema.Struct({ sessionID: SessionV1.SessionInfo.fields.id }))(event.data)
 -          const row = yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, data.sessionID)).get().pipe(Effect.orDie)
 +          // 发布与 HTTP 相同的持久化读投影，仍然只发非 durable 的兼容快照。
@@ -576,7 +578,7 @@ diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/
 +      // 源语义取助手 cost；fixture 的第二个 part 有额外费用，能区分请求与全局费用。
 +      expect((yield* session.get(created.id)).request?.cost).toBeCloseTo(1.01)
 +      expect(snapshots.at(-1)?.request?.input).toBe(1428)
-@@ -229,1 +235,13 @@
+@@ -229,1 +235,26 @@
        expect((yield* session.children(created.id)).find((item) => item.id === empty.id)?.tokens?.input).toBe(0)
 +      // 旧请求仍有 100 个助手，加入新用户必须立即生成独立零请求快照。
 +      const nextUserID = MessageID.ascending()
@@ -590,6 +592,19 @@ diff --git a/packages/opencode/test/session/session.test.ts b/packages/opencode/
 +      expect((yield* session.get(created.id)).tokens?.input).toBe(200)
 +      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
 +      expect(snapshots.at(-1)?.request?.cost).toBe(0)
++      // 退订不影响持久请求；没有消费者时无需为兼容快照扫描完整历史。
++      GlobalBus.off("event", listener)
++      const unobserved = {
++        id: MessageID.ascending(), sessionID: created.id, role: "user" as const, time: { created: 1001 },
++        agent: "build", model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
++      }
++      yield* session.updateMessage(unobserved)
++      expect(snapshots.at(-1)?.request?.messageID).toBe(nextUserID)
++      expect((yield* session.get(created.id)).request?.messageID).toBe(unobserved.id)
++      // 重新订阅后立即恢复真实投影，不能把无订阅状态缓存成永久禁用。
++      GlobalBus.on("event", listener)
++      yield* session.updateMessage({ ...unobserved, agent: "updated" })
++      expect(snapshots.at(-1)?.request?.messageID).toBe(unobserved.id)
 diff --git a/packages/opencode/src/cli/cmd/generate.ts b/packages/opencode/src/cli/cmd/generate.ts
 --- a/packages/opencode/src/cli/cmd/generate.ts
 +++ b/packages/opencode/src/cli/cmd/generate.ts

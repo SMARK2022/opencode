@@ -15,88 +15,108 @@ diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/open
 index 36ab2d4a7..8bae32acc 100644
 --- a/packages/opencode/src/agent/subagent-permissions.ts
 +++ b/packages/opencode/src/agent/subagent-permissions.ts
-@@ -1,33 +1,110 @@
- import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-+import { Wildcard } from "@opencode-ai/schema/wildcard"
- import type { Agent } from "./agent"
- 
- /**
-  * Build the `permission` ruleset for a subagent's session when it's spawned
-  * via the task tool. Combines:
-  *
+@@ -1,33 +1 @@
+-import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+-import type { Agent } from "./agent"
+-
+-/**
+- * Build the `permission` ruleset for a subagent's session when it's spawned
+- * via the task tool. Combines:
+- *
 - * 1. The parent session's deny rules and external_directory rules.
 - *    Ordered parent-agent non-allow restrictions also bound delegation;
 - *    matching parent asks and denies take precedence over session grants.
 - * 2. Default `todowrite` and `task` denies if the subagent's own ruleset
-+ * 1. The subagent's own agent ruleset: its capability boundaries stay the base.
-+ * 2. The parent **agent's** explicit admission ceilings — `ask` and `auto`
-+ *    make subagent execution no less strict than the delegating agent without
-+ *    coupling the behavior to a specific agent name.
-+ * 3. The parent **session's** runtime ceilings — nested subagents inherit
-+ *    already-derived `ask`/`auto`/`deny` overlays, while `allow` exceptions are
-+ *    preserved only when the child agent already allows the same boundary.
-+ * 4. Default `todowrite` and `task` denies if the subagent's own ruleset
-  *    doesn't already permit them.
-  */
- export function deriveSubagentSessionPermission(
-   input: {
-     parentSessionPermission: PermissionV1.Ruleset
-     subagent: Agent.Info
-   },
+- *    doesn't already permit them.
+- */
+-export function deriveSubagentSessionPermission(
+-  input: {
+-    parentSessionPermission: PermissionV1.Ruleset
+-    subagent: Agent.Info
+-  },
 -  // 父 allow 不扩张子能力；空默认只供没有父代理限制的独立 helper 调用。
-+  // 父代理权限来自当前委派上下文；独立 helper 调用可省略。
-   parentAgentPermission: PermissionV1.Ruleset = [],
- ): PermissionV1.Ruleset {
-   const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
-   const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
-+  const parentHasCatchAllDeny = parentAgentPermission.some(
-+    (rule) => rule.permission === "*" && rule.action === "deny",
-+  )
-+  const ceilings = [
-+    ...parentAgentPermission.flatMap((rule) => parentAgentCeiling(rule, input.subagent.permission, parentHasCatchAllDeny)),
-+    ...input.parentSessionPermission.flatMap((rule) => forwardParentSessionRule(rule, input.subagent.permission)),
-+  ]
-+
-   return [
+-  parentAgentPermission: PermissionV1.Ruleset = [],
+-): PermissionV1.Ruleset {
+-  const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
+-  const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
+-  return [
 -    ...input.parentSessionPermission.filter(
 -      (rule) => rule.permission === "external_directory" || rule.action === "deny",
 -    ),
 -    // source 后写父 non-allow：ask/deny 均覆盖会话 grant，原序保留最后匹配语义。
 -    ...parentAgentPermission.filter((rule) => rule.action !== "allow"),
+-    ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+-    ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
+-  ]
+-}
++export { deriveSubagentSessionPermission } from "@opencode-ai/core/permission/subagent"
+diff --git a/packages/core/src/permission/subagent.ts b/packages/core/src/permission/subagent.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/permission/subagent.ts
+@@ -0,0 +1,92 @@
++export * as SubagentPermissions from "./subagent"
++
++import { Wildcard } from "@opencode-ai/schema/wildcard"
++import type { PermissionV2 } from "../permission"
++import type { PermissionV1 } from "../v1/permission"
++
++export function derive(input: {
++  parentAgentPermission: PermissionV2.Ruleset
++  parentSessionPermission: PermissionV2.Ruleset
++  subagentPermission: PermissionV2.Ruleset
++}): PermissionV2.Ruleset {
++  // 仅转换协议字段；两代使用同一有序推导，不能另造更弱的Native近似算法。
++  return deriveSubagentSessionPermission({
++    parentSessionPermission: legacy(input.parentSessionPermission),
++    subagent: { permission: legacy(input.subagentPermission) },
++  }, legacy(input.parentAgentPermission)).map(rule => ({ action: rule.permission, resource: rule.pattern, effect: rule.action }))
++}
++
++function legacy(rules: PermissionV2.Ruleset): PermissionV1.Ruleset {
++  return rules.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect }))
++}
++
++// 子代理自身能力仍是基底；这里只派生父代理准入上限和父会话运行时上限。
++export function deriveSubagentSessionPermission(
++  input: { parentSessionPermission: PermissionV1.Ruleset; subagent: { permission: PermissionV1.Ruleset } },
++  parentAgentPermission: PermissionV1.Ruleset = [],
++): PermissionV1.Ruleset {
++  const canTask = input.subagent.permission.some(rule => rule.permission === "task")
++  const canTodo = input.subagent.permission.some(rule => rule.permission === "todowrite")
++  const parentHasCatchAllDeny = parentAgentPermission.some(rule => rule.permission === "*" && rule.action === "deny")
++  const ceilings = [
++    ...parentAgentPermission.flatMap(rule => parentAgentCeiling(rule, input.subagent.permission, parentHasCatchAllDeny)),
++    ...input.parentSessionPermission.flatMap(rule => forwardParentSessionRule(rule, input.subagent.permission)),
++  ]
++  return [
 +    ...ceilings,
 +    ...subagentDenyOverrides(input.subagent.permission, ceilings),
-     ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
-     ...(canTask ? [] : [{ permission: "task" as const, pattern: "*" as const, action: "deny" as const }]),
-   ]
- }
++    ...(canTodo ? [] : [{ permission: "todowrite" as const, pattern: "*", action: "deny" as const }]),
++    ...(canTask ? [] : [{ permission: "task" as const, pattern: "*", action: "deny" as const }]),
++  ]
++}
 +
-+function parentAgentCeiling(
-+  rule: PermissionV1.Rule,
-+  subagent: PermissionV1.Ruleset,
-+  parentHasCatchAllDeny: boolean | undefined,
-+) {
-+  // 父 catch-all 是自执行默认，不能抹掉 controller 委派的执行能力。
++function parentAgentCeiling(rule: PermissionV1.Rule, subagent: PermissionV1.Ruleset, parentHasCatchAllDeny: boolean) {
++  // 父catch-all约束自执行，不能抹掉controller委派给executor的能力。
 +  if (rule.permission === "*") return []
-+  // catch-all deny 下仅继承 edit 限制；其他显式 deny 保留 source 的委派语义。
++  // catch-all deny下只继承edit禁令，保留原计划模式和委派语义。
 +  if (rule.action === "deny" && parentHasCatchAllDeny && rule.permission !== "edit") return []
-+
 +  const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
 +  if (rule.action === "allow") {
-+    // 父 allow 只保留子代理也已允许的共享例外。
++    // 只保留父子共同允许的例外，不能放宽子代理ask、auto或deny。
 +    return childAction === "allow" ? [rule] : []
 +  }
 +  if (childAction === "deny") return childSpecificCeilings(rule, subagent)
-+
 +  const action = rule.action
 +  if (action === childAction) return []
 +  return [{ ...rule, action }]
 +}
 +
 +function forwardParentSessionRule(rule: PermissionV1.Rule, subagent: PermissionV1.Ruleset) {
-+  // 会话 allow 同样只转发双方共享的例外；ask/auto/deny 按原规则顺序下放。
++  // 会话allow同样仅共享例外；其他上限按原顺序传给下一跳。
 +  if (rule.action === "allow")
 +    return evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action === "allow" ? [rule] : []
-+
 +  const childAction = evaluateSubagentRule(subagent, rule.permission, rule.pattern)?.action ?? "ask"
 +  if (childAction === "deny") return childSpecificCeilings(rule, subagent)
 +  const action = rule.action
@@ -105,10 +125,9 @@ index 36ab2d4a7..8bae32acc 100644
 +}
 +
 +function childSpecificCeilings(parent: PermissionV1.Rule, subagent: PermissionV1.Ruleset) {
-+  // 子代理用通配 deny 兜底时，只对其显式非 deny 能力推导父限制。
-+  return subagent.flatMap((rule) => {
-+    if (rule.action === "deny") return []
-+    if (rule.permission === "*") return []
++  // 通配deny兜底后的窄能力必须承接父上限，其他关闭边界保持不变。
++  return subagent.flatMap(rule => {
++    if (rule.action === "deny" || rule.permission === "*") return []
 +    if (!Wildcard.match(rule.permission, parent.permission, process.platform === "win32")) return []
 +    if (!Wildcard.match(rule.pattern, parent.pattern, process.platform === "win32")) return []
 +    const action = parent.action
@@ -119,23 +138,186 @@ index 36ab2d4a7..8bae32acc 100644
 +
 +function subagentDenyOverrides(subagent: PermissionV1.Ruleset, ceilings: PermissionV1.Ruleset) {
 +  if (ceilings.length === 0) return []
-+  // 具体 deny 置于 ceiling 后；不重放通配兜底，以免覆盖已收紧的窄能力。
-+  return subagent.filter(
-+    (rule) =>
-+      rule.action === "deny" &&
-+      rule.permission !== "*" &&
-+      rule.pattern !== "*" &&
-+      ceilings.some((ceiling) => Wildcard.match(rule.permission, ceiling.permission, process.platform === "win32")),
-+  )
++  // 具体deny置于父宽上限之后；不重放会抹掉窄能力的通配兜底。
++  return subagent.filter(rule => rule.action === "deny" && rule.permission !== "*" && rule.pattern !== "*" &&
++    ceilings.some(ceiling => Wildcard.match(rule.permission, ceiling.permission, process.platform === "win32")))
 +}
 +
 +function evaluateSubagentRule(ruleset: PermissionV1.Ruleset, permission: string, pattern: string) {
-+  return ruleset.findLast(
-+    (rule) =>
-+      Wildcard.match(permission, rule.permission, process.platform === "win32") &&
-+      Wildcard.match(pattern, rule.pattern, process.platform === "win32"),
-+  )
++  return ruleset.findLast(rule => Wildcard.match(permission, rule.permission, process.platform === "win32") &&
++    Wildcard.match(pattern, rule.pattern, process.platform === "win32"))
 +}
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -10,1 +10,2 @@
+ import { PermissionV2 } from "../permission"
++import { SubagentPermissions } from "../permission/subagent"
+@@ -94,6 +95,9 @@
++      // 原生调用只做字段适配，父子交集及具体deny由共享source算法承担。
+       const childPermission: PermissionV2.Ruleset = [
+-        // 执行代理可以不同于持久父身份；父non-allow按原序后写，不能被会话grant覆盖。
+-        ...parentPermission.filter(rule => rule.action === "external_directory" || rule.effect === "deny"),
+-        ...parentAgent.permissions.filter(rule => rule.effect !== "allow"),
+-        ...["todowrite", "task"].flatMap(action => agent.permissions.some(rule => rule.action === action) ? [] : [{ action, resource: "*", effect: "deny" as const }]),
++        ...SubagentPermissions.derive({
++          parentAgentPermission: parentAgent.permissions,
++          parentSessionPermission: parentPermission,
++          subagentPermission: agent.permissions,
++        }),
++        ...(cfg.flatMap(entry => entry.type === "document" && entry.info.experimental?.primary_tools !== undefined ? [entry.info.experimental.primary_tools] : []).at(-1) ?? []).map(action => ({ action: action === "write" || action === "apply_patch" ? "edit" : action, resource: "*", effect: "deny" as const })),
+       ]
+@@ -108,5 +112,7 @@
+         if (existing) {
++          // extension真正开始后才替换旧权限；入队时不能改掉仍运行的上一段。
++          yield* sessions.setPermissions({ sessionID: child.id, permissions: childPermission })
+           const current = yield* sessions.get(child.id)
+           if (current.agent !== agent.id) yield* sessions.switchAgent({ sessionID: child.id, agent: agent.id })
+           if (model) yield* sessions.switchModel({ sessionID: child.id, model })
+         }
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -124,1 +124,2 @@
+   readonly get: (sessionID: SessionSchema.ID) => Effect.Effect<SessionSchema.Info, NotFoundError>
++  readonly setPermissions: (input: { sessionID: SessionSchema.ID; permissions: PermissionV2.Ruleset }) => Effect.Effect<void, NotFoundError>
+@@ -274,5 +275,18 @@
+       get: Effect.fn("V2Session.get")(function* (sessionID) {
+         const session = yield* store.get(sessionID)
+         if (!session) return yield* new NotFoundError({ sessionID })
+         return session
+       }),
++      setPermissions: Effect.fn("V2Session.setPermissions")(function* (input) {
++        const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get().pipe(Effect.orDie)
++        if (!row) return yield* new NotFoundError({ sessionID: input.sessionID })
++        const info = SessionV1.fromRow(row)
++        // 复用完整旧事件及存储wire；只改权限/更新时间，不能擦掉模型、用量或扩展元数据。
++        yield* events.publish(SessionV1.Event.Updated, {
++          sessionID: input.sessionID,
++          info: SessionV1.SessionInfo.make({
++            ...info, permission: input.permissions.map(rule => ({ permission: rule.action, pattern: rule.resource, action: rule.effect })),
++            time: { ...info.time, updated: Date.now() },
++          }),
++        })
++      }),
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -49,2 +49,2 @@
+-    // 显式user优先；未配置全局reviewer时，auto仍使用相同的隔离审查路径。
+-    if (!sessionID || selected === "user" || (selected !== "auto_review" && input.metadata.agent !== "auto")) return yield* new Disabled()
++    // auto准入已由权限owner决定；执行代理名称只作证据，显式user仍保留人工审批。
++    if (!sessionID || selected === "user") return yield* new Disabled()
+diff --git a/packages/core/src/config/experimental.ts b/packages/core/src/config/experimental.ts
+--- a/packages/core/src/config/experimental.ts
++++ b/packages/core/src/config/experimental.ts
+@@ -16,3 +16,5 @@
+ export class Experimental extends Schema.Class<Experimental>("ConfigV2.Experimental")({
+   policies: Policy.pipe(Schema.Array, Schema.optional),
++  // 子代理配置禁令在派生上限后生效，两代不能只在工具展示中隐藏。
++  primary_tools: Schema.Array(Schema.String).pipe(Schema.optional),
+ }) {}
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -78,1 +78,4 @@
+-    experimental: info.experimental?.policies && { policies: info.experimental.policies },
++    // 旧primary_tools必须到达真实Native Task，不能在schema迁移时静默丢弃。
++    experimental: (info.experimental?.policies || info.experimental?.primary_tools) && {
++      policies: info.experimental.policies, primary_tools: info.experimental.primary_tools?.map(normalizeAction),
++    },
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -10,1 +10,2 @@
+ import { PermissionV2 } from "@opencode-ai/core/permission"
++import { SubagentPermissions } from "@opencode-ai/core/permission/subagent"
+@@ -202,1 +203,33 @@
+       expect(yield* service.get(PermissionV2.ID.create("per_test"))).not.toHaveProperty("agent")
++      // 通过真实Native转换和求值核对共享算法，不在测试内复制权限推导。
++      const child: PermissionV2.Ruleset = [
++        { action: "bash", resource: "*", effect: "allow" },
++        { action: "bash", resource: "git push *", effect: "deny" },
++        { action: "edit", resource: "*", effect: "deny" },
++        { action: "external_directory", resource: "*", effect: "ask" },
++        { action: "external_directory", resource: "/shared/*", effect: "allow" },
++      ]
++      const parent: PermissionV2.Ruleset = [
++        { action: "bash", resource: "*", effect: "auto" },
++        { action: "edit", resource: "*", effect: "auto" },
++        { action: "external_directory", resource: "*", effect: "auto" },
++        { action: "external_directory", resource: "/shared/*", effect: "allow" },
++      ]
++      const overlay = SubagentPermissions.derive({ parentAgentPermission: parent, parentSessionPermission: [], subagentPermission: child })
++      expect(PermissionV2.evaluate("bash", "git status", child, overlay).effect).toBe("auto")
++      expect(PermissionV2.evaluate("bash", "git push origin dev", child, overlay).effect).toBe("deny")
++      expect(PermissionV2.evaluate("edit", "src/a.ts", child, overlay).effect).toBe("deny")
++      expect(PermissionV2.evaluate("external_directory", "/shared/a", child, overlay).effect).toBe("allow")
++      expect(PermissionV2.evaluate("external_directory", "/outside/a", child, overlay).effect).toBe("auto")
++      const nested = SubagentPermissions.derive({ parentAgentPermission: child, parentSessionPermission: overlay, subagentPermission: child })
++      expect(PermissionV2.evaluate("bash", "git status", child, nested).effect).toBe("auto")
++      expect(PermissionV2.evaluate("bash", "git push origin dev", child, nested).effect).toBe("deny")
++      // 通配关闭后的窄allow只被收紧；父会话grant不能反向放宽子ask。
++      const narrow: PermissionV2.Ruleset = [{ action: "*", resource: "*", effect: "deny" }, { action: "bash", resource: "git status", effect: "allow" }]
++      const narrowed = SubagentPermissions.derive({ parentAgentPermission: parent, parentSessionPermission: [], subagentPermission: narrow })
++      expect(PermissionV2.evaluate("bash", "git status", narrow, narrowed).effect).toBe("auto")
++      expect(PermissionV2.evaluate("bash", "git push origin dev", narrow, narrowed).effect).toBe("deny")
++      const manual: PermissionV2.Ruleset = [{ action: "read", resource: "*", effect: "ask" }]
++      const grants = SubagentPermissions.derive({ parentAgentPermission: [], parentSessionPermission: [{ action: "read", resource: "*", effect: "allow" }], subagentPermission: manual })
++      expect(PermissionV2.evaluate("read", "a", manual, grants).effect).toBe("ask")
++      expect(PermissionV2.evaluate("task", "general", child, overlay).effect).toBe("deny")
+@@ -407,1 +440,1 @@
+-    // 未启用 reviewer 的未知命令进入原生人工队列，已知只读操作仍走快速路径。
++    // auto准入进入同一隔离审查，显式user与已知只读快速路径仍分别保留。
+@@ -443,4 +476,11 @@
+-    const pending = yield* service.ask(assertion({ action: "bash", resources: ["git add ."], metadata: { command: "git add ." } }))
+-    expect(pending.effect).toBe("ask")
+-    yield* service.reply({ requestID: pending.id, reply: "once" })
+-    expect(reviewRequests).toHaveLength(0)
++    // 普通edit有general快速路径；strict使本断言真实到达reviewer而非仅得到allow。
++    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ strict: true }) })
++    yield* agents.transform(draft => draft.update(AgentV2.ID.make("reviewer_parent"), item => { item.permissions = [{ action: "edit", resource: "*", effect: "auto" }] }))
++    const implicit = yield* service.ask(assertion({ agent: AgentV2.ID.make("reviewer_parent"), action: "edit", resources: ["src/implicit.ts"], metadata: { filepath: "/project/src/implicit.ts", diff: "-before\n+after" } }))
++    expect(implicit.effect).toBe("allow")
++    expect(yield* service.list()).toEqual([])
++    expect(reviewRequests).toHaveLength(1)
++    expect(JSON.stringify(reviewRequests[0]?.messages)).toContain("reviewer_parent")
++    expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
++    // 普通代理的实际auto请求已完成；后续严格/失败回归仍从独立计数开始。
++    reviewRequests.length = 0
+diff --git a/packages/core/test/session-create.test.ts b/packages/core/test/session-create.test.ts
+--- a/packages/core/test/session-create.test.ts
++++ b/packages/core/test/session-create.test.ts
+@@ -241,1 +241,20 @@
+       expect(yield* session.create(input)).toMatchObject({ id, agent: "build" })
++      const store = yield* SessionStore.Service
++      const db = (yield* Database.Service).db
++      yield* db.update(SessionTable).set({ cost: 3, tokens_input: 4, metadata: { custom: "keep" } }).where(eq(SessionTable.id, id)).run().pipe(Effect.orDie)
++      const permissions = [{ action: "bash", resource: "*", effect: "auto" as const }]
++      // 真正调用Session setter并重读wire、投影及事件；不运行任何子会话或后台job。
++      yield* session.setPermissions({ sessionID: id, permissions })
++      expect(yield* store.permissions(id)).toEqual(permissions)
++      expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)).toMatchObject({
++        agent: "build", title: "updated", slug: "updated", cost: 3, tokens_input: 4, metadata: { custom: "keep" },
++        permission: [{ permission: "bash", pattern: "*", action: "auto" }], time_created: 0,
++      })
++      const recorded = yield* db.select().from(EventTable).where(eq(EventTable.aggregate_id, id)).orderBy(asc(EventTable.seq)).all().pipe(Effect.orDie)
++      expect(recorded.at(-1)).toMatchObject({ type: EventV2.versionedType(SessionV1.Event.Updated.type, 1), data: { info: { title: "updated", permission: [{ permission: "bash", pattern: "*", action: "auto" }] } } })
++      // 恢复是替换而非累加，空集合也必须清掉旧grant。
++      yield* session.setPermissions({ sessionID: id, permissions: [{ action: "read", resource: "blocked/*", effect: "deny" }] })
++      expect(yield* store.permissions(id)).toEqual([{ action: "read", resource: "blocked/*", effect: "deny" }])
++      yield* session.setPermissions({ sessionID: id, permissions: [] })
++      expect(yield* store.permissions(id)).toEqual([])
++      expect(yield* session.get(id)).toMatchObject({ id, title: "updated", agent: "build" })
+diff --git a/packages/core/test/config/config.test.ts b/packages/core/test/config/config.test.ts
+--- a/packages/core/test/config/config.test.ts
++++ b/packages/core/test/config/config.test.ts
+@@ -61,1 +61,2 @@
+           model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
++          experimental: { primary_tools: ["write", "bash"] },
+@@ -66,1 +67,2 @@
+         expect(info.auto_review).toMatchObject({ strict: true, fallback: "user" })
++        expect(info.experimental?.primary_tools).toEqual(["edit", "bash"])
 warning: in the working copy of 'F:\ML\PythonAIProject\Claude-Code\opencode\thirdparty\opencode-11720\.temp\patches\states\0279-00ec4b85ca4f\repo\packages/opencode/src/permission/reviewer/service.ts', LF will be replaced by CRLF the next time Git touches it
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 index 255d53ccb..a0dc2911a 100644

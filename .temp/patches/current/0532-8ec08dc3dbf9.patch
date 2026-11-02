@@ -2865,6 +2865,14 @@ diff --git a/packages/opencode/test/cli/tui/daemon.test.ts b/packages/opencode/t
 index a0328f7c2..fa25bc63b 100644
 --- a/packages/opencode/test/cli/tui/daemon.test.ts
 +++ b/packages/opencode/test/cli/tui/daemon.test.ts
+@@ -13,6 +13,6 @@
+ import { mkdir, rename } from "fs/promises"
+ // #495：win32 spawn adapter 测试沿目标唯一 DaemonProcess seam。
+-import { DaemonProcess, discoverOrSpawnDaemon } from "../../../src/cli/cmd/tui"
++import { DaemonProcess, connectionInfo, discoverOrSpawnDaemon, type DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
+ import path from "path"
+ import { fileURLToPath, pathToFileURL } from "url"
+ // #524：db status 压力夹具直接用 bun:sqlite 写入 part 行（FK OFF）。
 @@ -99,6 +99,30 @@ async function runDaemonStop(lockPath: string, env: Record<string, string> = {})
    return { exitCode, stderr }
  }
@@ -2896,10 +2904,36 @@ index a0328f7c2..fa25bc63b 100644
  /**
   * 在临时目录中启动守护进程，轮询直到锁文件出现且 HTTP 服务器响应。
   * 返回运行中的进程和锁文件内容。
-@@ -240,6 +264,87 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
+@@ -240,6 +264,113 @@ async function readUntil(reader: ReadableStreamDefaultReader<string>, text: stri
  }
  
  describe("daemon lifecycle", () => {
++  test("observes injected connection owners without process or network access", async () => {
++    const forbidden = () => { throw new Error("observation must not start, elect, clear, or wait") }
++    const lock: ServerLock.ServerLock = { pid: 71, port: 3101, token: "private-token", dbPath: path.resolve("observer-only.db"), channel: "test", startedAt: "2026-10-28" }
++    const observe = (owner: ServerLock.ServerLock | undefined, overrides: Partial<DiscoverDaemonDeps> = {}) => connectionInfo({
++      read: async () => owner, alive: () => true, ping: async () => true,
++      clear: forbidden, acquire: forbidden, spawn: forbidden,
++      sleep: forbidden, resolveDaemonFile: forbidden, resolveNetwork: forbidden,
++      identity: () => ({ dbPath: lock.dbPath, channel: lock.channel }), placement: () => "observer-only",
++      electionTimeoutMs: 1, electionStaleMs: 1, pollMs: 1, waitMs: 1,
++      ...overrides,
++    })
++    // 无controlPort才跳过真实控制面fetch；健康探测及owner读取也全部显式替换。
++    expect(lock.controlPort).toBeUndefined()
++    await expect(observe(undefined)).resolves.toEqual({ running: false })
++    await expect(observe(lock, { alive: () => false })).resolves.toEqual({ running: false })
++    const healthy = await observe(lock)
++    expect(healthy).toEqual({ running: true, pid: 71, url: "http://127.0.0.1:3101", responsive: true })
++    expect(Object.keys(healthy).toSorted()).toEqual(["pid", "responsive", "running", "url"])
++    await expect(observe(lock, { ping: async () => false })).resolves.toMatchObject({ running: true, pid: 71, responsive: false })
++    // 身份不符、探测中换代与读取失败均保留失败，不伪装无owner并触发重建。
++    await expect(observe({ ...lock, dbPath: path.resolve("other.db") })).rejects.toThrow("different database or channel")
++    let reads = 0
++    await expect(observe(lock, { read: async () => ++reads === 1 ? lock : { ...lock, token: "replacement" } })).rejects.toThrow("ownership changed")
++    await expect(observe(lock, { read: async () => { throw new Error("observer read failure") } })).rejects.toThrow("observer read failure")
++  })
++
 +  // #532：独立 lock/XDG/DB 保证该查询不可能观察或停止开发者真实 daemon。
 +  // running=false 是公开 expected literal，测试不读取 private lock parser 返回类型。
 +  // lock 仍不存在证明 status 没有把 read 操作偷偷升级为 ensure。

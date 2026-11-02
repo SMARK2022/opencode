@@ -14,24 +14,15 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
---- a/packages/opencode/src/plugin/vscode-bridge.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -16,6 +16,11 @@
- // 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
- // 把 notebook 源码整段复制进会话状态。
+diff --git a/packages/core/src/tool/notebook-view.ts b/packages/core/src/tool/notebook-view.ts
+--- a/packages/core/src/tool/notebook-view.ts
++++ b/packages/core/src/tool/notebook-view.ts
+@@ -6,1 +6,4 @@
  const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
-+// #233：insert 编辑在 TUI 中表现为新建文件——需要有界的源码 metadata 供代码渲染器
-+// #233：使用，而不是依赖空文件 diff。与 10 行折叠卡预算对齐：metadata 保持有界，
-+// #233：超大 notebook 源码仍须走 vscode_notebook_source。
++// 插入预览供两代代码组件共享；完整源码仍由source工具读取，不能复制进展示metadata。
 +const NOTEBOOK_INSERT_PREVIEW_LINES = 10
 +const NOTEBOOK_INSERT_PREVIEW_MAX_CHARS = 4 * 1024
- 
- const requiredFilePath = {
-   filePath: z
-@@ -199,12 +204,17 @@
-   // #224：diff 超过 16KB 只保留统计，diff 设为 undefined，diffOmitted 标记 "too-large"
-   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
+@@ -73,7 +76,12 @@
    const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
 +  const editType = stringValue(data.editType) ?? stringValue(args.editType)
 +  // #233：insert 有 afterSource 时生成有界预览——TUI 用代码渲染器展示插入内容
@@ -45,10 +36,7 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
      cellId: stringValue(args.cellId),
 -    editType: stringValue(data.editType) ?? stringValue(args.editType),
 +    editType,
-     cellCountBefore: numberValue(data.cellCountBefore),
-     cellCountAfter: numberValue(data.cellCountAfter),
-     dirty: booleanValue(data.dirty),
-@@ -212,8 +222,29 @@
+@@ -84,8 +92,29 @@
      language: stringValue(data.language),
      diff,
      diffOmitted: fullDiff !== undefined && diff === undefined ? "too-large" : undefined,
@@ -78,7 +66,7 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
    }
  }
  
-@@ -297,11 +328,22 @@
+@@ -169,11 +198,22 @@
  
  // #224：从 diff 文本统计 added/removed 行数
  function diffStats(diff: string) {
@@ -106,6 +94,128 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
  }
  
  function recordValue(value: unknown): Record<string, unknown> {
+diff --git a/packages/session-ui/src/components/notebook-tool.ts b/packages/session-ui/src/components/notebook-tool.ts
+--- a/packages/session-ui/src/components/notebook-tool.ts
++++ b/packages/session-ui/src/components/notebook-tool.ts
+@@ -58,1 +58,30 @@
+ }
++
++export function notebookInsertSource(view: Record<string, unknown> | undefined) {
++  if (view?.editType !== "insert") return
++  const source: string[] = []
++  let hunk = false
++  for (const line of typeof view.diff === "string" ? view.diff.split("\n") : []) {
++    if (line.startsWith("@@ ")) {
++      hunk = true
++      continue
++    }
++    // 文件头只在首个hunk之前；正文的+++必须还原为真正的++源码。
++    if (hunk && line.startsWith("+")) source.push(line.slice(1))
++  }
++  if (source.length) return { text: source.join("\n"), truncated: false }
++  return typeof view.insertedSourcePreview === "string"
++    ? { text: view.insertedSourcePreview, truncated: view.insertedSourcePreviewTruncated === true } : undefined
++}
++
++export function notebookPreviewCells(cells: Record<string, unknown>[]) {
++  // 最近失败优先，只影响折叠预览；展开正文仍保留原单元格次序。
++  const failed = cells.filter((cell) => typeof cell.exec === "string" && /failed|error/.test(cell.exec)).slice(-6)
++  return failed.length ? failed : cells.slice(0, 6)
++}
++
++export function notebookLanguage(value: unknown) {
++  if (typeof value !== "string") return
++  // 虚拟.ipynb路径不足以识别语言，沿原Notebook契约归一TS家族。
++  return ["typescriptreact", "javascriptreact", "javascript"].includes(value) ? "typescript" : value
++}
+diff --git a/packages/session-ui/src/components/notebook-tool-view.tsx b/packages/session-ui/src/components/notebook-tool-view.tsx
+--- a/packages/session-ui/src/components/notebook-tool-view.tsx
++++ b/packages/session-ui/src/components/notebook-tool-view.tsx
+@@ -8,1 +8,1 @@
+-import { notebookFields, notebookLine, notebookMetadata, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
++import { notebookFields, notebookInsertSource, notebookLanguage, notebookLine, notebookMetadata, notebookPreviewCells, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
+@@ -15,1 +15,3 @@
+   // 与现有文件工具共用diff组件；差分来自实际执行结果，不从newCode重建。
++  const inserted = createMemo(() => notebookInsertSource(view()))
++  const language = () => notebookLanguage(view()?.language)
+@@ -19,1 +21,1 @@
+-    return resolveFileDiff({ file: path(), patch: diff })
++    return { ...resolveFileDiff({ file: path(), patch: diff }), lang: language() }
+@@ -23,2 +25,9 @@
+   return (
+-    <BasicTool {...props} icon="code-lines" defaultOpen allowOpenWhilePending trigger={{ title: title(), subtitle: path(), args: [notebookValue(view()?.cellLabel ?? props.input.cellId), notebookValue(view()?.editType ?? props.input.operation)].filter((value): value is string => value !== undefined) }}>
++    <BasicTool {...props} icon="code-lines" defaultOpen allowOpenWhilePending trigger={(open) => <div class="flex min-w-0 flex-col gap-1 text-left">
++      <span>{title()} {path()} {notebookValue(view()?.cellLabel ?? props.input.cellId)} {notebookValue(view()?.editType ?? props.input.operation)}</span>
++      <Show when={!open()}>
++        <For each={notebookPreviewCells(cells())}>{(cell) => <pre style={{ "white-space": "pre-wrap" }}>{notebookLine(cell)}</pre>}</For>
++        <Show when={cells().flatMap((cell) => notebookRows(cell.artifacts)).length}>{(count) => <span>{i18n.t("ui.notebook.availableArtifacts", { count: count() })}</span>}</Show>
++        <Show when={inserted()}>{(source) => <pre style={{ "white-space": "pre-wrap" }}>{source().text.split("\n").slice(0, 10).join("\n")}</pre>}</Show>
++      </Show>
++    </div>}>
+@@ -29,2 +38,6 @@
+-        <Show when={patch()}>{(diff) => <Dynamic component={fileComponent} mode="diff" fileDiff={diff()} virtualize={props.virtualizeDiff} onRendered={props.onContentRendered} />}</Show>
+-        <Show when={view()?.diffOmitted}><p>{i18n.t("ui.notebook.diffOmitted")}</p></Show>
++        {/* 插入显示真实源码而非diff头；只有有界预览才给出source工具恢复提示。 */}
++        <Show when={inserted()} fallback={<Show when={patch()}>{(diff) => <Dynamic component={fileComponent} mode="diff" fileDiff={diff()} virtualize={props.virtualizeDiff} onRendered={props.onContentRendered} />}</Show>}>
++          {(source) => <><Dynamic component={fileComponent} mode="text" file={{ name: path(), contents: source().text, lang: language() }} overflow="scroll" onRendered={props.onContentRendered} />
++            <Show when={source().truncated}><p>{i18n.t("ui.notebook.insertPreviewTruncated")}</p></Show></>}
++        </Show>
++        <Show when={view()?.diffOmitted && !inserted()}><p>{i18n.t("ui.notebook.diffOmitted")}</p></Show>
+diff --git a/packages/ui/src/i18n/en.ts b/packages/ui/src/i18n/en.ts
+--- a/packages/ui/src/i18n/en.ts
++++ b/packages/ui/src/i18n/en.ts
+@@ -198,1 +198,3 @@
+   "ui.notebook.diffOmitted": "Diff omitted from metadata because it exceeds the notebook inline display budget.",
++  "ui.notebook.insertPreviewTruncated": "Inserted source preview is truncated; use vscode_notebook_source for the full cell.",
++  "ui.notebook.availableArtifacts": "Artifacts: {{count}} available after expand",
+diff --git a/packages/session-ui/src/components/message-part.test.ts b/packages/session-ui/src/components/message-part.test.ts
+--- a/packages/session-ui/src/components/message-part.test.ts
++++ b/packages/session-ui/src/components/message-part.test.ts
+@@ -4,1 +4,1 @@
+-import { notebookLine, notebookMetadata, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
++import { notebookInsertSource, notebookLanguage, notebookLine, notebookMetadata, notebookPreviewCells, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
+@@ -71,2 +71,17 @@
+   expect(notebookRows(undefined)).toEqual([])
++  // 同一实际消费者的纯决策边界，覆盖原渲染用例的源码/语言和晚失败意图。
++  const inserted = notebookInsertSource({ editType: "insert", diff: "--- NOT_SOURCE\n+++ notebook.ipynb\n@@ -0,0 +1,2 @@\n+print(1)\n+++ legal source", insertedSourcePreview: "incomplete", insertedSourcePreviewTruncated: true })
++  expect(inserted).toEqual({ text: "print(1)\n++ legal source", truncated: false })
++  expect(inserted?.text).not.toContain("NOT_SOURCE")
++  expect(notebookInsertSource({ editType: "insert", insertedSourcePreview: "bounded", insertedSourcePreviewTruncated: true })).toEqual({ text: "bounded", truncated: true })
++  expect(notebookInsertSource({ editType: "edit", insertedSourcePreview: "not inserted" })).toBeUndefined()
++  expect(notebookLanguage("python")).toBe("python")
++  expect(notebookLanguage("typescriptreact")).toBe("typescript")
++  expect(notebookLanguage("javascriptreact")).toBe("typescript")
++  expect(notebookLanguage(undefined)).toBeUndefined()
++  const run = Array.from({ length: 19 }, (_, i) => ({ i: i + 1, exec: i === 18 || i < 6 ? "current-run failed" : "not-run", artifacts: i === 18 ? [{ mime: "text/plain", artifactPath: "last.txt" }] : [] }))
++  expect(notebookPreviewCells(run).map((cell) => cell.i)).toEqual([2, 3, 4, 5, 6, 19])
++  expect(run[0]?.i).toBe(1)
++  expect(notebookRows(notebookPreviewCells(run).at(-1)?.artifacts)).toMatchObject([{ artifactPath: "last.txt" }])
++  expect(notebookPreviewCells(run.map((cell) => ({ ...cell, exec: "succeeded" }))).map((cell) => cell.i)).toEqual([1, 2, 3, 4, 5, 6])
+ })
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -235,1 +235,20 @@
+     expect(bounded.output?.content).toEqual([{ type: "text", text: "edit" }])
++    // 相同真实HTTP/registry链验证小插入、超大多行/单行及十行尾换行，非手造metadata。
++    for (const [source, added, truncated] of [
++      ["print(1)\n++ legal source prefix\n", 2, false],
++      ["import pandas\n" + "row payload\n".repeat(3000), 3001, true],
++      ["visible-prefix-" + "x".repeat(20_000) + "-hidden-suffix", 1, true],
++      [Array.from({ length: 10 }, (_, index) => `line_${index + 1}`).join("\n") + "\n", 10, false],
++    ] as const) {
++      responses["/notebook/edit"] = { ran: false, summary: "insert", data: { beforeSource: "", afterSource: source, affectedCellIndex: 0, editType: "insert", language: "python" } }
++      const result = yield* invoke("vscode_notebook_edit", { filePath, cellId: "BOTTOM", editType: "insert", newCode: "RAW_INPUT_NOT_RENDERED" })
++      const view = notebookMetadata(result.output?.structured).vscodeNotebook
++      expect(view).toMatchObject({ view: "edit", editType: "insert", language: "python", added, removed: 0, insertedSourcePreviewTruncated: truncated })
++      expect(typeof view.insertedSourcePreview).toBe("string")
++      expect(String(view.insertedSourcePreview).length).toBeLessThanOrEqual(4096)
++      expect(String(view.insertedSourcePreview).split("\n").length).toBeLessThanOrEqual(10)
++      expect(JSON.stringify(view)).not.toContain("RAW_INPUT_NOT_RENDERED")
++      if (added === 2) expect(view.insertedSourcePreview).toContain("++ legal source prefix")
++      if (source.includes("hidden-suffix")) expect(view.insertedSourcePreview).not.toContain("hidden-suffix")
++      if (added > 3000) expect(view).toHaveProperty("diffOmitted", "too-large")
++    }
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts

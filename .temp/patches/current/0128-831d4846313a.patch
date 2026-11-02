@@ -51,7 +51,7 @@ index b1e14aba7f..0461a02427 100644
    const sample = bytes.subarray(0, Math.min(bytes.length, 4096))
    let even = 0
    let odd = 0
-@@ -33,107 +34,224 @@ function utf16ByNulls(bytes: Uint8Array): TextEncoding | undefined {
+@@ -33,107 +34,227 @@ function utf16ByNulls(bytes: Uint8Array): TextEncoding | undefined {
      if (i % 2 === 0) even++
      else odd++
    }
@@ -292,7 +292,10 @@ index b1e14aba7f..0461a02427 100644
 +      }
 +      // Avoid buffering indefinitely. Emit a segment when it grows too large.
 +      if (pending.length >= MAX_SEGMENT_BYTES) {
-+        output += emit(MAX_SEGMENT_BYTES)
++        // UTF-8 码点最多四字节；完整前缀留在同一探测路径，残缺尾部等下次字节。
++        let length = MAX_SEGMENT_BYTES
++        while (length > MAX_SEGMENT_BYTES - 3 && !isUtf8(pending.subarray(0, length))) length--
++        output += emit(isUtf8(pending.subarray(0, length)) ? length : MAX_SEGMENT_BYTES)
 +        continue
 +      }
 +      // Flush everything on end().
@@ -447,7 +450,7 @@ index 0f66869a0f..de3bc73e94 100644
      expect(detectTextEncoding(input)).toBe("utf-8")
      expect(decodeText(input).text).toBe("hello")
    })
-@@ -33,14 +34,27 @@ describe("text-decoding", () => {
+@@ -33,16 +34,34 @@ describe("text-decoding", () => {
      expect(decodeText(input).text).toContain("默认分发")
    })
  
@@ -474,11 +477,22 @@ index 0f66869a0f..de3bc73e94 100644
    // #126：多字节 UTF-8 跨 chunk 不能截断
    test("streams UTF-8 across split multibyte chunks", () => {
 -    const input = new TextEncoder().encode("默认分发")
-+    const input = utf8("默认分发")
-     const decoder = createAutoTextDecoder()
-     const output = decoder.write(input.subarray(0, 2)) + decoder.write(input.subarray(2)) + decoder.end()
-     expect(output).toBe("默认分发")
-@@ -56,10 +70,64 @@ describe("text-decoding", () => {
+-    const decoder = createAutoTextDecoder()
+-    const output = decoder.write(input.subarray(0, 2)) + decoder.write(input.subarray(2)) + decoder.end()
+-    expect(output).toBe("默认分发")
++    // 同时穿过输入 chunk 与内部 8192 字节上限，中文和四字节码点必须完整保留。
++    for (const text of ["默认分发", "中".repeat(3000) + "终结-END", "😀".repeat(3000) + "终结-END"]) {
++      const input = utf8(text)
++      for (const split of [2, 8191, 8192, 8193]) {
++        const decoder = createAutoTextDecoder()
++        const output = decoder.write(input.subarray(0, split)) + decoder.write(input.subarray(split)) + decoder.end()
++        expect(output).toBe(text)
++        expect(decoder.encoding()).toBe("utf-8")
++      }
++    }
+-    expect(decoder.encoding()).toBe("utf-8")
+   })
+@@ -56,10 +76,64 @@ describe("text-decoding", () => {
      expect(decoder.encoding()).toBe("utf-16le")
    })
  
@@ -616,14 +630,12 @@ index 53ea900e40..4a60311f27 100644
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -242,5 +242,5 @@
+@@ -241,4 +241,4 @@
                const enabled = (configured.bash_compression ?? true) && (input.compress_output ?? true)
                // 诊断使用本次有效开关，opt-out 的样例不能预先被不可逆掩码。
                const diag = new BashDiagnosticCollector({ enabled })
 -              const decoder = createAutoTextDecoder()
 +              const decoder = createAutoTextDecoder({ encoding: configured.shell_encoding ?? "auto" })
--              const preview = createAutoTextDecoder()
-+              const preview = createAutoTextDecoder({ encoding: configured.shell_encoding ?? "auto" })
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts

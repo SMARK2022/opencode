@@ -1364,16 +1364,18 @@ diff --git a/packages/opencode/test/project/instance.test.ts b/packages/opencode
 index f78b99ef7..1a67892de 100644
 --- a/packages/opencode/test/project/instance.test.ts
 +++ b/packages/opencode/test/project/instance.test.ts
-@@ -1,7 +1,7 @@
+@@ -1,7 +1,9 @@
  import { describe, expect } from "bun:test"
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 -import { Deferred, Effect, Fiber, Layer } from "effect"
 +import { Deferred, Duration, Effect, Fiber, Layer } from "effect"
++import { ProjectV2 } from "@opencode-ai/core/project"
++import { Project } from "../../src/project/project"
  import { InstanceRef } from "../../src/effect/instance-ref"
  import { registerDisposer } from "../../src/effect/instance-registry"
  import { InstanceBootstrap } from "../../src/project/bootstrap"
-@@ -121,6 +121,43 @@ describe("InstanceStore", () => {
+@@ -121,6 +123,43 @@ describe("InstanceStore", () => {
      }),
    )
  
@@ -1417,3 +1419,51 @@ index f78b99ef7..1a67892de 100644
    it.live("removes failed loads from the cache", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped({ git: true })
+@@ -246,3 +285,47 @@ describe("InstanceStore", () => {
+     }),
+   )
+ })
++
++testEffect(Layer.empty).live("cancels and re-arms pending bootstrap with isolated services", () =>
++  Effect.gen(function* () {
++    const started = yield* Deferred.make<void>()
++    const release = yield* Deferred.make<void>()
++    let boots = 0
++    let stopped = false
++    const layer = LayerNode.compile(InstanceStore.node, [
++      [Project.node, Layer.mock(Project.Service, {
++        fromDirectory: directory => Effect.succeed({
++          sandbox: directory,
++          project: { id: ProjectV2.ID.make("global"), worktree: directory, sandboxes: [], time: { created: 0, updated: 0 } },
++        }),
++      })],
++      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, {
++        // 只有首个producer被Deferred挂住；本测试不装配默认Project/DB/Git或应用启动图。
++        run: Effect.gen(function* () {
++          boots++
++          if (boots !== 1) return
++          yield* Deferred.succeed(started, undefined)
++          yield* Deferred.await(release)
++        }).pipe(Effect.ensuring(Effect.sync(() => { stopped = true }))),
++      })],
++    ])
++    yield* Effect.gen(function* () {
++      const store = yield* InstanceStore.Service
++      const input = { directory: process.cwd() }
++      const loading = yield* store.load(input).pipe(Effect.forkScoped)
++      yield* Deferred.await(started)
++      // release前的500ms合同与source相同，失败也先释放fixture再断言，避免测试自身挂起。
++      const finished = yield* store.disposeAll().pipe(Effect.timeoutOrElse({ duration: Duration.millis(500), orElse: () => Effect.fail(new Error("dispose timeout")) }), Effect.exit)
++      const stoppedBeforeRelease = stopped
++      yield* Deferred.succeed(release, undefined)
++      const loadingExit = yield* Fiber.join(loading).pipe(Effect.exit)
++      expect(finished._tag).toBe("Success")
++      expect(stoppedBeforeRelease).toBe(true)
++      expect(loadingExit._tag).toBe("Failure")
++      // 被取消的旧entry不能留作可复用缓存；新entry仍保持既有load去重。
++      const current = yield* store.load(input)
++      expect(yield* store.load(input)).toBe(current)
++      expect(boots).toBe(2)
++    }).pipe(Effect.provide(layer))
++  }),
++)

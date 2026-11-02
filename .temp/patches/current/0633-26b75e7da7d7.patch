@@ -699,9 +699,9 @@ index 0000000000000000000000000000000000000000..79e3eec59f14e33bc58cc102eb1b2081
 +| 冷载荷恢复格式 | `packages/opencode/src/storage/cold.ts:254-303,367,793-817`，只读实验不调用生产回填函数 |
 +| 新增局部缺陷 | `summary.ts:46-53`；`source.ts:76,131-146,185-186`；`output.ts:111-135`；`env.ts:656-706,1003-1071` |
 +| Jupyter API 访问控制 | https://github.com/microsoft/vscode-jupyter/blob/main/src/standalone/api/kernels/apiAccess.ts |
-diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/ide/vscode-bridge.ts
---- a/packages/opencode/src/ide/vscode-bridge.ts
-+++ b/packages/opencode/src/ide/vscode-bridge.ts
+diff --git a/packages/core/src/ide/vscode-bridge.ts b/packages/core/src/ide/vscode-bridge.ts
+--- a/packages/core/src/ide/vscode-bridge.ts
++++ b/packages/core/src/ide/vscode-bridge.ts
 @@ -252,7 +252,11 @@ export async function callBridge(input: CallInput): Promise<unknown> {
  
  // 发现、鉴权、期限和错误传播仍由原调用路径承担。
@@ -715,16 +715,6 @@ diff --git a/packages/opencode/src/ide/vscode-bridge.ts b/packages/opencode/src/
  // 解析桥接：通过工作区和文件路径匹配最佳桥接
    const bridge = await resolveBridge({ cwd: input.cwd, filePath: input.filePath })
  // HTTP 响应：fetchWithTimeout 支持 AbortController 中止
-@@ -388,6 +392,8 @@ async function fetchWithTimeout(
-   signal?: AbortSignal,
- ) {
-   const controller = new AbortController()
-+  // 发现bridge期间也可能取消；注册监听之前检查已有状态，避免漏掉事件。
-+  signal?.throwIfAborted()
-   const timer = setTimeout(() => controller.abort(), timeoutMs)
-   const abort = () => controller.abort()
-   signal?.addEventListener("abort", abort, { once: true })
-
 diff --git a/packages/opencode/test/ide/vscode-bridge.test.ts b/packages/opencode/test/ide/vscode-bridge.test.ts
 --- a/packages/opencode/test/ide/vscode-bridge.test.ts
 +++ b/packages/opencode/test/ide/vscode-bridge.test.ts
@@ -1223,17 +1213,18 @@ diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
    output: { appendLine(value: string): void },
 +  signal: AbortSignal,
  ) {
-   if (method !== "POST" || !(NOTEBOOK_ROUTES.has(pathname) || LSP_ROUTES.has(pathname))) return undefined
+   if (method !== "POST" || !NOTEBOOK_ROUTES.has(pathname)) return undefined
    // undefined 是未匹配路由的判别值，不能被 HTTP 层序列化成成功的空结果。
-@@ -231,6 +237,8 @@ async function routeRequest(
-   if (!filePath && pathname !== "/lsp/diagnostics" && pathname !== "/lsp/workspace-symbol") throw new Error("filePath is required")
+@@ -223,7 +229,9 @@ async function routeRequest(
+   const filePath = stringProp(body, "filePath")
+   // 已鉴权路由共享必填路径检查，不能用类型断言把缺失路径送入新的严格接口。
+   if (!filePath) throw new Error("filePath is required")
  
    const handler = async () => {
 +    // 在唯一队列授予执行权后再检查，入队期间断开的编辑不能迟到写入。
 +    signal.throwIfAborted()
      switch (pathname) {
        case "/notebook/env":
-         return await notebookEnv(body)
 @@ -242,10 +250,10 @@ async function routeRequest(
          return await notebookSource(body)
  

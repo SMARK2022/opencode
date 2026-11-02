@@ -56,6 +56,26 @@ index c3056fc46..2e47f796c 100644
    })
  
    api.event.on("permission.replied", (event) => {
+@@ -73,3 +73,19 @@ const tui: TuiPlugin = async (api) => {
+   })
+ 
++  // Native事件沿原名投递，与V1共享request去重和唯一notify，不在总线增加别名或第二音效路径。
++  api.event.on("question.v2.asked", (event) => {
++    if (questions.has(event.properties.id)) return
++    questions.add(event.properties.id)
++    notify(api, event.properties.sessionID, "Question needs input", "question")
++  })
++  for (const type of ["question.v2.replied", "question.v2.rejected"] as const) {
++    api.event.on(type, (event) => questions.delete(event.properties.requestID))
++  }
++  api.event.on("permission.v2.asked", (event) => {
++    if (permissions.has(event.properties.id)) return
++    permissions.add(event.properties.id)
++    notify(api, event.properties.sessionID, "Permission needs input", "permission")
++  })
++  api.event.on("permission.v2.replied", (event) => permissions.delete(event.properties.requestID))
++
+   api.event.on("session.status", (event) => {
 
 diff --git a/packages/tui/test/cli/cmd/tui/notifications.test.ts b/packages/tui/test/cli/cmd/tui/notifications.test.ts
 index 5667cbdb0..9ff2a2565 100644
@@ -91,7 +111,7 @@ index 5667cbdb0..9ff2a2565 100644
        },
      ])
    })
-@@ -162,8 +162,12 @@ describe("internal notifications TUI plugin", () => {
+@@ -162,8 +162,41 @@ describe("internal notifications TUI plugin", () => {
      harness.emit({ id: "event-8", type: "permission.asked", properties: permission("permission-1") })
  
      expect(harness.notifications).toHaveLength(4)
@@ -105,4 +125,33 @@ index 5667cbdb0..9ff2a2565 100644
 +    ])
    })
  
++  test("Native input requests share semantic sounds and pending identity", async () => {
++    const harness = await setup()
++    const q = { id: "que_native", sessionID: "session", questions: [] }
++    const p = { id: "per_native", sessionID: "session", action: "edit", resources: [] }
++    // 去重看真实request ID；重投SSE或同一请求的兼容事件不能制造第二次提醒。
++    harness.emit({ id: "native-q1", type: "question.v2.asked", properties: q })
++    harness.emit({ id: "native-q2", type: "question.v2.asked", properties: q })
++    harness.emit({ id: "compat-q", type: "question.asked", properties: q })
++    // 回复与拒绝都释放同一pending键，之后相同请求身份才允许再次通知。
++    harness.emit({ id: "native-qr", type: "question.v2.replied", properties: { sessionID: "session", requestID: q.id, answers: [] } })
++    harness.emit({ id: "native-q3", type: "question.v2.asked", properties: q })
++    harness.emit({ id: "native-qx", type: "question.v2.rejected", properties: { sessionID: "session", requestID: q.id } })
++    harness.emit({ id: "native-q4", type: "question.v2.asked", properties: q })
++    harness.emit({ id: "native-p1", type: "permission.v2.asked", properties: p })
++    harness.emit({ id: "native-p2", type: "permission.v2.asked", properties: p })
++    // Native拒绝也是replied终态，不能让去重残留吞掉后续权限请求。
++    harness.emit({ id: "native-pr", type: "permission.v2.replied", properties: { sessionID: "session", requestID: p.id, reply: "reject" } })
++    harness.emit({ id: "native-p3", type: "permission.v2.asked", properties: p })
++    expect(harness.notifications).toHaveLength(5)
++    expect(harness.notifications.map(item => item.sound)).toEqual([
++      { name: "question", when: "always" },
++      { name: "question", when: "always" },
++      { name: "question", when: "always" },
++      { name: "permission", when: "always" },
++      { name: "permission", when: "always" },
++    ])
++    expect(harness.notifications.every(item => item.title === "Demo session")).toBe(true)
++  })
++
    test("notifies done when an active session completes with a finished assistant", async () => {

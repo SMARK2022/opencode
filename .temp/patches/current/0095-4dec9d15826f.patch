@@ -6,6 +6,707 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
+diff --git a/packages/opencode/src/mcp/index.ts b/packages/core/src/mcp/connection.ts
+rename from packages/opencode/src/mcp/index.ts
+rename to packages/core/src/mcp/connection.ts
+--- a/packages/opencode/src/mcp/index.ts
++++ b/packages/core/src/mcp/connection.ts
+@@ -3,3 +3,1 @@
+-import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+-import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+-import { serviceUse } from "@opencode-ai/core/effect/service-use"
++import { ConfigMCP } from "../config/mcp"
+@@ -18,15 +16,8 @@
+-import { Config } from "@/config/config"
+-import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+-import { NamedError } from "@opencode-ai/core/util/error"
+-import { InstallationVersion } from "@opencode-ai/core/installation/version"
+-import { withTimeout } from "@/util/timeout"
+-import { FSUtil } from "@opencode-ai/core/fs-util"
++import { NamedError } from "../util/error"
++import { InstallationVersion } from "../installation/version"
++import { withTimeout } from "../util/timeout"
+ import { McpOAuthPendingProvider, McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
+ import { McpOAuthCallback } from "./oauth-callback"
+ import { McpAuth } from "./auth"
+-import { EventV2Bridge } from "@/event-v2-bridge"
+-import { TuiEvent } from "@/server/tui-event"
+-import { Cause, Effect, Exit, Layer, Context, Schema, Stream } from "effect"
+-import { EffectBridge } from "@/effect/bridge"
+-import { InstanceState } from "@/effect/instance-state"
++import { Cause, Effect, Exit, Schema, Scope, Stream } from "effect"
+ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
+@@ -33,1 +25,0 @@
+-import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+@@ -75,2 +67,2 @@
+-function createClient(directory: string) {
+-  const client = new Client({ name: "opencode", version: InstallationVersion }, CLIENT_OPTIONS)
++function createClient(directory: string, Constructor: NonNullable<Options["Client"]> = Client) {
++  const client = new Constructor({ name: "opencode", version: InstallationVersion }, CLIENT_OPTIONS)
+@@ -117,5 +109,1 @@
+-type McpEntry = NonNullable<ConfigV1.Info["mcp"]>[string]
+-
+-function isMcpConfigured(entry: McpEntry): entry is ConfigMCPV1.Info {
+-  return typeof entry === "object" && entry !== null && "type" in entry
+-}
++type Server = typeof ConfigMCP.Server.Type
+@@ -143,1 +131,1 @@
+-  config: Record<string, ConfigMCPV1.Info>
++  config: Record<string, Server>
+@@ -164,1 +152,20 @@
++export type Notice =
++  | { readonly type: "tools_changed"; readonly server: string }
++  | { readonly type: "browser_open_failed"; readonly mcpName: string; readonly url: string }
++  | { readonly type: "auth_required"; readonly server: string; readonly status: "needs_auth" | "needs_client_registration" }
++
++export interface Options {
++  readonly directory: string
++  readonly config: () => Effect.Effect<ConfigMCP.Resolved>
++  readonly notify: (notice: Notice) => Effect.Effect<void>
++  readonly Client?: new (...args: ConstructorParameters<typeof Client>) => Client
++}
++
++export interface Snapshot {
++  readonly tools: Record<string, McpTool>
++  readonly instructions: ServerInstructions[]
++  readonly clients: Record<string, MCPClient>
++}
++
+ export interface Interface {
++  readonly snapshot: () => Effect.Effect<Snapshot>
+@@ -174,1 +182,1 @@
+-  readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
++  readonly add: (name: string, mcp: Server) => Effect.Effect<{ status: Record<string, Status> | Status }>
+@@ -200,11 +208,13 @@
+-export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
+-
+-export const use = serviceUse(Service)
+-
+-const layer = Layer.effect(
+-  Service,
+-  Effect.gen(function* () {
++export const make = Effect.fn("McpConnection.make")(function* (options: Options) {
++    const scope = yield* Effect.scope
+     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
+     const auth = yield* McpAuth.Service
+-    const events = yield* EventV2Bridge.Service
+     const browser = yield* McpBrowser.Service
++    // SDK回调只运行已闭合服务的Effect，不再依赖调用方的旧InstanceRef。
++    const callbackContext = yield* Effect.context<never>()
++    const promise = Effect.runPromiseWith(callbackContext)
++    const overrides: State["config"] = {}
++    const startupTimeout = Effect.fnUntraced(function* (mcp: Server) {
++      const cfg = yield* options.config()
++      return mcp.timeout?.startup ?? cfg.timeout?.startup ?? DEFAULT_TIMEOUT
++    })
+@@ -219,1 +231,0 @@
+-      const directory = yield* InstanceState.directory
+@@ -225,1 +236,1 @@
+-              const client = createClient(directory)
++              const client = createClient(options.directory, options.Client)
+@@ -238,1 +249,1 @@
+-      mcp: ConfigMCPV1.Info & { type: "remote" },
++      mcp: Server & { type: "remote" },
+@@ -256,5 +267,5 @@
+-            clientId: oauthConfig?.clientId,
+-            clientSecret: oauthConfig?.clientSecret,
++            clientId: oauthConfig?.client_id,
++            clientSecret: oauthConfig?.client_secret,
+             scope: oauthConfig?.scope,
+-            callbackPort: oauthConfig?.callbackPort,
+-            redirectUri: oauthConfig?.redirectUri,
++            callbackPort: oauthConfig?.callback_port,
++            redirectUri: oauthConfig?.redirect_uri,
+@@ -286,1 +297,1 @@
+-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
++      const connectTimeout = yield* startupTimeout(mcp)
+@@ -303,8 +314,3 @@
+-                return events
+-                  .publish(TuiEvent.ToastShow, {
+-                    title: "MCP Authentication Required",
+-                    message: `Server "${key}" requires a pre-registered client ID. Add clientId to your config.`,
+-                    variant: "warning",
+-                    duration: 8000,
+-                  })
++                return options
++                  .notify({ type: "auth_required", server: key, status: "needs_client_registration" })
+                   .pipe(Effect.ignore, Effect.as(undefined))
+@@ -314,8 +320,3 @@
+-                return events
+-                  .publish(TuiEvent.ToastShow, {
+-                    title: "MCP Authentication Required",
+-                    message: `Server "${key}" requires authentication. Run: opencode mcp auth ${key}`,
+-                    variant: "warning",
+-                    duration: 8000,
+-                  })
++                return options
++                  .notify({ type: "auth_required", server: key, status: "needs_auth" })
+                   .pipe(Effect.ignore, Effect.as(undefined))
+@@ -342,4 +341,4 @@
+-      mcp: ConfigMCPV1.Info & { type: "local" },
++      mcp: Server & { type: "local" },
+     ) {
+       const [cmd, ...args] = mcp.command
+-      const baseDir = yield* InstanceState.directory
++      const baseDir = options.directory
+@@ -359,1 +358,1 @@
+-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
++      const connectTimeout = yield* startupTimeout(mcp)
+@@ -373,2 +372,2 @@
+-      function* (key: string, mcp: ConfigMCPV1.Info) {
+-        if (mcp.enabled === false) {
++      function* (key: string, mcp: Server) {
++        if (mcp.disabled === true) {
+@@ -380,2 +379,2 @@
+-            ? yield* connectRemote(key, mcp as ConfigMCPV1.Info & { type: "remote" })
+-            : yield* connectLocal(key, mcp as ConfigMCPV1.Info & { type: "local" })
++            ? yield* connectRemote(key, mcp)
++            : yield* connectLocal(key, mcp)
+@@ -391,1 +390,1 @@
+-          const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout) : []
++          const listed = mcpClient.getServerCapabilities()?.tools ? yield* McpCatalog.defs(mcpClient, mcp.timeout?.request) : []
+@@ -416,1 +415,0 @@
+-    const cfgSvc = yield* Config.Service
+@@ -442,1 +440,1 @@
+-    function watch(s: State, name: string, client: MCPClient, bridge: EffectBridge.Shape, timeout?: number) {
++    function watch(s: State, name: string, client: MCPClient, timeout?: number) {
+@@ -449,6 +447,7 @@
+-        bridge.fork(
++        Effect.runForkWith(callbackContext)(
+           Effect.logWarning("MCP connection closed", { server: name }).pipe(
+-            Effect.andThen(events.publish(ToolsChanged, { server: name })),
++            Effect.andThen(options.notify({ type: "tools_changed", server: name })),
+             Effect.ignore,
++            Effect.forkIn(scope),
+           ),
+         )
+@@ -458,1 +457,1 @@
+-        bridge.promise(serverLog(name, notification.params)),
++        promise(serverLog(name, notification.params)),
+@@ -465,1 +464,1 @@
+-        const listed = await bridge.promise(McpCatalog.defs(client, timeout))
++        const listed = await promise(McpCatalog.defs(client, timeout))
+@@ -470,1 +469,1 @@
+-        await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
++        await promise(options.notify({ type: "tools_changed", server: name }).pipe(Effect.ignore))
+@@ -492,11 +491,11 @@
+-    const state = yield* InstanceState.make<State>(
++    // 延迟池绑定创建时的owner scope，不能由首次工具调用的短scope提前释放。
++    const state = yield* Effect.cached(
+       Effect.fn("MCP.state")(function* () {
+-        const cfg = yield* cfgSvc.get()
+-        const bridge = yield* EffectBridge.make()
+-        const config = cfg.mcp ?? {}
++        const cfg = yield* options.config()
++        const config = cfg.servers ?? {}
+         const s: State = {
+-          config: {},
++          config: overrides,
+           status: {},
+           clients: {},
+           defs: {},
+           instructions: {},
+@@ -509,6 +507,1 @@
+-              if (!isMcpConfigured(mcp)) {
+-                yield* Effect.logError("Ignoring MCP config entry without type", { key })
+-                return
+-              }
+-
+-              if (mcp.enabled === false) {
++              if (mcp.disabled === true) {
+@@ -525,1 +518,1 @@
+-                watch(s, key, result.mcpClient, bridge, mcp.timeout)
++                watch(s, key, result.mcpClient, mcp.timeout?.request)
+@@ -559,1 +552,1 @@
+-      }),
++      })().pipe(Effect.provideService(Scope.Scope, scope)),
+@@ -579,1 +572,0 @@
+-      const bridge = yield* EffectBridge.make()
+@@ -586,1 +578,1 @@
+-      watch(s, name, client, bridge, timeout)
++      watch(s, name, client, timeout)
+@@ -592,1 +584,1 @@
+-      const s = yield* InstanceState.get(state)
++      const s = yield* state
+@@ -594,2 +586,2 @@
+-      const cfg = yield* cfgSvc.get()
+-      const config = cfg.mcp ?? {}
++      const cfg = yield* options.config()
++      const config = cfg.servers ?? {}
+@@ -599,1 +591,0 @@
+-        if (!isMcpConfigured(mcp)) continue
+@@ -611,1 +602,1 @@
+-      const s = yield* InstanceState.get(state)
++      const s = yield* state
+@@ -615,6 +606,5 @@
+-    const instructions = Effect.fn("MCP.instructions")(function* () {
+-      const s = yield* InstanceState.get(state)
++    function instructionsFor(s: State): ServerInstructions[] {
+       return Object.entries(s.instructions)
+         .filter(([name]) => s.status[name]?.status === "connected")
+         .sort(([a], [b]) => a.localeCompare(b))
+         .map(([name, item]) => ({
+@@ -625,4 +615,8 @@
+-    })
++    }
+ 
+-    const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
+-      const s = yield* InstanceState.get(state)
++    const instructions = Effect.fn("MCP.instructions")(function* () {
++      return instructionsFor(yield* state)
++    })
++
++    const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: Server) {
++      const s = yield* state
+@@ -638,5 +632,5 @@
+-      return yield* storeClient(s, name, result.mcpClient, result.defs!, result.instructions, mcp.timeout)
++      return yield* storeClient(s, name, result.mcpClient, result.defs!, result.instructions, mcp.timeout?.request)
+     })
+ 
+-    const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
+-      const s = yield* InstanceState.get(state)
++    const add = Effect.fn("MCP.add")(function* (name: string, mcp: Server) {
++      const s = yield* state
+@@ -650,1 +644,1 @@
+-      yield* createAndStore(name, { ...mcp, enabled: true })
++      yield* createAndStore(name, { ...mcp, disabled: false })
+@@ -655,1 +649,1 @@
+-      const s = yield* InstanceState.get(state)
++      const s = yield* state
+@@ -661,18 +655,10 @@
+-    function requestTimeout(s: State, name: string, configured: McpEntry | undefined, fallback?: number) {
+-      const staticTimeout = configured && isMcpConfigured(configured) ? configured.timeout : undefined
+-      return s.config[name]?.timeout ?? staticTimeout ?? fallback
++    function requestTimeout(s: State, name: string, configured: Server | undefined, fallback?: number) {
++      return s.config[name]?.timeout?.request ?? configured?.timeout?.request ?? fallback
+     }
+ 
+-    const tools = Effect.fn("MCP.tools")(function* () {
++    const toolsFor = Effect.fnUntraced(function* (s: State, cfg: ConfigMCP.Resolved) {
+       const result: Record<string, McpTool> = {}
+-      const s = yield* InstanceState.get(state)
+-
+-      const cfg = yield* cfgSvc.get()
+-      const config = cfg.mcp ?? {}
+-      const defaultTimeout = cfg.experimental?.mcp_timeout
+-
+       for (const [clientName, client] of Object.entries(s.clients)) {
+         if (s.status[clientName]?.status !== "connected") continue
+-        const mcpConfig = config[clientName]
+         const listed = s.defs[clientName]
+         if (!listed) {
+@@ -682,1 +667,1 @@
+-        const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
++        const timeout = requestTimeout(s, clientName, cfg.servers?.[clientName], cfg.timeout?.request)
+@@ -690,1 +675,17 @@
++    const snapshot = Effect.fn("MCP.snapshot")(function* () {
++      const s = yield* state
++      const cfg = yield* options.config()
++      // 只复制容器；工具定义及SDK client保持原身份，避免刷新使在途调用无故失效。
++      const view: State = {
++        config: { ...s.config }, status: { ...s.status }, clients: { ...s.clients },
++        defs: { ...s.defs }, instructions: { ...s.instructions },
++      }
++      return { tools: yield* toolsFor(view, cfg), instructions: instructionsFor(view), clients: view.clients }
++    })
++
++    const tools = Effect.fn("MCP.tools")(function* () {
++      const s = yield* state
++      return yield* toolsFor(s, yield* options.config())
++    })
++
+     function collectFromConnected<T extends { name: string }>(
+@@ -698,1 +699,1 @@
+-        const cfg = yield* cfgSvc.get()
++        const cfg = yield* options.config()
+@@ -707,1 +708,1 @@
+-              (c) => listFn(c, requestTimeout(s, clientName, cfg.mcp?.[clientName], cfg.experimental?.mcp_timeout)),
++              (c) => listFn(c, requestTimeout(s, clientName, cfg.servers?.[clientName], cfg.timeout?.request)),
+@@ -717,1 +718,1 @@
+-      return yield* collectFromConnected(yield* InstanceState.get(state), McpCatalog.prompts, "prompts")
++      return yield* collectFromConnected(yield* state, McpCatalog.prompts, "prompts")
+@@ -722,1 +723,1 @@
+-        yield* InstanceState.get(state),
++        yield* state,
+@@ -732,1 +733,1 @@
+-        yield* InstanceState.get(state),
++        yield* state,
+@@ -746,1 +747,1 @@
+-      const s = yield* InstanceState.get(state)
++      const s = yield* state
+@@ -752,3 +753,3 @@
+-      const cfg = yield* cfgSvc.get()
++      const cfg = yield* options.config()
+       return yield* Effect.tryPromise({
+-        try: () => fn(client, requestTimeout(s, clientName, cfg.mcp?.[clientName], cfg.experimental?.mcp_timeout)),
++        try: () => fn(client, requestTimeout(s, clientName, cfg.servers?.[clientName], cfg.timeout?.request)),
+@@ -791,7 +792,3 @@
+-      const s = yield* InstanceState.get(state)
++      const s = yield* state
+       if (s.config[mcpName]) return s.config[mcpName]
+-
+-      const cfg = yield* cfgSvc.get()
+-      const mcpConfig = cfg.mcp?.[mcpName]
+-      if (!mcpConfig || !isMcpConfigured(mcpConfig)) return undefined
+-      return mcpConfig
++      return (yield* options.config()).servers?.[mcpName]
+@@ -818,2 +816,2 @@
+-        oauthConfig?.redirectUri ??
+-        (oauthConfig?.callbackPort ? `http://127.0.0.1:${oauthConfig.callbackPort}${OAUTH_CALLBACK_PATH}` : undefined)
++        oauthConfig?.redirect_uri ??
++        (oauthConfig?.callback_port ? `http://127.0.0.1:${oauthConfig.callback_port}${OAUTH_CALLBACK_PATH}` : undefined)
+@@ -833,2 +831,2 @@
+-          clientId: oauthConfig?.clientId,
+-          clientSecret: oauthConfig?.clientSecret,
++          clientId: oauthConfig?.client_id,
++          clientSecret: oauthConfig?.client_secret,
+@@ -850,1 +848,0 @@
+-      const directory = yield* InstanceState.directory
+@@ -854,1 +851,1 @@
+-          const client = createClient(directory)
++          const client = createClient(options.directory, options.Client)
+@@ -885,1 +882,1 @@
+-            ? yield* McpCatalog.defs(client, mcpConfig.timeout)
++            ? yield* McpCatalog.defs(client, mcpConfig.timeout?.request)
+@@ -893,3 +890,3 @@
+-        const s = yield* InstanceState.get(state)
++        const s = yield* state
+         yield* auth.clearOAuthState(mcpName)
+-        return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout)
++        return yield* storeClient(s, mcpName, client, listed, client.getInstructions()?.trim(), mcpConfig.timeout?.request)
+@@ -902,3 +899,1 @@
+-        Effect.catch(() => {
+-          return events.publish(BrowserOpenFailed, { mcpName, url: result.authorizationUrl }).pipe(Effect.ignore)
+-        }),
++        Effect.catch(() => options.notify({ type: "browser_open_failed", mcpName, url: result.authorizationUrl }).pipe(Effect.ignore)),
+@@ -941,1 +937,1 @@
+-      return yield* createAndStore(mcpName, { ...mcpConfig, enabled: true })
++      return yield* createAndStore(mcpName, { ...mcpConfig, disabled: false })
+@@ -961,5 +957,2 @@
+-      const runtimeConfig = (yield* InstanceState.has(state))
+-        ? (yield* InstanceState.get(state)).config[mcpName]
+-        : undefined
+-      const mcpConfig = runtimeConfig ?? (yield* cfgSvc.get()).mcp?.[mcpName]
+-      if (!mcpConfig || !isMcpConfigured(mcpConfig) || mcpConfig.type !== "remote") return "not_authenticated"
++      const mcpConfig = overrides[mcpName] ?? (yield* options.config()).servers?.[mcpName]
++      if (!mcpConfig || mcpConfig.type !== "remote") return "not_authenticated"
+@@ -972,1 +965,2 @@
+-    return Service.of({
++    return {
++      snapshot,
+@@ -992,13 +986,6 @@
+-    })
+-  }),
+-)
++    } satisfies Interface
++})
+ 
+ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
+ 
+-export const node = LayerNode.make({
+-  service: Service,
+-  layer: layer,
+-  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
+-})
+-
+-export * as MCP from "."
++export * as McpConnection from "./connection"
+diff --git a/packages/opencode/src/mcp/auth.ts b/packages/core/src/mcp/auth.ts
+rename from packages/opencode/src/mcp/auth.ts
+rename to packages/core/src/mcp/auth.ts
+--- a/packages/opencode/src/mcp/auth.ts
++++ b/packages/core/src/mcp/auth.ts
+@@ -1,7 +1,7 @@
+-import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { LayerNode } from "../effect/layer-node"
+ import path from "path"
+-import { serviceUse } from "@opencode-ai/core/effect/service-use"
+-import { Global } from "@opencode-ai/core/global"
++import { serviceUse } from "../effect/service-use"
++import { Global } from "../global"
+ import { Effect, Layer, Context, Option, Schema } from "effect"
+-import { FSUtil } from "@opencode-ai/core/fs-util"
+-import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
++import { FSUtil } from "../fs-util"
++import { EffectFlock } from "../util/effect-flock"
+diff --git a/packages/opencode/src/mcp/browser.ts b/packages/core/src/mcp/browser.ts
+rename from packages/opencode/src/mcp/browser.ts
+rename to packages/core/src/mcp/browser.ts
+--- a/packages/opencode/src/mcp/browser.ts
++++ b/packages/core/src/mcp/browser.ts
+@@ -1,1 +1,1 @@
+-import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { LayerNode } from "../effect/layer-node"
+diff --git a/packages/opencode/src/mcp/oauth-provider.ts b/packages/core/src/mcp/oauth-provider.ts
+similarity index 100%
+rename from packages/opencode/src/mcp/oauth-provider.ts
+rename to packages/core/src/mcp/oauth-provider.ts
+diff --git a/packages/opencode/src/mcp/oauth-callback.ts b/packages/core/src/mcp/oauth-callback.ts
+rename from packages/opencode/src/mcp/oauth-callback.ts
+rename to packages/core/src/mcp/oauth-callback.ts
+--- a/packages/opencode/src/mcp/oauth-callback.ts
++++ b/packages/core/src/mcp/oauth-callback.ts
+@@ -3,1 +3,1 @@
+-import { OauthCallbackPage } from "@opencode-ai/core/oauth/page"
++import { OauthCallbackPage } from "../oauth/page"
+diff --git a/packages/opencode/src/util/timeout.ts b/packages/core/src/util/timeout.ts
+similarity index 100%
+rename from packages/opencode/src/util/timeout.ts
+rename to packages/core/src/util/timeout.ts
+diff --git a/packages/opencode/src/mcp/index.ts b/packages/opencode/src/mcp/index.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/mcp/index.ts
+@@ -0,0 +1,95 @@
++import { Context, Effect, Layer } from "effect"
++import { ChildProcessSpawner } from "effect/unstable/process"
++import { LayerNode } from "@opencode-ai/core/effect/layer-node"
++import { serviceUse } from "@opencode-ai/core/effect/service-use"
++import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
++import { ConfigMigrateV1 } from "@opencode-ai/core/v1/config/migrate"
++import { ConfigMCP } from "@opencode-ai/core/config/mcp"
++import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
++import { McpConnection } from "@opencode-ai/core/mcp/connection"
++import { McpAuth } from "@opencode-ai/core/mcp/auth"
++import { McpBrowser } from "@opencode-ai/core/mcp/browser"
++import { Config } from "@/config/config"
++import { EffectBridge } from "@/effect/bridge"
++import { InstanceState } from "@/effect/instance-state"
++import { EventV2Bridge } from "@/event-v2-bridge"
++import { TuiEvent } from "@/server/tui-event"
++
++export { Resource, Status, Failed, NotFoundError, ToolsChanged, BrowserOpenFailed, type AuthStatus, type McpTool, type ServerInstructions } from "@opencode-ai/core/mcp/connection"
++
++export interface Interface extends Omit<McpConnection.Interface, "add"> {
++  readonly add: (name: string, mcp: ConfigMCPV1.Info) => ReturnType<McpConnection.Interface["add"]>
++  readonly native: () => Effect.Effect<McpConnection.Interface>
++}
++
++export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
++export const use = serviceUse(Service)
++
++const layer = Layer.effect(Service, Effect.gen(function* () {
++  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
++  const auth = yield* McpAuth.Service
++  const browser = yield* McpBrowser.Service
++  const events = yield* EventV2Bridge.Service
++  const config = yield* Config.Service
++  const publish = (notice: McpConnection.Notice) => {
++    switch (notice.type) {
++      case "tools_changed":
++        return events.publish(McpConnection.ToolsChanged, { server: notice.server }).pipe(Effect.asVoid)
++      case "browser_open_failed":
++        return events.publish(McpConnection.BrowserOpenFailed, { mcpName: notice.mcpName, url: notice.url }).pipe(Effect.asVoid)
++      case "auth_required":
++        return events.publish(TuiEvent.ToastShow, {
++          title: "MCP Authentication Required",
++          message: notice.status === "needs_client_registration"
++            ? `Server "${notice.server}" requires a pre-registered client ID. Add clientId to your config.`
++            : `Server "${notice.server}" requires authentication. Run: opencode mcp auth ${notice.server}`,
++          variant: "warning", duration: 8000,
++        }).pipe(Effect.asVoid)
++    }
++  }
++  const state = yield* InstanceState.make(instance => Effect.gen(function* () {
++    // 仅在旧实例内捕获桥接；Native取出同一连接后不再要求ambient InstanceRef。
++    const bridge = yield* EffectBridge.make()
++    return yield* McpConnection.make({
++      directory: instance.directory,
++      config: () => bridge.run(config.get().pipe(Effect.map(info => ConfigMCP.resolve([ConfigMigrateV1.mcp(info) ?? {}])))),
++      notify: notice => bridge.run(publish(notice)),
++    }).pipe(
++      Effect.provideService(McpAuth.Service, auth),
++      Effect.provideService(McpBrowser.Service, browser),
++      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
++    )
++  }))
++  const native = () => InstanceState.get(state)
++  const withConnection = <A, E>(f: (connection: McpConnection.Interface) => Effect.Effect<A, E>) => Effect.flatMap(native(), f)
++  return Service.of({
++    native,
++    status: () => withConnection(connection => connection.status()),
++    clients: () => withConnection(connection => connection.clients()),
++    instructions: () => withConnection(connection => connection.instructions()),
++    tools: () => withConnection(connection => connection.tools()),
++    snapshot: () => withConnection(connection => connection.snapshot()),
++    prompts: () => withConnection(connection => connection.prompts()),
++    resources: name => withConnection(connection => connection.resources(name)),
++    resourceTemplates: name => withConnection(connection => connection.resourceTemplates(name)),
++    add: (name, mcp) => withConnection(connection => connection.add(name, ConfigMigrateV1.migrateMcp(mcp))),
++    connect: name => withConnection(connection => connection.connect(name)),
++    disconnect: name => withConnection(connection => connection.disconnect(name)),
++    getPrompt: (client, name, args) => withConnection(connection => connection.getPrompt(client, name, args)),
++    readResource: (client, uri) => withConnection(connection => connection.readResource(client, uri)),
++    startAuth: name => withConnection(connection => connection.startAuth(name)),
++    authenticate: (name, onAuthorization) => withConnection(connection => connection.authenticate(name, onAuthorization)),
++    finishAuth: (name, code) => withConnection(connection => connection.finishAuth(name, code)),
++    removeAuth: name => withConnection(connection => connection.removeAuth(name)),
++    supportsOAuth: name => withConnection(connection => connection.supportsOAuth(name)),
++    hasStoredTokens: name => withConnection(connection => connection.hasStoredTokens(name)),
++    getAuthStatus: name => withConnection(connection => connection.getAuthStatus(name)),
++  })
++}))
++
++export const node = LayerNode.make({
++  service: Service, layer,
++  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
++})
++
++export * as MCP from "."
+diff --git a/packages/opencode/src/mcp/auth.ts b/packages/opencode/src/mcp/auth.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/mcp/auth.ts
+@@ -0,0 +1,1 @@
++export * from "@opencode-ai/core/mcp/auth"
+diff --git a/packages/opencode/src/mcp/browser.ts b/packages/opencode/src/mcp/browser.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/mcp/browser.ts
+@@ -0,0 +1,1 @@
++export * from "@opencode-ai/core/mcp/browser"
+diff --git a/packages/opencode/src/mcp/oauth-provider.ts b/packages/opencode/src/mcp/oauth-provider.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/mcp/oauth-provider.ts
+@@ -0,0 +1,1 @@
++export * from "@opencode-ai/core/mcp/oauth-provider"
+diff --git a/packages/opencode/src/mcp/oauth-callback.ts b/packages/opencode/src/mcp/oauth-callback.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/mcp/oauth-callback.ts
+@@ -0,0 +1,1 @@
++export * from "@opencode-ai/core/mcp/oauth-callback"
+diff --git a/packages/opencode/src/util/timeout.ts b/packages/opencode/src/util/timeout.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/util/timeout.ts
+@@ -0,0 +1,1 @@
++export * from "@opencode-ai/core/util/timeout"
+diff --git a/packages/opencode/src/mcp/catalog.ts b/packages/core/src/mcp/catalog.ts
+rename from packages/opencode/src/mcp/catalog.ts
+rename to packages/core/src/mcp/catalog.ts
+--- a/packages/opencode/src/mcp/catalog.ts
++++ b/packages/core/src/mcp/catalog.ts
+@@ -3,1 +3,0 @@
+-  CallToolResultSchema,
+@@ -6,1 +5,0 @@
+-  type Tool as MCPToolDef,
+@@ -8,1 +6,0 @@
+-import { dynamicTool, jsonSchema, type JSONSchema7, type Tool } from "ai"
+@@ -42,43 +39,0 @@
+-export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
+-  const inputSchema: JSONSchema7 = {
+-    ...(mcpTool.inputSchema as JSONSchema7),
+-    type: "object",
+-    properties: (mcpTool.inputSchema.properties ?? {}) as JSONSchema7["properties"],
+-    additionalProperties: false,
+-  }
+-
+-  return dynamicTool({
+-    description: mcpTool.description ?? "",
+-    inputSchema: jsonSchema(inputSchema),
+-    execute: async (args: unknown, options) => {
+-      const result = await client.callTool(
+-        {
+-          name: mcpTool.name,
+-          arguments: (args || {}) as Record<string, unknown>,
+-        },
+-        CallToolResultSchema,
+-        {
+-          resetTimeoutOnProgress: true,
+-          signal: options.abortSignal,
+-          timeout,
+-          // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
+-          onprogress: () => {},
+-        },
+-      )
+-      if (result.isError)
+-        throw new Error(
+-          result.content
+-            .flatMap((item) => (item.type === "text" ? [item.text] : []))
+-            .filter((text) => text.trim())
+-            .join("\n\n") || "MCP tool returned an error",
+-        )
+-      if (result.content.length > 0 || result.structuredContent === undefined || result.structuredContent === null)
+-        return result
+-      return {
+-        ...result,
+-        content: [{ type: "text" as const, text: JSON.stringify(result.structuredContent) }],
+-      }
+-    },
+-  })
+-}
+-
+diff --git a/packages/opencode/src/mcp/catalog.ts b/packages/opencode/src/mcp/catalog.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/mcp/catalog.ts
+@@ -0,0 +1,46 @@
++import { Client } from "@modelcontextprotocol/sdk/client/index.js"
++import { CallToolResultSchema, type Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
++import { dynamicTool, jsonSchema, type JSONSchema7, type Tool } from "ai"
++
++export { paginate, defs, fetch, sanitize, toolName, prompts, resources, resourceTemplates } from "@opencode-ai/core/mcp/catalog"
++
++export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
++  const inputSchema: JSONSchema7 = {
++    ...(mcpTool.inputSchema as JSONSchema7),
++    type: "object",
++    properties: (mcpTool.inputSchema.properties ?? {}) as JSONSchema7["properties"],
++    additionalProperties: false,
++  }
++  return dynamicTool({
++    description: mcpTool.description ?? "",
++    inputSchema: jsonSchema(inputSchema),
++    execute: async (args: unknown, options) => {
++      const result = await client.callTool(
++        { name: mcpTool.name, arguments: (args || {}) as Record<string, unknown> },
++        CallToolResultSchema,
++        {
++          resetTimeoutOnProgress: true,
++          signal: options.abortSignal,
++          timeout,
++          // SDK仅在存在回调时发送progress token，保留原超时续期语义。
++          onprogress: () => {},
++        },
++      )
++      if (result.isError)
++        throw new Error(
++          result.content
++            .flatMap((item) => (item.type === "text" ? [item.text] : []))
++            .filter((text) => text.trim())
++            .join("\n\n") || "MCP tool returned an error",
++        )
++      if (result.content.length > 0 || result.structuredContent === undefined || result.structuredContent === null)
++        return result
++      return {
++        ...result,
++        content: [{ type: "text" as const, text: JSON.stringify(result.structuredContent) }],
++      }
++    },
++  })
++}
++
++export * as McpCatalog from "./catalog"
+diff --git a/packages/core/package.json b/packages/core/package.json
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -89,1 +89,2 @@
+     "@ff-labs/fff-bun": "0.9.4",
++    "@modelcontextprotocol/sdk": "1.29.0",
+@@ -121,1 +122,2 @@
+     "npm-package-arg": "13.0.2",
++    "open": "10.1.2",
+diff --git a/bun.lock b/bun.lock
+--- a/bun.lock
++++ b/bun.lock
+@@ -324,1 +324,2 @@
+         "@lydell/node-pty": "catalog:",
++        "@modelcontextprotocol/sdk": "1.29.0",
+@@ -356,1 +357,2 @@
+         "npm-package-arg": "13.0.2",
++        "open": "10.1.2",
 diff --git a/packages/core/src/system-context/builtins.ts b/packages/core/src/system-context/builtins.ts
 --- a/packages/core/src/system-context/builtins.ts
 +++ b/packages/core/src/system-context/builtins.ts
@@ -106,10 +807,10 @@ diff --git a/packages/opencode/src/session/llm/request.ts b/packages/opencode/sr
  }
  
  export function hasToolCalls(messages: ModelMessage[]): boolean {
-diff --git a/packages/opencode/src/session/prompt/build-switch.txt b/packages/opencode/src/session/prompt/build-switch.txt
+diff --git a/packages/core/src/system-context/prompt/build-switch.txt b/packages/core/src/system-context/prompt/build-switch.txt
 index 3737b74d895124ae950cb1ba5d34a2752e2a3c22..32f5466de4f23903ca8c3b23909dddc8022d2d51 100644
---- a/packages/opencode/src/session/prompt/build-switch.txt
-+++ b/packages/opencode/src/session/prompt/build-switch.txt
+--- a/packages/core/src/system-context/prompt/build-switch.txt
++++ b/packages/core/src/system-context/prompt/build-switch.txt
 @@ -1,5 +1,5 @@
  <system-reminder>
  Your operational mode has changed from plan to build.
@@ -148,22 +849,14 @@ diff --git a/packages/opencode/src/tool/selection.ts b/packages/opencode/src/too
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/tool/selection.ts
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,10 @@
 +import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
-+import { Wildcard } from "@opencode-ai/core/util/wildcard"
++import { ToolSelection } from "@opencode-ai/core/tool/selection"
 +
-+const INTERNAL = new Set(["invalid", "_noop", "StructuredOutput"])
-+
-+export function isUserConfigurable(id: string) {
-+  return !INTERNAL.has(id)
-+}
++export const isUserConfigurable = ToolSelection.isUserConfigurable
 +
 +export function enabled(id: string, ruleset?: PermissionV1.Ruleset) {
-+  // 内部支持工具继续注册，供 provider 修复及结构化输出路径使用。
-+  if (!isUserConfigurable(id)) return true
-+  // 按工具名控制可见性，执行授权仍由 edit/read 等权限分组负责。
-+  const rule = ruleset?.findLast((rule) => Wildcard.match(id, rule.permission) && rule.pattern === "*")
-+  return rule?.action !== "deny"
++  return ToolSelection.enabled(id, ruleset?.map(rule => ({ action: rule.permission, resource: rule.pattern, effect: rule.action })))
 +}
 +
 +export * as ToolSelection from "./selection"
@@ -388,6 +1081,985 @@ diff --git a/packages/opencode/test/session/llm.test.ts b/packages/opencode/test
          expect(system).not.toContain("To read files use the read tool")
 +        expect(system).toContain("To edit files use the edit tool")
 +        expect(system).not.toContain("To create files use the write tool")
+diff --git a/packages/opencode/src/config/variable.ts b/packages/core/src/config/variable.ts
+rename from packages/opencode/src/config/variable.ts
+rename to packages/core/src/config/variable.ts
+--- a/packages/opencode/src/config/variable.ts
++++ b/packages/core/src/config/variable.ts
+@@ -5,2 +5,2 @@
+-import { Filesystem } from "@/util/filesystem"
+-import { InvalidError } from "@opencode-ai/core/v1/config/error"
++import { readFile } from "node:fs/promises"
++import { InvalidError } from "../v1/config/error"
+@@ -33,1 +33,1 @@
+-/** Apply {env:VAR} and {file:path} substitutions to config text. */
++// 两代共用同一变量/文件引用替换，仍由调用方执行唯一的JSONC解析。
+@@ -68,1 +68,1 @@
+-      await Filesystem.readText(resolvedPath).catch((error: NodeJS.ErrnoException) => {
++      await readFile(resolvedPath, "utf-8").catch((error: NodeJS.ErrnoException) => {
+diff --git a/packages/opencode/src/config/variable.ts b/packages/opencode/src/config/variable.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/config/variable.ts
+@@ -0,0 +1,1 @@
++export * from "@opencode-ai/core/config/variable"
+diff --git a/packages/core/src/config.ts b/packages/core/src/config.ts
+--- a/packages/core/src/config.ts
++++ b/packages/core/src/config.ts
+@@ -25,1 +25,2 @@
+ import { ConfigWatcher } from "./config/watcher"
++import { ConfigVariable } from "./config/variable"
+@@ -155,2 +156,4 @@
+       const errors: ParseError[] = []
+-      const input: unknown = parse(text, errors, { allowTrailingComma: true })
++      // 与V1在同一解析前展开凭证；file引用相对于各自配置文件，而不是Location目录。
++      const expanded = yield* Effect.promise(() => ConfigVariable.substitute({ text, type: "path", path: filepath }))
++      const input: unknown = parse(expanded, errors, { allowTrailingComma: true })
+diff --git a/packages/core/src/config/mcp.ts b/packages/core/src/config/mcp.ts
+--- a/packages/core/src/config/mcp.ts
++++ b/packages/core/src/config/mcp.ts
+@@ -45,4 +45,37 @@
++// 继承服务器可只改启停；必须在配置文档合并后再要求完整连接信息。
++export class Toggle extends Schema.Class<Toggle>("ConfigV2.MCP.Toggle")({ disabled: Schema.Boolean }) {}
++export const Entry = Schema.Union([Server, Toggle])
++
+ export class Info extends Schema.Class<Info>("ConfigV2.MCP")({
+   timeout: Timeout.pipe(Schema.optional),
+-  servers: Schema.Record(Schema.String, Server).pipe(Schema.optional),
++  servers: Schema.Record(Schema.String, Entry).pipe(Schema.optional),
+ }) {}
++
++export interface Resolved {
++  readonly timeout?: Timeout
++  readonly servers?: Readonly<Record<string, typeof Server.Type>>
++}
++
++export function resolve(entries: readonly Info[]): Resolved {
++  const merged = entries.reduce<Info>((previous, current) => inherit(previous, current), {})
++  return {
++    timeout: merged.timeout,
++    servers: Object.fromEntries(Object.entries(merged.servers ?? {}).flatMap(([name, server]) => "type" in server ? [[name, server] as const] : [])),
++  }
++}
++
++function inherit<A extends object>(previous: A | undefined, next: A): A {
++  const result = { ...previous, ...next }
++  Object.entries(next).forEach(([key, value]) => {
++    const old = previous ? Reflect.get(previous, key) : undefined
++    // 迁移器补出的undefined不是用户清除；false/空串正常覆盖，数组沿V1替换。
++    if (value === undefined) {
++      Reflect.set(result, key, old)
++      return
++    }
++    // Schema.Class也承载配置字段，不能只递归plain object而丢掉Header/OAuth继承。
++    if (value !== null && typeof value === "object" && !Array.isArray(value) && old !== null && typeof old === "object" && !Array.isArray(old))
++      Reflect.set(result, key, inherit(old, value))
++  })
++  return result
++}
+diff --git a/packages/core/src/mcp.ts b/packages/core/src/mcp.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/mcp.ts
+@@ -0,0 +1,44 @@
++export * as McpRuntime from "./mcp"
++
++import { Context, Effect, Layer } from "effect"
++import { McpEvent } from "@opencode-ai/schema/mcp-event"
++import { Config } from "./config"
++import { ConfigMCP } from "./config/mcp"
++import { CrossSpawnSpawner } from "./cross-spawn-spawner"
++import { makeLocationNode } from "./effect/app-node"
++import { EventV2 } from "./event"
++import { Location } from "./location"
++import { McpAuth } from "./mcp/auth"
++import { McpBrowser } from "./mcp/browser"
++import { McpConnection } from "./mcp/connection"
++
++export type Interface = McpConnection.Interface
++export class Service extends Context.Service<Service, Interface>()("@opencode/v2/McpRuntime") {}
++
++export const layer = Layer.effect(Service, Effect.gen(function* () {
++  const config = yield* Config.Service
++  const location = yield* Location.Service
++  const events = yield* EventV2.Service
++  return yield* McpConnection.make({
++    directory: location.directory,
++    config: () => config.entries().pipe(Effect.map(entries =>
++      ConfigMCP.resolve(entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : [])),
++    )),
++    notify: notice => {
++      switch (notice.type) {
++        case "tools_changed":
++          return events.publish(McpEvent.ToolsChanged, { server: notice.server }, { location }).pipe(Effect.asVoid)
++        case "browser_open_failed":
++          return events.publish(McpEvent.BrowserOpenFailed, { mcpName: notice.mcpName, url: notice.url }, { location }).pipe(Effect.asVoid)
++        case "auth_required":
++          return Effect.logWarning("MCP authentication required", { server: notice.server, status: notice.status })
++      }
++    },
++  })
++}))
++
++export const node = makeLocationNode({
++  service: Service,
++  layer,
++  deps: [Config.node, Location.node, EventV2.node, CrossSpawnSpawner.node, McpAuth.node, McpBrowser.node],
++})
+diff --git a/packages/core/src/mcp/tools.ts b/packages/core/src/mcp/tools.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/mcp/tools.ts
+@@ -0,0 +1,280 @@
++export * as McpTools from "./tools"
++
++import { CallToolResultSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js"
++import { ToolDefinition } from "@opencode-ai/llm"
++import { Context, Effect, Exit, Layer, Schema, Scope, Semaphore } from "effect"
++import { makeLocationNode } from "../effect/app-node"
++import { McpRuntime } from "../mcp"
++import { PermissionV2 } from "../permission"
++import { SystemContext } from "../system-context"
++import { Tool } from "../tool/tool"
++import { ToolRegistry } from "../tool/registry"
++import { Tools } from "../tool/tools"
++import { McpConnection } from "./connection"
++
++export interface Interface {
++  readonly prepare: () => Effect.Effect<(visibleNames: readonly string[]) => SystemContext.SystemContext>
++}
++export class Service extends Context.Service<Service, Interface>()("@opencode/v2/McpTools") {}
++
++export const layer = Layer.effect(Service, Effect.gen(function* () {
++  const mcp = yield* McpRuntime.Service
++  const tools = yield* Tools.Service
++  const permission = yield* PermissionV2.Service
++  const owner = yield* Scope.Scope
++  const lock = yield* Semaphore.make(1)
++  const active = new Map<string, { readonly entry: McpConnection.McpTool; readonly scope: Scope.Closeable }>()
++  const resources = resourceTools(mcp, permission)
++  let resourceScope: Scope.Closeable | undefined
++  return Service.of({
++    prepare: Effect.fn("McpTools.prepare")(() => lock.withPermit(Effect.gen(function* () {
++      // 观察和注册共用窄锁，较早快照不能在另一Session刷新后反向覆盖新定义。
++      const snapshot = yield* mcp.snapshot()
++      const changed = Object.entries(snapshot.tools).flatMap(([name, entry]) => {
++        const previous = active.get(name)?.entry
++        if (previous?.def === entry.def && previous.client === entry.client && previous.timeout === entry.timeout) return []
++        return [{ name, entry: { def: entry.def, client: entry.client, timeout: entry.timeout }, tool: adapt(name, entry, permission) }]
++      })
++      yield* Effect.forEach(changed, item => Tool.validateName(item.name), { discard: true }).pipe(Effect.orDie)
++      // 只保护同步的注册交接；SDK请求及权限等待始终可以被调用方取消。
++      yield* Effect.uninterruptible(Effect.gen(function* () {
++        for (const item of changed) {
++          const scope = yield* Scope.fork(owner)
++          yield* tools.register({ [item.name]: item.tool }).pipe(
++            Scope.provide(scope),
++            Effect.onExit(exit => Exit.isFailure(exit) ? Scope.close(scope, exit) : Effect.void),
++            Effect.orDie,
++          )
++          const previous = active.get(item.name)
++          active.set(item.name, { entry: item.entry, scope })
++          // 新注册先入栈；关闭旧scope仅撤销自己的token，不会移除新定义。
++          if (previous) yield* Scope.close(previous.scope, Exit.void)
++        }
++        for (const [name, previous] of active) {
++          if (Object.hasOwn(snapshot.tools, name)) continue
++          active.delete(name)
++          yield* Scope.close(previous.scope, Exit.void)
++        }
++        const hasResources = Object.values(snapshot.clients).some(client => !!client.getServerCapabilities()?.resources)
++        // 三个资源工具只在真实连接声明resources时存在，不能固定广告不可用能力。
++        if (hasResources && !resourceScope) {
++          resourceScope = yield* Scope.fork(owner)
++          yield* tools.register(resources).pipe(Scope.provide(resourceScope), Effect.orDie)
++        }
++        if (!hasResources && resourceScope) {
++          yield* Scope.close(resourceScope, Exit.void)
++          resourceScope = undefined
++        }
++      }))
++      return instructionsContext(snapshot.instructions)
++    }))),
++  })
++}))
++
++export const node = makeLocationNode({
++  service: Service, layer,
++  deps: [McpRuntime.node, ToolRegistry.toolsNode, PermissionV2.node],
++})
++
++const Projection = Schema.Struct({
++  structured: Schema.Unknown,
++  content: Schema.Array(Schema.Union([
++    Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
++    Schema.Struct({ type: Schema.Literal("file"), data: Schema.String, mime: Schema.String, name: Schema.optional(Schema.String) }),
++  ])),
++})
++
++function adapt(name: string, entry: McpConnection.McpTool, permission: PermissionV2.Interface) {
++  const def = entry.def
++  const client = entry.client
++  const timeout = entry.timeout
++  return Tool.make({
++    description: def.description ?? "",
++    // 对象参数保留原样，完整MCP schema直接用于广告，不经不完整的schema反向转换。
++    input: Schema.Record(Schema.String, Schema.Unknown),
++    inputSchema: Schema.decodeUnknownSync(ToolDefinition.fields.inputSchema)(structuredClone(def.inputSchema)),
++    output: Projection,
++    structured: Schema.Unknown,
++    toStructuredOutput: ({ output }) => output.structured,
++    toModelOutput: ({ output }) => output.content,
++    execute: (args, context) => Effect.gen(function* () {
++      yield* permission.assert({
++        sessionID: context.sessionID, agent: context.agent,
++        action: name, resources: ["*"], save: ["*"], metadata: {},
++        source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
++      }).pipe(Effect.mapError(error => new Tool.Failure({ message: error._tag === "PermissionV2.CorrectedError" ? error.feedback : error.message || error._tag })))
++      const result = yield* Effect.tryPromise({
++        // 公开名只负责广告/权限；服务器接收未经重命名的原始def.name。
++        try: signal => client.callTool({ name: def.name, arguments: args }, CallToolResultSchema, {
++          signal, timeout, resetTimeoutOnProgress: true,
++          // 回调存在时SDK才发送progress token，保留原调用超时续期语义。
++          onprogress() {},
++        }),
++        catch: error => new Tool.Failure({ message: error instanceof Error ? error.message : String(error) }),
++      })
++      if (result.isError) return yield* new Tool.Failure({
++        message: result.content.flatMap(item => item.type === "text" ? [item.text] : []).filter(text => text.trim()).join("\n\n") || "MCP tool returned an error",
++      })
++      return project(result)
++    }),
++  })
++}
++
++function resourceTools(mcp: McpConnection.Interface, permission: PermissionV2.Interface) {
++  const authorize = Effect.fnUntraced(function* (context: Tool.Context, server?: string, uri?: string) {
++    const clients = yield* mcp.clients()
++    const servers = Object.keys(clients).filter(name => !!clients[name].getServerCapabilities()?.resources).toSorted()
++    if (server && !servers.includes(server)) return yield* new Tool.Failure({ message: servers.length
++      ? `MCP server "${server}" does not support resources. Available resource servers: ${servers.join(", ")}`
++      : `MCP server "${server}" does not support resources` })
++    const patterns = server ? [`mcp:${server}:${uri ?? "*"}`] : servers.map(name => `mcp:${name}:*`)
++    yield* permission.assert({
++      sessionID: context.sessionID, agent: context.agent, action: "read", resources: patterns,
++      save: server ? [`mcp:${server}:*`] : patterns, metadata: { ...(server ? { server } : {}), ...(uri ? { uri } : {}) },
++      source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
++    }).pipe(Effect.mapError(error => new Tool.Failure({ message: error._tag === "PermissionV2.CorrectedError" ? error.feedback : error.message || error._tag })))
++  })
++  const list = (templates: boolean) => Tool.withPermission(Tool.make({
++    description: templates
++      ? "Lists resource templates provided by connected MCP servers. Resource templates are parameterized resources that can be read after filling in their URI template."
++      : "Lists resources provided by connected MCP servers. Resources provide context such as files, database schemas, or application-specific information.",
++    input: Schema.Struct({ server: Schema.optional(Schema.String.annotate({ description: templates
++      ? "Optional MCP server name. When omitted, lists resource templates from every connected server."
++      : "Optional MCP server name. When omitted, lists resources from every connected server." })) }),
++    output: Projection, structured: Schema.Unknown,
++    toStructuredOutput: ({ output }) => output.structured,
++    toModelOutput: ({ output }) => output.content,
++    execute: ({ server }, context) => Effect.gen(function* () {
++      yield* authorize(context, server)
++      const entries = templates ? yield* mcp.resourceTemplates(server) : yield* mcp.resources(server)
++      const values = Object.values(entries).filter(item => !server || item.client === server)
++        .toSorted((a, b) => (a.client + "\0" + a.name).localeCompare(b.client + "\0" + b.name))
++        .map(item => ({ ...Object.fromEntries(Object.entries(item).filter(([key]) => key !== "client")), server: item.client }))
++      const structured = { [templates ? "resourceTemplates" : "resources"]: values }
++      return { structured, content: [{ type: "text" as const, text: JSON.stringify(structured, null, 2) }] }
++    }),
++  }), "read")
++  return {
++    list_mcp_resources: list(false),
++    list_mcp_resource_templates: list(true),
++    read_mcp_resource: Tool.withPermission(Tool.make({
++      description: "Read a specific resource from an MCP server using the server name and resource URI. The URI is an MCP identifier and does not need to be a file URL.",
++      input: Schema.Struct({
++        server: Schema.NonEmptyString.annotate({ description: "MCP server name exactly as returned by list_mcp_resources." }),
++        uri: Schema.NonEmptyString.annotate({ description: "Resource URI to read. Use the exact URI string returned by list_mcp_resources." }),
++      }),
++      output: Projection, structured: Schema.Unknown,
++      toStructuredOutput: ({ output }) => output.structured,
++      toModelOutput: ({ output }) => output.content,
++      execute: ({ server, uri }, context) => Effect.gen(function* () {
++        yield* authorize(context, server, uri)
++        const result = yield* mcp.readResource(server, uri)
++        if (!result) return yield* new Tool.Failure({ message: `Failed to read MCP resource: ${server}/${uri}` })
++        const text: string[] = []
++        const files: Tool.Content[] = []
++        for (const item of result.contents) {
++          const mime = item.mimeType ?? "application/octet-stream"
++          if ("text" in item && typeof item.text === "string") {
++            text.push(`Resource: ${item.uri}\nMIME: ${mime}\n${item.text}`)
++            continue
++          }
++          if ("blob" in item && typeof item.blob === "string") {
++            const part = resourceBlob(item.uri, mime, item.blob)
++            if (part.type === "text") text.push(part.text)
++            if (part.type === "file") {
++              text.push(`[Binary MCP resource attached: ${item.uri} (${mime})]`)
++              files.push(part)
++            }
++            continue
++          }
++          text.push(`[MCP resource content without text or blob: ${item.uri}]`)
++        }
++        return { structured: { server, uri, contents: result.contents.length, attachments: files.length }, content: [
++          { type: "text" as const, text: text.join("\n\n") || `MCP resource ${uri} from ${server} returned no contents.` }, ...files,
++        ] }
++      }),
++    }), "read"),
++  }
++}
++
++const MAX_MCP_RESOURCE_BLOB_BYTES = 10 * 1024 * 1024
++const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set(["application/pdf", "image/gif", "image/jpeg", "image/png", "image/webp"])
++
++function project(result: CallToolResult): typeof Projection.Type {
++  const text: string[] = []
++  const files: Tool.Content[] = []
++  // structured-only结果同V1补可见文本；有content时不重复序列化整个结果及媒体。
++  if (result.content.length === 0 && result.structuredContent != null) text.push(JSON.stringify(result.structuredContent))
++  for (const item of result.content) {
++    if (item.type === "text") {
++      text.push(item.text)
++      continue
++    }
++    if (item.type === "image") {
++      files.push({ type: "file", data: item.data, mime: item.mimeType })
++      continue
++    }
++    if (item.type !== "resource") continue
++    const resource = item.resource
++    if ("text" in resource) text.push(resource.text)
++    if ("blob" in resource) {
++      const part = resourceBlob(resource.uri, resource.mimeType ?? "application/octet-stream", resource.blob)
++      if (part.type === "text") text.push(part.text)
++      if (part.type === "file") files.push(part)
++    }
++  }
++  return {
++    structured: result.structuredContent ?? {},
++    content: [...(text.length ? [{ type: "text" as const, text: text.join("\n\n") }] : []), ...files],
++  }
++}
++
++function resourceBlob(uri: string, mime: string, data: string): Tool.Content {
++  const size = base64Size(data)
++  // 只对嵌入blob沿用V1附件边界，不扩大为直接image输出的新限制。
++  if (!SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES.has(mime)) return {
++    type: "text", text: `[Binary MCP resource omitted: ${uri} (${mime}, ${formatBytes(size)}) is not a supported attachment type]`,
++  }
++  if (size > MAX_MCP_RESOURCE_BLOB_BYTES) return {
++    type: "text", text: `[Binary MCP resource omitted: ${uri} (${mime}, ${formatBytes(size)}) exceeds ${formatBytes(MAX_MCP_RESOURCE_BLOB_BYTES)}]`,
++  }
++  return { type: "file", data, mime, name: uri }
++}
++
++function base64Size(value: string) {
++  const trimmed = value.replace(/\s/g, "")
++  const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0
++  return Math.max(0, Math.floor(trimmed.length * 3 / 4) - padding)
++}
++
++function formatBytes(value: number) {
++  if (value < 1024) return `${value} B`
++  if (value < 1024 * 1024) return `${Math.ceil(value / 1024)} KB`
++  return `${Math.ceil(value / (1024 * 1024))} MB`
++}
++
++const Instruction = Schema.Struct({ name: Schema.String, instructions: Schema.String })
++function renderInstructions(items: readonly (typeof Instruction.Type)[]) {
++  return ["<mcp_instructions>", ...items.flatMap(item => [
++    `  <server name="${item.name}">`, ...item.instructions.split("\n").map(line => `    ${line}`), "  </server>",
++  ]), "</mcp_instructions>"].join("\n")
++}
++
++function instructionsContext(instructions: readonly McpConnection.ServerInstructions[]) {
++  const captured = instructions.map(item => ({ ...item, tools: [...item.tools] }))
++  return (visibleNames: readonly string[]) => {
++    const visible = new Set(visibleNames)
++    // 可见性属于这一轮，不存成Location上会被另一Session覆盖的“最近列表”。
++    const current = captured.filter(item => item.tools.length === 0 || item.tools.some(name => visible.has(name)))
++      .map(item => ({ name: item.name, instructions: item.instructions })).toSorted((a, b) => a.name.localeCompare(b.name))
++    if (current.length === 0) return SystemContext.empty
++    return SystemContext.make({
++      key: SystemContext.Key.make("core/mcp-instructions"),
++      codec: Schema.toCodecJson(Schema.Array(Instruction)),
++      load: Effect.succeed(current),
++      baseline: renderInstructions,
++      update: (_previous, value) => ["MCP server instructions have changed. The following instructions supersede the previous MCP server instructions.", renderInstructions(value)].join("\n"),
++      removed: () => "MCP server instructions are no longer available. Do not follow previously supplied MCP server instructions.",
++    })
++  }
++}
+diff --git a/packages/core/src/tool/tool.ts b/packages/core/src/tool/tool.ts
+--- a/packages/core/src/tool/tool.ts
++++ b/packages/core/src/tool/tool.ts
+@@ -46,1 +46,3 @@
+   readonly input: Input
++  // 外部MCP保留原始schema广告；普通工具仍由自身codec生成定义和校验输入。
++  readonly inputSchema?: ToolDefinition["inputSchema"]
+@@ -85,1 +87,1 @@
+-        inputSchema: toJsonSchema(config.input),
++        inputSchema: config.inputSchema ?? toJsonSchema(config.input),
+@@ -135,1 +137,2 @@
+-  /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
++  // canonical保存MCP原规范化ID，provider的名称长度约束不能阻止会话先关闭该工具。
++  /^[A-Za-z0-9_-]+$/.test(name)
+diff --git a/packages/core/src/tool/selection.ts b/packages/core/src/tool/selection.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/selection.ts
+@@ -0,0 +1,18 @@
++export * as ToolSelection from "./selection"
++
++import type { PermissionV2 } from "../permission"
++import { Wildcard } from "../util/wildcard"
++
++const INTERNAL = new Set(["invalid", "_noop", "StructuredOutput"])
++
++export function isUserConfigurable(id: string) {
++  return !INTERNAL.has(id)
++}
++
++export function enabled(id: string, rules: PermissionV2.Ruleset = []) {
++  // 内部定义供provider修复使用，不参与用户的能力开关。
++  if (!isUserConfigurable(id)) return true
++  // 这里只按工具原名与全局资源筛选；执行授权继续由leaf的权限分组负责。
++  const rule = rules.findLast(rule => Wildcard.match(id, rule.action) && rule.resource === "*")
++  return rule?.effect !== "deny"
++}
+diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registry.ts
+--- a/packages/core/src/tool/registry.ts
++++ b/packages/core/src/tool/registry.ts
+@@ -11,3 +11,4 @@
+ import { ApplicationTools } from "./application-tools"
++import { ToolSelection } from "./selection"
+ import { definition, permission, settle, validateName, type AnyTool, type RegistrationError } from "./tool"
+ import { Tools } from "./tools"
+@@ -23,3 +24,3 @@
+ export interface Interface {
+-  readonly materialize: (permissions?: PermissionV2.Ruleset) => Effect.Effect<Materialization>
++  readonly materialize: (permissions?: PermissionV2.Ruleset, selection?: PermissionV2.Ruleset) => Effect.Effect<Materialization>
+   /** Internal registration capability exposed publicly only through Tools.Service. */
+@@ -109,8 +110,9 @@
+-      materialize: Effect.fn("ToolRegistry.materialize")(function* (permissions = []) {
++      materialize: Effect.fn("ToolRegistry.materialize")(function* (permissions = [], selection = []) {
+         const registrations = new Map(applications.entries())
+         for (const [name, entries] of local) {
+           const registration = entries.at(-1)?.registration
+           if (registration) registrations.set(name, registration)
+         }
++        // 同一快照同时约束广告与settlement，关闭工具不能通过伪造调用绕回执行。
+         for (const [name, registration] of registrations)
+-          if (whollyDisabled(permission(registration.tool, name), permissions)) registrations.delete(name)
++          if (whollyDisabled(permission(registration.tool, name), permissions) || !ToolSelection.enabled(name, selection)) registrations.delete(name)
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -30,3 +30,5 @@
+ import { ToolRegistry } from "../../tool/registry"
++import { ToolSelection } from "../../tool/selection"
++import { McpTools } from "../../mcp/tools"
+ import { ToolOutputStore } from "../../tool-output-store"
+ import { SessionContextEpoch } from "../context-epoch"
+@@ -112,1 +114,2 @@
+     const models = yield* SessionRunnerModel.Service
++    const mcpTools = yield* McpTools.Service
+@@ -181,4 +184,13 @@
+-    const loadSystemContext = (agent: AgentV2.Selection) =>
+-      Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
+-        concurrency: "unbounded",
+-      }).pipe(Effect.map(SystemContext.combine))
++    const prepareTurn = Effect.fn("SessionRunner.prepareTurn")(function* (sessionID: SessionSchema.ID, agent: AgentV2.Selection) {
++      const mcpContextFor = yield* mcpTools.prepare()
++      // 工具与说明使用同一轮权限/选择快照，不能共享另一Session的可见工具列表。
++      const sessionPermissions = yield* store.permissions(sessionID)
++      const materialization = yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions], sessionPermissions)
++      return {
++        materialization,
++        context: Effect.all([
++          systemContext.load(), skillGuidance.load(agent), referenceGuidance.load(),
++          Effect.succeed(mcpContextFor(materialization.definitions.map(tool => tool.name))),
++        ], { concurrency: "unbounded" }).pipe(Effect.map(SystemContext.combine)),
++      }
++    })
+@@ -196,1 +211,3 @@
+-      const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent), session.id)
++      const prepared = yield* prepareTurn(session.id, agent)
++      // initialize仍在durable promotion之前，既有epoch基线与用户admission边界不移动。
++      const initialized = yield* SessionContextEpoch.initialize(db, prepared.context, session.id)
+@@ -254,1 +271,1 @@
+-        initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
++        initialized ?? (yield* SessionContextEpoch.prepare(db, events, prepared.context, session.id))
+@@ -260,5 +277,3 @@
+-      // 委派Session的持久范围也决定本轮广告，防止正文可见工具与实际权限分裂。
+-      const sessionPermissions = yield* store.permissions(session.id)
+-      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions])
+-      // 实际 tool materialization 已应用当前 agent 权限；最后一步无工具时不产生替代指引。
+-      const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name) ?? [])
++      const toolMaterialization = isLastStep ? undefined : prepared.materialization
++      // 指引只引用本轮真实可见工具；内部修复定义不算用户能力，空列表明确提示无工具。
++      const toolGuidance = SystemContextBuiltIns.toolUsage(toolMaterialization?.definitions.map((tool) => tool.name).filter(ToolSelection.isUserConfigurable) ?? [])
+@@ -564,1 +579,2 @@
+     SessionRunnerModel.node,
++    McpTools.node,
+diff --git a/packages/core/src/location-services.ts b/packages/core/src/location-services.ts
+--- a/packages/core/src/location-services.ts
++++ b/packages/core/src/location-services.ts
+@@ -18,1 +18,3 @@
+ import { PermissionV2 } from "./permission"
++import { McpRuntime } from "./mcp"
++import { McpTools } from "./mcp/tools"
+@@ -70,1 +72,3 @@
+   ToolRegistry.toolsNode,
++  McpRuntime.node,
++  McpTools.node,
+@@ -87,1 +91,1 @@
+-  replacements: LayerNode.Replacements = [],
++  replacements: LayerNode.Replacements | ((ref: Location.Ref) => LayerNode.Replacements) = [],
+@@ -95,1 +99,2 @@
+-        const allReplacements = defaults.concat(replacements, [[Location.node, Location.boundNode(ref)]])
++        // 放在hoist之前，替换owner的真实依赖才能参加原图分层。
++        const allReplacements = defaults.concat(typeof replacements === "function" ? replacements(ref) : replacements, [[Location.node, Location.boundNode(ref)]])
+diff --git a/packages/opencode/src/server/routes/instance/httpapi/server.ts b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+--- a/packages/opencode/src/server/routes/instance/httpapi/server.ts
++++ b/packages/opencode/src/server/routes/instance/httpapi/server.ts
+@@ -20,1 +20,2 @@
+ import { MCP } from "@/mcp"
++import { McpRuntime } from "@opencode-ai/core/mcp"
+@@ -277,13 +278,25 @@
+-  const locationServiceMapV2 = buildLocationServiceMap()
+-  return {
+-    layer: Layer.mergeAll(
+-      AppNodeBuilderV1.build(app),
+-      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), [
+-        [LocationServiceMap.node, locationServiceMapV2],
+-        [SessionExecution.node, SessionExecutionLocal.node],
+-      ]),
+-      AppNodeBuilderV1.build(MoveSession.node, [[LocationServiceMap.node, locationServiceMapV2]]),
+-    ).pipe(Layer.provideMerge(locationServiceMapV2)),
+-    memoMap,
+-  }
++  const legacyOwners = AppNodeBuilderV1.build(LayerNode.group([MCP.node, InstanceStore.node]))
++  const layer = Layer.unwrap(Effect.gen(function* () {
++    const mcp = yield* MCP.Service
++    const instances = yield* InstanceStore.Service
++    const locationServiceMapV2 = buildLocationServiceMap(ref => {
++      // 显式workspace有自己的Native owner；隐式本地位置取旧实例内的同一连接对象。
++      if (ref.workspaceID !== undefined) return []
++      return [[McpRuntime.node, Layer.effect(McpRuntime.Service,
++        instances.provide({ directory: ref.directory }, mcp.native()),
++      )]]
++    })
++    const replacements: LayerNode.Replacements = [
++      [LocationServiceMap.node, locationServiceMapV2],
++      [SessionExecution.node, SessionExecutionLocal.node],
++      [MCP.node, Layer.succeed(MCP.Service, mcp)],
++      [InstanceStore.node, Layer.succeed(InstanceStore.Service, instances)],
++    ]
++    return Layer.mergeAll(
++      AppNodeBuilderV1.build(app, replacements),
++      AppNodeBuilderV1.build(LayerNode.group([SessionV2.node, SessionExecution.node]), replacements),
++      AppNodeBuilderV1.build(MoveSession.node, replacements),
++    ).pipe(Layer.provideMerge(locationServiceMapV2))
++  })).pipe(Layer.provideMerge(legacyOwners))
++  return { layer, memoMap }
+ }
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -117,1 +117,3 @@
+       status: () => Effect.succeed({}),
++      native: () => Effect.die("unexpected Native MCP connection in prompt-effect tests"),
++      snapshot: () => Effect.succeed({ tools: {}, clients: {}, instructions }),
+diff --git a/packages/opencode/test/session/snapshot-tool-race.test.ts b/packages/opencode/test/session/snapshot-tool-race.test.ts
+--- a/packages/opencode/test/session/snapshot-tool-race.test.ts
++++ b/packages/opencode/test/session/snapshot-tool-race.test.ts
+@@ -38,1 +38,3 @@
+     status: () => Effect.succeed({}),
++    native: () => Effect.die("unexpected Native MCP connection in snapshot-effect tests"),
++    snapshot: () => Effect.succeed({ tools: {}, clients: {}, instructions: [] }),
+diff --git a/packages/core/test/session-runner-tool-registry.test.ts b/packages/core/test/session-runner-tool-registry.test.ts
+--- a/packages/core/test/session-runner-tool-registry.test.ts
++++ b/packages/core/test/session-runner-tool-registry.test.ts
+@@ -12,1 +12,16 @@
+-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, SchemaGetter, SchemaIssue, Scope } from "effect"
++import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, SchemaGetter, SchemaIssue, Scope } from "effect"
++import { Client } from "@modelcontextprotocol/sdk/client/index.js"
++import { Server } from "@modelcontextprotocol/sdk/server/index.js"
++import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
++import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ReadResourceRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js"
++import { ChildProcessSpawner } from "effect/unstable/process"
++import { McpConnection } from "@opencode-ai/core/mcp/connection"
++import { McpAuth } from "@opencode-ai/core/mcp/auth"
++import { McpBrowser } from "@opencode-ai/core/mcp/browser"
++import { McpRuntime } from "@opencode-ai/core/mcp"
++import { McpTools } from "@opencode-ai/core/mcp/tools"
++import { ConfigMCP } from "@opencode-ai/core/config/mcp"
++import { ConfigMigrateV1 } from "@opencode-ai/core/v1/config/migrate"
++import { PermissionV2 } from "@opencode-ai/core/permission"
++import { SystemContext } from "@opencode-ai/core/system-context"
++import { Tools } from "@opencode-ai/core/tool/tools"
+@@ -74,2 +74,2 @@
+-      const names = (rules: Parameters<ToolRegistry.Interface["materialize"]>[0]) =>
+-        toolDefinitions(service, rules).pipe(Effect.map((definitions) => definitions.map((tool) => tool.name)))
++      const names = (rules: Parameters<ToolRegistry.Interface["materialize"]>[0], selection?: Parameters<ToolRegistry.Interface["materialize"]>[1]) =>
++        service.materialize(rules, selection).pipe(Effect.map(({ definitions }) => definitions.map((tool) => tool.name)))
+@@ -95,4 +95,28 @@
+       expect(yield* names([{ action: "edit", resource: "*", effect: "deny" }])).toEqual(["question", "bash"])
++      // 单独关闭write不能误关共享edit权限的其他工具，ask与局部资源也不等于关闭。
++      expect(yield* names([], [{ action: "write", resource: "*", effect: "deny" }])).toEqual(["question", "bash", "edit", "apply_patch"])
++      expect(yield* names([], [{ action: "write", resource: "*", effect: "ask" }])).toEqual(["question", "bash", "edit", "write", "apply_patch"])
++      expect(yield* names([], [{ action: "write", resource: "private", effect: "deny" }])).toEqual(["question", "bash", "edit", "write", "apply_patch"])
++      expect(yield* names([], [
++        { action: "*", resource: "*", effect: "deny" },
++        { action: "write", resource: "*", effect: "allow" },
++      ])).toEqual(["write"])
++      expect(yield* names([], [
++        { action: "write", resource: "*", effect: "allow" },
++        { action: "*", resource: "*", effect: "deny" },
++      ])).toEqual([])
++      expect(yield* names([{ action: "edit", resource: "*", effect: "deny" }], [
++        { action: "write", resource: "*", effect: "allow" },
++      ])).toEqual(["question", "bash"])
++      // 内部支持工具保留；被关闭的定义不进入该快照的结算集合。
++      yield* service.register({ StructuredOutput: make() })
++      expect(yield* names([], [{ action: "*", resource: "*", effect: "deny" }])).toEqual(["StructuredOutput"])
++      const selected = yield* service.materialize([], [{ action: "write", resource: "*", effect: "deny" }])
++      expect(yield* selected.settle(call("write"))).toEqual({ result: { type: "error", value: "Unknown tool: write" } })
++      expect(yield* selected.settle(call("edit"))).toMatchObject({ result: { type: "text", value: "edit" } })
++      // 后续materialization重新读取选择，不把一次关闭缓存成永久注销。
++      const restored = yield* service.materialize([], [{ action: "write", resource: "*", effect: "allow" }])
++      expect(yield* restored.settle(call("write"))).toMatchObject({ result: { type: "text", value: "write" } })
+     }),
+   )
+ 
+@@ -122,1 +161,150 @@
+       expect(second[0]).toBe(first[0])
++      // 使用真实SDK协议和内存传输；不启动进程、HTTP/OAuth listener或产品宿主。
++      const started = yield* Deferred.make<void>()
++      const cancelled = yield* Deferred.make<void>()
++      const changed = yield* Deferred.make<void>()
++      const state = { connections: 0, closes: 0, deny: false, calls: [] as CallToolRequest["params"][], permissions: [] as PermissionV2.AssertInput[] }
++      const rawSchema = { type: "object" as const, properties: { mode: { type: "string" } }, not: { required: ["forbidden"] }, additionalProperties: true }
++      const server = new Server({ name: "fixture", version: "1" }, { capabilities: { tools: { listChanged: true }, resources: {} }, instructions: "Use the fixture tools exactly as described." })
++      let description = "Original MCP description"
++      server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo.tool", description, inputSchema: rawSchema }] }))
++      server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
++        state.calls.push(request.params)
++        expect(request.params.name).toBe("echo.tool")
++        const token = request.params._meta?.progressToken
++        expect(token).toBeDefined()
++        if (token !== undefined) await extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: 1 } })
++        if (request.params.arguments?.mode === "wait") {
++          return await new Promise<never>((_resolve, reject) => {
++            extra.signal.addEventListener("abort", () => {
++              Effect.runFork(Deferred.succeed(cancelled, undefined))
++              reject(new Error("cancelled fixture request"))
++            }, { once: true })
++            // 先安装取消监听再发布ready，避免fixture丢失同步送达的真实SDK取消通知。
++            Effect.runFork(Deferred.succeed(started, undefined))
++          })
++        }
++        if (request.params.arguments?.mode === "error") return { isError: true, content: [{ type: "text", text: "fixture rejected the request" }] }
++        if (request.params.arguments?.mode === "structured") return { content: [], structuredContent: { ok: true } }
++        return { structuredContent: { ok: true }, content: [
++          { type: "text", text: "MCP text" },
++          { type: "image", data: "AQI=", mimeType: "image/png" },
++          { type: "resource", resource: { uri: "fixture://pdf", blob: "AQI=", mimeType: "application/pdf" } },
++          { type: "resource", resource: { uri: "fixture://zip", blob: "AQI=", mimeType: "application/zip" } },
++        ] }
++      })
++      server.setRequestHandler(ListResourcesRequestSchema, async request => request.params?.cursor
++        ? { resources: [{ name: "second", uri: "fixture://second" }] }
++        : { resources: [{ name: "first", uri: "fixture://first" }], nextCursor: "next" })
++      server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [{ name: "template", uriTemplate: "fixture://{name}" }] }))
++      server.setRequestHandler(ReadResourceRequestSchema, async request => ({ contents: [{ uri: request.params.uri, text: "resource body", mimeType: "text/plain" }] }))
++      class MemoryClient extends Client {
++        override async connect(..._transport: Parameters<Client["connect"]>) {
++          state.connections++
++          const pair = InMemoryTransport.createLinkedPair()
++          await server.connect(pair[1])
++          await super.connect(pair[0])
++        }
++        override async close() {
++          state.closes++
++          await super.close()
++        }
++      }
++      const connection = yield* McpConnection.make({
++        directory: process.cwd(), Client: MemoryClient,
++        config: () => Effect.succeed(ConfigMCP.resolve([
++          ConfigMigrateV1.mcp({ mcp: { fixture: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false, enabled: false, timeout: 5000 } } }) ?? {},
++          ConfigMigrateV1.mcp({ mcp: { fixture: { enabled: true } } }) ?? {},
++        ])),
++        notify: notice => notice.type === "tools_changed" ? Deferred.succeed(changed, undefined).pipe(Effect.asVoid) : Effect.void,
++      }).pipe(Effect.provide(Layer.mergeAll(Layer.mock(McpAuth.Service, {}), Layer.mock(McpBrowser.Service, {}), Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}))))
++      const disabledConnection = yield* McpConnection.make({
++        directory: process.cwd(), Client: MemoryClient,
++        config: () => Effect.succeed(ConfigMCP.resolve([
++          ConfigMigrateV1.mcp({ mcp: { fixture: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false } } }) ?? {},
++          ConfigMigrateV1.mcp({ mcp: { fixture: { enabled: false } } }) ?? {},
++        ])),
++        notify: () => Effect.void,
++      }).pipe(Effect.provide(Layer.mergeAll(Layer.mock(McpAuth.Service, {}), Layer.mock(McpBrowser.Service, {}), Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}))))
++      yield* Effect.addFinalizer(() => Effect.promise(() => server.close()))
++      expect(yield* disabledConnection.status()).toEqual({ fixture: { status: "disabled" } })
++      expect(state.connections).toBe(0)
++      const permission = Layer.mock(PermissionV2.Service, { assert: input => {
++        state.permissions.push(input)
++        return state.deny ? Effect.fail(new PermissionV2.CorrectedError({ feedback: "permission refused" })) : Effect.void
++      } })
++      const context = yield* Layer.build(McpTools.layer.pipe(
++        Layer.provide(Layer.succeed(McpRuntime.Service, connection)),
++        Layer.provide(Layer.succeed(Tools.Service, { register: service.register })),
++        Layer.provide(permission),
++      ))
++      const native = Context.get(context, McpTools.Service)
++      const contextFor = yield* native.prepare()
++      expect(state.connections).toBe(1)
++      const snapshot = yield* service.materialize()
++      const definition = snapshot.definitions.find(tool => tool.name === "fixture_echo_tool")
++      expect(definition?.description).toBe(description)
++      expect(definition?.inputSchema).toEqual(rawSchema)
++      expect(snapshot.definitions.map(tool => tool.name)).toContain("list_mcp_resources")
++      expect((yield* SystemContext.initialize(contextFor(snapshot.definitions.map(tool => tool.name)))).baseline).toContain("Use the fixture tools exactly as described.")
++      expect((yield* SystemContext.initialize(contextFor([]))).baseline).toBe("")
++      yield* Effect.all([native.prepare(), native.prepare()], { concurrency: "unbounded" })
++      expect((yield* service.materialize()).definitions.find(tool => tool.name === "fixture_echo_tool")).toBe(definition)
++      const invoke = (name: string, input: Record<string, unknown>, id = "call-mcp") => snapshot.settle({ sessionID, ...identity, call: { type: "tool-call", name, id, input } })
++      const media = yield* invoke("fixture_echo_tool", { mode: "media", literal: "$&" })
++      expect(media.output?.structured).toEqual({ ok: true })
++      expect(media.output?.content).toEqual([
++        { type: "text", text: "MCP text\n\n[Binary MCP resource omitted: fixture://zip (application/zip, 2 B) is not a supported attachment type]" },
++        { type: "file", uri: "data:image/png;base64,AQI=", mime: "image/png", name: undefined },
++        { type: "file", uri: "data:application/pdf;base64,AQI=", mime: "application/pdf", name: "fixture://pdf" },
++      ])
++      expect(state.calls.at(-1)?.arguments).toEqual({ mode: "media", literal: "$&" })
++      expect(state.permissions.at(-1)).toMatchObject({ action: "fixture_echo_tool", sessionID, source: { messageID: identity.assistantMessageID, callID: "call-mcp" } })
++      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).result).toEqual({ type: "text", value: '{"ok":true}' })
++      expect((yield* invoke("fixture_echo_tool", { mode: "error" })).result).toEqual({ type: "error", value: "fixture rejected the request" })
++      const count = state.calls.length
++      state.deny = true
++      expect((yield* invoke("fixture_echo_tool", { mode: "media" })).result).toEqual({ type: "error", value: "permission refused" })
++      expect(state.calls).toHaveLength(count)
++      state.deny = false
++      expect((yield* invoke("list_mcp_resources", {})).output?.structured).toMatchObject({ resources: [{ name: "first", server: "fixture" }, { name: "second", server: "fixture" }] })
++      expect((yield* invoke("list_mcp_resource_templates", {})).output?.structured).toMatchObject({ resourceTemplates: [{ uriTemplate: "fixture://{name}", server: "fixture" }] })
++      expect((yield* invoke("read_mcp_resource", { server: "fixture", uri: "fixture://first" })).result).toEqual({ type: "text", value: "Resource: fixture://first\nMIME: text/plain\nresource body" })
++      expect(state.permissions.at(-1)).toMatchObject({ action: "read", resources: ["mcp:fixture:fixture://first"], save: ["mcp:fixture:*"] })
++      // 真实SDK取消通知终止单次调用，共享client仍可继续结算下一次请求。
++      const running = yield* invoke("fixture_echo_tool", { mode: "wait" }, "call-mcp-cancel").pipe(Effect.forkChild)
++      yield* Deferred.await(started)
++      yield* Fiber.interrupt(running)
++      yield* Deferred.await(cancelled)
++      expect(state.closes).toBe(0)
++      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).output?.structured).toEqual({ ok: true })
++      description = "Updated MCP description"
++      yield* Effect.promise(() => server.sendToolListChanged())
++      yield* Deferred.await(changed)
++      yield* native.prepare()
++      expect((yield* service.materialize()).definitions.find(tool => tool.name === "fixture_echo_tool")?.description).toBe(description)
++      expect((yield* invoke("fixture_echo_tool", { mode: "structured" })).result).toEqual({ type: "error", value: "Stale tool call: fixture_echo_tool" })
++      const hidden = yield* service.materialize([], [{ action: "fixture_echo_tool", resource: "*", effect: "deny" }])
++      expect(hidden.definitions.map(tool => tool.name)).not.toContain("fixture_echo_tool")
++      expect((yield* hidden.settle({ sessionID, ...identity, call: { type: "tool-call", name: "fixture_echo_tool", id: "disabled-mcp", input: {} } })).result).toEqual({ type: "error", value: "Unknown tool: fixture_echo_tool" })
++      yield* connection.disconnect("fixture")
++      yield* native.prepare()
++      expect((yield* service.materialize()).definitions.map(tool => tool.name)).toEqual(["echo"])
++      expect(state.closes).toBe(1)
++      // 数字前缀与长合成名保持原身份；已关闭的定义不能先阻断整个Native turn。
++      for (const serverName of ["1fixture", "fixture".repeat(10)]) {
++        yield* connection.add(serverName, { type: "remote", url: "https://mcp.fixture.invalid", oauth: false })
++        yield* native.prepare()
++        const materialized = yield* service.materialize()
++        const name = `${serverName}_echo_tool`
++        expect(materialized.definitions.map(tool => tool.name)).toContain(name)
++        const result = yield* materialized.settle({ sessionID, ...identity, call: { type: "tool-call", name, id: "named-mcp", input: { mode: "structured" } } })
++        expect(result.result).toEqual({ type: "text", value: '{"ok":true}' })
++        const disabled = yield* service.materialize([], [{ action: "*", resource: "*", effect: "deny" }])
++        expect(disabled.definitions).toEqual([])
++        expect((yield* disabled.settle({ sessionID, ...identity, call: { type: "tool-call", name, id: "disabled-named-mcp", input: {} } })).result).toEqual({ type: "error", value: `Unknown tool: ${name}` })
++        yield* connection.disconnect(serverName)
++        yield* native.prepare()
++        expect((yield* service.materialize()).definitions.map(tool => tool.name)).toEqual(["echo"])
++      }
++      expect(state.closes).toBe(3)
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1243,5 +1243,29 @@
+         expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+       }))
++      const db = (yield* Database.Service).db
++      // 在同一持久Session切换工具，核对真实请求与调用结果而不是只测selector。
++      for (const action of ["deny", "allow"] as const) {
++        yield* db.update(SessionTable).set({ permission: [{ permission: "echo", pattern: "*", action }] })
++          .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
++        yield* session.prompt({ sessionID, prompt: Prompt.make({ text: `Set echo ${action}` }), resume: false })
++        requests.length = 0
++        executions.length = 0
++        responses = [[
++          LLMEvent.stepStart({ index: 0 }),
++          LLMEvent.toolCall({ id: `call-${action}`, name: "echo", input: { text: action } }),
++          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++          LLMEvent.finish({ reason: "tool-calls" }),
++        ], []]
++        yield* session.resume(sessionID)
++        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect"] : ["defect", "echo"])
++        expect(executions).toEqual(action === "deny" ? [] : ["allow"])
++        const parts = requests[0]?.system.map(part => part.text) ?? []
++        expect(parts.filter(part => part === "Initial context")).toHaveLength(1)
++        expect(parts[0]).toBe(expectedToolGuidance)
++        const messages = yield* session.context(sessionID)
++        const tools = messages.flatMap(message => message.type === "assistant" ? message.content.filter(part => part.type === "tool") : [])
++        expect(tools.find(tool => tool.id === `call-${action}`)?.state.status).toBe(action === "deny" ? "error" : "completed")
++      }
+     }),
+   )
+ 
+@@ -3941,4 +3965,6 @@
+       expect(requests[0]?.toolChoice).toBeUndefined()
+       expect(requests[1]?.toolChoice).toMatchObject({ type: "none" })
+       expect(requests[1]?.tools).toEqual([])
++      // 最后一步没有工具，即使静态族正文提到工具也必须明确覆盖。
++      expect(requests[1]?.system.map(part => part.text).join("\n")).toContain("NO tools are currently available")
+       expect(requests[1]?.messages.at(-1)).toMatchObject({
+diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
+--- a/packages/core/src/v1/config/migrate.ts
++++ b/packages/core/src/v1/config/migrate.ts
+@@ -5,1 +5,2 @@
+ import { ConfigMCPV1 } from "./mcp"
++import { ConfigMCP } from "../../config/mcp"
+@@ -30,4 +30,9 @@
+ export function isV1(input: unknown) {
+   if (typeof input !== "object" || input === null || Array.isArray(input)) return false
+-  return Object.keys(input).some((key) => keys.has(key))
++  if (Object.keys(input).some((key) => keys.has(key))) return true
++  const mcp = "mcp" in input ? input.mcp : undefined
++  // 旧MCP可单独配置，不能因缺少其他旧键而被新schema当成空服务器集。
++  return typeof mcp === "object" && mcp !== null && !Array.isArray(mcp) &&
++    Object.values(mcp).some(server => typeof server === "object" && server !== null && (
++      ("type" in server && (server.type === "local" || server.type === "remote")) || ("enabled" in server && typeof server.enabled === "boolean")))
+ }
+@@ -128,1 +134,1 @@
+-function mcp(info: typeof ConfigV1.Info.Type) {
++export function mcp(info: Pick<typeof ConfigV1.Info.Type, "mcp" | "experimental">): ConfigMCP.Info | undefined {
+@@ -129,5 +135,6 @@
+   const servers = Object.fromEntries(
+-    Object.entries(info.mcp ?? {}).flatMap(([name, server]) =>
+-      "type" in server ? [[name, migrateMcp(server)] as const] : [],
++    // enabled-only是公开的继承覆盖，不能在全局与项目配置合并前丢弃。
++    Object.entries(info.mcp ?? {}).map(([name, server]) =>
++      [name, "type" in server ? migrateMcp(server) : { disabled: !server.enabled }],
+     ),
+   )
+@@ -139,1 +145,1 @@
+-function migrateMcp(info: ConfigMCPV1.Info) {
++export function migrateMcp(info: ConfigMCPV1.Info): typeof ConfigMCP.Server.Type {
+@@ -148,1 +154,2 @@
+-      timeout: info.timeout === undefined ? undefined : { request: info.timeout },
++      // V1同一期限控制连接和调用，不能迁移后把长连接等待缩回默认值。
++      timeout: info.timeout === undefined ? undefined : { startup: info.timeout, request: info.timeout },
+@@ -162,1 +168,1 @@
+-    timeout: info.timeout === undefined ? undefined : { request: info.timeout },
++    timeout: info.timeout === undefined ? undefined : { startup: info.timeout, request: info.timeout },
+diff --git a/packages/core/test/config/config.test.ts b/packages/core/test/config/config.test.ts
+--- a/packages/core/test/config/config.test.ts
++++ b/packages/core/test/config/config.test.ts
+@@ -7,1 +7,2 @@
+ import { ConfigProvider } from "@opencode-ai/core/config/provider"
++import { ConfigMCP } from "@opencode-ai/core/config/mcp"
+@@ -74,6 +75,89 @@
+       expect(ConfigMigrateV1.isV1({ shell: "/bin/zsh", model: "anthropic/claude" })).toBe(false)
+       expect(ConfigMigrateV1.isV1({ references: {} })).toBe(false)
+     }),
+   )
+ 
++  it.live("loads MCP-only legacy files without changing native server timeouts", () =>
++    Effect.acquireRelease(Effect.promise(() => tmpdir()), tmp => Effect.promise(() => tmp[Symbol.asyncDispose]())).pipe(
++      Effect.flatMap(tmp => Effect.gen(function* () {
++        // 只读取配置，虚构命令和域名不会启动客户端或连接外部服务。
++        const legacy = {
++          mcp: {
++            local: { type: "local", command: ["fixture-mcp-no-exec"], enabled: false, timeout: 10000 },
++            remote: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false, timeout: 20000 },
++          },
++        } as const
++        const native = { mcp: { servers: { type: { type: "local", command: ["fixture-mcp-no-exec"], timeout: { startup: 11000, request: 22000 } } } } } as const
++        // 新式服务器也可能名为type，必须按条目形状而不是键名决定配置版本。
++        expect(ConfigMigrateV1.isV1(legacy)).toBe(true)
++        expect(ConfigMigrateV1.isV1(native)).toBe(false)
++        for (const [name, input, expected] of [
++          ["legacy", legacy, { servers: { local: { disabled: true, timeout: { startup: 10000, request: 10000 } }, remote: { oauth: false, timeout: { startup: 20000, request: 20000 } } } }],
++          ["native", native, native.mcp],
++        ] as const) {
++          const directory = path.join(tmp.path, name)
++          yield* Effect.promise(async () => { await fs.mkdir(directory); await fs.writeFile(path.join(directory, "opencode.json"), JSON.stringify(input)) })
++          // 真实文件加载器必须选中正确decoder，不能只测直接调用迁移函数。
++          const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(directory)))
++          const document = entries.find(entry => entry.type === "document")
++          expect(document).toBeDefined()
++          expect(document?.info.mcp).toMatchObject(expected)
++        }
++        for (const enabled of [false, true]) {
++          const directory = path.join(tmp.path, `toggle-${enabled}`)
++          const globalDirectory = path.join(directory, "global")
++          yield* Effect.promise(async () => {
++            await fs.mkdir(globalDirectory, { recursive: true })
++            await fs.writeFile(path.join(globalDirectory, "opencode.json"), JSON.stringify({ mcp: { docs: { type: "local", command: ["fixture-mcp-no-exec"], enabled: !enabled, timeout: 15000 } } }))
++            await fs.writeFile(path.join(directory, "opencode.json"), JSON.stringify({ mcp: { docs: { enabled } } }))
++          })
++          // 使用真实全局/项目文件与同一运行时汇总器，双向启停不能丢失继承的command。
++          const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(directory, globalDirectory)))
++          const resolved = ConfigMCP.resolve(entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : []))
++          expect(resolved.servers?.docs).toMatchObject({ type: "local", command: ["fixture-mcp-no-exec"], disabled: !enabled, timeout: { startup: 15000, request: 15000 } })
++        }
++        expect(ConfigMigrateV1.isV1({ mcp: { docs: { enabled: false } } })).toBe(true)
++        const directory = path.join(tmp.path, "nested")
++        const globalDirectory = path.join(directory, "global")
++        yield* Effect.promise(async () => {
++          await fs.mkdir(globalDirectory, { recursive: true })
++          await fs.writeFile(path.join(globalDirectory, "opencode.json"), JSON.stringify({ mcp: {
++            docs: { type: "remote", url: "https://mcp.fixture.invalid", headers: { Authorization: "Bearer fixture", Common: "global" }, oauth: { clientId: "fixture-id", clientSecret: "fixture-secret" }, timeout: 17000 },
++            local: { type: "local", command: ["old-command"], cwd: "inherited-cwd", environment: { SHARED: "keep" } },
++          } }))
++          await fs.writeFile(path.join(directory, "opencode.json"), JSON.stringify({ mcp: {
++            docs: { type: "remote", url: "https://mcp.fixture.invalid", headers: { "X-Project": "project", Common: "project" }, oauth: { scope: "project-scope" } },
++            local: { type: "local", command: ["new-command"], environment: { PROJECT: "add" } },
++          } }))
++        })
++        // 走真实文档decoder后合并class字段，认证和环境未覆盖的键必须继续有效。
++        const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(directory, globalDirectory)))
++        const configs = entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : [])
++        const resolved = ConfigMCP.resolve(configs)
++        expect(resolved.servers?.docs).toMatchObject({ headers: { Authorization: "Bearer fixture", "X-Project": "project", Common: "project" }, oauth: { client_id: "fixture-id", client_secret: "fixture-secret", scope: "project-scope" }, timeout: { startup: 17000, request: 17000 } })
++        expect(resolved.servers?.local).toMatchObject({ command: ["new-command"], cwd: "inherited-cwd", environment: { SHARED: "keep", PROJECT: "add" } })
++        expect(ConfigMCP.resolve([...configs, ConfigMigrateV1.mcp({ mcp: { docs: { type: "remote", url: "https://mcp.fixture.invalid", oauth: false } } }) ?? {}]).servers?.docs).toMatchObject({ oauth: false })
++        const variables = path.join(tmp.path, "variables")
++        const key = "OPENCODE_MCP_FIXTURE_CREDENTIAL"
++        const previous = process.env[key]
++        const fileSecret = 'fixture"secret\nsecond line'
++        yield* Effect.acquireUseRelease(Effect.sync(() => { process.env[key] = "fixture-env-value" }), () => Effect.gen(function* () {
++          yield* Effect.promise(async () => {
++            await fs.mkdir(variables)
++            await fs.writeFile(path.join(variables, "credential.txt"), fileSecret + "\n")
++            await fs.writeFile(path.join(variables, "opencode.json"), "// {file:ignored-comment.txt}\n" + JSON.stringify({ mcp: {
++              docs: { type: "remote", url: "https://mcp.fixture.invalid", headers: { Authorization: `Bearer {env:${key}}` }, oauth: { clientId: `{env:${key}}`, clientSecret: "{file:credential.txt}" } },
++              local: { type: "local", command: ["fixture-mcp-no-exec"], environment: { CREDENTIAL: `{env:${key}}` } },
++            } }))
++          })
++          // 真实文件加载保留引用目录、JSON转义与注释跳过，不启动认证或本地MCP。
++          const entries = yield* Config.Service.use(service => service.entries()).pipe(Effect.provide(testLayer(variables)))
++          const resolved = ConfigMCP.resolve(entries.flatMap(entry => entry.type === "document" && entry.info.mcp ? [entry.info.mcp] : []))
++          expect(resolved.servers?.docs).toMatchObject({ headers: { Authorization: "Bearer fixture-env-value" }, oauth: { client_id: "fixture-env-value", client_secret: fileSecret } })
++          expect(resolved.servers?.local).toMatchObject({ environment: { CREDENTIAL: "fixture-env-value" } })
++        }), () => Effect.sync(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous }))
++      })),
++    ),
++  )
++
+   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>
 diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
 --- a/packages/core/test/system-context/builtins.test.ts
 +++ b/packages/core/test/system-context/builtins.test.ts

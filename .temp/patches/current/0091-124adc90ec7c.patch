@@ -5,9 +5,9 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=B7=BB=E5=8A=A0=E9=87=8D?=
  =?UTF-8?q?=E5=90=AFJupyter=E5=86=85=E6=A0=B8=E5=8A=9F=E8=83=BD=EF=BC=8C?=
  =?UTF-8?q?=E6=94=AF=E6=8C=81=E6=B8=85=E9=99=A4=E8=BF=90=E8=A1=8C=E7=8A=B6?=
 
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
 @@ -46,4 +46,10 @@ export const VscodeNotebookDescriptions = {
      "filePath is required. Use this when debugging kernel, interpreter, package, working-directory, or environment issues.",
      "The active runtime is probed from VS Code/Jupyter when available. Saved .ipynb kernelspec and language_info metadata is reported separately and is not treated as the active runtime.",
@@ -40,6 +40,105 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
    },
  }
  }
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -46,7 +46,12 @@
+   language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source." }).pipe(Schema.optional),
+ })
+ export const EnvInput = SummaryInput
++// 独立重启入口仅存在于本项中间态，原因只作原生日志，不作为执行参数。
++export const KernelInput = Schema.Struct({
++  filePath,
++  reason: Schema.String.annotate({ description: "Why the kernel is being restarted, for logging and user context." }).pipe(Schema.optional),
++})
+ 
+ // 原生data中的格、运行时、MIME与artifact保留未知嵌套字段，不让较窄投影丢掉模型结果。
+ export const Output = Schema.Struct({
+   ran: Schema.Boolean,
+@@ -92,5 +97,7 @@
+     vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
+       execute: (args, context) => call("/notebook/env", args, context, 10_000) }),
++    vscode_notebook_restart_kernel: Tool.make({ ...common, description: VscodeNotebookDescriptions.kernel, input: KernelInput,
++      execute: (args, context) => call("/notebook/kernel", args, context, 30_000) }),
+   }).pipe(Effect.orDie)
+ }))
+ 
+diff --git a/packages/core/test/location-layer.test.ts b/packages/core/test/location-layer.test.ts
+--- a/packages/core/test/location-layer.test.ts
++++ b/packages/core/test/location-layer.test.ts
+@@ -117,7 +117,8 @@
+             "todowrite",
+             "vscode_notebook_edit",
+             "vscode_notebook_env",
+             "vscode_notebook_output",
++            "vscode_notebook_restart_kernel",
+             "vscode_notebook_run",
+             "vscode_notebook_source",
+             "vscode_notebook_summary",
+@@ -141,7 +142,8 @@
+             "todowrite",
+             "vscode_notebook_edit",
+             "vscode_notebook_env",
+             "vscode_notebook_output",
++            "vscode_notebook_restart_kernel",
+             "vscode_notebook_run",
+             "vscode_notebook_source",
+             "vscode_notebook_summary",
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -22,4 +22,4 @@
+-it.live("registers six Notebook tools through the real bridge and preserves native results", () => Effect.gen(function* () {
++it.live("registers Notebook tools through the real bridge and preserves native results", () => Effect.gen(function* () {
+   const tmp = yield* Effect.acquireRelease(
+     Effect.promise(() => tmpdir()),
+     tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+@@ -53,6 +53,7 @@
+     "/notebook/run": { ran: true, summary: "run", data: { completed: true, cells: [{ id: "#VSC-a", execution: { status: "succeeded", provenance: "current" }, artifacts: [{ mime: "image/png", bytes: 12, artifactURI: "vscode-remote://fixture/plot.png" }] }] } },
+     "/notebook/output": { ran: false, summary: "output", data: { artifacts: [{ mime: "application/json", bytes: 7, text: '{"x":1}', artifactPath: path.join(tmp.path, "output.json") }] } },
+     "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0 } },
+     "/notebook/env": { ran: false, summary: "env", data: { runtime: { path: "fixture-python", version: "3" }, saved_metadata: { language_info: { name: "python" } } }, note: "saved metadata kept separate" },
++    "/notebook/kernel": { ran: true, summary: "Kernel restart requested.", data: { path: filePath, requested: true, askForKernelRestartOriginal: true, askForKernelRestartSuppressed: true } },
+   }
+   // 唯一监听只绑定回环随机端口；release也进入最终清理，失败断言不会留下等待请求。
+@@ -87,5 +88,5 @@
+-    // 必须实际注册六个名字，通用edit禁令还要过滤Notebook别名。
++    // 名字必须来自实际注册，通用edit禁令还要过滤Notebook别名。
+     const definitions = yield* toolDefinitions(registry)
+-    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
++    expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_restart_kernel", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
+     expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
+     expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")
+@@ -122,10 +123,12 @@
+-    // 后续env推进同一队列，迟到的取消编辑不能躲过最终六次RPC的完整比较。
++    // 后续env与重启推进同一队列，迟到的取消编辑不能躲过完整RPC比较。
+     for (const [name, input, endpoint] of [
+       ["vscode_notebook_output", { filePath, cellId: "#VSC-a" }, "/notebook/output"],
+       ["vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, "/notebook/edit"],
+       ["vscode_notebook_env", { filePath }, "/notebook/env"],
++      ["vscode_notebook_restart_kernel", { filePath, reason: "fixture-restart" }, "/notebook/kernel"],
++      ["vscode_notebook_restart_kernel", { filePath }, "/notebook/kernel"],
+     ] as const) {
+       const result = yield* invoke(name, input)
+       expect(result.result.type).toBe("text")
+       expect(result.output?.structured).toEqual(responses[endpoint])
+       expect(result.output?.content).toEqual([{ type: "text", text: responses[endpoint]?.summary }])
+@@ -134,8 +137,12 @@
+     expect(received.map(item => ({ path: item.path, method: item.method, auth: item.auth }))).toEqual(
+-      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
++      ["/notebook/summary", "/notebook/source", "/notebook/run", "/notebook/output", "/notebook/edit", "/notebook/env", "/notebook/kernel", "/notebook/kernel"].map(path => ({ path, method: "POST", auth: "Bearer fixture-token" })),
+     )
+     // 仅run补source规定的期限；未传oldCode/language等字段不能变为空值。
+     expect(received.map(item => item.body)).toEqual([
+       { filePath }, { filePath, cellId: "#VSC-a", offset: 3, limit: 20 }, { filePath, cellId: "#VSC-a", endCellId: "#VSC-b", timeoutMs: 300_000 },
+-      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath },
++      { filePath, cellId: "#VSC-a" }, { filePath, cellId: "#VSC-a", editType: "edit", newCode: ["x = 1"] }, { filePath }, { filePath, reason: "fixture-restart" }, { filePath },
+     ])
++    // 错误重启参数必须在canonical解码时拒绝，不发给原生宿主或补成空值。
++    expect((yield* invoke("vscode_notebook_restart_kernel", { reason: "missing path" })).result.type).toBe("error")
++    expect((yield* invoke("vscode_notebook_restart_kernel", { filePath, reason: 123 })).result.type).toBe("error")
++    expect(received).toHaveLength(8)
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts

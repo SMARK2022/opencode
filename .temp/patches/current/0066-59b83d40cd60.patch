@@ -141,6 +141,67 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 +    // 模型参数广告区分默认与既有 schema 上限，避免把 1000 误解成最大可请求范围。
 +    description: "The maximum number of directory entries or text lines to read (defaults to 1000, maximum 2000)",
    }),
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -9,4 +9,5 @@
+ } from "@opencode-ai/llm"
++import { ReadToolFileSystem } from "../../tool/read-filesystem"
+ import { SessionMessage } from "../message"
+ import type { FileAttachment } from "../prompt"
+ 
+@@ -181,7 +182,8 @@
+       if (typeof item.state.input.path !== "string" || typeof output.content !== "string" ||
+           (output.encoding !== "utf8" && output.type !== "text-page")) return item
+       // 下一页到达请求末界说明本页完整；字节提前截断与长行裁剪仍不能作为版本证明。
+-      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? 2000)
++      // 请求范围与实际reader共用默认常量，降默认页长后仍识别同一完整页面。
++      const pageEnd = Number(item.state.input.offset ?? 1) + Number(item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES)
+       if (output.type === "text-page" &&
+           ((output.next === undefined ? output.truncated !== false : output.next !== pageEnd) ||
+           output.content.includes("... (line truncated to 2000 chars)"))) return item
+@@ -193,5 +195,5 @@
+       // 默认化同一路径/范围，并比较新鲜 durable 结果及提醒；call ID 不代表版本。
+       const key = JSON.stringify([item.state.input.path, item.state.input.offset ?? 1,
+-        item.state.input.limit ?? 2000, output, item.state.content])
++        item.state.input.limit ?? ReadToolFileSystem.DEFAULT_READ_LINES, output, item.state.content])
+       if (!reads.has(key)) {
+         reads.add(key)
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -30,7 +30,7 @@
+     const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
+       .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
+     const first = read("first")
+-    const second = read("second", output, { path: "note.txt", offset: 1, limit: 2000 })
++    const second = read("second", output, { path: "note.txt", offset: 1, limit: 1000 })
+     // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
+     expect(results(first, second)[0]).toEqual({ type: "json", value: output })
+     expect(results(first, second)[1]).toMatchObject({ type: "text" })
+@@ -57,6 +57,12 @@
+     expect(results(read("page5", page, range), read("page6", page, { ...range, limit: 2 }))[1]).toMatchObject({ type: "json" })
+     // 压缩边界后重新提供正文，stub 不能把旧页证明带入新的可见历史。
+     expect(results(read("page7", page, range), checkpoint, read("page8", page, range))[1]).toEqual({ type: "json", value: page })
++    // 默认1000与显式1000是同一完整页；显式2000仍请求不同范围，不能被前页证明替代。
++    const defaultPage = { ...page, content: Array.from({ length: 1000 }, () => "line").join("\n"), next: 1001 }
++    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 1000 }))[1]))
++      .toContain("File unchanged since last read")
++    expect(results(read("default3", defaultPage), read("default4", defaultPage, { path: "note.txt", limit: 2000 }))[1])
++      .toEqual({ type: "json", value: defaultPage })
+ 
+     // 不足请求范围的页面、行内截断与媒体仍不具备完整正文证明。
+     for (const partial of [
+diff --git a/packages/tui/src/util/tool-definition-catalog.json b/packages/tui/src/util/tool-definition-catalog.json
+--- a/packages/tui/src/util/tool-definition-catalog.json
++++ b/packages/tui/src/util/tool-definition-catalog.json
+@@ -14,4 +14,4 @@
+   "read": {
+-    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 2000 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
+-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file or directory to read"},"offset":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The line number to start reading from (1-indexed)"},"limit":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The maximum number of lines to read (defaults to 2000)"}},"required":["filePath"]}
++    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 1000 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file or directory to read"},"offset":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The line number to start reading from (1-indexed)"},"limit":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The maximum number of lines to read (defaults to 1000)"}},"required":["filePath"]}
+   },
 diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/test/tool-read-filesystem.test.ts
 --- a/packages/core/test/tool-read-filesystem.test.ts
 +++ b/packages/core/test/tool-read-filesystem.test.ts

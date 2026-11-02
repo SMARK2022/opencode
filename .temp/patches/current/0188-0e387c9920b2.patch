@@ -16,7 +16,29 @@ diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/rea
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
 @@ -1,3 +1,4 @@
-+// #188：成功 edit/write/apply_patch 后禁止再 read 确认，工具自身会报错
++// 成功后的确认性复读可省略；失败恢复和未读范围仍可正常读取。
  import { Effect, Option, Schema, Scope, Stream } from "effect"
  import { NonNegativeInt } from "@opencode-ai/core/schema"
  import * as path from "path"
+diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
+--- a/packages/core/src/tool/read.ts
++++ b/packages/core/src/tool/read.ts
+@@ -56,4 +56,6 @@
+         [name]: Tool.make({
+           description:
+-            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 16 KiB per read; displayed lines are limited to 2000 characters.\nLine accounting scans at most 256 KiB beyond the returned page. If `<range total_exact=\"false\">` appears, `total` is a lower bound; otherwise it is exact.\nIf a result returns `<stub status=\"...\">`, use the already visible content in the current context instead of reading the same range again.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed.",
++            // 保留精心打磨的成功后提示原话；这不是工具执行层的读取禁令。
++            "Read a text file or supported image, page through a large UTF-8 text file by line offset, or list a directory page. Relative paths resolve from the current location; absolute paths inside it are accepted, while external absolute paths require external_directory approval.\n\nBy default, this tool returns up to 200 lines from the start of the file.\nText content is capped at 16 KiB per read; displayed lines are limited to 2000 characters.\nLine accounting scans at most 256 KiB beyond the returned page. If `<range total_exact=\"false\">` appears, `total` is a lower bound; otherwise it is exact.\nIf a result returns `<stub status=\"...\">`, use the already visible content in the current context instead of reading the same range again.\nFor source files, use `<range>`, `<more>`, and optional `<outline>` to choose targeted ranges. Do not page sequentially unless full-file comprehension is needed." +
++            "\nAfter a successful edit, write, or apply_patch, skip re-reading the file to confirm—the tool errors if it didn't work.",
+           input: Input,
+diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
+--- a/packages/core/test/tool-read.test.ts
++++ b/packages/core/test/tool-read.test.ts
+@@ -175,6 +175,6 @@
+     Effect.gen(function* () {
+       const registry = yield* ToolRegistry.Service
+ 
+-      expect(yield* toolDefinitions(registry)).toMatchObject([{ name: "read" }])
++      expect(yield* toolDefinitions(registry)).toMatchObject([{ name: "read", description: expect.stringContaining("After a successful edit, write, or apply_patch, skip re-reading the file to confirm—the tool errors if it didn't work.") }])
+       expect(yield* toolDefinitions(registry, [{ action: "read", resource: "*", effect: "deny" }])).toEqual([])
+       expect(

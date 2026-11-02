@@ -23,14 +23,11 @@ diff --git a/packages/core/src/v1/config/config.ts b/packages/core/src/v1/config
 index b1d3ae727..774d1682c 100644
 --- a/packages/core/src/v1/config/config.ts
 +++ b/packages/core/src/v1/config/config.ts
-@@ -173,6 +173,13 @@
+@@ -173,6 +173,10 @@
        }),
      }),
    ),
-+  // [local-smark] goal 续跑上限：0 = 禁用续跑，默认 10。
-+  // 0367 起从 experimental 提升为顶层字段，goal 功能始终可用
-+      // #367：goal_max_turns 从 experimental.goals 顶层化——goal 已是正式能力，
-+      // 嵌套开关让用户难以发现；顶层键与 disabled_tools 等既有稳定配置同层。
++  // Goal正式启用：顶层上限默认10；0只禁用自动续跑，不隐藏工具。
 +  goal_max_turns: Schema.optional(NonNegativeInt).annotate({
 +    description: "Maximum auto-continue turns per goal (default: 10, 0 to disable)",
 +  }),
@@ -100,7 +97,7 @@ index 8c766dc76..fe5e0bd09 100644
 -            ...(goalsEnabled ? [tool.goal] : []),
 +            // [local-smark] goal 工具：始终暴露给模型，不再需要 experimental 开关
 +            tool.goal,
-             ...(flags.experimentalLspTool ? [tool.lsp] : []),
+             // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
              ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
            ],
 diff --git a/packages/opencode/test/session/goal.test.ts b/packages/opencode/test/session/goal.test.ts
@@ -193,28 +190,30 @@ diff --git a/packages/core/src/config/experimental.ts b/packages/core/src/config
  import { Policy as PolicyV2 } from "../policy"
  
  // Each core domain exports the policy actions it supports. Adding an action to
-@@ -16,7 +15,4 @@
+@@ -16,9 +15,6 @@
  
  export class Experimental extends Schema.Class<Experimental>("ConfigV2.Experimental")({
    policies: Policy.pipe(Schema.Array, Schema.optional),
 -  // 两代 runner 使用相同开关与自动续跑上限，默认保持关闭。
 -  goals: Schema.optional(Schema.Boolean),
 -  goal_max_turns: Schema.optional(NonNegativeInt),
+   // 子代理配置禁令在派生上限后生效，两代不能只在工具展示中隐藏。
+   primary_tools: Schema.Array(Schema.String).pipe(Schema.optional),
  }) {}
 diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
 --- a/packages/core/src/v1/config/migrate.ts
 +++ b/packages/core/src/v1/config/migrate.ts
-@@ -68,11 +68,8 @@
+@@ -75,12 +75,10 @@
      plugins: info.plugin?.map((plugin) =>
        typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
      ),
--    experimental: info.experimental && {
--      policies: info.experimental.policies,
++    goal_max_turns: info.goal_max_turns,
+     experimental: info.experimental && {
+-      // Goal开关与原有子代理限制同时透传，不改变已有action归一化。
+       policies: info.experimental.policies, primary_tools: info.experimental.primary_tools?.map(normalizeAction),
 -      goals: info.experimental.goals,
 -      goal_max_turns: info.experimental.goal_max_turns,
--    },
-+    goal_max_turns: info.goal_max_turns,
-+    experimental: info.experimental?.policies && { policies: info.experimental.policies },
+     },
      providers: providers(info.provider),
    }
  }
@@ -273,7 +272,35 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
  import { ConfigCompaction } from "@opencode-ai/core/config/compaction"
  import { Tool } from "@opencode-ai/core/tool/tool"
  import {
-@@ -659,7 +658,7 @@
+@@ -283,6 +282,11 @@
+       ]),
+   }),
+ )
++// 内外两张runner图都替换MCP Service，纯用例不创建连接/OAuth清理链。
++const mcp = Layer.succeed(McpTools.Service, McpTools.Service.of({
++  prepare: () => Effect.succeed(() => SystemContext.empty),
++}))
++
+ let runnerMcp: McpTools.Interface | undefined
+ const runnerLayer = (configuration = config) => AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
+   [Snapshot.node, Snapshot.noopLayer],
+@@ -292,6 +296,7 @@
+   [Location.node, Location.boundNode({ directory: AbsolutePath.make("/project") })],
+   [SkillGuidance.node, skillGuidance],
+   [ReferenceGuidance.node, referenceGuidance],
++  [McpTools.node, mcp],
+   [PermissionV2.node, permission],
+   [Config.node, configuration],
+ ])
+@@ -348,6 +353,7 @@
+       [SkillGuidance.node, skillGuidance],
+       [ReferenceGuidance.node, referenceGuidance],
+       [Snapshot.node, Snapshot.noopLayer],
++      [McpTools.node, mcp],
+       [SessionExecution.node, execution(configuration)],
+       [Config.node, configuration],
+     ],
+@@ -659,7 +665,7 @@
  const goalConfig = Layer.succeed(Config.Service, Config.Service.of({
    entries: () => Effect.succeed([new Config.Document({
      type: "document",
@@ -292,6 +319,33 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
          { role: "user", content: [{ type: "text", text: "First" }] },
          { role: "user", content: [{ type: "text", text: "Second" }] },
        ])
+@@ -1298,7 +1306,7 @@
+     expect(PermissionV2.evaluate("edit", "/file.ts", inherited).effect).toBe("deny")
+     expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
+     expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("allow")
+     const actual = requests.at(-1)
+-    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
++    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
+     expect(userTexts(actual!).join("\n")).toContain("Inspect the requested module")
+     expect(userTexts(actual!).join("\n")).toContain("<parent_context>\n### Parent Session Inspected Files")
+@@ -1489,7 +1497,7 @@
+           `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : ""}`])
+         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
+         expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
+-        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
++        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
+       }))
+       const db = (yield* Database.Service).db
+       // 在同一持久Session切换工具，核对真实请求与调用结果而不是只测selector。
+@@ -1506,7 +1514,7 @@
+           LLMEvent.finish({ reason: "tool-calls" }),
+         ], []]
+         yield* session.resume(sessionID)
+-        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect"] : ["defect", "echo"])
++        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect", "goal"] : ["defect", "echo", "goal"])
+         expect(executions).toEqual(action === "deny" ? [] : ["allow"])
+         const parts = requests[0]?.system.map(part => part.text) ?? []
+         expect(parts.filter(part => part === "Initial context")).toHaveLength(1)
 @@ -2086,7 +2086,8 @@
        yield* session.resume(sessionID)
  
@@ -302,6 +356,122 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
        expect(yield* session.context(sessionID)).toMatchObject([
          { type: "user", text: "Use tools" },
          {
+diff --git a/packages/core/test/location-layer.test.ts b/packages/core/test/location-layer.test.ts
+--- a/packages/core/test/location-layer.test.ts
++++ b/packages/core/test/location-layer.test.ts
+@@ -109,6 +109,7 @@
+             "bash",
+             "edit",
+             "glob",
++            "goal",
+             "grep",
+             "question",
+             "read",
+@@ -133,6 +134,7 @@
+             "bash",
+             "edit",
+             "glob",
++            "goal",
+             "grep",
+             "question",
+             "read",
+diff --git a/packages/core/test/config/config.test.ts b/packages/core/test/config/config.test.ts
+--- a/packages/core/test/config/config.test.ts
++++ b/packages/core/test/config/config.test.ts
+@@ -56,12 +56,15 @@
+   it.effect("migrates auto permissions without dropping denies or agent configuration", () =>
+     Effect.sync(() => {
+       // 全局与 agent 均保留 auto，控制项独立迁移，静态拒绝不被覆盖。
+-      for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
++      for (const goal_max_turns of [0, 3]) for (const permission of [{ bash: "auto", edit: "deny" }, { bash: { "git *": "auto" }, edit: "deny" }]) {
+         const legacy = Schema.decodeUnknownSync(ConfigV1.Info)({
+-          model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
++          goal_max_turns, model: "test/model", permission: { ...permission, approvals_reviewer: "auto_review", auto_review: { strict: true, fallback: "user" } }, agent: { build: { permission } },
+           experimental: { primary_tools: ["write", "bash"] },
+         })
+         const info = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate(legacy))
++        // 真实两代decoder与迁移同时接受0/非默认上限，不能以空配置桩证明字段生效。
++        expect(info.goal_max_turns).toBe(goal_max_turns)
++        expect(legacy.goal_max_turns).toBe(goal_max_turns)
+         expect(info.model).toBe("test/model")
+         expect(info.approvals_reviewer).toBe("auto_review")
+         expect(info.auto_review).toMatchObject({ strict: true, fallback: "user" })
+diff --git a/packages/app/src/utils/session-message.ts b/packages/app/src/utils/session-message.ts
+--- a/packages/app/src/utils/session-message.ts
++++ b/packages/app/src/utils/session-message.ts
+@@ -68,10 +68,16 @@
+ export function syntheticTurn(message: SessionMessageInfo) {
+   if (message.type !== "synthetic" || sessionMessageHidden(message)) return
+   const reviewer = "metadata" in message && record(message.metadata) && message.metadata.permissionReviewerRequest === true
+-  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text : message.description
++  // 只提取真实Goal续跑包装；普通内部synthetic不能因含孤立objective而公开。
++  const objective = !reviewer && "text" in message && typeof message.text === "string"
++    ? message.text.match(/^<session-goal-continuation>[\s\S]*?<objective>([\s\S]*?)<\/objective>/)?.[1]
++    : undefined
++  const text = reviewer && "text" in message && typeof message.text === "string" ? message.text
++    : objective !== undefined ? objective.trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
++    : message.description
+   if (!text?.trim()) return
+-  // 只展示明确标记的审查协议原文；普通synthetic仍遵循原有description展示约定。
+-  return { text, reviewer }
++  // 解码顺序沿用源TUI；仅改变展示投影，审查原文和canonical XML都不回写。
++  return { text, reviewer, goal: objective !== undefined }
+ }
+ 
+ export function normalizeSessionMessages(sessionID: string, source: readonly SessionMessageInfo[]) {
+@@ -111,7 +117,7 @@
+         model: { providerID: model.providerID, modelID: model.id, variant: model.variant },
+       })
+       parts.set(message.id, [{
+-        ...textPart(sessionID, message.id, 0, synthetic.text, synthetic.reviewer ? false : true), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
++        ...textPart(sessionID, message.id, 0, synthetic.text, !(synthetic.reviewer || synthetic.goal)), metadata: synthetic.reviewer ? { permissionReviewerRequest: true } : undefined,
+       }])
+       return
+     }
+diff --git a/packages/app/src/utils/session-message.test.ts b/packages/app/src/utils/session-message.test.ts
+--- a/packages/app/src/utils/session-message.test.ts
++++ b/packages/app/src/utils/session-message.test.ts
+@@ -1,8 +1,40 @@
+ import { describe, expect, test } from "bun:test"
+ import type { SessionMessageInfo } from "@opencode-ai/client/promise"
+ import { normalizeSessionMessages } from "./session-message"
++import { Schema } from "effect"
++import { SessionEvent } from "@opencode-ai/schema/session-event"
++import { createV2SessionReducer } from "../context/server-session-v2-reducer"
+ 
+ describe("normalizeSessionMessages", () => {
++  test("renders native goal objectives through the same snapshot and live turn projection", () => {
++    const text = "<session-goal-continuation>\n<objective>\n A &amp; B\n&lt;tag&gt; &amp;lt; \n</objective>\nprivate budget\n</session-goal-continuation>"
++    const goal = { id: "msg_goal", type: "synthetic" as const, time: { created: 1 }, ...{ sessionID: "ses_1", text } }
++    const source = [
++      { id: "msg_internal", type: "synthetic", time: { created: 0 }, ...{ sessionID: "ses_1", text: "<objective>not a goal</objective>" } },
++      goal,
++      { id: "msg_after_goal", type: "assistant", agent: "build", model: { id: "model", providerID: "test" }, content: [], time: { created: 2 } },
++    ] satisfies SessionMessageInfo[]
++    const snapshot = normalizeSessionMessages("ses_1", source)
++    expect(snapshot.messages.map(message => message.id)).toEqual(["msg_goal", "msg_after_goal"])
++    expect(snapshot.messages[1]).toMatchObject({ parentID: "msg_goal" })
++    // 只把objective作为可见DTO；源XML与synthetic身份保持原样，字面实体沿用源解码顺序。
++    expect(snapshot.parts.get("msg_goal")?.[0]).toMatchObject({ text: "A & B\n<tag> <", synthetic: false })
++    expect(goal).toMatchObject({ type: "synthetic", text })
++    const event = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))({ id: "evt_goal", type: "session.next.synthetic",
++      durable: { aggregateID: "ses_1", seq: 1, version: 1 }, data: { sessionID: "ses_1", messageID: "msg_goal", timestamp: 1, text } })
++    const live = createV2SessionReducer().reduce([], event)
++    expect(live?.missing).toBeUndefined()
++    expect(normalizeSessionMessages("ses_1", live?.messages ?? []).parts.get("msg_goal")).toEqual(snapshot.parts.get("msg_goal"))
++    expect(live?.messages[0]).toMatchObject({ type: "synthetic", text })
++    // Reviewer优先于Goal识别；合法hidden仍隐藏，未标记内部消息仍不展示。
++    const reviewer = { ...goal, metadata: { permissionReviewerRequest: true } }
++    expect(normalizeSessionMessages("ses_1", [reviewer]).parts.get("msg_goal")?.[0]).toMatchObject({ text, synthetic: false,
++      metadata: { permissionReviewerRequest: true } })
++    expect(normalizeSessionMessages("ses_1", [{ ...goal, metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } }]).messages).toEqual([])
++    expect(normalizeSessionMessages("ses_1", [{ ...goal, ...{ text: "internal", description: "existing description" } }]).parts.get("msg_goal")?.[0])
++      .toMatchObject({ text: "existing description", synthetic: true })
++  })
++
+   test("projects current turns into stable legacy rendering records", () => {
+     const source = [
+       { id: "msg_1", type: "agent-switched", agent: "build", time: { created: 1 } },
 diff --git a/packages/tui/src/app.tsx b/packages/tui/src/app.tsx
 index 44dadf590..a5417dbac 100644
 --- a/packages/tui/src/app.tsx

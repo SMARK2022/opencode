@@ -52,6 +52,23 @@ index 9bc24d086b..e194f75f06 100644
    if (!endCellId) return [startCell]
 -  const endCell = resolveNotebookCell(notebook, undefined, endCellId)
 +  const endCell = resolveCell(endCellId)
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -34,2 +34,3 @@
+-  cellId: cellId.annotate({ description: "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx." }),
++  // 只补参数广告；首末格解析与范围验证继续共用原生run入口。
++  cellId: cellId.annotate({ description: "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx. Also supports TOP and BOTTOM for the first/last cell." }),
+   endCellId: cellId.annotate({ description: "Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive." }).pipe(Schema.optional),
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -98,3 +98,5 @@
+     const definitions = yield* toolDefinitions(registry)
+     expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
+     expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
++    // 检查实际广告的输入Schema，不能只更新V1插件而漏掉V2模型参数说明。
++    expect(JSON.stringify(definitions.find(item => item.name === "vscode_notebook_run"))).toContain("Also supports TOP and BOTTOM")
 diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
 --- a/packages/core/src/plugin/agent.ts
 +++ b/packages/core/src/plugin/agent.ts

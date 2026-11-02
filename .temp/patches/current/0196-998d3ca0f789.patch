@@ -133,10 +133,11 @@ diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/co
 +// #196：`approvals_reviewer` 和 `auto_review` 字段接受 control 值。未知 key 被视为普通
 +// #196：permission name 且必须是 rule，这样拼错的 control 不会先解析再在
 +// #196：Permission.fromConfig 中消失。运行时解析使用 `propertyOrder: "original"` 保留用户顺序。
- const InputObject = Schema.StructWithRest(
+-const InputObject = Schema.StructWithRest(
++const InputObjectBase = Schema.StructWithRest(
    Schema.Struct({
      read: Schema.optional(Rule),
-@@ -31,20 +76,56 @@ const InputObject = Schema.StructWithRest(
+@@ -31,20 +76,72 @@ const InputObject = Schema.StructWithRest(
      lsp: Schema.optional(Rule),
      doom_loop: Schema.optional(Action),
      skill: Schema.optional(Rule),
@@ -146,7 +147,23 @@ diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/co
 -  [Schema.Record(Schema.String, Rule)],
 -)
 +  [Schema.Record(Schema.String, InputValue)],
-+).check(controlsOnlyOnControlKeys)
++)
++
++// 按键构造合法随机配置，避免宽控制值与可选 undefined 使整体拒绝采样停滞。
++const InputObject = InputObjectBase.check(controlsOnlyOnControlKeys).annotate({
++  toArbitrary: () => (fc) =>
++    fc.tuple(
++      Schema.toArbitrary(InputObjectBase.schema),
++      Schema.toArbitrary(Schema.Record(Schema.String, Rule)),
++    ).map(([known, extra]) => ({
++      ...globalThis.Object.fromEntries(
++        globalThis.Object.entries(extra).filter(
++          ([key]) => !InputObjectBase.ast.propertySignatures.some((property) => property.name === key),
++        ),
++      ),
++      ...globalThis.Object.fromEntries(globalThis.Object.entries(known).filter(([, value]) => value !== undefined)),
++    })),
++})
  
  const InputSchema = Schema.Union([Action, InputObject])
  

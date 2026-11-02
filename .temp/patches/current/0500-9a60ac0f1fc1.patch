@@ -1174,14 +1174,15 @@ new file mode 100644
 diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
 --- a/packages/core/src/storage/cold-storage.ts
 +++ b/packages/core/src/storage/cold-storage.ts
-@@ -5,13 +5,16 @@ import {
+@@ -5,14 +5,17 @@ import {
    zstdDecompressSync as nodeZstdDecompressSync,
  } from "node:zlib"
- import { Schema } from "effect"
+ import { Effect, Schema } from "effect"
 -import { and, desc, eq, gt, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm"
--import { ColdStorageTable, MessageTable, PartTable, SessionTable } from "../session/sql"
+-import { ColdStorageTable, MessageTable, PartTable, SessionMessageTable, SessionTable } from "../session/sql"
 +import { and, desc, eq, gt, inArray, isNotNull, isNull, or, sql, type SQL } from "drizzle-orm"
-+import { ColdStorageTable, MessageTable, PartTable, SessionTable, type PartColdStats } from "../session/sql"
++import { ColdStorageTable, MessageTable, PartTable, SessionMessageTable, SessionTable, type PartColdStats, type SessionMessageColdStats } from "../session/sql"
+ import { SessionMessage } from "../session/message"
  import { MessageID, PartID } from "../v1/session"
  import { Database } from "../database/database"
  import { SessionSchema } from "../session/schema"
@@ -1193,7 +1194,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  
  // #493：TxOrDb 由 core 的同步 drizzle 客户端承载（Sqlite.Drizzle 服务，与 Effect 驱动共享同一原生连接）。
  type SessionID = SessionSchema.ID
-@@ -22,25 +25,60 @@ type Db = Sqlite.DrizzleClient
+@@ -22,26 +25,61 @@ type Db = Sqlite.DrizzleClient
  type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0]
  export type TxOrDb = Db | Tx
  
@@ -1224,10 +1225,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +}
 +
  type Owner = { type: "message"; id: MessageID } | { type: "part"; id: PartID }
+   | { type: "session_message"; id: SessionMessage.ID }
 +// hot owner 以 NULL ref/key 表示，v1 owner 只有 ref，v2 owner 同时持有 ref 与 32-byte key。
  type OwnerKind = Owner["type"]
 +// #0500：pack 是 v2 的持久单元——同 owner kind 的多个 entry 共享一个 payload。
-+type PackKind = "message-pack" | "part-pack"
++type PackKind = "message-pack" | "part-pack" | "session-message-pack"
 +// 三种持久状态唯一选择 decoder，读取失败后绝不尝试另一格式制造备用成功路径。
 +type StorageKind = OwnerKind | PackKind | "session-summary"
  type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -1297,9 +1299,9 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  
  // owner cursor 按 Message 后 Part 推进，payload cursor 按 hash 推进；两者不能在 resume 中互换。
  // cursor 只是跳过已提交批次的性能状态，真正幂等事实仍是 owner cold_ref 与 payload refcount。
--export type MaintenanceCursor = { owner: "message" | "part"; lastID: string } | { stage: "payload"; lastHash: string }
+-export type MaintenanceCursor = { owner: OwnerKind; lastID: string } | { stage: "payload"; lastHash: string }
 +export type MaintenanceCursor =
-+  | { owner: "message" | "part" | "session-summary"; lastID: string }
++  | { owner: OwnerKind | "session-summary"; lastID: string }
 +  | { stage: "payload"; lastHash: string }
  
  // MaintenanceTask 是可断线查询的控制元数据，不保存任何 Message/Part 内容或冷 payload 副本。
@@ -1318,7 +1320,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  }
  
 +function packKind(owner: OwnerKind): PackKind {
-+  return owner === "message" ? "message-pack" : "part-pack"
++  return owner === "message" ? "message-pack" : owner === "part" ? "part-pack" : "session-message-pack"
 +}
 +
 +// entry key 只覆盖 owner kind 与冷字段，pack hash 则覆盖整个排序后的 entries；两层地址分别服务去重和批量读取。
@@ -1875,10 +1877,16 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      const match = /^state\.attachments\.(\d+)\.url$/.exec(field)
      if (match && restored.type === "tool" && restored.state.status === "completed") {
        const attachment = restored.state.attachments?.[Number(match[1])]
-@@ -424,33 +899,13 @@ function restorePart(data: (typeof PartTable.$inferSelect)["data"], value: Envel
-   return restored
+@@ -475,6 +900,7 @@
+     fields[path] = value
+     target[key] = empty
+   })
+   if (Object.keys(fields).length === 0) return
+-  return { projection, ...envelope("session_message", fields) }
++  const selected = jsonObject(fields)
++  return { projection, fields: selected, key: entryKey("session_message", selected) }
  }
- 
+@@ -503,30 +930,10 @@
 -function latestBoundary(db: TxOrDb, sessionID: SessionID) {
 -  // completed summary 的 parent user 才能形成边界；未完成 marker 不能让历史提前进入冷存储。
 -  // SQL join 只选择最新有效 marker，避免为每个 owner 把整个 session 的 JSON 拉进 JS。
@@ -1916,17 +1924,21 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  }
  
  // eligibility 同时读取 session age 与最新 completed compaction boundary，两条规则在一个 owner 判断中合并。
-@@ -464,14 +919,21 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, olderThanMs
+@@ -541,17 +919,25 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, olderThanMs
      .where(eq(SessionTable.id, sessionID))
      .get()
    if (!session) return
--  return { aged: session.updated <= now - olderThanMs, boundary: latestBoundary(db, sessionID) }
+   const nativeBoundarySeq = db.select({ seq: SessionMessageTable.seq }).from(SessionMessageTable)
+     .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "compaction")))
+     .orderBy(desc(SessionMessageTable.seq)).limit(1).get()?.seq
+-  return { aged: session.updated <= now - olderThanMs, boundary: latestBoundary(db, sessionID), nativeBoundarySeq }
 +  const boundary = CompactionBoundary.latest(db, sessionID)
 +  return {
 +    aged: session.updated <= now - olderThanMs,
 +    boundary: boundary ? (boundary.tailStartID ?? boundary.markerID) : undefined,
 +    markerID: boundary?.markerID,
 +    summaryID: boundary?.summaryID,
++    nativeBoundarySeq,
 +  }
  }
  
@@ -1941,11 +1953,13 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    return state.aged || (state.boundary !== undefined && messageID < state.boundary)
  }
  
-@@ -491,52 +953,13 @@ function ownerCount(db: TxOrDb, hash: string) {
+@@ -574,54 +953,15 @@ function ownerCount(db: TxOrDb, hash: string) {
        .from(PartTable)
        .where(eq(PartTable.cold_ref, hash))
        .get()?.value ?? 0
--  return messages + parts
+   const native = db.select({ value: sql<number>`count(*)` }).from(SessionMessageTable)
+     .where(eq(SessionMessageTable.cold_ref, hash)).get()?.value ?? 0
+-  return messages + parts + native
 -}
 -
 -// 单 owner retain 保留严格复验，供实时 update/freeze 使用；维护批次走 retainBatch 共享查询和 codec 工作。
@@ -1997,11 +2011,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +      .from(SessionTable)
 +      .where(eq(SessionTable.summary_ref, hash))
 +      .get()?.value ?? 0
-+  return messages + parts + summaries
++  return messages + parts + native + summaries
  }
  
  // ownerCounts 以固定分块执行两个 GROUP BY，既遵守 SQLite variable 上限，也把数万 payload 的验证压成少量查询。
-@@ -563,78 +986,41 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
+@@ -649,83 +986,46 @@ function ownerCounts(db: TxOrDb, hashes: string[]) {
        .all()) {
        if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.value)
      }
@@ -2013,6 +2027,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +      .all()) {
 +      if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.value)
 +    }
+     for (const row of db.select({ hash: SessionMessageTable.cold_ref, value: sql<number>`count(*)` })
+       .from(SessionMessageTable).where(inArray(SessionMessageTable.cold_ref, batch))
+       .groupBy(SessionMessageTable.cold_ref).all()) {
+       if (row.hash) result.set(row.hash, (result.get(row.hash) ?? 0) + row.value)
+     }
    }
    return result
  }
@@ -2040,7 +2059,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 -  const counts = ownerCounts(
 -    db,
 -    existing.map((row) => row.hash),
-+function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: "part-pack" | "session-summary") {
++function requireReferenceMetadata(db: TxOrDb, hashes: string[], kind: PackKind | "session-summary") {
 +  // unique hash 去重只减少 SQL 工作量，不改变每个真实 owner 对 ref_count 的贡献。
 +  const unique = [...new Set(hashes)]
 +  if (unique.length === 0) return
@@ -2109,7 +2128,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  }
  
  // 引用增加按 hash 聚合，fork 和 maintenance 都不会对共享 payload 执行重复 UPDATE。
-@@ -698,6 +1084,7 @@ function requiredEnvelope(values: Map<string, Envelope>, hash: string) {
+@@ -788,6 +1084,7 @@ function requiredEnvelope(values: Map<string, Envelope>, hash: string) {
  // NOT EXISTS 是最后一道安全闸，防止外部并发写入或计数错误把仍被 fork 共享的 blob 删除。
  // 删除和 owner 清 ref 在同一事务；中断只发生在批次边界，不会产生已展开 row 指向已删 payload 的半状态。
  function decrementReferences(db: TxOrDb, hashes: string[], now: number) {
@@ -2117,10 +2136,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    const counts = new Map<string, number>()
    for (const hash of hashes) counts.set(hash, (counts.get(hash) ?? 0) + 1)
    const entries = [...counts]
-@@ -720,82 +1107,379 @@ function decrementReferences(db: TxOrDb, hashes: string[], now: number) {
+@@ -811,83 +1107,380 @@ function decrementReferences(db: TxOrDb, hashes: string[], now: number) {
          eq(ColdStorageTable.ref_count, 0),
          sql`not exists (select 1 from ${MessageTable} where ${MessageTable.cold_ref} = ${ColdStorageTable.hash})`,
          sql`not exists (select 1 from ${PartTable} where ${PartTable.cold_ref} = ${ColdStorageTable.hash})`,
+         sql`not exists (select 1 from ${SessionMessageTable} where ${SessionMessageTable.cold_ref} = ${ColdStorageTable.hash})`,
 +        sql`not exists (select 1 from ${SessionTable} where ${SessionTable.summary_ref} = ${ColdStorageTable.hash})`,
        ),
      )
@@ -2554,7 +2574,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  function freezeMessageBatch(
    db: TxOrDb,
    rows: (typeof MessageTable.$inferSelect)[],
-@@ -805,49 +1489,41 @@ function freezeMessageBatch(
+@@ -897,49 +1489,41 @@ function freezeMessageBatch(
      eligibilityState(sessionID: SessionID): ReturnType<typeof eligibility>
    },
  ) {
@@ -2630,7 +2650,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  function freezePartBatch(
    db: TxOrDb,
    rows: (typeof PartTable.$inferSelect)[],
-@@ -857,85 +1533,343 @@ function freezePartBatch(
+@@ -949,143 +1533,483 @@ function freezePartBatch(
      eligibilityState(sessionID: SessionID): ReturnType<typeof eligibility>
    },
  ) {
@@ -2814,6 +2834,166 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +    })
 +    .run()
 +  return { hash: value.hash, rawBytes: value.raw.byteLength, compressedBytes: payload.byteLength }
+ }
+ 
+-// Native批次复用唯一codec和引用内核；seq及消息时间不因存储维护而改变。
++// Native统计沿用原公开字符口径，按稳定content槽位保存标量，不复制身份或精确请求账本。
++export function projectSessionMessageStats(row: Pick<typeof SessionMessageTable.$inferSelect, "id" | "type" | "data">): SessionMessageColdStats | null {
++  const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
++  if (message.type !== "assistant") return null
++  const tools = message.content.flatMap((part, index) => {
++    if (part.type !== "tool") return []
++    const state = part.state
++    return [[String(index), {
++      inputChars: state.status === "pending" ? (typeof state.input === "string" ? state.input.length : 0) : JSON.stringify(state.input ?? {}).length,
++      outputChars: state.status === "completed"
++        ? state.content.filter(item => item.type === "text").map(item => item.text).join("\n").length + state.content.reduce((sum, item) => sum + (item.type === "file" ? item.uri.length : 0), 0)
++        : state.status === "error" ? state.error.message.length : 0,
++    }] as const]
++  })
++  return tools.length ? { version: 1, tools: Object.fromEntries(tools) } : null
++}
++
++function parseSessionMessageStats(value: unknown, hash?: string): SessionMessageColdStats | null {
++  if (value === null) return null
++  if (!isRecord(value) || value.version !== 1 || !isRecord(value.tools)) {
++    throw new CorruptionError({ message: "Native cold Stats projection is invalid", hash })
++  }
++  return { version: 1, tools: Object.fromEntries(Object.entries(value.tools).map(([key, item]) => {
++    if (!isRecord(item)) throw new CorruptionError({ message: "Native Tool Stats projection is invalid", hash })
++    return [key, { inputChars: statInteger(item.inputChars, "Native Tool inputChars is invalid", hash),
++      outputChars: statInteger(item.outputChars, "Native Tool outputChars is invalid", hash) }]
++  })) }
++}
++
++// 业务inspect仅恢复当前选集的内存副本；ref/key决定持久格式，失败不改走其它decoder。
++export function inspectSessionMessageRows(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
++  const legacy = rows.flatMap(row => row.cold_ref && !row.cold_key ? [row.cold_ref] : [])
++  const values = decodedBatch(db, legacy, "session_message")
++  const hashes = [...new Set(rows.flatMap(row => row.cold_ref && row.cold_key ? [row.cold_ref] : []))]
++  requireReferenceMetadata(db, hashes, "session-message-pack")
++  const packs = new Map(hashes.map(hash => [hash, decodePack(db, hash, "session_message")] as const))
++  return rows.map(row => {
++    if (!row.cold_ref) {
++      if (row.cold_key || row.cold_stats !== null) throw new CorruptionError({ message: "Hot Native message has cold pointers" })
++      return row
++    }
++    if (!row.cold_key) {
++      if (row.cold_stats !== null) throw new CorruptionError({ message: "Legacy Native message has cold Stats", hash: row.cold_ref })
++      return { ...row, data: restoreSessionMessage(row, requiredEnvelope(values, row.cold_ref)) }
++    }
++    const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
++    if (!fields) throw new CorruptionError({ message: "Native message key is missing from pack", hash: row.cold_ref })
++    const data = restoreSessionMessage(row, { version: 1, owner: "session_message", fields })
++    if (canonical(parseSessionMessageStats(row.cold_stats, row.cold_ref)) !== canonical(projectSessionMessageStats({ ...row, data }))) {
++      throw new CorruptionError({ message: "Native cold Stats do not match the payload", hash: row.cold_ref })
++    }
++    return { ...row, data }
++  })
++}
++
++// Native与Part一样：热态现场计算，已部署v1只读恢复，packed态仅校验引用元数据并读取同行标量。
++export function inspectSessionMessageStats(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
++  const legacy = new Map(inspectSessionMessageRows(db, rows.filter(row => row.cold_ref && !row.cold_key)).map(row => [row.id, row]))
++  requireReferenceMetadata(db, rows.flatMap(row => row.cold_ref && row.cold_key ? [row.cold_ref] : []), "session-message-pack")
++  return rows.map(row => {
++    if (!row.cold_ref) {
++      if (row.cold_key || row.cold_stats !== null) throw new CorruptionError({ message: "Hot Native Stats has cold pointers" })
++      return projectSessionMessageStats(row)
++    }
++    if (row.cold_key) return parseSessionMessageStats(row.cold_stats, row.cold_ref)
++    const restored = legacy.get(row.id)
++    if (!restored) throw new CorruptionError({ message: "Legacy Native Stats owner is missing", hash: row.cold_ref })
++    return projectSessionMessageStats(restored)
++  })
++}
++
+ function thawSessionMessageBatch(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[], now: number) {
+   const cold = rows.filter((row): row is typeof row & { cold_ref: string } => row.cold_ref !== null)
+-  const values = decodedBatch(db, cold.map(row => row.cold_ref), "session_message")
+-  const restored = rows.map(row => row.cold_ref
+-    ? { ...row, data: restoreSessionMessage(row, requiredEnvelope(values, row.cold_ref)), cold_ref: null }
+-    : row)
++  const restored = inspectSessionMessageRows(db, rows).map(row => ({ ...row, cold_ref: null, cold_key: null, cold_stats: null }))
+   if (cold.length > 0) {
+     db.insert(SessionMessageTable).values(restored.filter((_row, index) => Boolean(rows[index]?.cold_ref)))
+       .onConflictDoUpdate({ target: SessionMessageTable.id,
+-        set: { data: sql`excluded.data`, cold_ref: null, time_updated: sql`excluded.time_updated` } }).run()
++        set: { data: sql`excluded.data`, cold_ref: null, cold_key: null, cold_stats: null, time_updated: sql`excluded.time_updated` } }).run()
+     decrementReferences(db, cold.map(row => row.cold_ref), now)
+   }
+   return restored
+ }
+ 
+ function freezeSessionMessageBatch(
+   db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[],
+   input: { now: number; eligibilityState(sessionID: SessionID): ReturnType<typeof eligibility> },
+ ) {
+-  const prepared = rows.flatMap(row => {
++  const prepared = inspectSessionMessageRows(db, rows).flatMap(row => {
+     const value = extractSessionMessage(row)
+-    if (!value || value.raw.byteLength < MIN_ENVELOPE_BYTES || !eligibleSessionMessage(input.eligibilityState(row.session_id), row.seq)) return []
+-    return [{ row, value }]
++    if (!value || !row.cold_key && !eligibleSessionMessage(input.eligibilityState(row.session_id), row.seq)) return []
++    return [{ row, projection: value.projection, entry: { key: value.key, fields: value.fields }, stats: projectSessionMessageStats(row), oldRef: row.cold_ref }]
+   })
+-  const bytes = retainBatch(db, prepared.map(item => item.value), input.now)
+-  if (prepared.length > 0) {
+-    db.insert(SessionMessageTable).values(prepared.map(item => ({ ...item.row, data: item.value.projection, cold_ref: item.value.hash })))
+-      .onConflictDoUpdate({ target: SessionMessageTable.id,
+-        set: { data: sql`excluded.data`, cold_ref: sql`excluded.cold_ref`, time_updated: sql`excluded.time_updated` } }).run()
+-    incrementReferences(db, prepared.map(item => item.value), input.now)
++  // Native仍按durable seq判资格；分包只决定物理布局，不改变消息顺序、审批输入或时间。
++  const groups = new Map<SessionID, typeof prepared>()
++  for (const item of prepared) {
++    const group = groups.get(item.row.session_id)
++    if (group) group.push(item)
++    else groups.set(item.row.session_id, [item])
+   }
+-  return { skipped: rows.length - prepared.length,
+-    rawBytes: prepared.reduce((total, item) => total + item.value.raw.byteLength, 0),
+-    compressedBytes: prepared.reduce((total, item) => total + (bytes.get(item.value.hash) ?? 0), 0) }
++  let rawBytes = 0
++  let compressedBytes = 0
++  for (const items of groups.values()) for (const chunk of splitPacks("session_message", items)) {
++    const packed = retainPackPayload(db, "session_message", chunk.map(item => item.entry), input.now)
++    const added = chunk.filter(item => item.oldRef !== packed.hash).length
++    if (added) retainPackedReference(db, packed.hash, "session_message", input.now, added)
++    const updated = db.insert(SessionMessageTable).values(chunk.map(item => ({ ...item.row, data: item.projection,
++      cold_ref: packed.hash, cold_key: Buffer.from(item.entry.key), cold_stats: item.stats })))
++      .onConflictDoUpdate({ target: SessionMessageTable.id, set: { data: sql`excluded.data`, cold_ref: sql`excluded.cold_ref`,
++        cold_key: sql`excluded.cold_key`, cold_stats: sql`excluded.cold_stats`, time_updated: sql`excluded.time_updated` } })
++      .returning({ id: SessionMessageTable.id }).all()
++    if (updated.length !== chunk.length) throw new CorruptionError({ message: "Native pack assignment is incomplete", hash: packed.hash })
++    // 先保留新包、交换owner，再释放实际移动的旧引用；共享fork不会提前失去payload。
++    decrementReferences(db, chunk.flatMap(item => item.oldRef && item.oldRef !== packed.hash ? [item.oldRef] : []), input.now)
++    rawBytes += packed.rawBytes
++    compressedBytes += packed.compressedBytes
++  }
++  return { skipped: rows.length - prepared.length, rawBytes, compressedBytes }
+ }
+ 
+ // 投影已持有事件事务；这里只执行同连接恢复，不能重新预约或开启顶层BEGIN。
+ export function thawSessionMessageRowsInTransaction(db: TxOrDb, rows: (typeof SessionMessageTable.$inferSelect)[]) {
+-  if (!rows.some(row => row.cold_ref)) return rows
++  if (!rows.some(row => row.cold_ref)) return inspectSessionMessageRows(db, rows)
+   const current = rows.map(input => {
+     if (!input.cold_ref) return input
+     const row = db.select().from(SessionMessageTable)
+       .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id))).get()
+     if (!row) throw new CorruptionError({ message: `Native message disappeared during thaw: ${input.id}` })
+     return row
+   })
+   return thawSessionMessageBatch(db, current, Date.now())
+ }
+ 
+ // 普通读取先选定范围，再预约原连接并原子回填；范围外消息和统计热查询不被预热。
+ export function readSessionMessageRows(db: Database.Interface["db"], rows: (typeof SessionMessageTable.$inferSelect)[]) {
+-  if (!rows.some(row => row.cold_ref)) return Effect.succeed(rows)
++  if (!rows.some(row => row.cold_ref)) return Effect.sync(() => inspectSessionMessageRows(db.sync, rows))
+   return Database.withSync({ db, sync: db.sync }, sync => sync.transaction(
+     tx => thawSessionMessageRowsInTransaction(tx, rows), { behavior: "immediate" },
+   ))
  }
  
 -// release 的调用前提是当前 owner 已在同一事务清除 cold_ref，所以 remaining 是“其他 owner”的真实数量。
@@ -3030,7 +3210,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  }
  
  function releaseReference(db: TxOrDb, table: typeof MessageTable, id: MessageID, hash: string | null): void
-@@ -949,12 +1883,12 @@ function releaseReference(
+@@ -1100,14 +1883,14 @@ function releaseReference(
    if (!hash) return
    if (table === MessageTable) {
      db.update(MessageTable)
@@ -3038,14 +3218,17 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +      .set({ cold_ref: null, cold_key: null })
        .where(eq(MessageTable.id, MessageID.make(id)))
        .run()
-   } else {
+   } else if (table === PartTable) {
      db.update(PartTable)
 -      .set({ cold_ref: null })
 +      .set({ cold_ref: null, cold_key: null, cold_stats: null })
        .where(eq(PartTable.id, PartID.make(id)))
        .run()
+   } else {
+-    db.update(SessionMessageTable).set({ cold_ref: null }).where(eq(SessionMessageTable.id, SessionMessage.ID.make(id))).run()
++    db.update(SessionMessageTable).set({ cold_ref: null, cold_key: null, cold_stats: null }).where(eq(SessionMessageTable.id, SessionMessage.ID.make(id))).run()
    }
-@@ -981,8 +1915,8 @@ export function replaceMessage(
+@@ -1137,8 +1915,8 @@ export function replaceMessage(
      .get()
    // 先完成新的完整热写入，再 release 旧 blob；外键失败时不会留下已释放但未写入的 owner。
    db.insert(MessageTable)
@@ -3056,7 +3239,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      .run()
    if (previous?.cold_ref) releaseReference(db, MessageTable, row.id, previous.cold_ref)
  }
-@@ -1003,8 +1937,8 @@ export function replacePart(
+@@ -1159,8 +1937,8 @@ export function replacePart(
  ) {
    const previous = db.select({ cold_ref: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.id, row.id)).get()
    db.insert(PartTable)
@@ -3067,7 +3250,15 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      .run()
    if (previous?.cold_ref) releaseReference(db, PartTable, row.id, previous.cold_ref)
  }
-@@ -1060,6 +1994,19 @@ export function releaseSession(db: TxOrDb, sessionID: SessionID) {
+@@ -1206,6 +2010,6 @@
+   const previous = db.select().from(SessionMessageTable)
+     .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id))).get()
+   if (!previous) return
+-  db.update(SessionMessageTable).set({ type: input.type, time_created: input.time_created, data: input.data, cold_ref: null })
++  db.update(SessionMessageTable).set({ type: input.type, time_created: input.time_created, data: input.data, cold_ref: null, cold_key: null, cold_stats: null })
+     .where(and(eq(SessionMessageTable.id, input.id), eq(SessionMessageTable.session_id, input.session_id))).run()
+   if (previous.cold_ref) release(db, previous.cold_ref)
+@@ -1232,6 +2030,19 @@ export function releaseSession(db: TxOrDb, sessionID: SessionID) {
    for (const row of messages) {
      if (row.cold_ref) releaseReference(db, MessageTable, row.id, row.cold_ref)
    }
@@ -3087,7 +3278,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  }
  
  // fork 复制 raw row 而非业务对象：cold source 保留 projection+cold_ref，hot source 保留完整 JSON。
-@@ -1112,28 +2059,30 @@ export function clonePrefix(
+@@ -1284,28 +2059,30 @@ export function clonePrefix(
    const partMap = new Map(input.partMap.map((item) => [item.sourceID, item.targetID]))
    // owner prefix 理论上隔离 hash kind；这里仍验证真实引用，防止外部 SQL 破坏后 Map 覆盖先前 kind。
    // 同一 hash 跨 kind 是 corruption，不能任意选择最后遍历的 kind 再把 fork 伪装成成功。
@@ -3123,7 +3314,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    }
    const payloads = [...hashes.keys()].flatMap((_, index, all) => {
      if (index % DEFAULT_BATCH_SIZE !== 0) return []
-@@ -1152,7 +2101,18 @@ export function clonePrefix(
+@@ -1324,7 +2101,18 @@ export function clonePrefix(
      if (!expected || payload.kind !== expected || payload.ref_count !== (counts.get(payload.hash) ?? 0)) {
        throw new CorruptionError({ message: "Fork source cold payload metadata is inconsistent", hash: payload.hash })
      }
@@ -3143,7 +3334,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    }
  
    const messages = sourceMessages.map((row) => {
-@@ -1171,6 +2131,7 @@ export function clonePrefix(
+@@ -1343,6 +2131,7 @@ export function clonePrefix(
        time_updated: row.time_updated,
        data,
        cold_ref: row.cold_ref,
@@ -3151,7 +3342,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      }
    })
    for (let offset = 0; offset < messages.length; offset += DEFAULT_BATCH_SIZE) {
-@@ -1197,6 +2158,9 @@ export function clonePrefix(
+@@ -1369,6 +2158,9 @@ export function clonePrefix(
        time_updated: row.time_updated,
        data,
        cold_ref: row.cold_ref,
@@ -3161,7 +3352,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      }
    })
    for (let offset = 0; offset < parts.length; offset += DEFAULT_BATCH_SIZE) {
-@@ -1215,7 +2179,7 @@ export function clonePrefix(
+@@ -1387,7 +2179,7 @@ export function clonePrefix(
  }
  
  // freeze 是单 owner 事务内核，供公开 freezeOwner 使用；批量 maintenance 复用相同 extraction/eligibility 规则。
@@ -3170,7 +3361,35 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  // owner update 以 cold_ref IS NULL 保护状态，若同事务外的预期被破坏则 hard-fail 而不是覆盖。
  // payload 初始零引用，owner projection 写入后原子加一；任何异常都由 immediate transaction 回滚。
  function freeze(
-@@ -1229,69 +2193,36 @@ function freeze(
+@@ -1401,14 +2200,19 @@
+   if (input.type === "session_message") {
+     const row = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, input.id)).get()
+     if (!row) return { type: "skipped", reason: "missing" }
+-    if (row.cold_ref) return { type: "skipped", reason: "already-cold" }
+-    const value = extractSessionMessage(row)
++    if (row.cold_key) return { type: "skipped", reason: "already-cold" }
++    const source = row.cold_ref ? { ...row, data: restoreSessionMessage(row, decode(db, row.cold_ref, "session_message")) } : row
++    const value = extractSessionMessage(source)
+     if (!value) return { type: "skipped", reason: "no-fields" }
+-    if (value.raw.byteLength < MIN_ENVELOPE_BYTES) return { type: "skipped", reason: "below-threshold" }
+     if (!eligibleSessionMessage(eligibility(db, row.session_id, input.now, input.olderThanMs), row.seq)) return { type: "skipped", reason: "ineligible" }
+-    const retained = retain(db, value, input.now)
+-    db.update(SessionMessageTable).set({ data: value.projection, cold_ref: value.hash, time_updated: row.time_updated })
+-      .where(and(eq(SessionMessageTable.id, row.id), isNull(SessionMessageTable.cold_ref))).run()
+-    incrementReferences(db, [value], input.now)
+-    return { type: "frozen", hash: value.hash, rawBytes: value.raw.byteLength, compressedBytes: retained.compressedBytes }
++    const existing = db.select().from(SessionMessageTable)
++      .where(and(eq(SessionMessageTable.session_id, row.session_id), isNotNull(SessionMessageTable.cold_key))).all()
++    freezeSessionMessageBatch(db, [...existing.filter(item => item.id !== row.id), row], {
++      now: input.now, eligibilityState: sessionID => eligibility(db, sessionID, input.now, input.olderThanMs),
++    })
++    const ref = db.select({ ref: SessionMessageTable.cold_ref }).from(SessionMessageTable).where(eq(SessionMessageTable.id, row.id)).get()?.ref
++    if (!ref) throw new CorruptionError({ message: "Native pack target is missing" })
++    const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, ref)).get()
++    if (!payload) throw new CorruptionError({ message: "Native pack disappeared after assignment", hash: ref })
++    return { type: "frozen", hash: ref, rawBytes: payload.raw_bytes, compressedBytes: payload.compressed_bytes }
+   }
+@@ -1415,69 +2220,36 @@ function freeze(
    if (input.type === "message") {
      const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
      if (!row) return { type: "skipped", reason: "missing" }
@@ -3251,7 +3470,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  export function freezeOwner(db: TxOrDb, input: Owner & { now?: number; olderThanMs?: number }): FreezeResult {
    const now = input.now ?? Date.now()
    return db.transaction((db) => freeze(db, { ...input, now, olderThanMs: input.olderThanMs ?? THIRTY_DAYS_MS }), {
-@@ -1304,22 +2235,44 @@ export function freezeOwner(db: TxOrDb, input: Owner & { now?: number; olderThan
+@@ -1490,22 +2256,44 @@ export function freezeOwner(db: TxOrDb, input: Owner & { now?: number; olderThan
  // 成功回填后立即 release，后续 page/get 读取主表热 JSON，不再反复解压，这是持久预热语义。
  // corruption 会使整个范围 rollback，模型不会收到部分完整、部分占位的混合上下文。
  export function thawMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
@@ -3309,7 +3528,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      { behavior: "immediate" },
    )
  }
-@@ -1328,26 +2281,155 @@ export function thawMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSel
+@@ -1514,26 +2302,155 @@ export function thawMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSel
  // 事务内重读保证 projection 与 cold_ref 来自同一版本；已被其他 reader thaw 的 row 直接采用最新热数据。
  // release 在完整 data UPDATE 后执行，确保 fork 共享 payload 只在最后一个 owner 完成恢复时删除。
  export function thawPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
@@ -3478,7 +3697,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  // thawOwner 提供显式单 owner 展开，并用返回 boolean 区分 missing/hot 与实际发生的持久 thaw。
  // 它仍委托批量 row seam，不复制 decode、restore 或 refcount 规则。
  // 该 API 不接受“只返回解压值但不回填”的模式，避免形成与持久预热并行的第二套缓存语义。
-@@ -1366,72 +2448,80 @@ export function thawOwner(db: TxOrDb, input: Owner) {
+@@ -1558,78 +2469,84 @@ export function thawOwner(db: TxOrDb, input: Owner) {
  
  function eligibleOwnerCount(db: TxOrDb, now: number, olderThanMs: number) {
    const states = new Map<SessionID, ReturnType<typeof eligibility>>()
@@ -3502,6 +3721,10 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 -    .where(and(isNull(PartTable.cold_ref), partCandidate()))
 +    .where(and(isNull(PartTable.cold_key), partCondition))
      .all()
+-  const native = db.select().from(SessionMessageTable)
+-    .where(and(isNull(SessionMessageTable.cold_ref), sessionMessageCandidate())).all()
++  const native = db.select().from(SessionMessageTable)
++    .where(and(isNull(SessionMessageTable.cold_key), sessionMessageCandidate())).all()
    return (
      messages.filter((row) => {
 -      const value = extractMessage(row.data)
@@ -3517,7 +3740,13 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +      const value = partV2Value(db, row, legacyCache)
 +      if (!value) return false
 +      return eligible(state(row.session_id), row.message_id, row.data.type === "compaction")
-     }).length
+     }).length +
+-    native.filter(row => {
+-      const value = extractSessionMessage(row)
+-      return value !== undefined && value.raw.byteLength >= MIN_ENVELOPE_BYTES && eligibleSessionMessage(state(row.session_id), row.seq)
+-    }).length
++    // 已部署Native envelope只在内存恢复；status不能把历史预热或遗漏仍待升级的小消息。
++    inspectSessionMessageRows(db, native).filter(row => extractSessionMessage(row) !== undefined && eligibleSessionMessage(state(row.session_id), row.seq)).length
    )
  }
  
@@ -3591,8 +3820,23 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
        )
      )`
  }
-@@ -1444,16 +2534,18 @@ export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; older
-   const olderThanMs = input.olderThanMs ?? THIRTY_DAYS_MS
+@@ -1637,4 +2640,4 @@
+-// Native envelope的包装和字段数量不同，不套用V1的字节下界；最终仍按exact envelope判门槛。
++// Native同样按字段白名单和seq判资格，小消息交给pack而不再沿用每行字节门槛。
+ function sessionMessageCandidate() {
+   return inArray(SessionMessageTable.type, ["user", "assistant"])
+ }
+@@ -1648,7 +2650,6 @@
+   if (input.type === "session_message") {
+     const row = db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, input.id)).get()
+-    if (!row || row.cold_ref) return false
+-    const value = extractSessionMessage(row)
+-    return value !== undefined && value.raw.byteLength >= MIN_ENVELOPE_BYTES &&
++    if (!row || row.cold_key) return false
++    return inspectSessionMessageRows(db, [row]).some(value => extractSessionMessage(value) !== undefined) &&
+       eligibleSessionMessage(eligibility(db, row.session_id, now, olderThanMs), row.seq)
+   }
+@@ -1655,15 +2660,17 @@ export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; older
    if (input.type === "message") {
      const row = db.select().from(MessageTable).where(eq(MessageTable.id, input.id)).get()
 -    if (!row || row.cold_ref) return false
@@ -3617,7 +3861,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  }
  
  // verifyWith 把 owner 引用一次性 GROUP BY 反算，并逐 payload 校验 codec、size、hash 与 canonical envelope。
-@@ -1461,20 +2553,54 @@ export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; older
+@@ -1671,21 +2680,57 @@ export function isEligibleOwner(db: TxOrDb, input: Owner & { now?: number; older
  // report 同时记录 checked owner/payload，使空库成功与未执行扫描在用户输出中可区分。
  // 所有 repair 写入位于 immediate transaction；只读 verify 不获取 maintenance lease 或改变数据库。
  function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
@@ -3635,6 +3879,8 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +    .from(PartTable)
 +    .where(or(isNotNull(PartTable.cold_ref), isNotNull(PartTable.cold_key), isNotNull(PartTable.cold_stats)))
 +    .all()
++  const native = db.select().from(SessionMessageTable)
++    .where(or(isNotNull(SessionMessageTable.cold_ref), isNotNull(SessionMessageTable.cold_key), isNotNull(SessionMessageTable.cold_stats))).all()
 +  const summaries = db
 +    .select({
 +      ref: SessionTable.summary_ref,
@@ -3654,9 +3900,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    const refs = [
 -    ...db.select({ hash: MessageTable.cold_ref }).from(MessageTable).where(isNotNull(MessageTable.cold_ref)).all(),
 -    ...db.select({ hash: PartTable.cold_ref }).from(PartTable).where(isNotNull(PartTable.cold_ref)).all(),
+-    ...db.select({ hash: SessionMessageTable.cold_ref }).from(SessionMessageTable).where(isNotNull(SessionMessageTable.cold_ref)).all(),
 +    ...messages.flatMap((row) => (row.ref ? [{ hash: row.ref }] : [])),
 +    ...parts.flatMap((row) => (row.ref ? [{ hash: row.ref }] : [])),
 +    ...summaries.flatMap((row) => (row.ref ? [{ hash: row.ref }] : [])),
++    ...native.flatMap(row => row.cold_ref ? [{ hash: row.cold_ref }] : []),
    ]
    const hashes = new Set(payloads.map((row) => row.hash))
 +  const byHash = new Map(payloads.map((row) => [row.hash, row]))
@@ -3674,18 +3922,20 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    for (const payload of payloads) {
      const actual = counts.get(payload.hash) ?? 0
      if (payload.ref_count !== actual) {
-@@ -1488,14 +2614,89 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
+@@ -1699,14 +2740,105 @@ function verifyWith(db: TxOrDb, repair: boolean): VerifyReport {
        }
      }
      try {
 -      decode(db, payload.hash, payload.kind)
 +      // canonical、hash、size、codec 和 kind 共同构成 payload integrity，任一不符都算损坏。
 +      if (payload.kind === "session-summary") decodeSummary(db, payload.hash)
-+      else if (payload.kind === "message" || payload.kind === "part") decode(db, payload.hash, payload.kind)
++      else if (payload.kind === "message" || payload.kind === "part" || payload.kind === "session_message") decode(db, payload.hash, payload.kind)
 +      else if (payload.kind === "message-pack") {
 +        packEntries.set(payload.hash, decodePack(db, payload.hash, "message"))
 +      } else if (payload.kind === "part-pack") {
 +        packEntries.set(payload.hash, decodePack(db, payload.hash, "part"))
++      } else if (payload.kind === "session-message-pack") {
++        packEntries.set(payload.hash, decodePack(db, payload.hash, "session_message"))
 +      } else throw new CorruptionError({ message: "Unsupported cold payload kind", hash: payload.hash })
      } catch {
        corruptPayloads++
@@ -3741,6 +3991,20 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +      corruptOwners++
 +    }
 +  }
++  for (const owner of native) {
++    validateOwner("session_message", owner.cold_ref, owner.cold_key)
++    try {
++      if (!owner.cold_ref || !owner.cold_key) {
++        if (owner.cold_stats !== null) throw new CorruptionError({ message: "Non-packed Native message has cold Stats" })
++        continue
++      }
++      const fields = packEntries.get(owner.cold_ref)?.get(owner.cold_key.toString("hex"))
++      const stored = parseSessionMessageStats(owner.cold_stats, owner.cold_ref)
++      if (fields && canonical(stored) !== canonical(projectSessionMessageStats({ ...owner, data: restoreSessionMessage(owner, { version: 1, owner: "session_message", fields }) }))) {
++        throw new CorruptionError({ message: "Native cold Stats do not match the payload", hash: owner.cold_ref })
++      }
++    } catch { corruptOwners++ }
++  }
 +  // summary 的 ref/cursor 必须成对且指向 summary kind，repair 不猜测缺失的一半。
 +  for (const owner of summaries) {
 +    const seed = owner.seed === null || isSummarySeed(owner.seed)
@@ -3765,11 +4029,15 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      refCountMismatches,
      missingPayloads,
      corruptPayloads,
-@@ -1540,7 +2741,22 @@ export function expand(db: TxOrDb, input: { sessionID?: SessionID; all: boolean
+@@ -1751,11 +2850,26 @@ export function expand(db: TxOrDb, input: { sessionID?: SessionID; all: boolean
          .all()
        thawMessageRows(db, messages)
        thawPartRows(db, parts)
--      return { expanded: messages.length + parts.length }
+       const native = db.select().from(SessionMessageTable).where(and(
+         isNotNull(SessionMessageTable.cold_ref), input.sessionID ? eq(SessionMessageTable.session_id, input.sessionID) : undefined,
+       )).all()
+       thawSessionMessageBatch(db, native, Date.now())
+-      return { expanded: messages.length + parts.length + native.length }
 +      const summaries = db
 +        .select({ id: SessionTable.id, ref: SessionTable.summary_ref })
 +        .from(SessionTable)
@@ -3785,11 +4053,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +        if (!summary.ref) continue
 +        expandSummaryReference(db, summary.id, summary.ref)
 +      }
-+      return { expanded: messages.length + parts.length + summaries.length }
++      return { expanded: messages.length + parts.length + native.length + summaries.length }
      },
      { behavior: "immediate" },
    )
-@@ -1589,7 +2805,10 @@ function initialCursor(request: MaintenanceRequest): MaintenanceCursor | undefin
+@@ -1803,7 +2900,10 @@ function initialCursor(request: MaintenanceRequest): MaintenanceCursor | undefin
  // queued record 在任何数据库写入前生成，使 CLI 断线和 daemon crash 都有可查询的控制面事实。
  // batchSize、age 和 expand scope 在这里拒绝非法值，maintenance loop 不再处理模糊 argv/default。
  export function prepareMaintenance(request: MaintenanceRequest): PreparedMaintenance {
@@ -3800,7 +4068,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    const taskBacked =
      request.operation === "compress" ||
      request.operation === "expand" ||
-@@ -1598,6 +2817,8 @@ export function prepareMaintenance(request: MaintenanceRequest): PreparedMainten
+@@ -1812,6 +2912,8 @@ export function prepareMaintenance(request: MaintenanceRequest): PreparedMainten
    if (!taskBacked) return { type: "immediate", request }
  
    const now = Date.now()
@@ -3809,7 +4077,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    return {
      type: "task",
      request,
-@@ -1627,13 +2848,16 @@ function validateMaintenanceRequest(request: MaintenanceRequest) {
+@@ -1841,13 +2943,16 @@ function validateMaintenanceRequest(request: MaintenanceRequest) {
      "batchSize" in request &&
      (!Number.isSafeInteger(request.batchSize) || request.batchSize <= 0 || request.batchSize > MAX_BATCH_SIZE)
    ) {
@@ -3826,13 +4094,13 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    if (request.operation === "expand" && !request.all && !request.sessionID) {
      throw new ValidationError({ message: "Expand requires an explicit session or all=true" })
    }
-@@ -1697,13 +2921,17 @@ function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): Ma
+@@ -1912,14 +3016,18 @@ function taskCursor(input: unknown, operation: MaintenanceTask["operation"]): Ma
    // operation 决定唯一 cursor family，验证后 maintain 无需再解释任意 JSON shape。
    if (!isRecord(input)) throw new ValidationError({ message: "Maintenance task cursor is missing" })
    if (operation === "compress" || operation === "expand") {
--    if ((input.owner !== "message" && input.owner !== "part") || typeof input.lastID !== "string") {
+-    if ((input.owner !== "message" && input.owner !== "part" && input.owner !== "session_message") || typeof input.lastID !== "string") {
 +    if (
-+      (input.owner !== "message" && input.owner !== "part" && input.owner !== "session-summary") ||
++      (input.owner !== "message" && input.owner !== "part" && input.owner !== "session_message" && input.owner !== "session-summary") ||
 +      typeof input.lastID !== "string"
 +    ) {
        throw new ValidationError({ message: "Maintenance task owner cursor is invalid" })
@@ -3840,13 +4108,15 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      if (
        input.lastID &&
        ((input.owner === "message" && !Schema.is(MessageID)(input.lastID)) ||
--        (input.owner === "part" && !Schema.is(PartID)(input.lastID)))
+-        (input.owner === "part" && !Schema.is(PartID)(input.lastID)) ||
+-        (input.owner === "session_message" && !Schema.is(SessionMessage.ID)(input.lastID)))
 +        (input.owner === "part" && !Schema.is(PartID)(input.lastID)) ||
++        (input.owner === "session_message" && !Schema.is(SessionMessage.ID)(input.lastID)) ||
 +        (input.owner === "session-summary" && !Schema.is(SessionIDSchema)(input.lastID)))
      ) {
        throw new ValidationError({ message: "Maintenance task owner cursor ID is invalid" })
      }
-@@ -1799,6 +3027,13 @@ function pageCount(db: TxOrDb) {
+@@ -2011,6 +3122,13 @@ function pageCount(db: TxOrDb) {
    return isRecord(row) && typeof row.page_count === "number" ? row.page_count : 0
  }
  
@@ -3860,7 +4130,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
  // taskRequest 允许 resume 注入持久 task，但 operation 必须与本次 prepared request 一致。
  // cursor、计数和原始 args 以持久 task 为准，新的随机 prepared task 只提供当前 schema/operation 验证。
  function taskRequest(prepared: PreparedMaintenance, runtime: MaintenanceRuntime) {
-@@ -1820,8 +3056,11 @@ function nextMessageRows(
+@@ -2037,8 +3151,11 @@ function nextMessageRows(
    cold: boolean,
    batchSize: number,
  ) {
@@ -3874,7 +4144,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    if (lastID) conditions.push(gt(MessageTable.id, MessageID.make(lastID)))
    if (request.sessionID) conditions.push(eq(MessageTable.session_id, request.sessionID))
    return db
-@@ -1843,8 +3082,11 @@ function nextPartRows(
+@@ -2060,8 +3177,11 @@ function nextPartRows(
    cold: boolean,
    batchSize: number,
  ) {
@@ -3888,7 +4158,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    if (lastID) conditions.push(gt(PartTable.id, PartID.make(lastID)))
    if (request.sessionID) conditions.push(eq(PartTable.session_id, request.sessionID))
    return db
-@@ -1856,18 +3098,41 @@ function nextPartRows(
+@@ -2070,27 +3193,50 @@ function nextPartRows(
      .all()
  }
  
@@ -3917,6 +4187,16 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +  }
 +}
 +
+ function nextSessionMessageRows(db: TxOrDb, request: { sessionID?: SessionID }, lastID: string, cold: boolean, batchSize: number) {
+   return db.select().from(SessionMessageTable).where(and(
+-    cold ? isNotNull(SessionMessageTable.cold_ref) : isNull(SessionMessageTable.cold_ref),
++    cold ? isNotNull(SessionMessageTable.cold_ref) : isNull(SessionMessageTable.cold_key),
+     cold ? undefined : sessionMessageCandidate(),
+     lastID ? gt(SessionMessageTable.id, SessionMessage.ID.make(lastID)) : undefined,
+     request.sessionID ? eq(SessionMessageTable.session_id, request.sessionID) : undefined,
+   )).orderBy(SessionMessageTable.id).limit(batchSize).all()
+ }
+ 
  // maintain 是 operation dispatch、batch transaction、cursor advance、abort 与 terminal checkpoint 的唯一 owner。
  // 每批先 assert lease，SQLite immediate transaction 提交后才更新 task record；checkpoint 失败可由 owner 状态幂等恢复。
  // AbortSignal 只在批次边界观察，不中断正在写 WAL 的事务；下一 checkpoint 明确记录 interrupted 而非 failed。
@@ -3935,7 +4215,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    if (prepared.type === "immediate") return run(() => {
      if (prepared.request.operation === "status") return { type: "status", report: status(db) }
      if (prepared.request.operation === "verify") return { type: "verify", report: verify(db, prepared.request) }
-@@ -1875,34 +3140,38 @@ export async function maintain(db: TxOrDb,
+@@ -2098,34 +3240,38 @@ export async function maintain(db: TxOrDb,
        throw new ValidationError({ message: "vacuum requires confirm=true" })
      }
      if (!prepared.request.confirm) throw new ValidationError({ message: "vacuum requires confirm=true" })
@@ -3988,7 +4268,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      await runtime.checkpoint(structuredClone(task))
    }
  
-@@ -1913,6 +3183,19 @@ export async function maintain(db: TxOrDb,
+@@ -2139,6 +3283,19 @@ export async function maintain(db: TxOrDb,
    await checkpoint()
  
    try {
@@ -4008,7 +4288,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      let done = false
      while (!done) {
        runtime.lease.assertOwned()
-@@ -1928,6 +3211,7 @@ export async function maintain(db: TxOrDb,
+@@ -2154,6 +3311,7 @@ export async function maintain(db: TxOrDb,
          const cursor = task.cursor
          if (!cursor || !("owner" in cursor)) throw new ValidationError({ message: "Invalid owner maintenance cursor" })
          if (cursor.owner === "message") {
@@ -4016,7 +4296,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
            const outcome = await run(() => db.transaction(
              (db) => {
                const rows = cold
-@@ -1935,13 +3219,14 @@ export async function maintain(db: TxOrDb,
+@@ -2161,13 +3319,14 @@ export async function maintain(db: TxOrDb,
                  : nextMessageRows(db, request, cursor.lastID, false, request.batchSize)
                if (rows.length === 0) return { empty: true as const }
                const now = Date.now()
@@ -4033,7 +4313,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
                    })
                return {
                  empty: false as const,
-@@ -1955,6 +3240,7 @@ export async function maintain(db: TxOrDb,
+@@ -2181,6 +3340,7 @@ export async function maintain(db: TxOrDb,
              { behavior: "immediate" },
            ))
            if (outcome.empty) {
@@ -4041,16 +4321,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
              task.cursor = { owner: "part", lastID: "" }
              await checkpoint()
              continue
-@@ -1964,7 +3250,7 @@ export async function maintain(db: TxOrDb,
-           task.skipped += outcome.skipped
-           task.rawBytes += outcome.rawBytes
-           task.compressedBytes += outcome.compressedBytes
--        } else {
-+        } else if (cursor.owner === "part") {
-           const outcome = await run(() => db.transaction(
-             (db) => {
-               const rows = cold
-@@ -1972,13 +3258,14 @@ export async function maintain(db: TxOrDb,
+@@ -2198,13 +3358,14 @@ export async function maintain(db: TxOrDb,
                  : nextPartRows(db, request, cursor.lastID, false, request.batchSize)
                if (rows.length === 0) return { empty: true as const }
                const now = Date.now()
@@ -4067,12 +4338,22 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
                    })
                return {
                  empty: false as const,
-@@ -1991,6 +3278,12 @@ export async function maintain(db: TxOrDb,
-             },
-             { behavior: "immediate" },
-           ))
+@@ -2225,10 +3380,10 @@
+-        } else {
++        } else if (cursor.owner === "session_message") {
+           // 复用同一lease/提交后checkpoint，不能在Part阶段结束时漏掉Native owner。
+           const outcome = await run(() => db.transaction(tx => {
+             const rows = nextSessionMessageRows(tx, request, cursor.lastID, cold, request.batchSize)
+             if (rows.length === 0) return { empty: true as const }
+             const now = Date.now()
+             if (cold) thawSessionMessageBatch(tx, rows, now)
+             const result = cold ? { skipped: 0, rawBytes: 0, compressedBytes: 0 } : freezeSessionMessageBatch(tx, rows, {
+-              now, eligibilityState: sessionID => cachedEligibility(tx, sessionID, now, olderThanMs),
++              now, eligibilityState: batchEligibility(tx, now, olderThanMs),
+             })
+@@ -2238,3 +3393,9 @@
 +          if (outcome.empty && cold) {
-+            // expand 最后清 summary refs，完整降级结束后不残留 maintenance pointers。
++            // 三类业务owner结束后才展开summary，不能越过Native阶段提前完成。
 +            task.cursor = { owner: "session-summary", lastID: "" }
 +            await checkpoint()
 +            continue
@@ -4080,7 +4361,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
            if (outcome.empty) done = true
            else {
              task.cursor = outcome.cursor
-@@ -1999,8 +3292,32 @@ export async function maintain(db: TxOrDb,
+@@ -2243,8 +3410,32 @@ export async function maintain(db: TxOrDb,
              task.rawBytes += outcome.rawBytes
              task.compressedBytes += outcome.compressedBytes
            }
@@ -4114,7 +4395,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
          const cursor = task.cursor
          if (!cursor || !("stage" in cursor)) {
            throw new ValidationError({ message: "Invalid payload maintenance cursor" })
-@@ -2016,23 +3333,10 @@ export async function maintain(db: TxOrDb,
+@@ -2260,23 +3451,10 @@ export async function maintain(db: TxOrDb,
                .all()
              if (rows.length === 0) return { empty: true as const }
              let skipped = 0
@@ -4139,7 +4420,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
                  db.delete(ColdStorageTable).where(eq(ColdStorageTable.hash, row.hash)).run()
                  bytes += row.compressed_bytes
                } else skipped++
-@@ -2042,7 +3346,7 @@ export async function maintain(db: TxOrDb,
+@@ -2286,7 +3464,7 @@ export async function maintain(db: TxOrDb,
                cursor: { stage: "payload" as const, lastHash: rows[rows.length - 1].hash },
                processed: rows.length,
                skipped,
@@ -4148,7 +4429,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
                bytes,
              }
            },
-@@ -2075,11 +3379,15 @@ export async function maintain(db: TxOrDb,
+@@ -2321,11 +3497,15 @@ export async function maintain(db: TxOrDb,
  
  // status 汇总 logical raw、unique compressed、共享 bytes 与真实 refcount mismatch，不触发 thaw 或 owner rewrite。
  // eligibleOwners 复用 SQL candidate+唯一 eligibility 判定，报告的是当前可冻 owner 而非所有 hot rows。
@@ -4166,10 +4447,12 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    const counts = ownerCounts(
      db,
      payloads.map((row) => row.hash),
-@@ -2095,23 +3403,47 @@ export function status(db: TxOrDb): StatusReport {
+@@ -2339,25 +3521,49 @@ export function status(db: TxOrDb): StatusReport {
        .from(PartTable)
        .where(isNotNull(PartTable.cold_ref))
-       .get()?.value ?? 0)
+       .get()?.value ?? 0) +
+     (db.select({ value: sql<number>`count(*)` }).from(SessionMessageTable)
+       .where(isNotNull(SessionMessageTable.cold_ref)).get()?.value ?? 0)
 +  const summaryOwners =
 +    db
 +      .select({ value: sql<number>`count(*)` })
@@ -4215,10 +4498,117 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      refCountMismatches,
      orphans,
 
+diff --git a/packages/core/test/database-migration.test.ts b/packages/core/test/database-migration.test.ts
+--- a/packages/core/test/database-migration.test.ts
++++ b/packages/core/test/database-migration.test.ts
+@@ -17,6 +17,8 @@
+ import simplifyIntegrationCredentialsMigration from "@opencode-ai/core/database/migration/20260611192811_lush_chimera"
+ import simplifySessionInputMigration from "@opencode-ai/core/database/migration/20260622202450_simplify_session_input"
++import coldStoragePackMigration from "@opencode-ai/core/database/migration/20260930100000_cold_storage_pack_v2"
++import nativeColdStoragePackMigration from "@opencode-ai/core/database/migration/20260930100001_native_cold_storage_pack_v2"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { EventV2 } from "@opencode-ai/core/event"
+ import { ProjectV2 } from "@opencode-ai/core/project"
+@@ -144,6 +146,9 @@
+           ),
+         ).toBeUndefined()
+         expect(yield* db.get(sql`SELECT count(*) as count FROM migration`)).toEqual({ count: migrations.length })
++        // fresh DDL与旧库ALTER必须同时具有Native pack列，不能只靠空库跳过迁移体。
++        expect(yield* db.all(sql`SELECT name FROM pragma_table_info('session_message') WHERE name IN ('cold_key', 'cold_stats') ORDER BY name`))
++          .toEqual([{ name: "cold_key" }, { name: "cold_stats" }])
+         expect(
+           yield* db.all(
+             sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('event_aggregate_seq_idx', 'event_aggregate_type_seq_idx', 'session_input_session_pending_seq_idx', 'session_input_session_pending_delivery_seq_idx', 'session_input_session_admitted_seq_idx', 'session_input_session_promoted_seq_idx', 'session_message_session_idx', 'session_message_session_type_idx', 'session_message_session_seq_idx', 'session_message_session_type_seq_idx', 'session_message_session_time_created_id_idx') ORDER BY name`,
+@@ -161,6 +166,24 @@
+       }),
+     )
++    await run(Effect.gen(function* () {
++      const db = yield* makeDb
++      // 仅建立本次迁移读取的既有表，真实SQLite执行全部ALTER并验证原Native行不变。
++      yield* db.run(sql`CREATE TABLE cold_storage (hash text PRIMARY KEY)`)
++      yield* db.run(sql`CREATE TABLE message (id text PRIMARY KEY)`)
++      yield* db.run(sql`CREATE TABLE part (id text PRIMARY KEY)`)
++      yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY)`)
++      yield* db.run(sql`CREATE TABLE session_message (id text PRIMARY KEY, data text NOT NULL, cold_ref text REFERENCES cold_storage(hash))`)
++      yield* db.run(sql`INSERT INTO cold_storage (hash) VALUES ('legacy-ref')`)
++      yield* db.run(sql`INSERT INTO session_message (id, data, cold_ref) VALUES ('msg_legacy', '{"content":[]}', 'legacy-ref')`)
++      yield* DatabaseMigration.applyOnly(db, [coldStoragePackMigration, nativeColdStoragePackMigration])
++      expect(yield* db.get(sql`SELECT id, data, cold_ref, cold_key, cold_stats FROM session_message`))
++        .toEqual({ id: "msg_legacy", data: '{"content":[]}', cold_ref: "legacy-ref", cold_key: null, cold_stats: null })
++      expect(yield* db.all(sql`SELECT name FROM pragma_table_info('session_message') WHERE name IN ('cold_key', 'cold_stats') ORDER BY name`))
++        .toEqual([{ name: "cold_key" }, { name: "cold_stats" }])
++      expect(yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'session_summary_ref_idx'`))
++        .toEqual({ name: "session_summary_ref_idx" })
++    }))
+   })
+ 
+   test("rejects a non-empty database without a session table", async () => {
+     await expect(
+
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect } from "bun:test"
+ import { DateTime, Effect, Layer, Schema } from "effect"
+-import { asc, eq, sql } from "drizzle-orm"
++import { asc, eq, inArray, sql } from "drizzle-orm"
+ import { Database } from "@opencode-ai/core/database/database"
+ import { DatabaseMigration } from "@opencode-ai/core/database/migration"
+ import stepUsageMigration from "@opencode-ai/core/database/migration/20260623000000_session_step_usage"
+@@ -121,7 +121,36 @@
+       expect(restored?.data).toMatchObject({ content: body })
+       expect(restored?.seq).toBe(1)
+       expect(restored?.time_created).toBe(0)
+       expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+       expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, otherID)).get())?.data).toMatchObject({ content: body })
++      const hidden = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, hiddenID)).get()
++      if (!hidden) return yield* Effect.die("Native hidden fixture is missing")
++      const distinctData = { ...hidden.data, content: [{ type: "reasoning" as const, id: "distinct", text: "a different Native entry" }] }
++      yield* db.update(SessionMessageTable).set({ data: distinctData }).where(eq(SessionMessageTable.id, hiddenID)).run()
++      const originals = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
++      // 同Session不同内容必须共享一个pack并保留不同entry key，而不是只证明相同envelope去重。
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: oldID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
++        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: hiddenID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
++      })
++      const packed = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
++      expect(new Set(packed.map(row => row.cold_ref)).size).toBe(1)
++      expect(new Set(packed.map(row => row.cold_key?.toString("hex"))).size).toBe(2)
++      const bad = packed.find(row => row.id === hiddenID)
++      if (!bad?.cold_key) return yield* Effect.die("Native pack key is missing")
++      const key = Buffer.from(bad.cold_key)
++      // 第二个key损坏时完整选集必须回滚，不能先热化第一条或消耗共享引用。
++      yield* db.update(SessionMessageTable).set({ cold_key: Buffer.alloc(1), time_updated: bad.time_updated }).where(eq(SessionMessageTable.id, hiddenID)).run()
++      const broken = yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()
++      expect((yield* ColdStorage.readSessionMessageRows(db, broken).pipe(Effect.exit))._tag).toBe("Failure")
++      expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()).toEqual(broken)
++      expect((yield* db.select().from(ColdStorageTable).get())?.ref_count).toBe(2)
++      yield* db.update(SessionMessageTable).set({ cold_key: key, time_updated: bad.time_updated }).where(eq(SessionMessageTable.id, hiddenID)).run()
++      expect(yield* Effect.promise(() => ColdStorage.maintain(db.sync, ColdStorage.prepareMaintenance({
++        operation: "expand", sessionID, all: false, batchSize: 1,
++      }), runtime))).toMatchObject({ type: "task", task: { status: "completed", processed: 2 } })
++      // 全行比较同时锁定seq、时间、正文及ref/key/stats清理，不靠删断言掩盖格式差异。
++      expect(yield* db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, [oldID, hiddenID])).orderBy(SessionMessageTable.seq).all()).toEqual(originals)
++      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+     }),
+   )
+@@ -328,6 +357,8 @@
+       yield* db.update(SessionTable).set({ time_updated: 0 }).where(eq(SessionTable.id, sessionID)).run()
+       yield* Database.withSync({ db, sync: db.sync }, sync => {
+-        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
++        // 内部摘要只inspect，必须仍是冷owner；迟到完成事件随后自行恢复并交换引用。
++        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID })).toMatchObject({ type: "skipped", reason: "already-cold" })
++        expect(sync.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()?.cold_ref).toBeTruthy()
+       })
+       yield* events.publish(SessionEvent.Step.Ended, settlement)
+       expect((yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)).toMatchObject({ content: expected.content })
+
 diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
 --- a/packages/core/src/session/sql.ts
 +++ b/packages/core/src/session/sql.ts
-@@ -16,6 +16,52 @@ import { AgentV2 } from "../agent"
+@@ -16,6 +16,58 @@ import { AgentV2 } from "../agent"
  import type { Revert } from "@opencode-ai/schema/revert"
  
  type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type" | "id">
@@ -4251,13 +4641,19 @@ diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
 +      }
 +    }
 +
++// Native每个content槽位只保留字符标量；身份、状态和用量仍来自原消息及精确账本。
++export type SessionMessageColdStats = {
++  version: 1
++  tools: Record<string, { inputChars: number; outputChars: number }>
++}
++
 +// #0500：cold_storage 在 SessionTable 之前声明，使 Session summary 与 Message/Part 共享同一 RESTRICT 外键。
 +// kind 由读取器校验而不是 SQLite CHECK 约束限制，旧数据库可通过同一迁移直接扩展到 v2 owner union。
 +export const ColdStorageTable = sqliteTable(
 +  "cold_storage",
 +  {
 +    hash: text().primaryKey(),
-+    kind: text().$type<"message" | "part" | "message-pack" | "part-pack" | "session-summary">().notNull(),
++    kind: text().$type<"message" | "part" | "session_message" | "message-pack" | "part-pack" | "session-message-pack" | "session-summary">().notNull(),
 +    codec: text().$type<"zstd">().notNull(),
 +    payload: blob({ mode: "buffer" }).notNull(),
 +    raw_bytes: integer().notNull(),
@@ -4369,7 +4765,7 @@ diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
 -  "cold_storage",
 -  {
 -    hash: text().primaryKey(),
--    kind: text().$type<"message" | "part">().notNull(),
+-    kind: text().$type<"message" | "part" | "session_message">().notNull(),
 -    codec: text().$type<"zstd">().notNull(),
 -    payload: blob({ mode: "buffer" }).notNull(),
 -    raw_bytes: integer().notNull(),
@@ -4414,6 +4810,16 @@ diff --git a/packages/core/src/session/sql.ts b/packages/core/src/session/sql.ts
    (table) => [
      index("part_message_id_id_idx").on(table.message_id, table.id),
      index("part_session_idx").on(table.session_id),
+@@ -188,6 +273,9 @@
+     data: text({ mode: "json" }).notNull().$type<SessionMessageData>(),
+     // Native投影与V1共用payload表，seq、身份和审批所需热字段不外移。
+     cold_ref: text().references(() => ColdStorageTable.hash, { onDelete: "restrict" }),
++    // Native与旧消息共用pack协议，统计只读取本owner的精确标量而不展开消息。
++    cold_key: blob({ mode: "buffer" }),
++    cold_stats: text({ mode: "json" }).$type<SessionMessageColdStats>(),
+   },
+   (table) => [
+     uniqueIndex("session_message_session_seq_idx").on(table.session_id, table.seq),
 
 diff --git a/packages/core/src/session/compaction-boundary.ts b/packages/core/src/session/compaction-boundary.ts
 new file mode 100644
@@ -4611,6 +5017,22 @@ diff --git a/packages/core/src/session/projector.ts b/packages/core/src/session/
          const next = usage(event.data.part)
          if (previous) yield* applyUsage(db, row.session_id, previous, -1)
 
+diff --git a/packages/core/src/session/tool-diffs.ts b/packages/core/src/session/tool-diffs.ts
+--- a/packages/core/src/session/tool-diffs.ts
++++ b/packages/core/src/session/tool-diffs.ts
+@@ -93,7 +93,9 @@
+     .orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
+-  // 真实请求归属先筛选，工具结果在既有聚合器消费前完整恢复。
+-  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.map(row => row.message).filter(row => !hidden(row.data.metadata?.hidden)))
++  // 内部摘要按精确request/seq选集恢复内存副本，不把业务历史持久预热。
++  const restored = yield* Database.withSync({ db, sync: db.sync }, sync =>
++    ColdStorage.inspectSessionMessageRows(sync, rows.map(row => row.message).filter(row => !hidden(row.data.metadata?.hidden))),
++  )
+   const messages = restored.map(row => decode({ ...row.data, id: row.id, type: row.type }))
+     .filter((message): message is SessionMessage.Assistant => message.type === "assistant" && !hidden(message.metadata?.hidden))
+   // Native与V1同样只消费当前请求的完成工具；整树快照既不参与归因，也不再吞错补成功。
+   const byTool = collect(messages.flatMap(message => message.content.flatMap(part =>
+
 diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/search.ts
 --- a/packages/core/src/session/search.ts
 +++ b/packages/core/src/session/search.ts
@@ -4706,7 +5128,16 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
            CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE
          );
        `)
-@@ -269,6 +272,11 @@ export default {
+@@ -253,6 +256,8 @@ export default {
+           \`time_updated\` integer NOT NULL,
+           \`data\` text NOT NULL,
+           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
++          \`cold_key\` blob,
++          \`cold_stats\` text,
+           CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+         );
+       `)
+@@ -269,6 +274,11 @@ export default {
            \`summary_deletions\` integer,
            \`summary_files\` integer,
            \`summary_diffs\` text,
@@ -4718,36 +5149,41 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
            \`metadata\` text,
            \`cost\` real DEFAULT 0 NOT NULL,
            \`tokens_input\` integer DEFAULT 0 NOT NULL,
-@@ -381,6 +389,8 @@ export default {
+@@ -381,7 +389,9 @@ export default {
        `)
        yield* tx.run(`CREATE INDEX \`cold_storage_ref_count_idx\` ON \`cold_storage\` (\`ref_count\`);`)
        yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
 +      // #0500：summary payload cache 的 RESTRICT 引用索引——expand/cleanup 反算共用。
 +      yield* tx.run(`CREATE INDEX \`session_summary_ref_idx\` ON \`session\` (\`summary_ref\`);`)
        yield* tx.run(`CREATE INDEX \`part_cold_ref_idx\` ON \`part\` (\`cold_ref\`);`)
+       yield* tx.run(`CREATE INDEX \`session_message_cold_ref_idx\` ON \`session_message\` (\`cold_ref\`);`)
      })
    },
 
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -50,4 +50,5 @@
+@@ -50,5 +50,7 @@
      // #493：cold_storage 表 + message/part.cold_ref 引用列
      import("./migration/20260717035626_cold_storage"),
+     import("./migration/20260717035627_native_cold_storage"),
 +    import("./migration/20260930100000_cold_storage_pack_v2"),
++    import("./migration/20260930100001_native_cold_storage_pack_v2"),
    ])
  ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
 diff --git a/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts b/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,25 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +// #0500：cold storage pack v2 列扩展——pack entry key、Part 同行 stats 投影与 Session summary cache 状态。
 +// v1→v2 升级由既有数据的事务性 repack 承担（eligible v1 owner 逐批升级），迁移只补列不搬数据。
 +export default {
 +  id: "20260930100000_cold_storage_pack_v2",
++  // source的V1 pack已完整部署；Native列由紧随其后的独立增量迁移负责。
++  legacy: ["20260718230857_cold_storage_pack_v2"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      // #0500：cold_key 在 pack row 内定位 owner entry；v1 owner 保持 NULL，读取器按状态选择唯一 decoder。
@@ -4762,6 +5198,29 @@ new file mode 100644
 +      yield* tx.run(`ALTER TABLE \`session\` ADD \`summary_init_dirty\` integer DEFAULT 0 NOT NULL;`)
 +      yield* tx.run(`ALTER TABLE \`session\` ADD \`summary_seed\` text;`)
 +      yield* tx.run(`CREATE INDEX \`session_summary_ref_idx\` ON \`session\` (\`summary_ref\`);`)
++    })
++  },
++} satisfies DatabaseMigration.Migration
+diff --git a/packages/core/src/database/migration/20260930100001_native_cold_storage_pack_v2.ts b/packages/core/src/database/migration/20260930100001_native_cold_storage_pack_v2.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/database/migration/20260930100001_native_cold_storage_pack_v2.ts
+@@ -0,0 +1,18 @@
++import { Effect } from "effect"
++import { sql } from "drizzle-orm"
++import type { DatabaseMigration } from "../migration"
++
++export default {
++  id: "20260930100001_native_cold_storage_pack_v2",
++  up(tx) {
++    return Effect.gen(function* () {
++      // V1旧完成标记只覆盖message/part；Native的pack定位与统计投影另行升级。
++      const columns = yield* tx.all<{ name: string }>(sql`SELECT name FROM pragma_table_info('session_message')`)
++      // 已部署目标版本可能已有这两列；各列只补一次，原冷引用与正文保持不变。
++      if (!columns.some((column) => column.name === "cold_key"))
++        yield* tx.run(`ALTER TABLE \`session_message\` ADD \`cold_key\` blob;`)
++      if (!columns.some((column) => column.name === "cold_stats"))
++        yield* tx.run(`ALTER TABLE \`session_message\` ADD \`cold_stats\` text;`)
 +    })
 +  },
 +} satisfies DatabaseMigration.Migration
@@ -4962,7 +5421,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +})
 +
  // #493：fork 只读取 raw storage rows，不经 decoder，不会把 source prefix 持久 thaw。
- // messageID 是 exclusive fork point；Part 按 session+message_id 范围选择，避免超上限的 IN 参数。
+ // messageID按同会话的(time_created,id)定位exclusive前缀；不存在的锚点沿用全量可见复制。
  export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
 @@ -735,8 +857,9 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
    return Effect.gen(function* () {
@@ -4974,9 +5433,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
          Effect.catchIf(NotFoundError.isInstance, () =>
            Effect.succeed({ items: [] as WithParts[], more: false, cursor: undefined }),
          ),
-@@ -992,8 +1110,13 @@ export function formatRecentUserMemento(messages: NonNullable<CompactionPart["re
- }
- 
+@@ -943,6 +1110,11 @@
  export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: SessionID) {
 +  // #0500：cutoff 先于任何 business hydrate 决定；无 tail 时 marker 本身就是 head 终点，
 +  // 有 tail 时从原始 retained turn 开始读取，再由 filterCompacted 恢复 provider 顺序。
@@ -5071,12 +5528,13 @@ diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/session/summary-cache.ts
-@@ -0,0 +1,784 @@
+@@ -0,0 +1,723 @@
 +import { Effect, Schema } from "effect"
 +import path from "path"
 +import { and, asc, desc, eq, gt, isNull, lte, sql, type SQL } from "drizzle-orm"
 +// #0500：目标分层——cold owner 在 core；TxOrDb 与 SummaryPayload 由 cold-storage 导出。
 +import { Database } from "@opencode-ai/core/database/database"
++import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
 +import { ColdStorage, type SummaryPayload, type TxOrDb } from "@opencode-ai/core/storage/cold-storage"
 +import { InstanceState } from "@/effect/instance-state"
 +import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session/sql"
@@ -5147,72 +5605,10 @@ new file mode 100644
 +// SummaryCache 与 SessionSummary 共用这一纯归并规则，避免缓存增量和显式 diff 各自定义文件状态。
 +// 输入只保留 completed Tool metadata；可见 Text、Tool output 和其他 Part 不会因聚合被复制到缓存。
 +export function collectToolDiffs(messages: readonly ToolDiffMessage[], worktree: string): Snapshot.FileDiff[] {
-+  // accumulator 保留文件首次出现顺序，使全量构建与增量合并得到相同排列。
-+  const result = createAccumulator()
-+  const merge = (file: string, patch: string, additions: number, deletions: number, status?: string) => {
-+    // 路径先归一为 worktree 相对形式，跨平台分隔符不能制造两个逻辑文件。
-+    const rel = toWorktreeRel(worktree, file)
-+    // patch 按消息顺序拼接，计数直接相加，不能从最终 patch 反猜工具精确统计。
-+    mergeFileDiff(result, {
-+      file: rel,
-+      patch,
-+      additions,
-+      deletions,
-+      // added/deleted 比 modified 更强，后续轻量修改不能抹掉建立或删除事实。
-+      status: mapStatus(status) ?? inferStatus(additions, deletions),
-+    } satisfies Snapshot.FileDiff)
-+  }
-+
-+  for (const msg of messages) {
-+    // hidden Message/Part 不属于可见历史，撤销和修复痕迹不能污染摘要。
-+    if (msg.info.hidden) continue
-+    for (const part of msg.parts) {
-+      if (part.hidden) continue
-+      // 只有 completed Tool metadata 进入这里，running 半成品不会抢先写缓存。
-+      const meta = part.state.metadata
-+      // 未知 metadata 被忽略而不持久化，派生 cache 不扩展业务数据边界。
-+      if (!meta || typeof meta !== "object" || Array.isArray(meta)) continue
-+      const record = meta as Record<string, unknown>
-+
-+      // files 是 edit/apply_patch 的批量历史形状。
-+      const files = arrayValue(record.files)
-+      if (files.length) {
-+        for (const entry of files) {
-+          if (!entry || typeof entry !== "object") continue
-+          const value = entry as Record<string, unknown>
-+          const file = stringValue(value.relativePath) ?? stringValue(value.filePath) ?? ""
-+          if (!file) continue
-+          merge(
-+            file,
-+            stringValue(value.patch) ?? "",
-+            numberValue(value.additions),
-+            numberValue(value.deletions),
-+            stringValue(value.type),
-+          )
-+        }
-+        continue
-+      }
-+
-+      // filediff 收口旧单文件 producer 形状。
-+      const filediff = record.filediff
-+      if (filediff && typeof filediff === "object" && !Array.isArray(filediff)) {
-+        const value = filediff as Record<string, unknown>
-+        const file = stringValue(value.file)
-+        if (file) merge(file, stringValue(value.patch) ?? "", numberValue(value.additions), numberValue(value.deletions))
-+        continue
-+      }
-+
-+      // diff/filepath 收口 shell 类旧 metadata，消费者无需理解 producer 版本。
-+      const diff = stringValue(record.diff)
-+      const file = stringValue(record.filepath)
-+      if (diff && file) {
-+        const stats = countPatchStats(diff)
-+        merge(file, diff, stats.additions, stats.deletions)
-+      }
-+    }
-+  }
-+  // 此函数保持纯计算；DB 引用交换与 refcount 生命周期只属于 commit transaction。
-+  return result.values
++  const records = messages.flatMap(message => message.info.hidden ? [] :
++    message.parts.flatMap(part => part.hidden ? [] : [part.state.metadata]),
++  ).filter((meta): meta is Record<string, unknown> => meta !== null && typeof meta === "object" && !Array.isArray(meta))
++  return ToolDiffs.collect(records, worktree)
 +}
 +
 +export function toToolDiffMessages(messages: readonly MessageV2.WithParts[]): ToolDiffMessage[] {
@@ -5950,10 +6346,12 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/session/summary.ts
 --- a/packages/opencode/src/session/summary.ts
 +++ b/packages/opencode/src/session/summary.ts
-@@ -1,69 +1,18 @@
+@@ -1,71 +1,21 @@
  import { LayerNode } from "@opencode-ai/core/effect/layer-node"
  import { Effect, Layer, Context, Schema } from "effect"
--import path from "path"
+ import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
+ import { SessionStore } from "@opencode-ai/core/session/store"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
  import { EventV2Bridge } from "@/event-v2-bridge"
  import { Snapshot } from "@/snapshot"
@@ -6025,24 +6423,15 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
  
  export interface Interface {
    readonly summarize: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<void>
-@@ -79,6 +28,8 @@ const layer = Layer.effect(
+@@ -81,5 +31,7 @@ const layer = Layer.effect(
      const sessions = yield* Session.Service
      const events = yield* EventV2Bridge.Service
+     const nativeMessages = yield* SessionStore.Service
      const config = yield* Config.Service
 +    const storage = yield* Storage.Service
 +    const database = yield* Database.Service
  
-     const computeDiff = Effect.fn("SessionSummary.computeDiff")(function* (input: { messages: SessionV1.WithParts[] }) {
-       // 修改文件追踪以「工具调用流」为唯一来源：edit/write/apply_patch 各自携带
-@@ -89,49 +40,61 @@ const layer = Layer.effect(
-       // 这是有意为之的取舍：宁可遗漏非工具改动，也不混入其他 session 的改动。
-       const ctx = yield* InstanceState.context
-       const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
--      return collectToolDiffs(input.messages, base)
-+      // #0500：归一化与聚合由 SummaryCache 承担——本层不再持有第二份 FileDiff 实现。
-+      return SummaryCache.collectToolDiffs(SummaryCache.toToolDiffMessages(input.messages), base)
-     })
- 
+@@ -97,48 +49,59 @@ const layer = Layer.effect(
      const summarize = Effect.fn("SessionSummary.summarize")(function* (input: {
        sessionID: SessionID
        messageID: MessageID
@@ -6104,6 +6493,16 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
  
      const diff = Effect.fn("SessionSummary.diff")(function* (input: { sessionID: SessionID; messageID?: MessageID }) {
 -      if (!input.messageID) return []
+-      // 两代消息分表；按已保存的身份读取Native摘要，不执行工具或解析模型可见文本。
+-      const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID))
+-      if (native?.sessionID === input.sessionID && native.message.type === "user") {
+-        return native.message.summary?.diffs.map((item) => ({ ...item })) ?? []
+-      }
++      if (input.messageID) {
++        // Native保留精确per-user摘要；身份与Session同时限定，不能退化为旧消息表聚合。
++        const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID), input.sessionID)
++        if (native?.message.type === "user") return native.message.summary?.diffs.map(item => ({ ...item })) ?? []
++      }
 -      const message = (yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
 -        (item) => item.info.id === input.messageID,
 +      // #0500：DB 权威聚合经 SummaryCache 读取；路径归一化后同步镜像，用户清理后可重建。
@@ -6124,139 +6523,11 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
      })
  
      return Service.of({ summarize, diff, computeDiff })
-@@ -139,125 +102,6 @@ const layer = Layer.effect(
- )
- 
- 
--// 将路径统一为相对 base 的正斜杠路径，使不同工具来源（edit 的绝对路径、
--// apply_patch 的 worktree 相对路径）能按同一 key 聚合去重。
--// 相对路径按 fromBase（默认 base 本身）解析为绝对再求相对。
--function toWorktreeRel(base: string, target: string, fromBase: string = base) {
--  const abs = path.isAbsolute(target) ? target : path.resolve(fromBase, target)
--  return path.relative(base, abs).replaceAll("\\", "/")
--}
--
--// 统计 unified diff 文本行：+ 计入 additions、- 计入 deletions，
--// 排除 +++/--- 文件头（与 TUI diffLineStats 计数契约一致）。write 工具不自带计数，
--// 在此由其 patch 文本现场统计。
--function countPatchStats(patch: string) {
--  let additions = 0
--  let deletions = 0
--  for (const line of patch.split("\n")) {
--    if (line.startsWith("+++") || line.startsWith("---")) continue
--    if (line.startsWith("+")) additions++
--    else if (line.startsWith("-")) deletions++
--  }
--  return { additions, deletions }
--}
--
--// 仅凭 patch 行推断变更类型（status 在 FileDiff 中可选，TUI 不渲染）：
--// 只增不删视为新增、只删不增视为删除、否则视为修改。
--function inferStatus(additions: number, deletions: number): "added" | "deleted" | "modified" {
--  if (deletions === 0 && additions > 0) return "added"
--  if (additions === 0 && deletions > 0) return "deleted"
--  return "modified"
--}
--
--// 工具 metadata 形态各异，按结构特征归一为 per-file FileDiff：
--// - apply_patch: metadata.files[]（relativePath 已相对 worktree，含 type/计数）
--// - edit: metadata.filediff（绝对 file，含 patch/计数）
--// - write: metadata.diff + metadata.filepath（绝对，仅 exists=true 有 diff，计数现场算）
--function collectToolDiffs(messages: SessionV1.WithParts[], worktree: string): Snapshot.FileDiff[] {
--  const byFile = new Map<string, Snapshot.FileDiff>()
--  const merge = (file: string, patch: string, additions: number, deletions: number, status?: string) => {
--    const rel = toWorktreeRel(worktree, file)
--    const hit = byFile.get(rel)
--    // 同文件多次工具编辑（并行 A/B 或多轮 edit）：patch 拼接、计数累加，
--    // status 取最重（added/deleted 优先于 modified），保持单条文件终态。
--    byFile.set(rel, {
--      file: rel,
--      patch: (hit?.patch ?? "") + patch,
--      additions: (hit?.additions ?? 0) + additions,
--      deletions: (hit?.deletions ?? 0) + deletions,
--      status: heaviestStatus(hit?.status, mapStatus(status) ?? inferStatus(additions, deletions)),
--    } satisfies Snapshot.FileDiff)
--  }
--
--  for (const msg of messages) {
--    // 跳过被 undo/隐藏的整条消息，避免 cleanup 后重算时把已撤销的工具改动重新聚合。
--    if (msg.info.hidden) continue
--    for (const part of msg.parts) {
--      if (part.hidden) continue
--      if (part.type !== "tool" || part.state.status !== "completed") continue
--      const meta = part.state.metadata as Record<string, unknown>
--
--      const files = arrayValue(meta.files)
--      if (files.length) {
--        // apply_patch：每个 file 条目自带 type 与增删计数
--        for (const entry of files) {
--          if (!entry || typeof entry !== "object") continue
--          const fp = stringValue((entry as Record<string, unknown>).relativePath) ?? stringValue((entry as Record<string, unknown>).filePath) ?? ""
--          if (!fp) continue
--          const patch = stringValue((entry as Record<string, unknown>).patch) ?? ""
--          merge(fp, patch, numberValue((entry as Record<string, unknown>).additions), numberValue((entry as Record<string, unknown>).deletions), stringValue((entry as Record<string, unknown>).type))
--        }
--        continue
--      }
--
--      const filediff = meta.filediff
--      if (filediff && typeof filediff === "object") {
--        // edit：filediff 自带 file/patch/计数（file 为绝对路径）
--        const fd = filediff as Record<string, unknown>
--        const fp = stringValue(fd.file)
--        if (fp) merge(fp, stringValue(fd.patch) ?? "", numberValue(fd.additions), numberValue(fd.deletions))
--        continue
--      }
--
--      const diff = stringValue(meta.diff)
--      const fp = stringValue(meta.filepath)
--      // write：filepath+diff（exists=true 时 diff 为旧→新内容；exists=false 时 diff 为空→新内容）
--      if (diff && fp) {
--        const { additions, deletions } = countPatchStats(diff)
--        merge(fp, diff, additions, deletions)
--      }
--    }
--  }
--  return [...byFile.values()]
--}
--
--type Status = "added" | "deleted" | "modified"
--
--function heaviestStatus(a: Status | undefined, b: Status): Status {
--  if (!a) return b
--  // 已是 added/deleted 的不再被后续 modified 覆盖，保留更有信号量的状态
--  if (a === "added" || a === "deleted") return a
--  return b
--}
--
--function mapStatus(type: string | undefined): Status | undefined {
--  if (!type) return undefined
--  if (type === "add") return "added"
--  if (type === "delete") return "deleted"
--  // update/move 及未知类型统一按 modified
--  return "modified"
--}
--
--function stringValue(value: unknown): string | undefined {
--  return typeof value === "string" ? value : undefined
--}
--function numberValue(value: unknown): number {
--  return typeof value === "number" && Number.isFinite(value) ? value : 0
--}
--function arrayValue(value: unknown): unknown[] {
--  return Array.isArray(value) ? value : []
--}
--
- export const DiffInput = Schema.Struct({
-   sessionID: SessionID,
-   messageID: Schema.optional(MessageID),
-@@ -269,7 +113,8 @@ export const node = LayerNode.make({
+@@ -158,6 +119,6 @@ export const node = LayerNode.make({
    layer: layer,
-   // #477：computeDiff 不再消费 Snapshot——diff() 方法经 Snapshot.node 之外的持久化
-   // 路径读取，node deps 随之收缩；FileDiff 类型 import 保留供 Interface 签名使用。
--  deps: [Session.node, EventV2Bridge.node, Config.node],
-+  // #477/#0500：computeDiff 归一化已移入 SummaryCache；storage mirror 写入需要 Storage.node。
-+  deps: [Session.node, EventV2Bridge.node, Config.node, Storage.node, Database.node],
+   // 两代摘要读取仍使用各自持久消息表，不再为Modified Files构造整树快照。
+-  deps: [Session.node, EventV2Bridge.node, Config.node, SessionStore.node],
++  deps: [Session.node, EventV2Bridge.node, Config.node, SessionStore.node, Storage.node, Database.node],
  })
  
  export * as SessionSummary from "./summary"
@@ -6264,15 +6535,7 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
 diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src/cli/cmd/stats-data.ts
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -1,7 +1,6 @@
--// #180：SQL 会话预过滤 + 工具事件单遍生成
- import { DateTime, Effect, Schema } from "effect"
- import { SessionMessage } from "@opencode-ai/core/session/message"
- import { SessionMessageTable } from "@opencode-ai/core/session/sql"
- import { MessageID } from "@/session/schema"
- import { Session } from "@/session/session"
- // #174：assistant 表优先费用
-@@ -8,15 +7,15 @@ import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core
+@@ -9,16 +9,16 @@
  // #174：NotFound 变空数组
  // #174：单会话 NotFound 降级为空数组，不中断整批
  // #174：单会话缺失降级为空，不中断整批
@@ -6281,8 +6544,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 -import { eq, sql, gte } from "drizzle-orm"
 +import { and, gte, inArray, sql } from "drizzle-orm"
  // #174：SessionTable 只用于枚举，不在此写用量
--import { SessionTable } from "@opencode-ai/core/session/sql"
-+import { MessageTable, PartTable, SessionTable, type PartColdStats } from "@opencode-ai/core/session/sql"
+-import { SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { MessageTable, PartTable, SessionTable, SessionMessageTable, type PartColdStats } from "@opencode-ai/core/session/sql"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
 +import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
  import type { Project } from "@/project/project"
  // #483：Project 身份读取——project group 的 label/path 来自存储行，不再用裸 ID 展示
@@ -6474,7 +6738,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
        index++
      }
      events.push(...toolEventsFromAssistant({ message: item.message, chars, event: item.event }))
-@@ -857,58 +842,187 @@ const toolEventsFromAssistants = (
+@@ -857,58 +842,186 @@ const toolEventsFromAssistants = (
    return events
  }
  
@@ -6489,7 +6753,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 -  const legacyIDs = new Set(legacyMessages.map((message) => String(message.info.id)))
 -  const projected = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, session.id)).all().pipe(Effect.orDie)
 -  // 两种历史共享账本，但原生工具只在 session_message；同 ID 的迁移投影不能重复计数。
--  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user")).map((row) => {
+-  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created)).map((row) => {
 -    const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
 -    const assistant = message.type === "assistant" ? message : undefined
 -    const estimate = assistant?.inputEstimate
@@ -6526,7 +6790,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +
 +// #0500：Stats 读取 selected Session 的 scalar projection，而不是调用 transcript hydration。
 +// Message SELECT 明确排除 user summary.diffs；Part 只读取 Tool/StepFinish，避免把无关 archive 搬入 JS。
-+const loadStatsRows = (sessionIDs: SessionID[]) =>
++const loadStatsRows = (sessionIDs: SessionID[], cutoff: number) =>
 +  Effect.gen(function* () {
 +    const database = yield* Database.Service
 +    return yield* Database.withSync(database, (sync): StatsRows => {
@@ -6648,26 +6912,25 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 +          append(assistants, row.session_id, row)
 +        }
 +      }
-+      // 原生历史不参与 legacy 冷存储；沿既有解码与精确账本关联转成同一内部统计标量。
++      // Native沿同一只读冷统计入口取字符投影，身份、模型和精确账本关联仍由原消息承担。
 +      const legacyIDs = new Set(messageRows.map((row) => String(row.id)))
 +      for (const batch of batches) {
 +        const projected = sync.select().from(SessionMessageTable).where(inArray(SessionMessageTable.session_id, batch)).all()
-+        for (const row of projected) {
-+          if (legacyIDs.has(row.id) || (row.type !== "assistant" && row.type !== "user")) continue
++          .filter(row => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created))
++        const nativeStats = ColdStorage.inspectSessionMessageStats(sync, projected)
++        for (const [rowIndex, row] of projected.entries()) {
 +          const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
 +          const id = MessageID.make(row.id)
 +          if (message.type !== "assistant") {
 +            append(messages, row.session_id, { id, time: row.time_created, role: "user", parts: [] })
 +            continue
 +          }
-+          const parts: StatsPart[] = message.content.flatMap((part): StatsToolPart[] => {
++          const parts: StatsPart[] = message.content.flatMap((part, contentIndex): StatsToolPart[] => {
 +            if (part.type !== "tool") return []
 +            const state = part.state
-+            return [{ version: 1, type: "tool", tool: part.name, status: state.status,
-+              inputChars: state.status === "pending" ? (typeof state.input === "string" ? state.input.length : 0) : JSON.stringify(state.input ?? {}).length,
-+              outputChars: state.status === "completed"
-+                ? state.content.filter((item) => item.type === "text").map((item) => item.text).join("\n").length + state.content.reduce((sum, item) => sum + (item.type === "file" ? item.uri.length : 0), 0)
-+                : state.status === "error" ? state.error.message.length : 0,
++            const projection = nativeStats[rowIndex]?.tools[String(contentIndex)]
++            if (!projection) throw new Error("Native Stats Tool projection is unavailable: " + row.id)
++            return [{ version: 1, type: "tool", tool: part.name, status: state.status, ...projection,
 +              start: DateTime.toEpochMillis(part.time.ran ?? part.time.created),
 +              end: DateTime.toEpochMillis(part.time.completed ?? part.time.ran ?? part.time.created),
 +            }]
@@ -6751,7 +7014,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
        const assistantEvents = assistantRows.map((row) => {
          const request = requestsByID.get(row.request_id)
          return {
-@@ -1054,15 +1120,15 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows) => {
+@@ -1053,15 +1120,15 @@ const aggregateSession = (session: Session.Info, cutoff: number, rows: StatsRows) => {
    for (const message of visibleMessages) {
 -    if (message.info.role !== "assistant") continue
 -    if (tracked.has(message.info.id) || (message.info.parentID && fallbackRequests.has(message.info.parentID))) continue
@@ -6774,9 +7037,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
        assistantCalls: 1,
        // #176：补入的历史助手没有账本明细，组件取消息实况、请求结局计量保持零基。
        components: componentsFromAssistant(message),
-@@ -1041,8 +1154,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -1083,8 +1154,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
        const item = getToolUsage(toolUsage, part.tool)
-       // #176：工具调用次数 +1
+       // Called/Progress/Success 覆盖同一 parts 项，统一扫描只计一次调用。
        item.count++
 -      item.inputChars += toolInputChars(part)
 -      item.outputChars += toolOutputChars(part)
@@ -6786,7 +7049,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
      }
    }
  
-@@ -1052,7 +1166,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -1094,7 +1166,7 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
      const assistantRows = assistantUsageRows.filter((row) => includeTime(cutoff, row.time_created))
      const requestsByID = new Map(requestRows.map((row) => [row.request_id, row]))
      // #180：assistant_message_id → 消息映射，种子在此复用避免二次扫描
@@ -6814,7 +7077,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
          source: "legacy-message",
          agent: session.agent ?? "unknown",
          status: "completed",
-@@ -1101,8 +1215,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -1142,8 +1215,9 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
      event.status = event.status ?? "completed"
    }
  
@@ -6825,7 +7088,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
  
  // #174：aggregateStats 唯一写路径
  // #174：唯一写 StatsReport 的路径
-@@ -1131,12 +1246,11 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
+@@ -1172,12 +1246,11 @@ export const aggregateStats = Effect.fn("Cli.stats.aggregate")(function* (input:
  
  // #174：aggregates 写聚合快照，页面不得再 select
  // #174：aggregates 生成只读 StatsReport 快照
@@ -6836,13 +7099,129 @@ diff --git a/packages/opencode/src/cli/cmd/stats-data.ts b/packages/opencode/src
 -    concurrency: 20,
 -  })
 +  // #0500：raw snapshot 一次读取，移除旧 concurrency:20 的 per-session hydration/N+1。
-+  const rows = yield* loadStatsRows(filteredSessions.map((session) => session.id))
++  const rows = yield* loadStatsRows(filteredSessions.map((session) => session.id), cutoff)
 +  // loader/inspect 均无写入，v1 decode 也不会清 owner/ref 或补写 cold_stats。
 +  const aggregates = filteredSessions.map((session) => aggregateSession(session, cutoff, rows))
 +  // #0500：toolFilter 保持原公开过滤顺序，在完整 Session toolUsage 形成后才筛选。
  
    const total = emptyUsage()
    const daily = new Map<number, DailyUsage>()
+
+diff --git a/packages/opencode/test/cli/stats-mixed-history.test.ts b/packages/opencode/test/cli/stats-mixed-history.test.ts
+--- a/packages/opencode/test/cli/stats-mixed-history.test.ts
++++ b/packages/opencode/test/cli/stats-mixed-history.test.ts
+@@ -11,7 +11,8 @@
+ import type { SessionV1 } from "@opencode-ai/core/v1/session"
+-import { RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
+-import { MessageTable, PartTable, SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
++import { ColdStorageTable, MessageTable, PartTable, SessionTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
++import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+ import { SessionMessage } from "@opencode-ai/core/session/message"
+ import { SessionSchema } from "@opencode-ai/core/session/schema"
+ import { Session } from "../../src/session/session"
+ import { MessageID, PartID, SessionID } from "../../src/session/schema"
+@@ -149,5 +150,25 @@
+     expect(withNative.toolUsage.find((tool) => tool.id === "native-tool")?.contextTokens).toBeGreaterThan(0)
+     const nativeAgent = yield* aggregateStats({ projectFilter: projectID, agentFilter: "native-agent" })
+     expect(nativeAgent.total).toMatchObject({ tokens: { total: 40 }, cost: 0.5, components: { system: 20, toolCalls: 10, toolResults: 10 } })
++    // 非零组件、旧历史补计和多维过滤在两代归档后必须保持同一完整报表。
++    const filters = [{ projectFilter: projectID }, { projectFilter: projectID, days: 1 },
++      { projectFilter: projectID, modelFilter: "legacy-model", providerFilter: "legacy-provider", sourceFilter: "legacy-message" },
++      { projectFilter: projectID, sourceFilter: "command", agentFilter: "ledger-agent", statusFilter: "completed" },
++      { projectFilter: projectID, agentFilter: "native-agent" }, { projectFilter: projectID, toolFilter: "native-tool" }]
++    const hot = yield* Effect.forEach(filters, filter => aggregateStats(filter))
++    yield* Effect.promise(() => ColdStorage.maintain(database.db.sync, ColdStorage.prepareMaintenance({
++      operation: "compress", sessionID, olderThanMs: 0, batchSize: 2,
++    }), { lease: { assertOwned() {} }, checkpoint: async () => {},
++      run: <A>(body: () => A) => Effect.runPromise(Database.withSync(database, body)) }))
++    const stored = Effect.all([database.db.select().from(MessageTable).all(), database.db.select().from(PartTable).all(),
++      database.db.select().from(SessionMessageTable).all(), database.db.select().from(ColdStorageTable).all(),
++      database.db.select().from(RequestUsageTable).all(), database.db.select().from(RequestUsageAssistantTable).all()])
++    const before = yield* stored
++    expect(before[1].some(row => row.cold_key)).toBe(true)
++    expect(before[2].some(row => row.cold_key)).toBe(true)
++    for (const [index, filter] of filters.entries()) {
++      expect(yield* aggregateStats(filter)).toEqual(hot[index])
++    }
++    expect(yield* stored).toEqual(before)
+   }),
+ )
+
+diff --git a/packages/opencode/test/cli/stats-native.test.ts b/packages/opencode/test/cli/stats-native.test.ts
+--- a/packages/opencode/test/cli/stats-native.test.ts
++++ b/packages/opencode/test/cli/stats-native.test.ts
+@@ -1,5 +1,9 @@
+ import { expect } from "bun:test"
++import { createHash } from "node:crypto"
++import { eq } from "drizzle-orm"
+ import { DateTime, Effect } from "effect"
+ import { Database } from "@opencode-ai/core/database/database"
++import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
++import { RequestUsageAssistantTable, RequestUsageTable } from "@opencode-ai/core/session/request-usage.sql"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { EventV2 } from "@opencode-ai/core/event"
+@@ -16,3 +20,3 @@
+-import { SessionTable } from "@opencode-ai/core/session/sql"
++import { ColdStorageTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+ import { SessionV1 } from "@opencode-ai/core/v1/session"
+ import { Session } from "../../src/session/session"
+@@ -54,4 +58,5 @@
+     yield* events.publish(SessionEvent.Tool.Progress, { ...call, structured: {}, content: [{ type: "text", text: "progress" }] })
+-    yield* events.publish(SessionEvent.Tool.Success, { ...call, structured: {}, content: [{ type: "text", text: "done" }], provider: { executed: false } })
++    const structured = { legacy: "native legacy ".repeat(500) }
++    yield* events.publish(SessionEvent.Tool.Success, { ...call, structured, content: [{ type: "text", text: "done" }], provider: { executed: false } })
+     yield* events.publish(SessionEvent.Step.Ended, { sessionID, assistantMessageID, timestamp, finish: "stop", cost: 0.5, tokens })
+     const native = yield* aggregateStats({ projectFilter: projectID })
+@@ -61,5 +66,48 @@
+     expect(native.toolUsage[0]).toMatchObject({ inputChars: 2, outputChars: 4 })
+     expect(native.total).toMatchObject({ cost: 0.5, tokens: { total: 10 } })
+     expect(native.sessions[0]).toMatchObject({ messages: 2, tools: 1 })
++    // 三种持久表示须生成同一完整报表；统计不得回热owner、交换引用或补写账本。
++    const stored = Effect.all([database.db.select().from(SessionMessageTable).all(), database.db.select().from(ColdStorageTable).all(),
++      database.db.select().from(RequestUsageTable).all(), database.db.select().from(RequestUsageAssistantTable).all()])
++    yield* Database.withSync(database, sync => {
++      expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
++    })
++    const packed = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
++    if (!packed?.cold_ref) return yield* Effect.die("Native packed fixture is missing")
++    const packedRef = packed.cold_ref
++    expect(packed.cold_key).toHaveLength(32)
++    expect(packed.cold_stats?.tools["0"]).toEqual({ inputChars: 2, outputChars: 4 })
++    const archive = yield* database.db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, packedRef)).get()
++    if (!archive) return yield* Effect.die("Native pack payload is missing")
++    expect(archive.kind).toBe("session-message-pack")
++    // 损坏frame仍可读同行统计，证明Stats没有暗中解包；完整业务读取另由codec负责拒绝。
++    yield* database.db.update(ColdStorageTable).set({ payload: Buffer.from([0]) }).where(eq(ColdStorageTable.hash, packedRef)).run()
++    const packedBefore = yield* stored
++    expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
++    expect(yield* stored).toEqual(packedBefore)
++    yield* database.db.update(ColdStorageTable).set({ payload: archive.payload }).where(eq(ColdStorageTable.hash, packedRef)).run()
++    // 从真实writer生成的fields建立旧版envelope夹具，不在测试重写字段抽取规则。
++    const frame: unknown = JSON.parse(Buffer.from(Bun.zstdDecompressSync(archive.payload)).toString("utf8"))
++    if (!frame || typeof frame !== "object" || !("entries" in frame) || !Array.isArray(frame.entries)) return yield* Effect.die("Native pack entries are missing")
++    const entry: unknown = frame.entries[0]
++    if (!entry || typeof entry !== "object" || !("fields" in entry)) return yield* Effect.die("Native pack fields are missing")
++    const raw = Buffer.from(JSON.stringify({ fields: entry.fields, owner: "session_message", version: 1 }))
++    const payload = Buffer.from(Bun.zstdCompressSync(raw))
++    const hash = createHash("sha256").update("session_message").update(Buffer.from([0])).update(raw).digest("hex")
++    yield* Database.withSync(database, sync => sync.transaction(tx => {
++      tx.insert(ColdStorageTable).values({ hash, kind: "session_message", codec: "zstd", payload, raw_bytes: raw.byteLength,
++        compressed_bytes: payload.byteLength, ref_count: 1, time_created: now, time_updated: now }).run()
++      tx.update(SessionMessageTable).set({ cold_ref: hash, cold_key: null, cold_stats: null }).where(eq(SessionMessageTable.id, assistantMessageID)).run()
++      tx.delete(ColdStorageTable).where(eq(ColdStorageTable.hash, packedRef)).run()
++    }, { behavior: "immediate" }))
++    const legacyBefore = yield* stored
++    expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
++    expect(yield* stored).toEqual(legacyBefore)
++    yield* Database.withSync(database, sync => {
++      expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID, olderThanMs: 0, now: Date.now() + 1 }).type).toBe("frozen")
++    })
++    const upgradedBefore = yield* stored
++    expect(yield* aggregateStats({ projectFilter: projectID })).toEqual(native)
++    expect(yield* stored).toEqual(upgradedBefore)
+     // 同 ID 的迁移副本不双计；另一个旧消息仍进入全历史统计，但不进入最近一天。
+     for (const item of [
 
 diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/test/storage/cold.test.ts
 --- a/packages/opencode/test/storage/cold.test.ts

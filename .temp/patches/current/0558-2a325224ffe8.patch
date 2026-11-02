@@ -1137,13 +1137,44 @@ diff --git a/packages/opencode/src/server/shared/workspace-routing.ts b/packages
 diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
-@@ -1,327 +1,289 @@
--import { beforeEach, describe, expect, mock, test } from "bun:test"
+@@ -1,366 +1,325 @@
+-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 +import { afterEach, beforeEach, describe, expect, test } from "bun:test"
  import { randomUUID } from "crypto"
  import fs from "fs/promises"
  import path from "path"
  import { Global } from "@opencode-ai/core/global"
++import { mkdtemp } from "node:fs/promises"
++import os from "node:os"
+ import { PromptVoiceAssets } from "../../src/prompt-voice-assets"
+ 
+ test("generates the same recorder resources for legacy and native build roots", () => {
+   const roots = [path.resolve("legacy-build"), path.resolve("native", "nested", "build")]
+   const targets = [
+     ["win32", "x64", ["windows/amd64/pv_recorder.node"]],
+     ["win32", "arm64", ["windows/arm64/pv_recorder.node"]],
+     ["darwin", "x64", ["mac/x86_64/pv_recorder.node"]],
+     ["darwin", "arm64", ["mac/arm64/pv_recorder.node"]],
+     ["linux", "x64", ["linux/x86_64/pv_recorder.node"]],
+     ["linux", "arm64", ["raspberry-pi/cortex-a53-aarch64/pv_recorder.node", "raspberry-pi/cortex-a72-aarch64/pv_recorder.node", "raspberry-pi/cortex-a76-aarch64/pv_recorder.node"]],
+   ] as const
+   for (const [os, arch, expected] of targets) {
+     const paths = roots.map((root) => {
+       const text = PromptVoiceAssets.createPvRecorderNativeFileMap({ os, arch }, root)
+       expected.forEach((key, index) => expect(text).toContain(`${JSON.stringify(key)}: file_${index},`))
+       // 只解析真实生成函数的file-loader引用，不编译产物、加载addon或读取二进制计算校验码。
+       const files = [...text.matchAll(/^import file_\d+ from (".*") with \{ type: "file" \};$/gm)].map((match) => {
+         const spec: unknown = JSON.parse(match[1])
+         if (typeof spec !== "string") throw new Error("Expected a generated file import")
+         return path.resolve(root, spec)
+       })
+       expect(files).toHaveLength(expected.length)
+       expected.forEach((key, index) => expect(files[index]?.replaceAll("\\", "/")).toEndWith(`/lib/${key}`))
+       return files
+     })
+     expect(paths[0]).toEqual(paths[1])
+   }
+ })
 -
 -class FakePvRecorder {
 -  static last: FakePvRecorder | undefined
@@ -1173,8 +1204,6 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 -        busyWait(FakePvRecorder.queuedReadDelayMs)
 -      } else if (queued === undefined && FakePvRecorder.liveReadDelayMs > 0) {
 -        busyWait(FakePvRecorder.liveReadDelayMs)
-+import { mkdtemp } from "node:fs/promises"
-+import os from "node:os"
 +
 +// #558：fake Worker 保持与真实 Worker 相同的 SharedArrayBuffer stop 契约；
 +// 帧值 7777 证明 WAV 内容来自 Worker 消息而非主线程构造。
@@ -1188,10 +1217,10 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 +
 +  postMessage(message: { type: string; control?: SharedArrayBuffer }) {
 +    if (message.type !== "start" || !message.control) return
-+    const control = new Int32Array(message.control) // fake keeps the same shared stop contract as the real Worker.
++    const control = new Int32Array(message.control) // fake沿生产原子停止边界，不创建线程。
 +    queueMicrotask(() => {
 +      if (FakeVoiceWorker.startupError) {
-+        this.onerror?.(new ErrorEvent("error", { message: FakeVoiceWorker.startupError })) // startup error must reject before started.
++        this.onerror?.(new ErrorEvent("error", { message: FakeVoiceWorker.startupError })) // 启动错误必须先于ready拒绝。
 +        return
        }
 -      pcm.fill(queued ?? FakePvRecorder.liveFrameValue)
@@ -1214,9 +1243,9 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 -
 -  stop() {
 -    this.started = false
-+      this.onmessage?.(new MessageEvent("message", { data: { type: "started" } })) // readiness precedes frame delivery.
-+      this.onmessage?.(new MessageEvent("message", { data: { type: "frame", frame: new Int16Array(4).fill(7_777) } })) // deterministic PCM proves the public WAV path.
-+      if (FakeVoiceWorker.terminalError) this.onmessage?.(new MessageEvent("message", { data: { type: "error", message: FakeVoiceWorker.terminalError } })) // terminal error never becomes a successful stop.
++      this.onmessage?.(new MessageEvent("message", { data: { type: "started" } })) // ready先于帧投递。
++      this.onmessage?.(new MessageEvent("message", { data: { type: "frame", frame: new Int16Array(4).fill(7_777) } })) // 固定PCM证明实际WAV路径。
++      if (FakeVoiceWorker.terminalError) this.onmessage?.(new MessageEvent("message", { data: { type: "error", message: FakeVoiceWorker.terminalError } })) // 错误终态不能变成成功停止。
 +    })
 +    if (FakeVoiceWorker.terminalError) return
 +    this.timer = setInterval(() => {
@@ -1248,7 +1277,10 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 +const NativeWorker = globalThis.Worker
  
  describe("prompt voice recorder", () => {
-   beforeEach(() => {
+   const tmpRoot = Global.Path.tmp
+   beforeEach(async () => {
+     // 每例只扫描自己创建的目录，旧WAV清理不能碰全局缓存或其它会话的录音。
+     Global.Path.tmp = await fs.mkdtemp(path.join(tmpRoot, "voice-recorder-test-"))
 -    FakePvRecorder.last = undefined
 -    FakePvRecorder.readStatus = 0
 -    FakePvRecorder.releaseCount = 0
@@ -1268,6 +1300,13 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 +    Reflect.deleteProperty(globalThis, "OPENCODE_VOICE_WORKER_PATH")
    })
  
+-  afterEach(async () => {
+-    const dir = Global.Path.tmp
+-    Global.Path.tmp = tmpRoot
+-    // 仅回收本例唯一目录；先恢复配置，失败也不让其它测试继承失效路径。
+-    await fs.rm(dir, { recursive: true, force: true })
+-  })
+-
 -  // 崩溃或强杀会绕过 handle.abort()，因此下一次真实录音启动前要清理很久以前的 prompt WAV。
 -  // 新近 WAV 可能来自另一个仍在停止/转写中的 Prompt，不能只按文件名前缀粗暴删除。
 -  test("removes stale prompt voice files without deleting recent recordings", async () => {
@@ -1295,11 +1334,15 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 -      await recorder.abort()
 -      await fs.rm(recent, { force: true })
 -    }
-+  afterEach(() => {
++  afterEach(async () => {
++    const dir = Global.Path.tmp
++    Global.Path.tmp = tmpRoot
 +    Reflect.set(globalThis, "Worker", NativeWorker)
 +    // 两个 compile define 都必须还原，否则最后一个用例的值会泄漏给同进程的其它测试文件。
 +    Reflect.deleteProperty(globalThis, "OPENCODE_COMPILED")
 +    Reflect.deleteProperty(globalThis, "OPENCODE_VOICE_WORKER_PATH")
++    // 先还原所有共享配置，再回收本例唯一目录。
++    await fs.rm(dir, { recursive: true, force: true })
    })
  
 -  // compiled exe 不能在 native 资源缺失时回退到 @picovoice 包路径，否则会重新触发 CI 绝对路径加载错误。
@@ -1385,7 +1428,7 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
 +      const log = path.join(tmp.path, "native.log")
 +      const result = await runNativeWorker(tmp.path, fakeNativeSource({ ...failure, log }), { stopOnStarted: false, stopOnFrame: true })
 +
-+      expect(result.terminal).toBe("stopped") // cleanup status cannot rewrite a completed recording.
++      expect(result.terminal).toBe("stopped") // cleanup状态不能改写已完成录音。
 +      expect(result.frames.length).toBeGreaterThan(0)
 +      const actions = (await Bun.file(log).text()).trim().split("\n")
 +      expect(actions.filter((action) => action === "stop")).toEqual(["stop"])
@@ -1720,9 +1763,8 @@ diff --git a/packages/opencode/test/server/workspace-routing.test.ts b/packages/
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1727,6 +1727,16 @@ const scenarios: Scenario[] = [
-       // 空 sessionIDs 返回空对象
-       check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
+@@ -1767,5 +1767,15 @@ const scenarios: Scenario[] = [
+       check(Object.keys(body).length === 0, "empty native sessionIDs should return empty object")
      }),
 +  // #558：session.search.scan gate 差集登记——POST 载荷为全库扫描（非单会话），断言集合返回形态。
 +  http.protected
@@ -1737,3 +1779,66 @@ diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/
    http.protected
      .post("/tui/append-prompt", "tui.appendPrompt")
      .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))
+
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -66,4 +66,10 @@
++  const voiceWorkerPath = "opencode-voice-recorder-worker.ts"
++  const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
+   const result = await Bun.build({
+     // Native与旧入口嵌入同一资源表，不复制录音器或引入源码包路径回退。
+-    files: { "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir) },
+-    entrypoints: ["./src/index.ts", "opencode-pvrecorder.gen.ts"],
++    files: {
++      "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir),
++      // 与legacy使用同一虚拟入口，编译后不依赖checkout或构建机的源码路径。
++      [voiceWorkerPath]: await Bun.file(path.resolve(dir, "../tui/src/prompt-voice-recorder-worker.ts")).text(),
++    },
++    entrypoints: ["./src/index.ts", "opencode-pvrecorder.gen.ts", voiceWorkerPath],
+@@ -89,1 +97,3 @@
+       OPENCODE_COMPILED: "true",
++      // 同一共享录音器消费compiled地址；缺失资源仍明确失败，不回落到源码态。
++      OPENCODE_VOICE_WORKER_PATH: bunfsRoot + voiceWorkerPath,
+@@ -105,1 +115,14 @@
++  // 两代都保留真实compiled入口probe；仅匹配当前平台，ack与close由同一生产角色验证。
++  if (item.os === process.platform && item.arch === process.arch && !item.abi) {
++    const smoke = Bun.spawn([path.resolve(dir, `dist/${name}/bin/${binary}`)], {
++      env: { ...process.env, OPENCODE_PROCESS_ROLE: "voice-smoke" },
++      stdout: "pipe", stderr: "pipe", windowsHide: true,
++    })
++    const [exit, stdout, stderr] = await Promise.all([
++      smoke.exited, new Response(smoke.stdout).text(), new Response(smoke.stderr).text(),
++    ])
++    if (exit !== 0 || stdout.trim() !== "voice-worker-probe-ok")
++      throw new Error(stderr.trim() || `voice worker smoke exited ${exit} without marker`)
++  }
++
+   await Bun.write(
+
+diff --git a/packages/cli/src/index.ts b/packages/cli/src/index.ts
+--- a/packages/cli/src/index.ts
++++ b/packages/cli/src/index.ts
+@@ -10,1 +10,22 @@
++// probe在Runtime.run和Daemon.layer之前退出；不启动产品服务或加载native录音addon。
++if (process.env.OPENCODE_PROCESS_ROLE === "voice-smoke") {
++  const { voiceWorkerPath } = await import("../../tui/src/prompt-voice-recorder")
++  const worker = new Worker(voiceWorkerPath(), { ref: true })
++  const acknowledged = Promise.withResolvers<void>()
++  const closed = Promise.withResolvers<void>()
++  const timeout = Bun.sleep(10_000).then(() => { throw new Error("Compiled voice Worker probe timed out") })
++  worker.onmessage = event => { if (event.data?.type === "probe") acknowledged.resolve() }
++  worker.onerror = event => acknowledged.reject(new Error(event.message || "Compiled voice Worker failed"))
++  worker.addEventListener("close", () => closed.resolve(), { once: true })
++  worker.postMessage({ type: "probe" })
++  try {
++    // ack证明入口、close证明资源已释放；任何错误仍拒绝，finally只负责回收。
++    await Promise.race([Promise.all([acknowledged.promise, closed.promise]), timeout])
++    process.stdout.write("voice-worker-probe-ok\n")
++  } finally {
++    worker.terminate()
++  }
++  process.exit(0)
++}
++
+ const Handlers = Runtime.handlers(Commands, {

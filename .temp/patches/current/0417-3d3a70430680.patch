@@ -8,69 +8,71 @@ diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes
  const REASONING_PREVIEW_ROWS = 5
 +// 分隔符只在显示投影中加入，各原Part仍独立解析且不改transcript。
 +const REASONING_SEPARATOR = "---\n"
-@@ -1912,22 +1913,8 @@
+@@ -1912,24 +1913,8 @@
    const [override, setOverride] = createSignal<boolean>()
 -  const [bodyMounted, setBodyMounted] = createSignal(false)
    const parts = createMemo(() => props.parts.filter((part) => normalizeReasoning(part.text)))
    // 加密占位仍显示上游Thought标题，不从metadata猜测正文或长度。
    const opaque = createMemo(() => parts().length === 0 && props.parts.some((part) => Boolean(part.metadata)))
-   const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
--  const [displayTexts, setDisplayTexts] = createThrottledSignal<string[]>([], 50)
+-  // 标题、预算和每个正文共用同一次文本快照，不各自启动节流窗口。
+-  const texts = createMemo(() => parts().map((part) => ({ part, text: normalizeReasoning(part.text) })))
+-  const [displayTexts, setDisplayTexts] = createThrottledSignal<ReturnType<typeof texts>>([], 50)
 -  createEffect(() => setDisplayTexts(texts()))
--  const renderedTexts = createMemo(() => displayTexts().length ? displayTexts() : texts())
+-  const renderedParts = createMemo(() => displayTexts().length ? displayTexts() : texts())
+-  const renderedTexts = createMemo(() => renderedParts().map((entry) => entry.text))
++  const texts = createMemo(() => parts().map((part) => normalizeReasoning(part.text)))
    const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
 -  const previews = createMemo(() => {
 -    let remaining = REASONING_PREVIEW_ROWS
--    return parts().flatMap((part, index) => {
+-    return renderedParts().flatMap((entry, index) => {
 -      // 后续成员必须同时分到marker及至少一行正文，不能留下孤立标记。
 -      const markerRows = index === 0 ? 0 : 1
 -      if (remaining <= markerRows) return []
--      const bodyRows = Math.min(reasoningRows(normalizeReasoning(part.text), ctx.width), remaining - markerRows)
+-      const bodyRows = Math.min(reasoningRows(entry.text, ctx.width), remaining - markerRows)
 -      remaining -= markerRows + bodyRows
--      return [{ part, index, bodyRows }]
+-      return [{ ...entry, index, bodyRows }]
 -    })
 -  })
 +  // 分隔行也计预算；估算不依赖expanded，避免布局反馈改变折叠选择。
-   const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
-@@ -1939,1 +1926,0 @@
+-  const overflow = createMemo(() => renderedParts().reduce((rows, entry, index) => rows + reasoningRows(entry.text, ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
++  const overflow = createMemo(() => parts().reduce((rows, part, index) => rows + reasoningRows(normalizeReasoning(part.text), ctx.width) + Number(index > 0), 0) > REASONING_PREVIEW_ROWS)
+@@ -1941,1 +1926,0 @@
 -  createEffect(() => { if (expanded()) setBodyMounted(true) })
-@@ -1948,2 +1934,2 @@
+@@ -1950,2 +1934,2 @@
 -          title={[reasoningSummary(renderedTexts()[0] ?? "").title, renderedTexts().length > 1 ? `${renderedTexts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
 -          characters={opaque() ? undefined : renderedTexts().reduce((total, text) => total + text.length, 0)}
 +          title={[reasoningSummary(texts()[0] ?? "").title, texts().length > 1 ? `${texts().length} segments` : undefined].filter(Boolean).join(" · ") || null}
 +          characters={opaque() ? undefined : texts().reduce((total, text) => total + text.length, 0)}
-@@ -1951,16 +1937,9 @@
+@@ -1953,16 +1937,9 @@
 -        {/* 总预览只有五行，且与普通正文同宽，不再额外增加横向padding。 */}
 -        <box visible={!expanded()} maxHeight={REASONING_PREVIEW_ROWS} overflow="hidden">
--          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part}
--            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${parts().length}]`} rows={preview.bodyRows}
+-          <For each={previews()}>{(preview) => <ReasoningBody id={`reasoning-preview-${preview.part.id}`} part={preview.part} text={preview.text}
+-            marker={preview.index === 0 ? undefined : `[seg ${preview.index + 1}/${renderedParts().length}]`} rows={preview.bodyRows}
 -            width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />}</For>
 -        </box>
 -        {/* 首次展开后保留full树，仅切visible，避免复用已销毁的CodeRenderable。 */}
 -        <Show when={bodyMounted()}><box visible={expanded()}>
--          <For each={parts().map((part) => part.id)}>{(id) => {
+-          <For each={renderedParts().map((entry) => entry.part.id)}>{(id) => {
 +        {/* 每Part从首帧常驻，展开只改变共享裁剪约束，不挂第二棵异步高亮树。 */}
 +        <box maxHeight={expanded() ? undefined : REASONING_PREVIEW_ROWS} overflow={expanded() ? "visible" : "hidden"}>
 +          <For each={parts().map((part) => part.id)}>{(id, index) => {
-             const part = createMemo(() => parts().find((item) => item.id === id)!)
--            const index = createMemo(() => parts().findIndex((item) => item.id === id))
--            return <ReasoningBody id={`text-${id}`} part={part()} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${parts().length}]`}
+-            const item = createMemo(() => renderedParts().find((entry) => entry.part.id === id)!)
+-            const index = createMemo(() => renderedParts().findIndex((entry) => entry.part.id === id))
+-            return <ReasoningBody id={`text-${id}`} part={item().part} text={item().text} marker={index() === 0 ? undefined : `[seg ${index() + 1}/${renderedParts().length}]`}
 -              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
++            const part = createMemo(() => parts().find((item) => item.id === id)!)
 +            return <ReasoningBody id={`text-${id}`} part={part} separator={index() > 0} expanded={expanded()}
 +              width={ctx.width} syntaxStyle={syntax()} conceal={ctx.conceal()} />
            }}</For>
 -        </box></Show>
--        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${parts().length > previews().length ? ` · +${parts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
+-        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : `…${renderedParts().length > previews().length ? ` · +${renderedParts().length - previews().length} segments` : ""} · ▼ 展开查看完整推理`}</text></Show>
 +        </box>
 +        <Show when={overflow()}><text fg={theme.textMuted}>{expanded() ? "▲ 收起推理" : "▼ 展开查看完整推理"}</text></Show>
-@@ -1972,55 +1951,17 @@
--function ReasoningBody(props: { id: string; part: ReasoningPart; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
+@@ -1974,52 +1951,17 @@
+-function ReasoningBody(props: { id: string; part: ReasoningPart; text: string; marker?: string; rows?: number; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
 +function ReasoningBody(props: { id: string; part: () => ReasoningPart; separator: boolean; expanded: boolean; width: number; syntaxStyle: ReturnType<typeof generateSubtleSyntax>; conceal: boolean }) {
    const { theme } = useTheme()
--  const content = createMemo(() => normalizeReasoning(props.part.text))
--  const [displayContent, setDisplayContent] = createThrottledSignal("", 50)
--  createEffect(() => setDisplayContent(content()))
--  const renderedContent = createMemo(() => displayContent() || content())
+-  const renderedContent = createMemo(() => props.text)
 +  // accessor跟随Part快照替换；固定分隔符不依赖source序号和总数。
 +  const content = createMemo(() => {
 +    const text = normalizeReasoning(props.part().text)

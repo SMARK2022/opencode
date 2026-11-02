@@ -103,6 +103,38 @@ diff --git a/packages/core/test/tool-read-filesystem.test.ts b/packages/core/tes
        expect(remaining.truncated).toBe(false)
        expect(remaining.next).toBeUndefined()
      }),
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -30,7 +30,7 @@
+     const results = (...history: SessionMessage.Message[]) => toLLMMessages(history, model)
+       .flatMap((message) => message.content.flatMap((part) => part.type === "tool-result" ? [part.result] : []))
+     const first = read("first")
+-    const second = read("second", output, { path: "note.txt", offset: 1, limit: 1000 })
++    const second = read("second", output, { path: "note.txt", offset: 1, limit: 400 })
+     // 仅模型重复正文缩为 stub；第一个完整结果和原始 durable 结果都须保留。
+     expect(results(first, second)[0]).toEqual({ type: "json", value: output })
+     expect(results(first, second)[1]).toMatchObject({ type: "text" })
+@@ -60,6 +60,6 @@
+-    // 默认1000与显式1000是同一完整页；显式2000仍请求不同范围，不能被前页证明替代。
+-    const defaultPage = { ...page, content: Array.from({ length: 1000 }, () => "line").join("\n"), next: 1001 }
+-    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 1000 }))[1]))
++    // 默认400与显式400是同一完整页；显式2000仍请求不同范围，不能被前页证明替代。
++    const defaultPage = { ...page, content: Array.from({ length: 400 }, () => "line").join("\n"), next: 401 }
++    expect(JSON.stringify(results(read("default1", defaultPage), read("default2", defaultPage, { path: "note.txt", limit: 400 }))[1]))
+       .toContain("File unchanged since last read")
+     expect(results(read("default3", defaultPage), read("default4", defaultPage, { path: "note.txt", limit: 2000 }))[1])
+       .toEqual({ type: "json", value: defaultPage })
+diff --git a/packages/tui/src/util/tool-definition-catalog.json b/packages/tui/src/util/tool-definition-catalog.json
+--- a/packages/tui/src/util/tool-definition-catalog.json
++++ b/packages/tui/src/util/tool-definition-catalog.json
+@@ -14,4 +14,4 @@
+   "read": {
+-    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 1000 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
+-    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file or directory to read"},"offset":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The line number to start reading from (1-indexed)"},"limit":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The maximum number of lines to read (defaults to 1000)"}},"required":["filePath"]}
++    "description": "Read a file or directory from the local filesystem. If the path does not exist, an error is returned.\n\nUsage:\n- The filePath parameter should be an absolute path.\n- By default, this tool returns up to 400 lines from the start of the file.\n- The offset parameter is the line number to start from (1-indexed).\n- To read later sections, call this tool again with a larger offset.\n- Use the grep tool to find specific content in large files or files with long lines.\n- If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.\n- Contents are returned with each line prefixed by its line number as `<line>: <content>`. For example, if a file has contents \"foo\\n\", you will receive \"1: foo\\n\". For directories, entries are returned one per line (without line numbers) with a trailing `/` for subdirectories.\n- Any line longer than 2000 characters is truncated.\n- Call this tool in parallel when you know there are multiple files you want to read.\n- Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.\n- This tool can read image files and PDFs and return them as file attachments.\n",
++    "parameters": {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"filePath":{"type":"string","description":"The absolute path to the file or directory to read"},"offset":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The line number to start reading from (1-indexed)"},"limit":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"The maximum number of lines to read (defaults to 400)"}},"required":["filePath"]}
+   },
 diff --git a/sdks/vscode/src/bridge.ts b/sdks/vscode/src/bridge.ts
 --- a/sdks/vscode/src/bridge.ts
 +++ b/sdks/vscode/src/bridge.ts

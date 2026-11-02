@@ -20,7 +20,7 @@ index 0000000000..2222222222
 +// #163：禁止回落到 #162 的 glob-first / task-only 旧策略
 +describe("anthropic tool_usage_policy", () => {
 +  const text = readFileSync(
-+    path.join(import.meta.dir, "../../src/session/prompt/anthropic.txt"),
++    path.join(import.meta.dir, "../../../core/src/system-context/prompt/anthropic.txt"),
 +    "utf8",
 +  )
 +

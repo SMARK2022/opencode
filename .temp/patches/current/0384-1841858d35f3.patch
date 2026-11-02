@@ -63,9 +63,9 @@ diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/
  import { describe, expect, test } from "bun:test"
  import path from "path"
 +import { createRoot, createSignal } from "solid-js"
- import { tmpdir } from "../fixture/fixture"
- import {
-   createVoiceInputController,
+ import { Effect } from "effect"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 @@ -9,6 +10,8 @@ import {
    type VoiceRecorderHandle,
    type VoiceTranscriber,

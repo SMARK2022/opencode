@@ -5,6 +5,75 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=B7=BB=E5=8A=A0=E7=88=B6=E4=BB=A3?=
  =?UTF-8?q?=E7=90=86=E6=9D=83=E9=99=90=E8=BF=87=E6=BB=A4=E9=80=BB=E8=BE=91?=
  =?UTF-8?q?=EF=BC=8C=E4=BB=A5=E5=A2=9E=E5=BC=BA=E4=BB=BB=E5=8A=A1=E4=BC=9A?=
 
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -91,7 +91,10 @@
+       const parentPermission = yield* store.permissions(parent.id)
++      const parentAgent = yield* agents.get(context.agent)
++      if (!parentAgent) return yield* new ToolFailure({ message: `Unknown parent agent: ${context.agent}` })
+       const childPermission: PermissionV2.Ruleset = [
+-        // source此时只继承Session拒绝/外部目录规则；父代理non-allow由后续67按原序扩展。
++        // 执行代理可以不同于持久父身份；父non-allow按原序后写，不能被会话grant覆盖。
+         ...parentPermission.filter(rule => rule.action === "external_directory" || rule.effect === "deny"),
++        ...parentAgent.permissions.filter(rule => rule.effect !== "allow"),
+         ...["todowrite", "task"].flatMap(action => agent.permissions.some(rule => rule.action === action) ? [] : [{ action, resource: "*", effect: "deny" as const }]),
+       ]
+       const child = existing ?? (yield* sessions.create({
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -928,3 +928,15 @@
+     const db = (yield* Database.Service).db
++    // 会话仍是build；存储grant与实际调用的plan限制冲突，不能从旧身份推导继承规则。
++    yield* db.update(SessionTable).set({ permission: [{ permission: "external_directory", pattern: "/approved/*", action: "allow" }] })
++      .where(eq(SessionTable.id, sessionID)).run().pipe(Effect.orDie)
++    yield* agents.transform(draft => draft.update(AgentV2.ID.make("plan"), parent => {
++      parent.mode = "primary"
++      parent.permissions = [
++        { action: "edit", resource: "*", effect: "deny" },
++        { action: "external_directory", resource: "*", effect: "deny" },
++        { action: "external_directory", resource: "/approved/*", effect: "ask" },
++        { action: "read", resource: "*", effect: "allow" },
++      ]
++    }))
+     const taskAssertions: PermissionV2.AssertInput[] = []
+     yield* agents.transform(draft => draft.update(AgentV2.ID.make("research"), agent => {
+@@ -954,9 +966,9 @@
+     const invoke = (task_id?: string, subagent_type = "research") => registry.materialize().pipe(Effect.flatMap(tools => tools.settle({
+-      sessionID, agent: AgentV2.ID.make("build"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
++      sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
+       call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
+         input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}) } },
+     })))
+     const first = yield* invoke()
+     expect(first.result.type).toBe("text")
+     expect(taskAssertions).toMatchObject([{ action: "task", resources: ["research"], sessionID,
+-      agent: "build", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
++      agent: "plan", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
+@@ -971,7 +983,16 @@
+-    expect(yield* store.permissions(child.id)).toEqual([
++    const inherited = yield* store.permissions(child.id)
++    expect(inherited).toEqual([
++      { action: "external_directory", resource: "/approved/*", effect: "allow" },
++      { action: "edit", resource: "*", effect: "deny" },
++      { action: "external_directory", resource: "*", effect: "deny" },
++      { action: "external_directory", resource: "/approved/*", effect: "ask" },
+       { action: "todowrite", resource: "*", effect: "deny" },
+       { action: "task", resource: "*", effect: "deny" },
+     ])
++    // 固定结果由真实求值器检查；父allow没有下放，有序ask仍覆盖较早deny及会话allow。
++    expect(PermissionV2.evaluate("edit", "/file.ts", inherited).effect).toBe("deny")
++    expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
++    expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("ask")
+     const actual = requests.at(-1)
+     expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo"])
+     expect(userTexts(actual!)).toContain("Inspect the requested module")
+@@ -983,3 +1004,4 @@
+     expect((yield* sessions.context(child.id)).filter(message => message.type === "user")).toHaveLength(2)
++    expect(yield* store.permissions(child.id)).toEqual(inherited)
+     const rows = yield* db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.parent_id, sessionID)).all().pipe(Effect.orDie)
+     expect(rows).toEqual([{ id: child.id }])
 diff --git a/packages/opencode/src/agent/subagent-permissions.ts b/packages/opencode/src/agent/subagent-permissions.ts
 --- a/packages/opencode/src/agent/subagent-permissions.ts
 +++ b/packages/opencode/src/agent/subagent-permissions.ts

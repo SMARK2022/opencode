@@ -402,43 +402,21 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
  import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, renderDiagnosticAppendix } from "./bash-compress"
 +import { createAutoTextDecoder } from "../text-decoding"
  
-@@ -163,1 +164,1 @@
--          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
-+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; the in-memory preview may lose data at the process capture limit, while observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
-@@ -243,3 +244,6 @@
-               const diag = new BashDiagnosticCollector({ enabled })
+@@ -162,1 +163,1 @@
+-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output is decoded as UTF-8; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
++          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. Use workdir instead of changing directories inside the command. Verify a parent directory exists before creating files or directories, using available dedicated tools or the selected shell's native existence check. Prefer available dedicated tools for file operations. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the acceptable shell shown in system context, selected from configuration or the platform default. Follow the execution shell guidance supplied in system context. Independent commands may be separate calls in one response; dependent commands must use shell-native success conditions. Output supports UTF-8, UTF-16 and legacy codepage decoding; a bounded rolling preview keeps the latest output, including output observed before timeout. Observed raw bytes are retained when presentation changes. Repetitive output may be compacted according to the user's bash_compression setting. Use compress_output: false when exact raw formatting matters, including snapshots and text fixtures. Read the retained raw output for complete logs.`,
+@@ -243,2 +244,2 @@
 -              const decoder = new TextDecoder()
 +              const decoder = createAutoTextDecoder()
-+              const preview = createAutoTextDecoder()
-+              const parts: string[] = []
-+              let captured = 0
-               const started = yield* Clock.currentTimeMillis
-@@ -270,1 +274,10 @@
--                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => diag.push(decoder.decode(chunk, { stream: true }))))),
-+                  onOutput: (chunk) => write(chunk).pipe(
-+                    Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })),
-+                    Effect.andThen(Effect.sync(() => {
-+                      diag.push(decoder.write(chunk))
-+                      if (captured >= MAX_CAPTURE_BYTES) return
-+                      const end = Math.min(chunk.byteLength, MAX_CAPTURE_BYTES - captured)
-+                      parts.push(preview.write(chunk.subarray(0, end)))
-+                      captured += end
-+                    })),
-+                  ),
-@@ -277,3 +290,3 @@
--              diag.push(decoder.decode())
-+              diag.push(decoder.end())
+               const parts: string[] = []
+@@ -289,1 +290,1 @@
+-                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.decode(chunk, { stream: true }))))),
++                  onOutput: (chunk) => write(chunk).pipe(Effect.mapError((cause) => new AppProcess.AppProcessError({ command: input.command, cause })), Effect.andThen(Effect.sync(() => observe(decoder.write(chunk))))),
+@@ -296,3 +297,3 @@
+-              observe(decoder.decode())
++              observe(decoder.end())
                diag.end()
                const diagnostic = diag.snapshot()
-@@ -299,3 +312,4 @@
--              const output = result.output?.toString("utf8") || "(no output)"
-+              const text = parts.join("") + preview.end()
-+              const output = text || "(no output)"
-               // 传真实调用 command，不使用描述或重新解析执行命令。
-               const compressed = compressVisibleOutput(output, { enabled }, input.command)
-@@ -313,1 +327,1 @@
--                retain: compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
-+                retain: (result.output !== undefined && !Buffer.from(text).equals(result.output)) || compressed.text !== output || compressed.stats.applied || compressed.stats.secretsRedacted > 0 || result.outputTruncated === true || diagnostic.discardedChars > 0,
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts

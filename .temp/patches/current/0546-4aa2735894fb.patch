@@ -695,6 +695,103 @@ index 48127c9c4..b0af25151 100644
  // #227：隐藏请求与畸形 assistant 回复——重试后只保留最终可见尝试
    return Effect.gen(function* () {
 
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -164,13 +164,16 @@
+           Effect.onExit((exit) => Effect.gen(function* () {
+             const finalizer = exit._tag === "Failure"
+-            yield* publisher.flush(finalizer)
+-            // 成功裁决或文本回退也可能遗留其它call的输入，attempt退出必须一并闭合。
+-            if (exit._tag === "Success")
+-              yield* publisher.failUnsettledTools("Tool execution did not complete before stream ended", false, finalizer)
+-            if (exit._tag === "Failure") {
+-              const failure = Cause.squash(exit.cause)
+-              const reason = failure instanceof Error ? failure.message : "Review cancelled"
+-              yield* publisher.failUnsettledTools(reason, false, true)
++            const failure = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined
++            const reason = exit._tag === "Success" ? "Tool execution did not complete before stream ended" : failure instanceof Error ? failure.message : "Review cancelled"
++            const closeTools = publisher.failUnsettledTools(reason, false, finalizer)
++            // 首次工具提交失败仍在助手完成前复扫同一身份；flush或再次清理失败仅记录，保留原退出原因。
++            yield* publisher.flush(finalizer).pipe(
++              Effect.ensuring(closeTools.pipe(
++                Effect.catchCause(cause => Effect.logWarning("reviewer tool finalization failed", { cause }).pipe(Effect.andThen(closeTools))),
++              )),
++              Effect.catchCause(cause => Effect.logWarning("reviewer attempt finalization failed", { cause })),
++            )
++            if (exit._tag === "Failure") {
+               yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
+             }
+             const settlement = publisher.stepSettlement()
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -50,2 +50,4 @@
+ let reviewOpenTool = false
+ const reviewBodies: unknown[] = []
++let reviewTerminalWriteFailures = 0
++const reviewTerminals: string[] = []
+@@ -103,3 +105,21 @@
+ const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
+ 
++// 只在提交边界注入一次故障；所有成功发布仍经过同一真实DB和投影，顺序记录在提交之后。
++const reviewEvents = Layer.effect(EventV2.Service, Effect.gen(function* () {
++  const events = yield* EventV2.Service
++  return EventV2.Service.of({
++    ...events,
++    publish: (definition, data, options) => Effect.gen(function* () {
++      if (definition.type === SessionEvent.Tool.Failed.type && reviewTerminalWriteFailures > 0) {
++        reviewTerminalWriteFailures--
++        return yield* Effect.die("simulated terminal tool write failure")
++      }
++      const result = yield* events.publish(definition, data, options)
++      if (definition.type === SessionEvent.Tool.Failed.type) reviewTerminals.push("tool")
++      if (definition.type === SessionEvent.Step.Failed.type) reviewTerminals.push("assistant")
++      return result
++    }),
++  })
++})).pipe(Layer.provide(EventV2.layerWith()))
++
+ const current = Layer.succeed(
+@@ -119,4 +139,5 @@
+     [[Location.node, current], [Config.node, reviewConfig],
++      [EventV2.node, reviewEvents],
+       // 只替换模型与运输边界；Permission、reviewer、Schema 和事件仍使用真实实现。
+       [SessionRunnerModel.node, reviewModel], [LayerNodePlatform.llmClient, reviewClient],
+     ],
+@@ -990,4 +1011,6 @@
+     reviewGate = undefined
+     reviewStarted = undefined
++    reviewTerminalWriteFailures = 1
++    reviewTerminals.length = 0
+     let interrupted = 0
+-    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewScript = undefined; reviewSettings = new Config.Info({}); reviewStarted = undefined; reviewGate = undefined }))
++    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewScript = undefined; reviewSettings = new Config.Info({}); reviewStarted = undefined; reviewGate = undefined; reviewTerminalWriteFailures = 0; reviewTerminals.length = 0 }))
+@@ -1000,4 +1023,6 @@
+     const hang = (ready: Deferred.Deferred<void>) => Stream.make(
++      LLMEvent.toolInputStart({ id: "retry-incomplete", name: "permission_review_decision" }),
++      LLMEvent.toolInputDelta({ id: "retry-incomplete", name: "permission_review_decision", text: "{" }),
+       LLMEvent.reasoningStart({ id: "retry" }),
+       LLMEvent.reasoningDelta({ id: "retry", text: "partial review before deadline" }),
+     ).pipe(
+@@ -1023,2 +1048,4 @@
+     expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
++    expect(reviewTerminalWriteFailures).toBe(0)
++    expect(reviewTerminals).toEqual(["tool", "assistant"])
+     const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
+@@ -1028,3 +1055,5 @@
+     const traces = yield* sessions.context(childID)
+     expect(traces.find(message => message.type === "assistant" && message.finish === "error")).toMatchObject({ time: { completed: DateTime.makeUnsafe(1000) } })
+     expect(JSON.stringify(traces)).toContain("partial review before deadline")
++    // completed winner保留，首次清理半写不留下open工具，也不能使原超时跳过下一次审查。
++    expect(traces.flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
+@@ -1053,4 +1082,6 @@
+     expect(reviewRequests).toHaveLength(1)
+     expect(yield* service.list()).toEqual([])
++    const messages = yield* sessions.context(childID)
++    expect(messages.flatMap(message => message.type === "assistant" ? message.content : []).filter(part => part.type === "tool" && (part.state.status === "pending" || part.state.status === "running"))).toEqual([])
+   }))
+ })
 diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packages/opencode/test/permission/reviewer-service.test.ts
 index 03f4b54df..009b3f283 100644
 --- a/packages/opencode/test/permission/reviewer-service.test.ts

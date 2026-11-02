@@ -1,3 +1,192 @@
+diff --git a/packages/core/src/instruction-context.ts b/packages/core/src/instruction-context.ts
+--- a/packages/core/src/instruction-context.ts
++++ b/packages/core/src/instruction-context.ts
+@@ -5,2 +5,5 @@
+-import { isAbsolute, join, relative, sep } from "path"
++import { basename, dirname, isAbsolute, join, relative, sep } from "path"
+ import { FSUtil } from "./fs-util"
++import { Config } from "./config"
++import { LayerNodePlatform } from "./effect/app-node-platform"
++import { HttpClient } from "effect/unstable/http"
+@@ -28,1 +31,4 @@
+     const registry = yield* SystemContextRegistry.Service
++    const config = yield* Config.Service
++    const client = yield* HttpClient.HttpClient
++    const http = HttpClient.filterStatusOk(client)
+@@ -47,13 +52,26 @@
+-      const discovered = new Set(
+-        yield* Effect.forEach(
+-          Flag.OPENCODE_DISABLE_PROJECT_CONFIG || !insideProject
+-            ? []
+-            : yield* fs.up({
+-                targets: ["AGENTS.md"],
+-                start,
+-                stop,
+-              }),
+-          fs.resolve,
+-        ),
+-      )
+-      const paths = Array.dedupe([yield* fs.resolve(join(global.config, "AGENTS.md")), ...discovered])
++      const discovered = new Set<string>()
++      if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && insideProject) {
++        for (const name of names()) {
++          const matches = yield* fs.up({ targets: [name], start, stop })
++          if (matches.length === 0) continue
++          for (const match of matches) discovered.add(yield* fs.resolve(match))
++          break
++        }
++      }
++      // 全局首个存在项获胜；项目按文件类型选一组，不能叠加所有祖先的三种规则。
++      const globals: string[] = []
++      for (const candidate of [join(global.config, "AGENTS.md"), ...(names().includes("CLAUDE.md") ? [join(global.home, ".claude", "CLAUDE.md")] : [])]) {
++        const resolved = yield* fs.resolve(candidate)
++        if (!(yield* fs.existsSafe(resolved))) continue
++        globals.push(resolved)
++        break
++      }
++      // 配置按优先级顺序串联；latest只取最后一份文档会丢失前序有效规则。
++      const configured = Array.dedupe((yield* config.entries()).flatMap(entry => entry.type === "document" ? entry.info.instructions ?? [] : []))
++      const extra = yield* Effect.forEach(configured.filter(item => !/^https?:\/\//.test(item)), raw => {
++        const pattern = raw.startsWith("~/") ? join(global.home, raw.slice(2)) : raw
++        if (isAbsolute(pattern)) return fs.glob(basename(pattern), { cwd: dirname(pattern), absolute: true, include: "file" })
++        // 关闭项目配置时，相对规则仍允许从全局配置目录解析，不再遍历项目祖先。
++        return fs.globUp(pattern, Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? global.config : start, Flag.OPENCODE_DISABLE_PROJECT_CONFIG ? global.config : insideProject ? stop : start)
++      })
++      const paths = Array.dedupe([...globals, ...discovered, ...extra.flat()])
+@@ -77,1 +93,10 @@
++    const remote = Effect.gen(function* () {
++      const urls = Array.dedupe((yield* config.entries()).flatMap(entry => entry.type === "document" ? entry.info.instructions ?? [] : [])).filter(item => /^https?:\/\//.test(item))
++      return yield* Effect.forEach(urls, url => http.get(url).pipe(
++        Effect.flatMap(response => response.text),
++        Effect.timeout("5 seconds"),
++        Effect.map(content => ({ url, content })),
++      ), { concurrency: 4 }).pipe(Effect.map(files => files.filter(file => file.content !== "")))
++    })
++
+     yield* registry.register({
+@@ -79,1 +104,2 @@
+-      load: observe().pipe(
++      load: Effect.all([
++      observe().pipe(
+@@ -88,3 +114,5 @@
+         Effect.catchDefect(() => Effect.succeed(source(SystemContext.unavailable))),
+       ),
++      remote.pipe(Effect.map(remoteContext), Effect.catch(() => Effect.succeed(remoteContext(SystemContext.unavailable)))),
++      ]).pipe(Effect.map(SystemContext.combine)),
+     })
+@@ -97,1 +125,1 @@
+-  deps: [FSUtil.node, Global.node, Location.node, SystemContextRegistry.node],
++  deps: [FSUtil.node, Global.node, Location.node, SystemContextRegistry.node, Config.node, LayerNodePlatform.httpClient],
+@@ -105,3 +136,19 @@
+   const claude = !truthy("OPENCODE_DISABLE_CLAUDE_CODE") && !truthy("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT")
+   return ["AGENTS.md", ...(claude ? ["CLAUDE.md"] : []), "CONTEXT.md"]
+ }
++
++const RemoteFiles = Schema.Array(Schema.Struct({ url: Schema.String, content: Schema.String }))
++
++function remoteContext(files: typeof RemoteFiles.Type | SystemContext.Unavailable) {
++  if (files !== SystemContext.unavailable && files.length === 0) return SystemContext.empty
++  const render = (values: typeof RemoteFiles.Type) => values.map(file => `Instructions from: ${file.url}\n${file.content}`).join("\n\n")
++  // URL不进入本地路径codec；短暂网络失败沿Context Epoch保留已接纳正文，不伪装删除或空成功。
++  return SystemContext.make({
++    key: SystemContext.Key.make("core/instructions-remote"),
++    codec: Schema.toCodecJson(RemoteFiles),
++    load: Effect.succeed(files),
++    baseline: render,
++    update: (_previous, current) => `These remote instructions replace all previously loaded remote instructions.\n\n${render(current)}`,
++    removed: () => "Previously loaded remote instructions no longer apply.",
++  })
++}
+diff --git a/packages/core/test/instruction-context.test.ts b/packages/core/test/instruction-context.test.ts
+--- a/packages/core/test/instruction-context.test.ts
++++ b/packages/core/test/instruction-context.test.ts
+@@ -2,1 +2,4 @@
+ import { Effect, Layer } from "effect"
++import { Config } from "@opencode-ai/core/config"
++import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
++import { HttpClient, HttpClientResponse } from "effect/unstable/http"
+@@ -23,8 +26,13 @@
+   filesystemLayer?: Layer.Layer<FSUtil.Service>
++  home?: string
++  entries?: Config.Entry[]
++  httpLayer?: Layer.Layer<HttpClient.HttpClient>
+ }) =>
+   AppNodeBuilder.build(LayerNode.group([SystemContextRegistry.node, InstructionContext.node]), [
+-    [Global.node, Global.layerWith({ config: input.config })],
++    [Global.node, Global.layerWith({ config: input.config, home: input.home ?? path.join(input.config, "home") })],
+     [Location.node, input.locationServiceLayer],
++    [Config.node, Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed(input.entries ?? []) }))],
++    ...(input.httpLayer ? [[LayerNodePlatform.httpClient, input.httpLayer] as const] : []),
+     ...(input.filesystemLayer ? [[FSUtil.node, input.filesystemLayer] as const] : []),
+   ])
+ 
+@@ -31,1 +39,63 @@
+ describe("InstructionContext", () => {
++  it.live("loads prioritized files, ordered configured globs and URL bodies through the same context", () => Effect.acquireRelease(
++    Effect.promise(() => tmpdir()), tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++  ).pipe(Effect.flatMap(tmp => Effect.gen(function* () {
++    const project = path.join(tmp.path, "project")
++    const directory = path.join(project, "packages")
++    const config = path.join(tmp.path, "config")
++    const home = path.join(tmp.path, "home")
++    const globalClaude = path.join(home, ".claude", "CLAUDE.md")
++    const projectClaude = path.join(project, "CLAUDE.md")
++    const packageClaude = path.join(directory, "CLAUDE.md")
++    const custom = path.join(project, "rules", "custom.md")
++    const manual = path.join(home, "manual.md")
++    const url = "https://instructions.example/rules"
++    yield* Effect.promise(async () => {
++      await Promise.all([fs.mkdir(directory, { recursive: true }), fs.mkdir(config, { recursive: true }), fs.mkdir(path.dirname(globalClaude), { recursive: true }), fs.mkdir(path.dirname(custom), { recursive: true })])
++      await Promise.all([fs.writeFile(globalClaude, "Global Claude"), fs.writeFile(projectClaude, "Project Claude"), fs.writeFile(packageClaude, "Package Claude"), fs.writeFile(path.join(project, "CONTEXT.md"), "Shadowed context"), fs.writeFile(custom, "Configured glob"), fs.writeFile(manual, "Home manual")])
++    })
++    const entries = [
++      new Config.Document({ type: "document", info: new Config.Info({ instructions: ["rules/*.md", url] }) }),
++      new Config.Document({ type: "document", info: new Config.Info({ instructions: ["~/manual.md", custom, url] }) }),
++    ]
++    let failed = false
++    const fetched: string[] = []
++    const httpLayer = Layer.succeed(HttpClient.HttpClient, HttpClient.make(request => Effect.sync(() => {
++      fetched.push(request.url)
++      return HttpClientResponse.fromWeb(request, new Response(failed ? "unavailable" : "Remote rule", { status: failed ? 503 : 200 }))
++    })))
++    const load = SystemContextRegistry.Service.use(registry => registry.load()).pipe(Effect.provide(instructionLayer({
++      config, home, entries, httpLayer,
++      locationServiceLayer: Layer.succeed(Location.Service, location({ directory: AbsolutePath.make(directory) }, { projectDirectory: AbsolutePath.make(project) })),
++    })))
++    const initialized = yield* SystemContext.initialize(yield* load)
++    expect(initialized.baseline).toBe([
++      `Instructions from: ${globalClaude}\nGlobal Claude`,
++      `Instructions from: ${packageClaude}\nPackage Claude`,
++      `Instructions from: ${projectClaude}\nProject Claude`,
++      `Instructions from: ${custom}\nConfigured glob`,
++      `Instructions from: ${manual}\nHome manual`,
++      `Instructions from: ${url}\nRemote rule`,
++    ].join("\n\n"))
++    expect(initialized.baseline).not.toContain("Shadowed context")
++    expect(fetched).toEqual([url])
++    expect(initialized.snapshot).toMatchObject({ "core/instructions-remote": { value: [{ url, content: "Remote rule" }] } })
++    // 暂时网络错误不能把已接纳的远程规则转换成删除；本地正文也仍使用同一epoch。
++    failed = true
++    expect(yield* SystemContext.reconcile(yield* load, initialized.snapshot)).toMatchObject({ _tag: "Unchanged" })
++    failed = false
++    const agents = path.join(directory, "AGENTS.md")
++    yield* Effect.promise(() => fs.writeFile(agents, "Preferred agents"))
++    const preferred = yield* SystemContext.initialize(yield* load)
++    expect(preferred.baseline).toContain(`Instructions from: ${agents}\nPreferred agents`)
++    expect(preferred.baseline).not.toContain(`Instructions from: ${projectClaude}`)
++    expect(preferred.baseline).not.toContain(`Instructions from: ${packageClaude}`)
++    // 移除URL配置才生成显式删除消息；重复配置不会重复获取或重复拼接正文。
++    entries.splice(0, entries.length, new Config.Document({ type: "document", info: new Config.Info({ instructions: ["rules/*.md", "~/manual.md"] }) }))
++    const count = fetched.length
++    expect(yield* SystemContext.reconcile(yield* load, preferred.snapshot)).toMatchObject({
++      _tag: "Updated", text: expect.stringContaining("Previously loaded remote instructions no longer apply."),
++    })
++    expect(fetched).toHaveLength(count)
++  }))))
++
+@@ -251,1 +321,1 @@
+-        targets: ["AGENTS.md"],
++        targets: ["CONTEXT.md"],
 diff --git a/packages/opencode/src/provider/claudecode.ts b/packages/opencode/src/provider/claudecode.ts
 --- a/packages/opencode/src/provider/claudecode.ts
 +++ b/packages/opencode/src/provider/claudecode.ts
@@ -531,12 +720,12 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
  
  export const name = "bash"
  export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
-@@ -48,5 +51,8 @@
+@@ -48,5 +51,7 @@
  
- const defaultShell = () => (process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh")
-+// 单一选择器同时供执行和环境生产者读取，避免配置优先级或平台默认值漂移。
+-const defaultShell = () => (process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh")
++// 两代共用实际shell选择器；执行与环境指引不能分别回退cmd和PowerShell。
 +const selectedShell = (entries: readonly Config.Entry[]) =>
-+  Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info] : [])).shell ?? defaultShell()
++  Shell.acceptable(Object.assign({}, ...entries.flatMap((entry) => entry.type === "document" ? [entry.info] : [])).shell)
  
  const modelOutput = (output: Output) => {
    const warnings = output.warnings?.length
@@ -765,6 +954,27 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
        expect(systemTexts(requests[1]!)).toContain("Replacement context")
      }),
    )
+
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -15,6 +15,7 @@
+ import { AbsolutePath } from "@opencode-ai/core/schema"
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { Shell } from "@opencode-ai/core/shell"
+ import { BashTool } from "@opencode-ai/core/tool/bash"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+ import { ToolOutputStore } from "@opencode-ai/core/tool-output-store"
+ import { location } from "./fixture/location"
+@@ -168,6 +169,8 @@
+               },
+             })
+             expect(runs).toMatchObject([{ command: "pwd", cwd: realpathSync(tmp.path) }])
++            // 检查真正交给进程边界的选择，不能只验证system里显示了哪个shell。
++            expect(runs[0]?.shell).toBe(Shell.acceptable())
+             expect(runs[0]?.options).toMatchObject({
+               combineOutput: true,
+               maxOutputBytes: BashTool.MAX_CAPTURE_BYTES,
 
 diff --git a/packages/core/test/system-context/builtins.test.ts b/packages/core/test/system-context/builtins.test.ts
 --- a/packages/core/test/system-context/builtins.test.ts

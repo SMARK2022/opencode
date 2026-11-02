@@ -1,76 +1,25 @@
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
-@@ -7,11 +7,13 @@ import "./version-env"
+@@ -7,11 +7,12 @@ import "./version-env"
  import { $ } from "bun"
  import path from "path"
-+import { createRequire } from "module"
++import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
  import { fileURLToPath } from "url"
  import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
  
  const __filename = fileURLToPath(import.meta.url)
  const __dirname = path.dirname(__filename)
  const dir = path.resolve(__dirname, "..")
-+const require = createRequire(import.meta.url)
  
  process.chdir(dir)
  
-@@ -144,6 +146,49 @@ const targets = singleFlag
-   ? allTargets.filter((item) => item.os === osFilter && item.abi === undefined && item.avx2 !== false && (!archFilter || item.arch === archFilter))
-   : allTargets
- 
-+// PvRecorder 的 `.node` 必须按目标平台嵌入；运行时再释放到真实 cache 文件，避免 Bun compile 中 `__dirname` 指向 CI 构建路径。
-+const pvRecorderNativeFilesForTarget = (item: (typeof allTargets)[number]) => {
-+  if (item.os === "win32") {
-+    // Picovoice 在 Windows x64 包目录里使用 `amd64` 命名；这里不能直接复用 Bun target 的 `x64` 字符串。
-+    if (item.arch === "x64") return ["windows/amd64/pv_recorder.node"]
-+    // Windows arm64 与 Node/Bun 的 arch 名称一致，保持包内 lib 相对路径即可。
-+    if (item.arch === "arm64") return ["windows/arm64/pv_recorder.node"]
-+  }
-+  if (item.os === "darwin") {
-+    // macOS Intel 包路径沿用 Picovoice 的 `x86_64`，和 release target 的 `x64` 不同。
-+    if (item.arch === "x64") return ["mac/x86_64/pv_recorder.node"]
-+    // Apple Silicon 使用单独 native addon，不能和 x64 通过 Rosetta 路径混用。
-+    if (item.arch === "arm64") return ["mac/arm64/pv_recorder.node"]
-+  }
-+  if (item.os === "linux") {
-+    // Linux x64 只有 glibc/musl 外层 Bun runtime 不同；Picovoice native 路径本身不区分 libc。
-+    if (item.arch === "x64") return ["linux/x86_64/pv_recorder.node"]
-+    if (item.arch === "arm64")
-+      // 官方包只提供 Raspberry Pi CPU 变体；全部嵌入后运行时再按 /proc/cpuinfo 精确选择。
-+      return [
-+        "raspberry-pi/cortex-a53-aarch64/pv_recorder.node",
-+        "raspberry-pi/cortex-a72-aarch64/pv_recorder.node",
-+        "raspberry-pi/cortex-a76-aarch64/pv_recorder.node",
-+      ]
-+  }
-+  return []
-+}
-+
-+function createPvRecorderNativeFileMap(item: (typeof allTargets)[number]) {
-+  // `with { type: "file" }` 让 Bun 把 native 二进制作为资源嵌入 exe，而不是让 Picovoice 自己从 node_modules 相对路径加载。
-+  const pvRecorderLib = path.join(path.dirname(require.resolve("@picovoice/pvrecorder-node/package.json")), "lib")
-+  const imports = pvRecorderNativeFilesForTarget(item).map((file, index) => {
-+    // require.resolve 兼容 hoisted workspace 安装；spec 再转成相对路径，交给 Bun.build 嵌入真实 native 文件。
-+    const spec = path
-+      .relative(dir, path.join(pvRecorderLib, ...file.split("/")))
-+      .replaceAll("\\", "/")
-+    return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
-+  })
-+  // key 保持 Picovoice 包内 lib 的相对路径，运行时只需按当前 platform/arch 选同一个稳定字符串。
-+  const entries = pvRecorderNativeFilesForTarget(item).map((file, index) => `  ${JSON.stringify(file)}: file_${index},`)
-+  return [...imports, "export default {", ...entries, "}"].join("\n")
-+}
-+
- await $`rm -rf dist`
- 
- const binaries: Record<string, string> = {}
 @@ -192,10 +237,14 @@ for (const item of targets) {
     files: {
       [treeSitterWorkerPath]: treeSitterWorker,
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
 +      // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
-+      "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
++      "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir),
     },
     entrypoints: [
       "./src/index.ts",
@@ -141,20 +90,17 @@ diff --git a/packages/tui/src/config/keybind.ts b/packages/tui/src/config/keybin
  
 
 
-diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
---- a/packages/opencode/src/config/tui.ts
-+++ b/packages/opencode/src/config/tui.ts
-@@ -294,5 +294,10 @@
-   const result = TuiConfig.resolve(
-     {
-       ...acc.result,
-+      // #317：合并全部文件后才补 macOS F8 默认，无配置时也生效。
-+      // 显式快捷键（包括 none）最后覆盖，较高优先级的无关配置不能重置用户选择。
-+      keybinds: process.platform === "darwin"
-+        ? { prompt_voice_toggle: "f8", ...acc.result.keybinds }
-+        : acc.result.keybinds,
-       // 默认只绑定到 browser-agent 的稳定 CLI 子命令，不把 ChatGPT DOM/HTTP 细节放进 TUI。
-       // 用户仍可用 tui.json 覆盖为任意 argv 转写器；`{file}` 占位由 prompt-voice-input 做安全校验。
+diff --git a/packages/tui/src/config/index.tsx b/packages/tui/src/config/index.tsx
+--- a/packages/tui/src/config/index.tsx
++++ b/packages/tui/src/config/index.tsx
+@@ -113,3 +113,7 @@
+ export function resolve(input: Info, options: ResolveOptions): Resolved {
+   const keybinds: TuiKeybind.KeybindOverrides = { ...input.keybinds }
++  if (process.platform === "darwin") {
++    // 两个host均在合并完成后进入这里；只补缺省值，显式none/false/空绑定数组不能被F8重新打开。
++    keybinds.prompt_voice_toggle ??= "f8"
++  }
+   if (!options.terminalSuspend) {
 
 
 diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt-voice-recorder.ts
@@ -433,20 +379,64 @@ diff --git a/packages/tui/src/prompt-voice-recorder.ts b/packages/tui/src/prompt
 diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 --- a/packages/tui/test/prompt/prompt-voice-recorder.test.ts
 +++ b/packages/tui/test/prompt/prompt-voice-recorder.test.ts
-@@ -1,4 +1,8 @@
- import { beforeEach, describe, expect, mock, test } from "bun:test"
+@@ -1,4 +1,37 @@
+-import { beforeEach, describe, expect, mock, test } from "bun:test"
++import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 +import { randomUUID } from "crypto"
 +import fs from "fs/promises"
 +import path from "path"
 +import { Global } from "@opencode-ai/core/global"
++import { PromptVoiceAssets } from "../../src/prompt-voice-assets"
++
++test("generates the same recorder resources for legacy and native build roots", () => {
++  const roots = [path.resolve("legacy-build"), path.resolve("native", "nested", "build")]
++  const targets = [
++    ["win32", "x64", ["windows/amd64/pv_recorder.node"]],
++    ["win32", "arm64", ["windows/arm64/pv_recorder.node"]],
++    ["darwin", "x64", ["mac/x86_64/pv_recorder.node"]],
++    ["darwin", "arm64", ["mac/arm64/pv_recorder.node"]],
++    ["linux", "x64", ["linux/x86_64/pv_recorder.node"]],
++    ["linux", "arm64", ["raspberry-pi/cortex-a53-aarch64/pv_recorder.node", "raspberry-pi/cortex-a72-aarch64/pv_recorder.node", "raspberry-pi/cortex-a76-aarch64/pv_recorder.node"]],
++  ] as const
++  for (const [os, arch, expected] of targets) {
++    const paths = roots.map((root) => {
++      const text = PromptVoiceAssets.createPvRecorderNativeFileMap({ os, arch }, root)
++      expected.forEach((key, index) => expect(text).toContain(`${JSON.stringify(key)}: file_${index},`))
++      // 只解析真实生成函数的file-loader引用，不编译产物、加载addon或读取二进制计算校验码。
++      const files = [...text.matchAll(/^import file_\d+ from (".*") with \{ type: "file" \};$/gm)].map((match) => {
++        const spec: unknown = JSON.parse(match[1])
++        if (typeof spec !== "string") throw new Error("Expected a generated file import")
++        return path.resolve(root, spec)
++      })
++      expect(files).toHaveLength(expected.length)
++      expected.forEach((key, index) => expect(files[index]?.replaceAll("\\", "/")).toEndWith(`/lib/${key}`))
++      return files
++    })
++    expect(paths[0]).toEqual(paths[1])
++  }
++})
  
  class FakePvRecorder {
    static last: FakePvRecorder | undefined
-@@ -70,6 +74,46 @@ describe("prompt voice recorder", () => {
+@@ -62,2 +95,5 @@
+ describe("prompt voice recorder", () => {
+-  beforeEach(() => {
++  const tmpRoot = Global.Path.tmp
++  beforeEach(async () => {
++    // 每例只扫描自己创建的目录，旧WAV清理不能碰全局缓存或其它会话的录音。
++    Global.Path.tmp = await fs.mkdtemp(path.join(tmpRoot, "voice-recorder-test-"))
+@@ -70,6 +106,53 @@ describe("prompt voice recorder", () => {
      FakePvRecorder.queuedReadDelayMs = 0
      FakePvRecorder.liveReadDelayMs = 40
      FakePvRecorder.liveFrameValue = 321
 +    delete (globalThis as { OPENCODE_COMPILED?: boolean }).OPENCODE_COMPILED
++  })
++
++  afterEach(async () => {
++    const dir = Global.Path.tmp
++    Global.Path.tmp = tmpRoot
++    // 仅回收本例唯一目录；先恢复配置，失败也不让其它测试继承失效路径。
++    await fs.rm(dir, { recursive: true, force: true })
 +  })
 +
 +  // 崩溃或强杀会绕过 handle.abort()，因此下一次真实录音启动前要清理很久以前的 prompt WAV。
@@ -514,6 +504,94 @@ diff --git a/packages/tui/test/prompt/prompt-voice-recorder.test.ts b/packages/t
    return new Promise<void>((resolve, reject) => {
 
 
+diff --git a/packages/tui/src/prompt-voice-assets.ts b/packages/tui/src/prompt-voice-assets.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/prompt-voice-assets.ts
+@@ -0,0 +1,40 @@
++export * as PromptVoiceAssets from "./prompt-voice-assets"
++
++import path from "path"
++import { createRequire } from "module"
++
++// 两个构建入口共用目标资源契约，包从TUI依赖边界解析，import路径则相对各自构建根。
++export function createPvRecorderNativeFileMap(item: { os: string; arch: string }, root: string) {
++  const pvRecorderLib = path.join(path.dirname(createRequire(import.meta.url).resolve("@picovoice/pvrecorder-node/package.json")), "lib")
++  const files = pvRecorderNativeFilesForTarget(item)
++  const imports = files.map((file, index) => {
++    // Bun file-loader负责嵌入字节；生成模块只保存平台key到资源地址的映射。
++    const spec = path.relative(root, path.join(pvRecorderLib, ...file.split("/"))).replaceAll("\\", "/")
++    return `import file_${index} from ${JSON.stringify(spec.startsWith(".") ? spec : `./${spec}`)} with { type: "file" };`
++  })
++  const entries = files.map((file, index) => `  ${JSON.stringify(file)}: file_${index},`)
++  return [...imports, "export default {", ...entries, "}"].join("\n")
++}
++
++function pvRecorderNativeFilesForTarget(item: { os: string; arch: string }) {
++  if (item.os === "win32") {
++    // Picovoice的Windows x64目录名与Bun target不同，不能直接拼接arch。
++    if (item.arch === "x64") return ["windows/amd64/pv_recorder.node"]
++    if (item.arch === "arm64") return ["windows/arm64/pv_recorder.node"]
++  }
++  if (item.os === "darwin") {
++    // Intel与Apple Silicon保持独立资源，运行时使用同样的平台key选择。
++    if (item.arch === "x64") return ["mac/x86_64/pv_recorder.node"]
++    if (item.arch === "arm64") return ["mac/arm64/pv_recorder.node"]
++  }
++  if (item.os === "linux") {
++    // glibc/musl只区分外层Bun runtime，Picovoice包内x64资源key相同。
++    if (item.arch === "x64") return ["linux/x86_64/pv_recorder.node"]
++    if (item.arch === "arm64") return [
++      "raspberry-pi/cortex-a53-aarch64/pv_recorder.node",
++      "raspberry-pi/cortex-a72-aarch64/pv_recorder.node",
++      "raspberry-pi/cortex-a76-aarch64/pv_recorder.node",
++    ]
++  }
++  return []
++}
+diff --git a/packages/cli/script/build.ts b/packages/cli/script/build.ts
+--- a/packages/cli/script/build.ts
++++ b/packages/cli/script/build.ts
+@@ -7,3 +7,4 @@
+ import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
++import { PromptVoiceAssets } from "../../tui/src/prompt-voice-assets"
+ import pkg from "../package.json"
+ import { modelsData } from "./generate"
+@@ -65,3 +66,5 @@
+   const result = await Bun.build({
+-    entrypoints: ["./src/index.ts"],
++    // Native与旧入口嵌入同一资源表，不复制录音器或引入源码包路径回退。
++    files: { "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir) },
++    entrypoints: ["./src/index.ts", "opencode-pvrecorder.gen.ts"],
+     tsconfig: "./tsconfig.json",
+@@ -85,3 +88,4 @@
+       OPENCODE_VERSION: `'${Script.version}'`,
++      OPENCODE_COMPILED: "true",
+       OPENCODE_CLI_NAME: `'${binary}'`,
+       OPENCODE_MODELS_DEV: modelsData,
+diff --git a/packages/tui/test/config.test.tsx b/packages/tui/test/config.test.tsx
+--- a/packages/tui/test/config.test.tsx
++++ b/packages/tui/test/config.test.tsx
+@@ -65,3 +65,19 @@
+   expect(config.keybinds.has("session.list")).toBe(true)
+   expect(config.cursor).toBeUndefined()
++  const original = process.platform
++  try {
++    for (const platform of ["darwin", "linux", "win32"]) {
++      Object.defineProperty(process, "platform", { value: platform })
++      // 测真实最终lookup，平台默认必须同时覆盖两host，且不能修改输入或复活用户禁用的绑定。
++      expect(resolve({}, { terminalSuspend: true }).keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe(platform === "darwin" ? "f8" : "alt+v")
++      const explicit = { keybinds: { prompt_voice_toggle: "alt+x" } }
++      expect(resolve(explicit, { terminalSuspend: true }).keybinds.get("prompt.voice.toggle")?.[0]?.key).toBe("alt+x")
++      expect(explicit.keybinds).toEqual({ prompt_voice_toggle: "alt+x" })
++      for (const binding of ["none", false, []] as const) {
++        expect(resolve({ keybinds: { prompt_voice_toggle: binding } }, { terminalSuspend: true }).keybinds.has("prompt.voice.toggle")).toBe(false)
++      }
++    }
++  } finally {
++    Object.defineProperty(process, "platform", { value: original })
++  }
+ })
 diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts

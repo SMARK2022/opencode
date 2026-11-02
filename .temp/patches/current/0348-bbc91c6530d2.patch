@@ -24,11 +24,44 @@ new file mode 100644
 diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
 --- a/packages/core/src/tool/edit.ts
 +++ b/packages/core/src/tool/edit.ts
+@@ -9,3 +9,4 @@
++import path from "path"
+ import { ToolFailure } from "@opencode-ai/llm"
+ import { FileDiff } from "@opencode-ai/schema/file-diff"
+ import { createTwoFilesPatch, diffLines } from "diff"
+@@ -16,1 +17,3 @@
+ import { LocationMutation } from "../location-mutation"
++import { Location } from "../location"
++import { SessionStore } from "../session/store"
 @@ -18,3 +18,4 @@
  import { ToolRegistry } from "./registry"
 +import { closestMatch } from "./edit-excerpt"
  import { Tool } from "./tool"
  import { Tools } from "./tools"
+@@ -89,2 +93,4 @@
+     const format = yield* Format.Service
++    const location = yield* Location.Service
++    const sessions = yield* SessionStore.Service
+ 
+@@ -131,2 +137,18 @@
+                 const target = yield* unableToEdit(mutation.resolve({ path: input.path, kind: "file" }))
++                // 只使用本Session实际可见的完成态工具历史；条件写入新鲜度不能替代此前检查。
++                const resolveForCompare = (value: string) => {
++                  const resolved = path.resolve(location.directory, value)
++                  return process.platform === "win32" ? resolved.toLowerCase() : resolved
++                }
++                const filePath = path.resolve(location.directory, input.path)
++                const hasTouched = (yield* unableToEdit(sessions.context(context.sessionID))).some(message =>
++                  message.type === "assistant" && message.content.some(part => {
++                    if (part.type !== "tool" || part.state.status !== "completed") return false
++                    if (part.name !== "read" && part.name !== "write" && part.name !== "edit") return false
++                    return typeof part.state.input.path === "string" && resolveForCompare(part.state.input.path) === resolveForCompare(filePath)
++                  }))
++                if (!hasTouched) return yield* new ToolFailure({
++                  message: `File has not been read in this session: ${filePath}. Read it first to verify current content, then retry the edit.`,
++                })
++                // 目标正文仍须等两项权限通过才读取，源工具名与错误原话均不扩展。
+                 const external = target.externalDirectory
 @@ -172,6 +173,8 @@
                  const replacements = countOccurrences(source.text, oldString)
                  if (replacements === 0) {
@@ -39,6 +72,9 @@ diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
 +                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation." +
 +                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
                    })
+@@ -234,1 +257,1 @@
+-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
 diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
 --- a/packages/core/src/tool/apply-patch.ts
 +++ b/packages/core/src/tool/apply-patch.ts
@@ -71,7 +107,7 @@ diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/appl
 +                        return new ToolFailure({ message: `${error}${closest ? `\n\nActual content near expected location:\n${closest.excerpt}` : ""}` })
 +                      },
 +                    })
-@@ -159,4 +170,8 @@
+@@ -169,4 +180,8 @@
 -                  }).pipe(Effect.mapError(() => fail(hunk.path)))
 +                  }).pipe(Effect.catch(error => {
 +                    errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
@@ -80,7 +116,7 @@ diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/appl
                  }
  
 +                if (prepared.length === 0) return yield* new ToolFailure({ message: errors.join("\n") })
-                 const patchFiles = prepared.map(patchFile)
+                 const patchFiles: Array<typeof FileDiff.Info.Type> = []
 @@ -192,1 +207,1 @@
 -                return { applied, files: patchFiles }
 +                return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
@@ -121,7 +157,7 @@ diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/to
 @@ -324,2 +324,3 @@
 -            ).toEqual({ type: "error", value: "Unable to apply patch at missing.txt" })
 -            expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(false)
-+            ).toEqual({ type: "text", value: "Applied patch sequentially:\nA created.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.\n\nFailed to update 1 file(s):\nUnable to apply patch at missing.txt" })
++            ).toEqual({ type: "text", value: expect.stringMatching(/^Applied patch sequentially:\nA created\.txt\n\nChanged:\n```diff\n[\s\S]*\+created\n[\s\S]*LSP diagnostics unavailable[\s\S]*Failed to update 1 file\(s\):\nUnable to apply patch at missing\.txt$/) })
 +            expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
 +            expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "created.txt"), "utf8"))).toBe("created\n")
 diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
@@ -130,6 +166,360 @@ diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit
 @@ -322,1 +322,1 @@
 -                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
 +                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.\n\nClosest match at line 1:\nsame same",
+diff --git a/packages/core/test/lib/tool.ts b/packages/core/test/lib/tool.ts
+--- a/packages/core/test/lib/tool.ts
++++ b/packages/core/test/lib/tool.ts
+@@ -4,1 +4,1 @@
+-import { Effect } from "effect"
++import { Effect, Schema } from "effect"
+@@ -19,2 +19,15 @@
+ export const executeTool = (registry: ToolRegistry.Interface, input: ToolRegistry.ExecuteInput) =>
+   settleTool(registry, input).pipe(Effect.map((settlement) => settlement.result))
++
++// 仅为显式测试场景提供完成态历史；调用工具本身不会自动制造此前已读的证明。
++export const toolHistory = (path: string, tool = "read") => [
++  Schema.decodeUnknownSync(SessionMessage.Assistant)({
++    id: "msg_prior", type: "assistant", agent: "build",
++    model: { id: "test", providerID: "test" },
++    time: { created: 0, completed: 1 },
++    content: [{
++      type: "tool", id: "prior", name: tool, time: { created: 0, completed: 1 },
++      state: { status: "completed", input: { path }, structured: {}, content: [] },
++    }],
++  }),
++]
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -14,1 +14,2 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionStore } from "@opencode-ai/core/session/store"
+@@ -21,1 +22,1 @@
+-import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
++import { toolIdentity, executeTool, settleTool, toolDefinitions, toolHistory } from "./lib/tool"
+@@ -81,1 +82,1 @@
+-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>) => {
++const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = []) => {
+@@ -101,2 +102,3 @@
+           [PermissionV2.node, permission],
++          [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? history : []) })],
+           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+@@ -123,2 +125,3 @@
+         const target = path.join(tmp.path, "hello.txt")
++        const history: ReturnType<typeof toolHistory> = []
+         return Effect.promise(() => fs.writeFile(target, "before\nrest\n")).pipe(
+@@ -128,2 +131,11 @@
+                 expect((yield* toolDefinitions(registry)).map((tool) => tool.name)).toEqual(["edit"])
++                // 相同真实leaf先验证缺失/跨Session历史均拒绝，再显式提供当前文件的已读证据。
++                const blind = call({ path: "hello.txt", oldString: "before", newString: "after" })
++                expect(yield* executeTool(registry, blind)).toEqual({ type: "error", value: `File has not been read in this session: ${target}. Read it first to verify current content, then retry the edit.` })
++                history.push(...toolHistory("hello.txt"))
++                expect(yield* executeTool(registry, { ...blind, sessionID: SessionV2.ID.make("ses_other") })).toEqual({ type: "error", value: `File has not been read in this session: ${target}. Read it first to verify current content, then retry the edit.` })
++                expect(assertions).toEqual([])
++                expect(reads).toBe(0)
++                expect(writes).toEqual([])
++
+                 expect(yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).toEqual(
+@@ -157,3 +169,4 @@
+                 expect(writes).toEqual([yield* Effect.promise(() => fs.realpath(target))])
+               }),
++              history,
+             ),
+@@ -175,3 +188,4 @@
+             withTool(tmp.path, (registry) =>
+               executeTool(registry, call({ path: target, oldString: "before", newString: "after" })),
++              toolHistory("absolute.txt", "write"),
+             ),
+@@ -200,3 +214,4 @@
+             withTool(active.path, (registry) =>
+               executeTool(registry, call({ path: target, oldString: "before", newString: "after" })),
++              toolHistory(target, "edit"),
+             ),
+@@ -233,3 +248,4 @@
+             yield* withTool(active.path, (registry) =>
+               executeTool(registry, call({ path: external, oldString: "before", newString: "after" })),
++              toolHistory(external),
+             ),
+@@ -247,3 +263,4 @@
+             yield* withTool(active.path, (registry) =>
+               executeTool(registry, call({ path: external, oldString: "before", newString: "after" })),
++              toolHistory(external),
+             ),
+@@ -296,3 +313,4 @@
+                 expect(writes).toEqual([])
+               }),
++              toolHistory("secret.txt"),
+             ),
+@@ -342,3 +360,4 @@
+                 expect(writes).toEqual([])
+               }),
++              toolHistory("matches.txt"),
+             ),
+@@ -361,2 +380,3 @@
+               settleTool(registry, call({ path: "all.txt", oldString: "same", newString: "after", replaceAll: true })),
++              toolHistory("all.txt"),
+             ),
+@@ -370,1 +390,1 @@
+-              const replaced = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: "after", newString: literal, replaceAll: true })))
++              const replaced = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: "after", newString: literal, replaceAll: true })), toolHistory("all.txt", "edit"))
+@@ -377,1 +397,1 @@
+-              const lastLine = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: original, newString: final })))
++              const lastLine = yield* withTool(tmp.path, (registry) => settleTool(registry, call({ path: "all.txt", oldString: original, newString: final })), toolHistory("all.txt", "edit"))
+@@ -397,3 +417,4 @@
+           const settled = yield* withTool(tmp.path, (registry) =>
+             settleTool(registry, call({ path: "windows.txt", oldString: "before\r\nrest", newString: "after\nrest" })),
++            toolHistory("windows.txt"),
+           )
+@@ -423,3 +444,4 @@
+             withTool(tmp.path, (registry) =>
+               executeTool(registry, call({ path: "concurrent.txt", oldString: "before", newString: "after" })),
++              toolHistory("concurrent.txt"),
+             ),
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -17,1 +17,2 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionStore } from "@opencode-ai/core/session/store"
+@@ -24,1 +25,1 @@
+-import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
++import { toolIdentity, executeTool, settleTool, toolDefinitions, toolHistory } from "./lib/tool"
+@@ -66,1 +67,1 @@
+-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, formatting?: { formatter: Config.Info["formatter"]; tool?: "edit" | "apply_patch" }) => {
++const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, formatting?: { formatter: Config.Info["formatter"]; tool?: "edit" | "apply_patch"; history?: ReturnType<typeof toolHistory> }) => {
+@@ -88,1 +89,4 @@
++          ...(formatting?.tool === "edit" ? [
++            [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? formatting.history ?? [] : []) })] as const,
++          ] : []),
+           ...(formatting ? [
+@@ -202,1 +206,1 @@
+-            const edit = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-edit", name: "edit", input: { path: resource, oldString: "const n = 2;", newString: "const n=3" } } }), { formatter, tool: "edit" })
++            const edit = yield* withTool(tmp.path, (registry) => settleTool(registry, { ...identity, call: { type: "tool-call", id: "format-edit", name: "edit", input: { path: resource, oldString: "const n = 2;", newString: "const n=3" } } }), { formatter, tool: "edit", history: toolHistory(resource, "write") })
+
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -32,1 +32,5 @@
++export interface ConditionalMoveInput extends ConditionalWriteInput {
++  readonly content: string
++  readonly destination: Target
++}
+ export interface RemoveInput {
+@@ -44,1 +48,7 @@
++export class MoveIncompleteError extends Schema.TaggedErrorClass<MoveIncompleteError>()("FileMutation.MoveIncompleteError", {
++  path: Schema.String,
++  destination: Schema.String,
++  reason: Schema.String,
++}) {}
++
+ export interface WriteResult {
+@@ -50,1 +60,3 @@
++  // 最终展示和增删统计必须使用同一次持锁写入的前像。
++  readonly previous?: string
+   readonly diff?: string
+@@ -73,1 +85,2 @@
++  readonly moveIfUnchanged: (input: ConditionalMoveInput) => Effect.Effect<WriteResult, StaleContentError | MoveIncompleteError | FSUtil.Error>
+   readonly remove: (input: RemoveInput) => Effect.Effect<RemoveResult, FSUtil.Error>
+@@ -125,1 +138,2 @@
++        previous,
+         diff: createTwoFilesPatch(input.target.resource, input.target.resource, before, after),
+@@ -210,1 +224,24 @@
++    const moveIfUnchanged = Effect.fn("FileMutation.moveIfUnchanged")((input: ConditionalMoveInput) => {
++      const commit = Effect.gen(function* () {
++        const source = yield* fs.readFile(input.target.canonical)
++        if (!sameBytes(source, input.expected)) return yield* new StaleContentError({ path: input.target.canonical })
++        const previous = yield* fs.readFile(input.destination.canonical)
++          .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
++        // 目的地继承源BOM，格式化与最终回读沿用唯一文本收尾路径。
++        yield* fs.writeWithDirs(input.destination.canonical, input.content)
++        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined)
++        if (input.destination.canonical !== input.target.canonical) {
++          yield* fs.remove(input.target.canonical).pipe(Effect.mapError(error => new MoveIncompleteError({
++            path: input.target.canonical, destination: input.destination.canonical, reason: error.message,
++          })))
++        }
++        return result
++      })
++      if (input.destination.canonical === input.target.canonical) return withTargetLock(input.target)(commit)
++      // 两端按同一顺序取锁，反向Move不会互相持有一半锁而死锁。
++      const first = input.target.canonical < input.destination.canonical ? input.target : input.destination
++      const second = first === input.target ? input.destination : input.target
++      return withTargetLock(first)(withTargetLock(second)(commit))
++    })
++
+     const remove = Effect.fn("FileMutation.remove")((input: RemoveInput) =>
+@@ -222,1 +259,1 @@
+-    return Service.of({ create, write, writeTextPreservingBom, writeIfUnchanged, remove })
++    return Service.of({ create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove })
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -65,2 +65,3 @@
+       readonly source: Uint8Array
++      readonly destination?: LocationMutation.Target
+       readonly content: string
+@@ -85,1 +86,1 @@
+-              "Apply one patch containing add, update, and delete file operations. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
++              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
+@@ -110,12 +111,17 @@
+-                const move = hunks.find((hunk) => hunk.type === "update" && hunk.movePath !== undefined)
+-                if (move) return yield* new ToolFailure({ message: "apply_patch moves are not supported yet" })
+ 
+-                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target }> = []
+-                for (const hunk of hunks)
+-                  targets.push({ hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) })
++                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target }> = []
++                for (const hunk of hunks) {
++                  const target = yield* mutation.resolve({ path: hunk.path, kind: "file" })
++                  const destination = hunk.type === "update" && hunk.movePath
++                    ? yield* mutation.resolve({ path: hunk.movePath, kind: "file" }) : undefined
++                  targets.push({ hunk, target, destination })
++                }
+                 // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
+-                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] }>()
+-                for (const { hunk, target } of targets) {
+-                  const external = target.externalDirectory
+-                  if (external) externalDirectories.set(`${external.resource}:${hunk.type}`, { ...external, operation: hunk.type })
++                const externalDirectories = new Map<string, LocationMutation.ExternalDirectoryAuthorization & { operation: Patch.Hunk["type"] | "move" }>()
++                for (const { hunk, target, destination } of targets) {
++                  // Move目的地有独立授权边界，不能用源路径审批代替。
++                  for (const entry of [{ target, operation: hunk.type }, ...(destination ? [{ target: destination, operation: "move" as const }] : [])]) {
++                    const external = entry.target.externalDirectory
++                    if (external) externalDirectories.set(`${external.resource}:${entry.operation}`, { ...external, operation: entry.operation })
++                  }
+                 }
+@@ -134,2 +142,2 @@
+-                  metadata: { files: targets.map(item => ({ type: item.hunk.type, relativePath: item.target.resource })), patchText: input.patchText },
+-                  resources: [...new Set(targets.map(({ target }) => target.resource))],
++                  metadata: { files: targets.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
++                  resources: [...new Set(targets.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
+@@ -145,1 +153,1 @@
+-                for (const { hunk, target } of targets) {
++                for (const { hunk, target, destination } of targets) {
+@@ -175,2 +183,3 @@
+                       source,
++                      destination,
+                       content: Patch.joinBom(update.content, update.bom),
+@@ -193,1 +202,1 @@
+-                        const result = yield* files.create({
++                        const result = yield* files.writeTextPreservingBom({
+@@ -202,1 +211,2 @@
+-                        patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
++                        // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
++                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }), status: result.existed ? "modified" : "added" })
+@@ -211,9 +221,21 @@
+-                      const result = yield* files.writeIfUnchanged({
++                      const moving = change.destination && change.destination.canonical !== change.target.canonical ? change.destination : undefined
++                      const write = {
+                         target: change.target,
+                         expected: change.source,
+                         content: change.content,
+                         format: format.file,
+-                      })
++                      }
++                      const result = yield* (moving ? files.moveIfUnchanged({ ...write, destination: moving }) : files.writeIfUnchanged(write))
++                      if (moving) {
++                        // 用既有删除/创建合同呈现真实两端变化，不新增无人消费的move状态。
++                        applied.push({ type: "delete", resource: change.target.resource, target: change.target.canonical })
++                        applied.push({ type: result.existed ? "update" : "add", resource: result.resource, target: result.target })
++                        patchFiles.push(patchFile({ ...change, type: "delete", after: "" }))
++                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }), status: result.existed ? "modified" : "added" })
++                        return
++                      }
+                       applied.push({ type: change.type, resource: result.resource, target: result.target })
+                       patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
+-                    }).pipe(Effect.mapError(() => fail(change.path))),
++                    }).pipe(Effect.mapError(error => error instanceof FileMutation.MoveIncompleteError
++                      ? new ToolFailure({ message: `${fail(change.path).message}. Destination ${error.destination} was written, but source ${error.path} could not be removed: ${error.reason}` })
++                      : fail(change.path))),
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -254,1 +254,1 @@
+-  it.live("rejects moves before applying any hunk", () =>
++  it.live("moves with source BOM and reports both actual endpoints", () =>
+@@ -260,1 +260,1 @@
+-        return Effect.promise(() => fs.writeFile(source, "before\n")).pipe(
++        return Effect.promise(() => Promise.all([fs.writeFile(source, "\uFEFFbefore\n"), fs.writeFile(path.join(tmp.path, "moved.txt"), "discard\n")])).pipe(
+@@ -271,3 +271,15 @@
+-                ).toEqual({ type: "error", value: "apply_patch moves are not supported yet" })
+-                expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(false)
+-                expect(assertions).toEqual([])
++                ).toMatchObject({ type: "text", value: expect.stringContaining("-discard\n+after") })
++                expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
++                expect(yield* exists(source)).toBe(false)
++                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "moved.txt"), "utf8"))).toBe("\uFEFFafter\n")
++                expect(assertions).toMatchObject([{ action: "edit", resources: ["created.txt", "old.txt", "moved.txt"] }])
++                expect(readsBeforeEditApproval).toBe(0)
++                // 同路径Move等同条件更新，不能先写后把自身删除。
++                const same = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: moved.txt\n*** Move to: moved.txt\n@@\n-after\n+again\n*** End Patch", "same-path"))
++                expect(same.result.type).toBe("text")
++                expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(same.output?.structured).files).toMatchObject([{ file: "moved.txt", status: "modified", additions: 1, deletions: 1 }])
++                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "moved.txt"), "utf8"))).toBe("\uFEFFagain\n")
++                const fresh = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: moved.txt\n*** Move to: nested/final.txt\n@@\n-again\n+final\n*** End Patch", "new-destination"))
++                expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(fresh.output?.structured).files).toMatchObject([{ file: "moved.txt", status: "deleted", additions: 0, deletions: 1 }, { file: "nested/final.txt", status: "added", additions: 1, deletions: 0 }])
++                expect(yield* exists(path.join(tmp.path, "moved.txt"))).toBe(false)
++                expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nested/final.txt"), "utf8"))).toBe("\uFEFFfinal\n")
+@@ -301,2 +313,15 @@
+                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\n")
++                const local = path.join(active.path, "local.txt")
++                yield* Effect.promise(() => fs.writeFile(local, "local\n"))
++                const move = call(`*** Begin Patch\n*** Update File: local.txt\n*** Move to: ${target}\n@@\n-local\n+moved\n*** End Patch`, "external-move")
++                reset()
++                denyAction = "external_directory"
++                expect((yield* executeTool(registry, move)).type).toBe("error")
++                expect(assertions.map(item => item.action)).toEqual(["external_directory"])
++                expect(yield* Effect.promise(() => fs.readFile(local, "utf8"))).toBe("local\n")
++                reset()
++                expect((yield* executeTool(registry, move)).type).toBe("text")
++                expect(assertions[0]?.metadata).toMatchObject({ operation: "move", patchText: move.call.input.patchText })
++                expect(readsBeforeEditApproval).toBe(0)
++                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("moved\n")
+               }),
+@@ -379,1 +405,1 @@
+-  it.live("rejects add hunks targeting an existing file without replacing it", () =>
++  it.live("replaces an existing Add target and supports Delete then Add rewrites", () =>
+@@ -394,2 +407,8 @@
+-                ).toEqual({ type: "error", value: "Unable to apply patch at existing.txt" })
+-                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("sentinel\n")
++                ).toMatchObject({ type: "text", value: expect.stringContaining("-sentinel\n+replacement") })
++                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
++                const rewrite = yield* settleTool(registry, call("*** Begin Patch\n*** Delete File: existing.txt\n*** Add File: existing.txt\n+complete rewrite\n*** End Patch", "rewrite"))
++                const output = Schema.decodeUnknownSync(ApplyPatchTool.Output)(rewrite.output?.structured)
++                expect(output.applied).toMatchObject([{ type: "delete", resource: "existing.txt" }, { type: "add", resource: "existing.txt" }])
++                expect(output.files).toMatchObject([{ status: "deleted", additions: 0, deletions: 1 }, { status: "added", additions: 1, deletions: 0 }])
++                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("complete rewrite\n")
++                expect(readsBeforeEditApproval).toBe(0)
+@@ -405,1 +425,1 @@
+-  it.live("rejects an add target that appears during permission approval", () =>
++  it.live("reports the actual Add preimage written during permission approval", () =>
+@@ -419,2 +439,2 @@
+-            ).toEqual({ type: "error", value: "Unable to apply patch at appeared.txt" })
+-            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("winner\n")
++            ).toMatchObject({ type: "text", value: expect.stringContaining("-winner\n+replacement") })
++            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
+diff --git a/packages/core/test/file-mutation.test.ts b/packages/core/test/file-mutation.test.ts
+--- a/packages/core/test/file-mutation.test.ts
++++ b/packages/core/test/file-mutation.test.ts
+@@ -313,2 +313,18 @@
+         expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
++        const mutation = yield* LocationMutation.Service
++        const files = yield* FileMutation.Service
++        const destination = yield* mutation.resolve({ path: "destination.txt" })
++        yield* Effect.promise(() => fs.writeFile(destination.canonical, "sentinel"))
++        // stale源必须在目的写入前拒绝；两端原文均不能因此改变。
++        expect(yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("older"), content: "replacement" }).pipe(Effect.flip)).toMatchObject({ _tag: "FileMutation.StaleContentError" })
++        expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
++        expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("sentinel")
++        // 真正Move仍调用同一个formatter并回报最终磁盘正文，而非请求片段。
++        const moved = yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("current"), content: "submitted",
++          format: file => Effect.promise(() => fs.writeFile(file, "formatted")).pipe(Effect.as(true)),
++        })
++        expect(moved).toMatchObject({ previous: "sentinel", text: "formatted", formattedContent: "formatted" })
++        expect(moved.diff).toContain("+formatted")
++        expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("formatted")
++        expect(yield* Effect.promise(() => fs.stat(targetPath).then(() => true, () => false))).toBe(false)
+       }).pipe(provide(directory)),
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts

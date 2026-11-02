@@ -71,8 +71,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +      const result = search(parts, event.properties.partID, (p) => p.id)
 +      // #186：找不到 part 时不创建空壳，避免伪造 tool/text
 +      if (!result.found) return
-+      // #186：合并后的单次 apply 仍要 touch，保持活跃 part 跟踪
-+      // #186：touch 必须在 setStore 前，供 sticky/scroll 活跃集使用
++      // 合并后的实际写入仍须标记 hydration 冲突，避免旧 HTTP 快照覆盖实时内容。
++      // 此标记不创建 orphan，也不改变 pending raw 的嵌套状态契约。
 +      touchPart(event.properties.sessionID, event.properties.partID)
 +      setStore(
 +        "part",
@@ -174,6 +174,195 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      const exit = useExit()
      const args = useArgs()
  
+@@ -761,6 +854,8 @@ export const {
+             await syncingSessions.get(sessionID)!.catch(() => undefined)
+           }
++          // 请求开始前结清旧窗；之后到达的片段才属于本次 hydration tracker。
++          flushPartDeltas()
+           const tracker = { messages: new Set<string>(), parts: new Set<string>(), session: undefined }
+           hydratingSessions.set(sessionID, tracker)
+           const task = (async () => {
+             const [session, messages, todo, diff] = await Promise.all([
+@@ -773,6 +868,8 @@ export const {
+               sdk.client.session.status({ workspace: project.workspace.current() })
+                 .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
+             ])
++            // 先应用排队片段并标记 touched，再让快照仲裁，避免同一文本被追加两次。
++            flushPartDeltas()
+             setStore(
+               produce((draft) => {
+                 const match = search(draft.session, sessionID, (s) => s.id)
+diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.tsx
+--- a/packages/tui/src/context/data.tsx
++++ b/packages/tui/src/context/data.tsx
+@@ -23,6 +23,7 @@
+ import { useSDK } from "./sdk"
+ import { useEvent } from "./event"
+ import { createSignal, onCleanup, onMount } from "solid-js"
++import { createDataEventQueue } from "./data-deltas"
+ 
+ type LocationData = {
+   agent?: AgentV2Info[]
+@@ -402,9 +403,11 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
+       }
+     }
+ 
++    // 原生显示投影也按帧合并；事件总线仍向其他消费者逐条交付。
++    const deltas = createDataEventQueue(handleEvent)
+     onMount(() => {
+       const unsub = events.subscribe((event, metadata) => {
+-        handleEvent({
++        deltas.push({
+           ...event,
+           data: event.properties,
+           location: { directory: metadata.directory, workspaceID: metadata.workspace },
+@@ -427,8 +430,11 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
+             return store.session.message[sessionID]
+           },
+           async refresh(sessionID: string) {
++            // HTTP 替换前后都结清当前窗，不把旧 delta 追加到包含它的完整快照。
++            deltas.flush()
+             const result = await sdk.client.v2.session.messages({ sessionID }, { throwOnError: true })
++            deltas.flush()
+             setStore("session", "message", sessionID, result.data.data)
+           },
+         },
+         permission: {
+diff --git a/packages/tui/src/context/data-deltas.ts b/packages/tui/src/context/data-deltas.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/src/context/data-deltas.ts
+@@ -0,0 +1,59 @@
++import type { V2Event } from "@opencode-ai/sdk/v2"
++import { batch, onCleanup } from "solid-js"
++
++type Delta = Extract<V2Event, { type: "session.next.text.delta" | "session.next.reasoning.delta" | "session.next.tool.input.delta" }>
++
++export function createDataEventQueue(apply: (event: V2Event) => void) {
++  let pending: Delta[] = []
++  let timer: ReturnType<typeof setTimeout> | undefined
++
++  function flush() {
++    if (timer) clearTimeout(timer)
++    timer = undefined
++    const events = pending
++    pending = []
++    // 同一帧批量提交，但不同内容的先后顺序不能因合并而改变。
++    batch(() => events.forEach(apply))
++  }
++
++  function target(event: Delta) {
++    const data = event.data
++    const content = "textID" in data ? data.textID : "reasoningID" in data ? data.reasoningID : data.callID
++    // 类型也是单元身份：同一个 ID 的正文、推理与工具参数不能混写。
++    return JSON.stringify([event.type, data.sessionID, data.assistantMessageID, content])
++  }
++
++  onCleanup(() => {
++    // 销毁只丢弃待显示片段，既不更改持久化消息，也不写已销毁的 store。
++    if (timer) clearTimeout(timer)
++    pending = []
++  })
++
++  return {
++    flush,
++    push(event: V2Event) {
++      if (
++        event.type !== "session.next.text.delta" &&
++        event.type !== "session.next.reasoning.delta" &&
++        event.type !== "session.next.tool.input.delta"
++      ) {
++        // 完整值、结束和失败先看到所有前序片段，再沿原 reducer 转换状态。
++        flush()
++        apply(event)
++        return
++      }
++      const previous = pending.at(-1)
++      if (previous && target(previous) === target(event)) {
++        // 相同判别类型和目标已核对；保留首条事件身份，仅拼接其 payload。
++        pending[pending.length - 1] = {
++          ...previous,
++          data: { ...previous.data, delta: previous.data.delta + event.data.delta },
++        } as Delta
++      } else {
++        pending.push(event)
++      }
++      // 只在首片段开启 16ms 窗，持续输入不能把刷新退化成 debounce。
++      if (!timer) timer = setTimeout(flush, 16)
++    },
++  }
++}
+diff --git a/packages/tui/test/context/data-deltas.test.ts b/packages/tui/test/context/data-deltas.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/tui/test/context/data-deltas.test.ts
+@@ -0,0 +1,66 @@
++import { expect, test } from "bun:test"
++import type { V2Event } from "@opencode-ai/sdk/v2"
++import { createRoot } from "solid-js"
++import { createDataEventQueue } from "../../src/context/data-deltas"
++
++function delta(id: string, text: string, textID = "text") {
++  return {
++    id,
++    type: "session.next.text.delta" as const,
++    location: { directory: "/test" },
++    data: { timestamp: 0, sessionID: "session", assistantMessageID: "message", textID, delta: text },
++  } satisfies V2Event
++}
++
++test("coalesces only adjacent native cells and preserves the first event identity", () => {
++  const received: V2Event[] = []
++  const scope = createRoot((dispose) => ({ dispose, queue: createDataEventQueue((event) => received.push(event)) }))
++  try {
++    scope.queue.push(delta("first", "a"))
++    scope.queue.push(delta("second", "b"))
++    scope.queue.push(delta("other", "c", "other"))
++    scope.queue.push(delta("last", "d"))
++    expect(received).toEqual([])
++    scope.queue.flush()
++    // 交错目标是硬边界，不能把最后的 d 搬到另一单元的 c 之前。
++    expect(received).toMatchObject([
++      { id: "first", data: { delta: "ab" } },
++      { id: "other", data: { delta: "c" } },
++      { id: "last", data: { delta: "d" } },
++    ])
++  } finally {
++    scope.dispose()
++  }
++})
++
++test("flushes native deltas before the complete-value boundary", () => {
++  const received: V2Event[] = []
++  const scope = createRoot((dispose) => ({ dispose, queue: createDataEventQueue((event) => received.push(event)) }))
++  try {
++    scope.queue.push(delta("fragment", "a"))
++    const end = { ...delta("end", ""), type: "session.next.text.ended" as const, data: { ...delta("end", "").data, text: "a" } }
++    scope.queue.push(end)
++    // 完整正文替换在增量之后执行，不能再把已包含的 a 补写一次。
++    expect(received).toMatchObject([{ id: "fragment" }, { id: "end", data: { text: "a" } }])
++  } finally {
++    scope.dispose()
++  }
++})
++
++test("publishes a native frame and drops pending work on disposal", async () => {
++  const received: V2Event[] = []
++  const scope = createRoot((dispose) => ({ dispose, queue: createDataEventQueue((event) => received.push(event)) }))
++  try {
++    scope.queue.push(delta("first", "a"))
++    scope.queue.push(delta("second", "b"))
++    await Bun.sleep(40)
++    expect(received).toMatchObject([{ id: "first", data: { delta: "ab" } }])
++    scope.queue.push(delta("disposed", "c"))
++    scope.dispose()
++    await Bun.sleep(40)
++    // dispose 后不能再有 timer 写入，也不能把末帧冒充终态提交。
++    expect(received).toHaveLength(1)
++  } finally {
++    scope.dispose()
++  }
++})
 diff --git a/packages/tui/test/cli/cmd/tui/sync.test.tsx b/packages/tui/test/cli/cmd/tui/sync.test.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync.test.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync.test.tsx

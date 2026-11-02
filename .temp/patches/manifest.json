@@ -3,7 +3,7 @@
   "generatedAt": "2026-09-24T18:20:31.122Z",
   "sourceRepo": "/Users/sunbenteng/Project/opencode",
   "sourceRef": "dev-smark",
-  "sourceTip": "ac4568b10f773a6167b5f0e68d6e310e9cf6a228",
+  "sourceTip": "9f52803e680e9bba24c5c5dfe6ce98abfb6d7f57",
   "firstSmarkCommit": "9f117055c5a8a09f5cc7080786accf853bdb25fe",
   "forkBase": "224548d87d9aa9b8fdbcba2a8c1f96d5f2679ffa",
   "targetRepo": "/Users/sunbenteng/Project/opencode/thirdparty/opencode-v1.17.18-smark",
@@ -7093,6 +7093,204 @@
       "subject": "fix(reasoning): 修复跨模型推理状态回放",
       "originalPatch": "original/0644-ac4568b10f77.patch",
       "currentPatch": "current/0644-ac4568b10f77.patch"
+    },
+    {
+      "index": 645,
+      "sha": "378033d16a3662197a264fb3fe96ef2e74a8c5f1",
+      "parent": "ac4568b10f773a6167b5f0e68d6e310e9cf6a228",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-09-24T22:43:41+08:00",
+      "subject": "fix(session): 撤回压缩边界并统一隐藏消息读取",
+      "originalPatch": "original/0645-378033d16a36.patch",
+      "currentPatch": "current/0645-378033d16a36.patch"
+    },
+    {
+      "index": 646,
+      "sha": "45d9daa2ed35f4ebc2acb277860704565c0cf349",
+      "parent": "378033d16a3662197a264fb3fe96ef2e74a8c5f1",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-09-29T22:09:21+08:00",
+      "subject": "fix(shell): 修复命令结束后的生命周期挂起",
+      "originalPatch": "original/0646-45d9daa2ed35.patch",
+      "currentPatch": "current/0646-45d9daa2ed35.patch"
+    },
+    {
+      "index": 647,
+      "sha": "1ff9a1abafa2d9c2ed53e65ad487c40ddbc146b5",
+      "parent": "45d9daa2ed35f4ebc2acb277860704565c0cf349",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-09-30T11:30:06+08:00",
+      "subject": "fix(voice): 保留转录认证并更新浏览器恢复实现",
+      "originalPatch": "original/0647-1ff9a1abafa2.patch",
+      "currentPatch": "current/0647-1ff9a1abafa2.patch"
+    },
+    {
+      "index": 648,
+      "sha": "82ef20ff07312852df2b235adb2780467ff79b61",
+      "parent": "1ff9a1abafa2d9c2ed53e65ad487c40ddbc146b5",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-02T02:53:18+08:00",
+      "subject": "fix(shell): 修复后台启动命令的返回挂起",
+      "originalPatch": "original/0648-82ef20ff0731.patch",
+      "currentPatch": "current/0648-82ef20ff0731.patch"
+    },
+    {
+      "index": 649,
+      "sha": "8e9181e3144a918bf36acc2f3c834ac1c4a78ff6",
+      "parent": "82ef20ff07312852df2b235adb2780467ff79b61",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-02T03:12:05+08:00",
+      "subject": "feat(storage): 冷存储 v3 紧凑包格式与只读恢复读取",
+      "originalPatch": "original/0649-8e9181e3144a.patch",
+      "currentPatch": "current/0649-8e9181e3144a.patch"
+    },
+    {
+      "index": 650,
+      "sha": "7b3a006897bef1ecaf1c6eb65c2e96286b6818ee",
+      "parent": "8e9181e3144a918bf36acc2f3c834ac1c4a78ff6",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-02T13:42:24+08:00",
+      "subject": "feat(permission): reviewer 证据段化投影与 ASTRA 停摆修复（Codex Guardian 对齐）",
+      "originalPatch": "original/0650-7b3a006897be.patch",
+      "currentPatch": "current/0650-7b3a006897be.patch"
+    },
+    {
+      "index": 651,
+      "sha": "1142534f6aa52a71dd12a1a3a5901ae3d6a1cbf0",
+      "parent": "7b3a006897bef1ecaf1c6eb65c2e96286b6818ee",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-04T03:52:22+08:00",
+      "subject": "fix(daemon): 根治 SSE cancel 竞态与 daemon 误自杀，闭合卡死恢复链",
+      "originalPatch": "original/0651-1142534f6aa5.patch",
+      "currentPatch": "current/0651-1142534f6aa5.patch"
+    },
+    {
+      "index": 652,
+      "sha": "94e9a5f77fdcd4fcd8fcb8ae370ade0d6c0c943f",
+      "parent": "1142534f6aa52a71dd12a1a3a5901ae3d6a1cbf0",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-04T04:04:16+08:00",
+      "subject": "fix(test): 修复冷存储测试在共享数据库下的 CI 误报",
+      "originalPatch": "original/0652-94e9a5f77fdc.patch",
+      "currentPatch": "current/0652-94e9a5f77fdc.patch"
+    },
+    {
+      "index": 653,
+      "sha": "1f7c9c7dfdf04ad5ef3e69efdd2049c574bba2f4",
+      "parent": "94e9a5f77fdcd4fcd8fcb8ae370ade0d6c0c943f",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-04T15:36:36+08:00",
+      "subject": "test(provider): 修复 SSE 回归测试的共享日志误报",
+      "originalPatch": "original/0653-1f7c9c7dfdf0.patch",
+      "currentPatch": "current/0653-1f7c9c7dfdf0.patch"
+    },
+    {
+      "index": 654,
+      "sha": "680dc87e4fd5e712c6efe0dcee6b646d142102b9",
+      "parent": "1f7c9c7dfdf04ad5ef3e69efdd2049c574bba2f4",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-05T01:03:31+08:00",
+      "subject": "feat(storage): 加速冷存储维护并展示压缩进度",
+      "originalPatch": "original/0654-680dc87e4fd5.patch",
+      "currentPatch": "current/0654-680dc87e4fd5.patch"
+    },
+    {
+      "index": 655,
+      "sha": "60d410461f4241548abc1f8ccc3ae040982e508b",
+      "parent": "680dc87e4fd5e712c6efe0dcee6b646d142102b9",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-07T17:36:31+08:00",
+      "subject": "fix(shell): 隔离 Windows 捕获宿主并修复原生读取与生命周期",
+      "originalPatch": "original/0655-60d410461f42.patch",
+      "currentPatch": "current/0655-60d410461f42.patch"
+    },
+    {
+      "index": 656,
+      "sha": "194535beddd6a15149a92a0fa0f19bfa3df9ab78",
+      "parent": "60d410461f4241548abc1f8ccc3ae040982e508b",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-07T20:02:51+08:00",
+      "subject": "test(shell): 隐私测试自持日志sink修复CI分片串扰",
+      "originalPatch": "original/0656-194535beddd6.patch",
+      "currentPatch": "current/0656-194535beddd6.patch"
+    },
+    {
+      "index": 657,
+      "sha": "28cac51a3eb5cf8142941af4f807dfb81a948bb7",
+      "parent": "194535beddd6a15149a92a0fa0f19bfa3df9ab78",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-08T12:36:36+08:00",
+      "subject": "perf(session): 会话列表预览去重与有界索引查询",
+      "originalPatch": "original/0657-28cac51a3eb5.patch",
+      "currentPatch": "current/0657-28cac51a3eb5.patch"
+    },
+    {
+      "index": 658,
+      "sha": "e1abb83472bc83dd84f6d8e17d61a61d370d5f2f",
+      "parent": "28cac51a3eb5cf8142941af4f807dfb81a948bb7",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-08T22:02:27+08:00",
+      "subject": "fix(tui): 修复屏外高亮标志卡死导致的分钟级渲染自旋",
+      "originalPatch": "original/0658-e1abb83472bc.patch",
+      "currentPatch": "current/0658-e1abb83472bc.patch"
+    },
+    {
+      "index": 659,
+      "sha": "7234496bfa1cfb5d2a61c295a72e11802ae2419f",
+      "parent": "e1abb83472bc83dd84f6d8e17d61a61d370d5f2f",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-09T03:21:41+08:00",
+      "subject": "fix(permission): reviewer 授权语义补两条边界并统一策略模板版式",
+      "originalPatch": "original/0659-7234496bfa1c.patch",
+      "currentPatch": "current/0659-7234496bfa1c.patch"
+    },
+    {
+      "index": 660,
+      "sha": "55da6addd9282687418efed80106d7a378e467e3",
+      "parent": "7234496bfa1cfb5d2a61c295a72e11802ae2419f",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-11T17:11:56+08:00",
+      "subject": "fix(openai): 回移 Astra 加速支持并隔离跨 Provider 密文",
+      "originalPatch": "original/0660-55da6addd928.patch",
+      "currentPatch": "current/0660-55da6addd928.patch"
+    },
+    {
+      "index": 661,
+      "sha": "534034cd6e08fbe453f2002cdc91ab623a838c7e",
+      "parent": "55da6addd9282687418efed80106d7a378e467e3",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-16T09:28:33+08:00",
+      "subject": "fix(prompt): 避免 Git 与凭据限制覆盖用户明确授权",
+      "originalPatch": "original/0661-534034cd6e08.patch",
+      "currentPatch": "current/0661-534034cd6e08.patch"
+    },
+    {
+      "index": 662,
+      "sha": "9f52803e680e9bba24c5c5dfe6ce98abfb6d7f57",
+      "parent": "534034cd6e08fbe453f2002cdc91ab623a838c7e",
+      "author": "SMARK",
+      "email": "3222301373@qq.com",
+      "authoredAt": "2026-10-16T15:29:50+08:00",
+      "subject": "fix(session): 复用现有重试处理 Cloudflare 拦截与限流",
+      "originalPatch": "original/0662-9f52803e680e.patch",
+      "currentPatch": "current/0662-9f52803e680e.patch"
     }
   ]
 }

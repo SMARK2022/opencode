@@ -21,7 +21,7 @@ diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/
 index 960748276..c3043802f 100644
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1711,6 +1711,22 @@ const scenarios: Scenario[] = [
+@@ -1711,6 +1711,31 @@ const scenarios: Scenario[] = [
        object(body)
        check((body as any).cleared === false, "clearing non-existent goal should return false")
      }),
@@ -40,6 +40,15 @@ index 960748276..c3043802f 100644
 +      object(body)
 +      // 空 sessionIDs 返回空对象
 +      check(Object.keys(body).length === 0, "empty sessionIDs should return empty object")
++    }),
++  // Native批量端点单独登记，不能用旧/session/preview覆盖新公开路由。
++  http.protected
++    .post("/api/session/preview", "v2.session.preview")
++    .inProject({ git: false })
++    .at(ctx => ({ path: "/api/session/preview", headers: ctx.headers(), body: { sessionIDs: [], limit: 2 } }))
++    .json(200, body => {
++      object(body)
++      check(Object.keys(body).length === 0, "empty native sessionIDs should return empty object")
 +    }),
    http.protected
      .post("/tui/append-prompt", "tui.appendPrompt")

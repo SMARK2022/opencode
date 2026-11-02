@@ -1127,7 +1127,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
      }
  
      async function bootstrap(input: { fatal?: boolean } = {}) {
-@@ -1275,14 +1343,20 @@ export const {
+@@ -1243,16 +1311,22 @@ export const {
          async sync(sessionID: string, options?: { force?: boolean }) {
            // #132：force 忽略 fullSynced 缓存
            if (!options?.force && fullSyncedSessions.has(sessionID)) return
@@ -1138,6 +1138,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              // #132：旧请求失败仍需补读；仅忽略旧失败，新快照错误照常传出。
              await syncingSessions.get(sessionID)!.catch(() => undefined)
            }
+           // 请求开始前结清旧窗；之后到达的片段才属于本次 hydration tracker。
+           flushPartDeltas()
 +          if (deletedSessionIDs.has(sessionID)) return
 +          const token = ++syncRequestSeq
 +          syncTokens.set(sessionID, token)
@@ -1149,7 +1151,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              // diff 不再参与首屏屏障：大 Session 的 patch 聚合不再阻塞 messages/todo 渲染。
 -            const [session, messages, todo] = await Promise.all([
 +            const [session, messages, todo, status] = await Promise.all([
-@@ -1299,11 +1305,14 @@ export const {
+@@ -1269,14 +1343,17 @@ export const {
                // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
 -              sdk.client.session.status({ workspace: project.workspace.current() })
 -                .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
@@ -1160,16 +1162,21 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              // #368：SDK 未生成 session.goal 方法——as any 调用运行时 undefined→TypeError 被吞，
              // goal 状态永不在会话打开时加载（/goal 误弹 Set）。改用 sdk.fetch 直调 GET，非致命。
              try {
-               const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
+               const url = new URL(`/session/${sessionID}/goal`, sdk.url)
+               const dir = result.path.directory || sdk.directory
+               if (dir) url.searchParams.set("directory", dir)
+               const resp = await sdk.fetch(url)
 +              if (!alive()) return
                if (resp.ok) {
                  const body = (await resp.json()) as { goal?: SessionGoalInfo }
 +                if (!alive()) return
                  setStore("session_goal", sessionID, body.goal ?? undefined)
-@@ -1311,25 +1320,31 @@ export const {
+@@ -1284,27 +1361,33 @@ export const {
              } catch {
                // goal 端点不可用时不阻塞 session sync
              }
+             // 先应用排队片段并标记 touched，再让快照仲裁，避免同一文本被追加两次。
+             flushPartDeltas()
 +            if (!alive()) return
 +            // SDK的失败页data=undefined不是权威空页，不能据此裁剪本地正文。
 +            const pageFailed = messages.data === undefined
@@ -1648,8 +1655,8 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +import { PromptWindowCache } from "../../src/session/prompt-window-cache"
  import { SessionRevert } from "../../src/session/revert"
 @@ -70 +71 @@
--import { provideInstance, provideTmpdirInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
-+import { disposeAllInstancesEffect, provideInstance, provideTmpdirInstance, testInstanceStoreLayer, TestInstance, tmpdirScoped } from "../fixture/fixture"
+-import { provideTmpdirInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
++import { disposeAllInstancesEffect, provideTmpdirInstance, testInstanceStoreLayer, TestInstance, tmpdirScoped } from "../fixture/fixture"
 @@ -6825,9 +6826,91 @@
        const texts = continuationTexts(yield* MessageV2.filterCompactedEffect(chat.id))
        expect(texts.length).toBeGreaterThanOrEqual(4)
@@ -1742,6 +1749,58 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +    PromptWindowCache.release(slot)
 +  }
 +})
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -39,2 +39,3 @@
+ import { SessionHistory } from "../history"
++import { PromptCacheSlots } from "../prompt-cache-slots"
+ import { SessionGoal } from "../goal"
+@@ -141,6 +142,9 @@
+     // Location内只保留可替换entry，跨独立请求复用；执行与Goal状态不进入缓存。
+-    let retainedMessages: {
++    const promptCache = PromptCacheSlots.acquire<{
+       sessionID: SessionSchema.ID
++      instance: typeof location
+       history: ReturnType<typeof SessionHistory.makeCache>
+       messages: ReturnType<typeof makeMessageCache>
+-    } | undefined
++    }>()
++    // 注销只属于Location Service退出；普通resume/idle继续保留同一个warm单槽。
++    yield* Effect.addFinalizer(() => Effect.sync(() => PromptCacheSlots.release(promptCache)))
+@@ -238,1 +242,3 @@
++      // 首个Session读取前取得租约，删除/dispose期间的迟发结果不能重新成为长期owner。
++      const cacheLease = PromptCacheSlots.lease(promptCache)
+       const session = yield* getSession(sessionID)
+@@ -328,5 +334,5 @@
+-      const retained = retainedMessages?.sessionID === session.id ? retainedMessages : {
+-        sessionID: session.id, history: SessionHistory.makeCache(), messages: makeMessageCache(),
++      const retained = PromptCacheSlots.read(promptCache, session.id) ?? {
++        sessionID: session.id, instance: location, history: SessionHistory.makeCache(), messages: makeMessageCache(),
+       }
+       // await前捕获entry，另一Session替换唯一指针不能混入本次在途历史或转换。
+-      retainedMessages = retained
++      PromptCacheSlots.publish(promptCache, cacheLease, retained)
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -37,1 +37,2 @@
+ import GOAL_DESCRIPTION from "../../opencode/src/tool/goal.txt"
++import { PromptCacheSlots } from "@opencode-ai/core/session/prompt-cache-slots"
+@@ -1443,2 +1444,13 @@
+       expect(failed?.tokens).toBeUndefined()
++      // 前面的独立resume保warm引用；同一真实runner在失效后必须冷重建且交付相同原话。
++      PromptCacheSlots.invalidateSession(sessionID)
++      responses = [done]
++      responseStream = undefined
++      yield* session.resume(sessionID)
++      const refreshed = projected.at(-1)
++      expect(refreshed?.input).toBeDefined()
++      expect(refreshed?.output).toBeDefined()
++      expect(refreshed?.input).not.toBe(stable.input)
++      expect(refreshed?.output).not.toBe(stable.output)
++      expect(requests.at(-1)?.messages[0]?.content[0]).toEqual({ type: "text", text: "Read only" })
+       yield* replaySessionProjection(sessionID)
 diff --git a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
 --- a/packages/tui/test/cli/cmd/tui/sync-fixture.tsx
 +++ b/packages/tui/test/cli/cmd/tui/sync-fixture.tsx

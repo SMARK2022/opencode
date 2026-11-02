@@ -1,9 +1,6 @@
 diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/test/session-runner-model.test.ts
 --- a/packages/core/test/session-runner-model.test.ts
 +++ b/packages/core/test/session-runner-model.test.ts
-@@ -63,1 +63,1 @@
--          http: { body: { custom_extension: { enabled: true } } },
-+          http: { body: { custom_extension: { enabled: true } }, chunkTimeout: 180_000 },
 @@ -98,1 +98,1 @@
 -            settings: { apiKey: "settings-secret", compatibility: "strict" },
 +            settings: { apiKey: "settings-secret", compatibility: "strict", chunkTimeout: false },
@@ -30,25 +27,22 @@ diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/openco
 diff --git a/packages/llm/test/executor.test.ts b/packages/llm/test/executor.test.ts
 --- a/packages/llm/test/executor.test.ts
 +++ b/packages/llm/test/executor.test.ts
-@@ -2,1 +2,1 @@
--import { Effect, Fiber, Layer, Random, Ref } from "effect"
-+import { Deferred, Effect, Fiber, Layer, Random, Ref } from "effect"
 @@ -4,1 +4,1 @@
--import { Headers, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-+import { FetchHttpClient, Headers, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
-@@ -428,1 +428,76 @@
+-import { Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
++import { FetchHttpClient, Headers, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+@@ -428,1 +428,79 @@
 +  it.effect("enforces raw HTTP progress deadlines without changing cancellation or explicit false", () =>
 +    Effect.gen(function* () {
 +      const encoder = new TextEncoder()
 +      const model = OpenAIChat.route
 +        .with({ endpoint: { baseURL: "https://api.openai.test/v1" }, http: { chunkTimeout: 50 } })
 +        .model({ id: "gpt-4o-mini" })
-+      for (const phase of ["headers", "body", "heartbeat", "disabled", "cancel"] as const) {
++      for (const phase of ["headers", "body", "headers-and-body", "heartbeat", "disabled", "cancel"] as const) {
 +        const ready = yield* Deferred.make<void>()
 +        const reading = Promise.withResolvers<void>()
 +        const controller = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>()
 +        let cancelled = false
-+        const body = new ReadableStream<Uint8Array>({
++        const body = () => new ReadableStream<Uint8Array>({
 +          start(value) { controller.resolve(value) },
 +          pull() { reading.resolve() },
 +          cancel() { cancelled = true },
@@ -63,18 +57,21 @@ diff --git a/packages/llm/test/executor.test.ts b/packages/llm/test/executor.tes
 +            if (phase === "headers") return yield* Effect.never.pipe(
 +              Effect.ensuring(Effect.sync(() => { cancelled = true })),
 +            )
-+            if (phase === "disabled") yield* Effect.sleep(200)
-+            return input.respond(body, { headers: { "content-type": "text/event-stream" } })
++            if (phase === "disabled" || phase === "headers-and-body") yield* Effect.sleep(phase === "disabled" ? 200 : 30)
++            return input.respond(body(), { headers: { "content-type": "text/event-stream" } })
 +          }))),
 +          Effect.provideService(FetchHttpClient.RequestInit, { cache: "no-store" }),
 +          Effect.match({ onFailure: (error) => ({ error }), onSuccess: (response) => ({ response }) }),
 +          Effect.forkChild,
 +        )
 +        yield* Deferred.await(ready)
-+        if (phase === "headers" || phase === "body") {
-+          if (phase === "body") yield* Effect.promise(() => reading.promise)
++        if (phase === "headers-and-body") yield* TestClock.adjust(30)
++        if (phase === "headers" || phase === "body" || phase === "headers-and-body") {
++          if (phase !== "headers") yield* Effect.promise(() => reading.promise)
 +          // 首次拉取包含 headers，后续 body 停滞同样给出 typed transport error 并释放 reader。
-+          yield* TestClock.adjust(51)
++          yield* TestClock.adjust(phase === "headers-and-body" ? 21 : 51)
++          // 未交付frame前仍遵循原有两次有限重试；每次新响应使用独立reader，不能回读已取消body。
++          for (const delay of [500, 1000]) yield* TestClock.adjust(delay + 51)
 +          expect(yield* Fiber.join(fiber)).toMatchObject({
 +            error: { reason: { _tag: "Transport", kind: "timeout", message: "SSE read timed out" } },
 +          })
@@ -141,105 +138,95 @@ diff --git a/packages/opencode/test/lib/llm-server.ts b/packages/opencode/test/l
 +          if (wait) yield* Effect.promise(() => wait)
 +          return fail(next)
 +        }
-diff --git a/packages/llm/src/schema/options.ts b/packages/llm/src/schema/options.ts
---- a/packages/llm/src/schema/options.ts
-+++ b/packages/llm/src/schema/options.ts
-@@ -53,5 +53,7 @@
- export class HttpOptions extends Schema.Class<HttpOptions>("LLM.HttpOptions")({
-   body: Schema.optional(JsonSchema),
-   headers: Schema.optional(Schema.Record(Schema.String, Schema.String)),
-   query: Schema.optional(Schema.Record(Schema.String, Schema.String)),
-+  // 运输窗口独立于协议正文；false 明确关闭，缺省值由应用集成层决定。
-+  chunkTimeout: Schema.optional(Schema.Union([Schema.Number, Schema.Literal(false)])),
- }) {}
-@@ -70,2 +72,4 @@
--  if (!body && !headers && !query) return undefined
--  return new HttpOptions({ body, headers, query })
-+  // 后置显式值覆盖前置默认值，不能用真值筛选丢掉 false。
-+  const chunkTimeout = items.findLast((item) => item?.chunkTimeout !== undefined)?.chunkTimeout
-+  if (!body && !headers && !query && chunkTimeout === undefined) return undefined
-+  return new HttpOptions({ body, headers, query, chunkTimeout })
 diff --git a/packages/llm/src/route/transport/http.ts b/packages/llm/src/route/transport/http.ts
 --- a/packages/llm/src/route/transport/http.ts
 +++ b/packages/llm/src/route/transport/http.ts
 @@ -1,2 +1,2 @@
--import { Effect, Stream } from "effect"
--import { Headers, HttpClientRequest } from "effect/unstable/http"
-+import { Effect, Option, Stream } from "effect"
-+import { FetchHttpClient, Headers, HttpClientRequest } from "effect/unstable/http"
-@@ -8,1 +8,1 @@
--import { mergeJsonRecords, type LLMRequest } from "../../schema"
-+import { LLMError, TransportReason, mergeJsonRecords, type LLMRequest } from "../../schema"
-@@ -130,20 +130,39 @@
-   frames: (prepared, request, runtime) =>
-     Stream.unwrap(
--      runtime.http
--        .execute(prepared.request)
--        .pipe(
+-import { Cause, Clock, Effect, Schedule, Stream } from "effect"
+-import { Headers, HttpClientError, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
++import { Cause, Clock, Effect, Option, Schedule, Stream } from "effect"
++import { FetchHttpClient, Headers, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
+@@ -11,1 +11,7 @@
+-function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LLMRequest) {
++const progressTimeout = () => new LLMError({
++  module: "HttpTransport",
++  method: "frames",
++  reason: new TransportReason({ message: "SSE read timed out", kind: "timeout" }),
++})
++
++function observeSSE(response: HttpClientResponse.HttpClientResponse, request: LLMRequest, startedAt: number) {
+@@ -15,7 +21,13 @@
+   // 必须在framing前按原始字节计时，心跳/注释也续期，且不依赖是否采集timing。
+-  const stream = chunkTimeout === false ? response.stream : response.stream.pipe(Stream.timeoutOrElse({
+-    duration: chunkTimeout,
+-    orElse: () => Stream.fail(new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({
+-      request: response.request, cause: new Cause.TimeoutError(),
+-    }) })),
+-  }))
++  const stream = chunkTimeout === false ? response.stream : Stream.transformPull(response.stream, (pull) => Effect.sync(() => {
++    let progressedAt = startedAt
++    // headers与首块共享dispatch起点；之后每个raw pull成功才续期，不按semantic frame续期。
++    return Effect.gen(function* () {
++      const remaining = chunkTimeout - ((yield* Clock.currentTimeMillis) - progressedAt)
++      const chunk = yield* pull.pipe(Effect.timeoutOrElse({
++        duration: Math.max(0, remaining), orElse: () => Effect.fail(progressTimeout()),
++      }))
++      progressedAt = yield* Clock.currentTimeMillis
++      return chunk
++    })
++  }))
+@@ -49,2 +61,2 @@
+         const cause = "cause" in error.reason ? error.reason.cause : undefined
+-        const timeout = Cause.isTimeoutError(cause) || (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "SSE_READ_TIMEOUT")
++        const timeout = Cause.isTimeoutError(cause) || (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "SSE_READ_TIMEOUT") || (error instanceof LLMError && error.reason._tag === "Transport" && error.reason.kind === "timeout")
+@@ -182,20 +194,29 @@
+       const frames = Stream.unwrap(
+-        runtime.http.execute(prepared.request).pipe(
+-          Effect.annotateLogs({ providerID: request.model.provider, modelID: request.model.id, sessionID: prepared.request.headers["x-session-affinity"] ?? prepared.request.headers["x-opencode-session"] }),
 -          Effect.map((response) =>
 -            prepared.framing.frame(
--              response.stream.pipe(
--                Stream.mapError((error) =>
--                  ProviderShared.eventError(
--                    `${request.model.provider}/${request.model.route.id}`,
--                    `Failed to read ${request.model.provider}/${request.model.route.id} stream`,
--                    ProviderShared.errorText(error),
--                  ),
--                ),
+-              observeSSE(response, request).pipe(
+-                // 字节读取失败是运输故障；协议/JSON解码仍在原有不可重试分支。
+-                Stream.mapError((error) => new LLMError({
+-                  module: "HttpTransport",
+-                  method: "frames",
+-                  reason: new TransportReason({
+-                    message: `Failed to read ${request.model.provider}/${request.model.route.id} stream: ${ProviderShared.errorText(error)}`,
+-                    kind: error.reason._tag,
+-                  }),
+-                })),
 -              ),
 -            ),
 -          ),
 -        ),
-+      Effect.gen(function* () {
-+        const init = yield* Effect.serviceOption(FetchHttpClient.RequestInit)
-+        // 仅本次模型运输关闭 Bun idle timeout，保留调用方的其他 fetch 选项及取消信号。
-+        const transport = { ...Option.getOrElse(init, () => ({})), timeout: false }
-+        const bytes = Stream.unwrap(
-+          runtime.http.execute(prepared.request).pipe(
-+            Effect.map((response) =>
-+              response.stream.pipe(
-+                Stream.mapError((error) =>
-+                  ProviderShared.eventError(
-+                    `${request.model.provider}/${request.model.route.id}`,
-+                    `Failed to read ${request.model.provider}/${request.model.route.id} stream`,
-+                    ProviderShared.errorText(error),
-+                  ),
-+                ),
-+              ),
-+            ),
-+          ),
-+        ).pipe(Stream.provideService(FetchHttpClient.RequestInit, transport))
-+        // 在 framing 前计原始进度：首次 pull 包含 headers 等待，注释和心跳也重置后续窗口。
-+        const timeout = request.http?.chunkTimeout
-+        return prepared.framing.frame(
-+          typeof timeout === "number" && timeout > 0
-+            ? bytes.pipe(
-+                Stream.timeoutOrElse({
-+                  duration: timeout,
-+                  orElse: () => Stream.fail(new LLMError({
-+                    module: "HttpTransport",
-+                    method: "frames",
-+                    reason: new TransportReason({ message: "SSE read timed out", kind: "timeout" }),
-+                  })),
++        Effect.gen(function* () {
++          const startedAt = yield* Clock.currentTimeMillis
++          const timeout = request.http?.chunkTimeout ?? 180_000
++          const init = yield* Effect.serviceOption(FetchHttpClient.RequestInit)
++          // 只覆盖本次运输的Bun idle选项；原fetch配置、取消和有限重试仍归现有owner。
++          const transport = { ...Option.getOrElse(init, () => ({})), timeout: false }
++          const execute = runtime.http.execute(prepared.request).pipe(
++            Effect.annotateLogs({ providerID: request.model.provider, modelID: request.model.id, sessionID: prepared.request.headers["x-session-affinity"] ?? prepared.request.headers["x-opencode-session"] }),
++            Effect.provideService(FetchHttpClient.RequestInit, transport),
++          )
++          const response = yield* (timeout === false ? execute : execute.pipe(
++            Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(progressTimeout()) }),
++          ))
++          return prepared.framing.frame(
++            observeSSE(response, request, startedAt).pipe(
++              // 字节读取失败是运输故障；协议/JSON解码仍在原有不可重试分支。
++              Stream.mapError((error) => error instanceof LLMError ? error : new LLMError({
++                module: "HttpTransport",
++                method: "frames",
++                reason: new TransportReason({
++                  message: `Failed to read ${request.model.provider}/${request.model.route.id} stream: ${ProviderShared.errorText(error)}`,
++                  kind: error.reason._tag,
 +                }),
-+              )
-+            : bytes,
-+        )
-+      }),
-     ),
-diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
---- a/packages/core/src/session/runner/model.ts
-+++ b/packages/core/src/session/runner/model.ts
-@@ -118,1 +118,3 @@
-   const body = model.request.body
-+  // Catalog settings 负责运输策略，不能把 chunkTimeout 写入模型协议正文。
-+  const chunkTimeout = model.api.settings?.chunkTimeout
-@@ -137,1 +139,4 @@
--    http: { body: httpBody },
-+    http: {
-+      body: httpBody,
-+      chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : 180_000,
-+    },
++              })),
++            ),
++          )
++        }),
+       )
 diff --git a/packages/opencode/src/session/llm/native-request.ts b/packages/opencode/src/session/llm/native-request.ts
 --- a/packages/opencode/src/session/llm/native-request.ts
 +++ b/packages/opencode/src/session/llm/native-request.ts
@@ -250,16 +237,6 @@ diff --git a/packages/opencode/src/session/llm/native-request.ts b/packages/open
      providerOptions: input.providerOptions,
 +    // 与 AI SDK 路径共用配置含义，但运输窗口不混入 providerOptions 或正文 overlay。
 +    http: { chunkTimeout: input.chunkTimeout },
-diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
---- a/packages/opencode/src/session/llm/native-runtime.ts
-+++ b/packages/opencode/src/session/llm/native-runtime.ts
-@@ -88,1 +88,2 @@
-   const timeout = input.provider.options.timeout
-+  const chunkTimeout = input.provider.options.chunkTimeout
-@@ -117,1 +118,3 @@
-     headers: Object.fromEntries(headers),
-+    // 原生入口沿 Provider 缺省三分钟窗口；显式 false 必须一直传到 raw-byte owner。
-+    chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : 180_000,
 diff --git a/packages/core/src/network-proxy.ts b/packages/core/src/network-proxy.ts
 
 --- a/packages/core/src/network-proxy.ts

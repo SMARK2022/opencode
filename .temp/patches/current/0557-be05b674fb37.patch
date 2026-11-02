@@ -1288,33 +1288,6 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
        : sql`0`
      : undefined
    const where = and(eq(MessageTable.session_id, input.sessionID), lower, before ? older(before) : undefined)
-@@ -844,9 +898,14 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
- export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
--  const conditions = [eq(MessageTable.session_id, input.sessionID)]
--  if (input.messageID) conditions.push(lt(MessageTable.id, input.messageID))
-+  const anchor = input.messageID
-+    ? db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
-+        .where(and(eq(MessageTable.session_id, input.sessionID), eq(MessageTable.id, input.messageID))).get()
-+    : undefined
-+  // 已有边界按持久时间/ID截取；缺失边界保留原ID范围合同，raw读取仍不解码冷payload。
-+  const before = input.messageID ? anchor ? older(anchor) : lt(MessageTable.id, input.messageID) : undefined
-+  const conditions = and(eq(MessageTable.session_id, input.sessionID), before)
-   const messages = db
-     .select({ id: MessageTable.id })
-     .from(MessageTable)
--    .where(and(...conditions))
-+    .where(conditions)
-     .orderBy(MessageTable.time_created, MessageTable.id)
-     .all()
-@@ -854,7 +913,7 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
-         .select({ id: PartTable.id, message_id: PartTable.message_id })
-         .from(PartTable)
-         .where(
-           input.messageID
--            ? and(eq(PartTable.session_id, input.sessionID), lt(PartTable.message_id, input.messageID))
-+            ? and(eq(PartTable.session_id, input.sessionID), inArray(PartTable.message_id, db.select({ id: MessageTable.id }).from(MessageTable).where(conditions)))
-             : eq(PartTable.session_id, input.sessionID),
-         )
 @@ -1010,7 +1073,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
  export function filterCompacted(msgs: Iterable<WithParts>) {
    // #204：压缩标记须按 newest→oldest 扫描——summary assistant 先于 parent compaction user 出现，才能停止遍历并恢复 retained tail
@@ -2363,7 +2336,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 @@ -40,1 +42,1 @@
 -import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 +import { MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
-@@ -69,17 +71,28 @@ import { InstanceState } from "@/effect/instance-state"
+@@ -69,17 +71,29 @@ import { InstanceState } from "@/effect/instance-state"
  import { InstanceRef } from "@/effect/instance-ref"
  import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
  import { httpError, reply, TestLLMServer } from "../lib/llm-server"
@@ -2384,8 +2357,9 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 -    computeDiff: () => Effect.succeed([]),
 +    // #557：computeDiff 走真实纯计算（SummaryCache）——Revert ownership 依赖 tool metadata 派生文件。
 +    computeDiff: (input) =>
-+      InstanceState.context.pipe(
++      InstanceRef.pipe(
 +        Effect.map((ctx) => {
++          if (!ctx) throw new Error("Missing prompt fixture Instance")
 +          const base = ctx.worktree && ctx.worktree !== "/" ? ctx.worktree : ctx.directory
 +          return SummaryCache.collectToolDiffs(SummaryCache.toToolDiffMessages(input.messages), base)
 +        }),
@@ -2393,7 +2367,7 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
    }),
  )
  
-@@ -161,6 +176,123 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
+@@ -161,4 +176,114 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
    )
  }
  
@@ -2401,32 +2375,24 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +// 目标 MCP seam 是原生 McpTool {def, client}——fake client 的 callTool 落盘 mutation 文件。
 +let mcpMutationFile = ""
 +let mcpEnabled = true
++const mutatingMcpTools = (): ReturnType<MCP.Interface["tools"]> => Effect.succeed(
++  mcpEnabled ? {
++    mcp_mutate: {
++      def: { name: "mcp_mutate", description: "mutate one test file", inputSchema: { type: "object" as const, properties: {}, additionalProperties: false } },
++      client: { callTool: () => Bun.write(mcpMutationFile, "mcp").then(() => ({ content: [{ type: "text", text: "mutated" }] })) } as never,
++    },
++  } : ({} as Record<string, never>),
++)
 +const mutatingMcp = Layer.succeed(
 +  MCP.Service,
 +  MCP.Service.of({
 +    status: () => Effect.succeed({}),
++    native: () => Effect.die("unexpected Native MCP connection in prompt-effect tests"),
++    // 同一fake工具快照服务两条既有读取入口，不创建真实连接或另一份动态工具数据。
++    snapshot: () => mutatingMcpTools().pipe(Effect.map(tools => ({ tools, clients: {}, instructions: [] }))),
 +    clients: () => Effect.succeed({}),
 +    instructions: () => Effect.succeed([]),
-+    tools: (): ReturnType<MCP.Interface["tools"]> =>
-+      Effect.succeed(
-+        mcpEnabled
-+          ? {
-+              mcp_mutate: {
-+                def: {
-+                  name: "mcp_mutate",
-+                  description: "mutate one test file",
-+                  inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
-+                },
-+                client: {
-+                  callTool: () =>
-+                    Bun.write(mcpMutationFile, "mcp").then(() => ({
-+                      content: [{ type: "text", text: "mutated" }],
-+                    })),
-+                } as never,
-+              },
-+            }
-+          : ({} as Record<string, never>),
-+      ),
++    tools: mutatingMcpTools,
 +    prompts: () => Effect.succeed({}),
 +    resources: () => Effect.succeed({}),
 +    resourceTemplates: () => Effect.succeed({}),
@@ -2459,7 +2425,8 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +        ...base,
 +        // track 计数发生在真实调用之前，晚 capture 和重复 capture 都能被断言观察。
 +        track: () =>
-+          InstanceState.directory.pipe(
++          InstanceRef.pipe(
++            Effect.map(ctx => { if (!ctx) throw new Error("Missing prompt fixture Instance"); return ctx.directory }),
 +            Effect.tap((dir) => Effect.sync(() => snapshotTracks.set(dir, (snapshotTracks.get(dir) ?? 0) + 1))),
 +            Effect.andThen(base.track()),
 +          ),
@@ -2514,8 +2481,6 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +  }),
 +)
 +
- // #499：记录每次 admission 推进时的 Instance 目录——并发 caller 应共享同一 Running work 的单次 init。
- const lspDirectories: string[] = []
  const lsp = Layer.succeed(
 @@ -187,6 +296,56 @@ const lsp = Layer.succeed(
    }),
@@ -3402,3 +3367,705 @@ diff --git a/packages/opencode/test/server/httpapi-event.test.ts b/packages/open
 +          }
 +        })
 +        expect(terminalEvent).toMatchObject({
+
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -221,2 +221,11 @@
++// 懒基线可晚于Started到达；归属随助手持久化，恢复不能借用其他助手的工具声明。
++export interface Snapshot extends Schema.Schema.Type<typeof Snapshot> {}
++export const Snapshot = Schema.Struct({
++  start: Schema.String.pipe(optional),
++  end: Schema.String.pipe(optional),
++  files: Schema.Array(RelativePath).pipe(optional),
++  worktree: Schema.Literals(["declared", "ambient"]).pipe(optional),
++}).annotate({ identifier: "Session.Message.Snapshot" })
++
+ export interface Assistant extends Schema.Schema.Type<typeof Assistant> {}
+ export const Assistant = Schema.Struct({
+@@ -229,5 +239,1 @@
+-  snapshot: Schema.Struct({
+-    start: Schema.String.pipe(optional),
+-    end: Schema.String.pipe(optional),
+-    files: Schema.Array(RelativePath).pipe(optional),
+-  }).pipe(optional),
++  snapshot: Snapshot.pipe(optional),
+
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -190,2 +190,14 @@
+ 
++  // 快照更新独立于用量确认；工具失败或无step-finish时也能重放真实的文件归属。
++  export const SnapshotUpdated = Event.define({
++    type: "session.next.step.snapshot.updated",
++    ...options,
++    schema: {
++      ...Base,
++      assistantMessageID: SessionMessage.ID,
++      snapshot: SessionMessage.Snapshot,
++    },
++  })
++  export type SnapshotUpdated = typeof SnapshotUpdated.Type
++
+   export const Ended = Event.define({
+@@ -528,2 +540,3 @@
+   Step.Started,
++  Step.SnapshotUpdated,
+   Step.Ended,
+@@ -564,2 +577,3 @@
+   Step.Started,
++  Step.SnapshotUpdated,
+   Step.Ended,
+
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -240,1 +240,6 @@
++      "session.next.step.snapshot.updated": (event) =>
++        updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
++          // 只修订已存在的同一助手，不创建零token首写，也不改变失败或消费状态。
++          draft.snapshot = { ...draft.snapshot, ...castDraft(event.data.snapshot) }
++        }),
+       "session.next.step.ended": (event) => {
+
+diff --git a/packages/core/src/session/projector.ts b/packages/core/src/session/projector.ts
+--- a/packages/core/src/session/projector.ts
++++ b/packages/core/src/session/projector.ts
+@@ -627,2 +627,3 @@
+     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
++    yield* events.project(SessionEvent.Step.SnapshotUpdated, (event) => run(db, event))
+     yield* events.project(SessionEvent.Step.Ended, (event) =>
+
+diff --git a/packages/core/src/tool/tool.ts b/packages/core/src/tool/tool.ts
+--- a/packages/core/src/tool/tool.ts
++++ b/packages/core/src/tool/tool.ts
+@@ -16,2 +16,5 @@
+   readonly goalTurn?: SessionGoal.GoalTurnContext
++  readonly loadGoalTurn?: () => Effect.Effect<SessionGoal.GoalTurnContext | undefined>
++  // runner提供快照门，叶子仍独占权限和执行；模型输入不能声明工作树权限。
++  readonly captureWorktree?: (authority: "declared" | "ambient") => Effect.Effect<void>
+ }
+@@ -48,2 +51,4 @@
+   readonly description: string
++  // 未声明工具与只读工具保持none；不根据公开名字推断副作用。
++  readonly worktree?: "none" | "declared" | "ambient"
+   readonly input: Input
+@@ -100,1 +105,5 @@
+-          config.execute(input, context).pipe(
++          (config.worktree && config.worktree !== "none" && context.captureWorktree
++            ? context.captureWorktree(config.worktree)
++            : Effect.void).pipe(
++            // 输入校验成功后、插件/权限和真实执行前才支付baseline成本。
++            Effect.andThen(() => config.execute(input, context)),
+
+diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registry.ts
+--- a/packages/core/src/tool/registry.ts
++++ b/packages/core/src/tool/registry.ts
+@@ -24,2 +24,4 @@
+   readonly goalTurn?: SessionGoal.GoalTurnContext
++  readonly loadGoalTurn?: () => Effect.Effect<SessionGoal.GoalTurnContext | undefined>
++  readonly captureWorktree?: (authority: "declared" | "ambient") => Effect.Effect<void>
+ }
+@@ -79,2 +81,4 @@
+         goalTurn: input.goalTurn,
++        loadGoalTurn: input.loadGoalTurn,
++        captureWorktree: input.captureWorktree,
+       }).pipe(
+
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -108,2 +108,4 @@
+           Tool.make({
++            // 恢复只认本助手实际成功声明的文件，不接纳整个快照窗口。
++            worktree: "declared",
+             description: [
+
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -70,2 +70,4 @@
+           Tool.make({
++            // 单文件归属仍由成功结果中的target/diff声明。
++            worktree: "declared",
+             description:
+
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -83,2 +83,4 @@
+           Tool.make({
++            // 多文件和部分应用继续沿原结果合同聚合，不放宽恢复边界。
++            worktree: "declared",
+             description:
+
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -171,2 +171,4 @@
+         [name]: Tool.make({
++          // Shell副作用无法由参数穷举，按source显式声明ambient而非名称猜测。
++          worktree: "ambient",
+           // 专用工具存在性由 request.toolUsage 广告，本 description 不伪造固定工具列表。
+
+diff --git a/packages/core/src/mcp/tools.ts b/packages/core/src/mcp/tools.ts
+--- a/packages/core/src/mcp/tools.ts
++++ b/packages/core/src/mcp/tools.ts
+@@ -91,2 +91,4 @@
+   return Tool.make({
++    // 仅远端Tool调用视为ambient；下面的resource list/read仍是只读none。
++    worktree: "ambient",
+     description: def.description ?? "",
+
+diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
+--- a/packages/core/src/tool/goal.ts
++++ b/packages/core/src/tool/goal.ts
+@@ -46,2 +46,3 @@
+       execute: (input, context) => Effect.gen(function* () {
+-        const turn = context.goalTurn
++        // 真正使用Goal时才加载有界lineage，现有直接调用仍可提供同一可信对象。
++        const turn = context.loadGoalTurn ? yield* context.loadGoalTurn() : context.goalTurn
+
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -32,1 +32,2 @@
++  restore = true,
+ ) {
+@@ -55,3 +56,5 @@
+   // 已选定compaction/epoch范围；合法隐藏行不为普通模型上下文预热。
+-  return yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
++  const visible = rows.filter(row => !hidden(row.data.metadata?.hidden))
++  // runner先核对raw前缀，只有变化后缀才恢复冷payload；其他消费者保持原读取路径。
++  return restore ? yield* ColdStorage.readSessionMessageRows(db, visible) : visible
+ })
+@@ -95,10 +99,33 @@
++// 单entry只保存当前Session；寿命由runner scope持有，proof用完整row而非毫秒revision或额外hash。
++export const makeCache = () => ({
++  boundary: "", proof: [] as string[],
++  entries: [] as Array<{ seq: number; message: SessionMessage.Message }>,
++})
++
+ export const entriesForRunner = Effect.fn("SessionHistory.entriesForRunner")(function* (
+   db: DatabaseService,
+   sessionID: SessionSchema.ID,
+   baselineSeq: number,
++  cache?: ReturnType<typeof makeCache>,
+ ) {
+-  const rows = yield* messageRows(db, sessionID, yield* latestCompaction(db, sessionID), baselineSeq)
+-  return (yield* Effect.forEach(rows, (row) =>
++  const compaction = yield* latestCompaction(db, sessionID)
++  const rows = yield* messageRows(db, sessionID, compaction, baselineSeq, false)
++  const boundary = JSON.stringify([sessionID, baselineSeq, compaction?.seq])
++  // 包含data、seq和cold key/ref/stats，原位修改、隐藏和冷热迁移都会在首个分歧处失效。
++  const proof = rows.map(row => JSON.stringify(row))
++  const mismatch = cache?.boundary === boundary
++    ? proof.findIndex((key, index) => key !== cache.proof[index]) : 0
++  const matched = cache?.boundary === boundary ? mismatch < 0 ? rows.length : mismatch : 0
++  const suffix = yield* ColdStorage.readSessionMessageRows(db, rows.slice(matched))
++  const decoded = yield* Effect.forEach(suffix, (row) =>
+     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+-  )).filter((entry) => !hidden(entry.message.metadata?.hidden))
++  )
++  const entries = [...(cache?.entries.slice(0, matched) ?? []), ...decoded]
++    .filter(entry => !hidden(entry.message.metadata?.hidden))
++  if (cache) {
++    cache.boundary = boundary
++    cache.proof = proof
++    cache.entries = entries
++  }
++  return entries
+ })
+@@ -172,1 +203,5 @@
+     .where(and(eq(SessionMessageTable.session_id, sessionID),
++      // 在limit之前排除合法hidden，不能让最近的隐藏行挤掉真正的前一Goal turn。
++      sql`not coalesce((json_extract(${SessionMessageTable.data}, '$.metadata.hidden.reason') = 'permission-reviewer-protocol-retry'
++        and json_type(${SessionMessageTable.data}, '$.metadata.hidden.time') = 'integer'
++        and json_extract(${SessionMessageTable.data}, '$.metadata.hidden.time') >= 0), 0)`,
+
+diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
+--- a/packages/core/src/session/runner/to-llm-message.ts
++++ b/packages/core/src/session/runner/to-llm-message.ts
+@@ -189,9 +189,31 @@
++// 每块保留转换后的Read覆盖状态；稳定前缀复用时不能丢掉跨消息的去重证明。
++export const makeMessageCache = () => ({
++  model: "", entries: [] as Array<{
++    message: SessionMessage.Message; output: Message[]; reads: ReadPresentation.ReadRangeMeta[]
++  }>,
++})
++
+ /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
+-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) => {
++export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model, cache = makeMessageCache()) => {
+   // 证明仅存在于本次选出的历史；下一 Session/compaction 投影重新开始，不持久缓存。
+-  const reads: ReadPresentation.ReadRangeMeta[] = []
+-  return messages.flatMap((message) => {
+-    if (message.type === "compaction") reads.length = 0
+-    if (message.type !== "assistant") return toLLMMessage(message, model)
++  let reads: ReadPresentation.ReadRangeMeta[] = []
++  const previous = cache.model === `${model.provider}/${model.id}` ? cache.entries : []
++  const entries: typeof cache.entries = []
++  let reusable = true
++  const output = messages.flatMap((message, index) => {
++    const cached = reusable ? previous[index] : undefined
++    if (cached?.message === message) {
++      reads = cached.reads
++      entries.push(cached)
++      return cached.output
++    }
++    reusable = false
++    // 覆盖状态只作不可变替换，后缀追加不能污染已缓存前缀或收缩后的窗口。
++    if (message.type === "compaction") reads = []
++    const retain = (output: Message[]) => {
++      entries.push({ message, output, reads })
++      return output
++    }
++    if (message.type !== "assistant") return retain(toLLMMessage(message, model))
+     const content = message.content.map((item): SessionMessage.AssistantContent => {
+       // provider 托管、被裁剪或带媒体的结果不具备本地完整文本 Read 的证明。
+@@ -214,1 +238,1 @@
+-      if (!stub) reads.push(page.read)
++      if (!stub) reads = [...reads, page.read]
+@@ -229,3 +253,6 @@
+-    return toLLMMessage({ ...message, content }, model)
++    return retain(toLLMMessage({ ...message, content }, model))
+   })
++  cache.model = `${model.provider}/${model.id}`
++  cache.entries = entries
++  return output
+ }
+
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -53,1 +53,1 @@
+-import { DECIDE_PROMPT, toDecideMessages, toLLMMessages } from "./to-llm-message"
++import { DECIDE_PROMPT, makeMessageCache, toDecideMessages, toLLMMessages } from "./to-llm-message"
+@@ -140,1 +140,7 @@
+     const compaction = SessionCompaction.make({ events, llm, db, todos: todos.get, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
++    // Location内只保留可替换entry，跨独立请求复用；执行与Goal状态不进入缓存。
++    let retainedMessages: {
++      sessionID: SessionSchema.ID
++      history: ReturnType<typeof SessionHistory.makeCache>
++      messages: ReturnType<typeof makeMessageCache>
++    } | undefined
+@@ -322,8 +328,16 @@
+-      const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
++      const retained = retainedMessages?.sessionID === session.id ? retainedMessages : {
++        sessionID: session.id, history: SessionHistory.makeCache(), messages: makeMessageCache(),
++      }
++      // await前捕获entry，另一Session替换唯一指针不能混入本次在途历史或转换。
++      retainedMessages = retained
++      const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq, retained.history)
+       const context = entries.map((entry) => entry.message)
+-      // 只有实际提升的User或已发布的Goal Synthetic换turn，pending inbox和技术重入不换。
+-      const lineage = yield* SessionHistory.goalTurn(db, session.id)
+-      if (lineage?.id !== continuation.goalTurn?.id) continuation.goalTurn = lineage
++      // 普通Provider turn不查Goal lineage；同一步并发调用共享查询，同eligible turn保留read身份。
++      const loadGoalTurn = yield* Effect.cached(Effect.gen(function* () {
++        const lineage = yield* SessionHistory.goalTurn(db, session.id)
++        if (lineage?.id !== continuation.goalTurn?.id) continuation.goalTurn = lineage
++        return continuation.goalTurn
++      }))
+       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
+       const decide = agent.id === "decide"
+       // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
+@@ -362,1 +371,1 @@
+-      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
++      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model, retained.messages)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
+@@ -390,1 +399,3 @@
+-      const startSnapshot = yield* snapshots.capture()
++      // 基线只在校验后的non-none本地调用启动；同助手共享一次in-flight捕获及失败。
++      let startSnapshot: Snapshot.ID | undefined
++      let snapshotAuthority: "declared" | "ambient" | undefined
+@@ -414,1 +425,0 @@
+-        snapshot: startSnapshot,
+@@ -419,1 +429,16 @@
+       const withPublication = Semaphore.makeUnsafe(1).withPermit
++      const captureSnapshot = yield* Effect.cached(snapshots.capture())
++      const captureWorktree = (authority: "declared" | "ambient") => withPublication(Effect.gen(function* () {
++        const baseline = yield* captureSnapshot
++        if (!baseline || snapshotAuthority === "ambient" || snapshotAuthority === authority) return
++        const next = authority === "ambient" ? "ambient" : snapshotAuthority ?? "declared"
++        // Started早于工具校验，晚到的baseline必须走durable更新，而非只保存在局部getter。
++        yield* events.publish(SessionEvent.Step.SnapshotUpdated, {
++          sessionID: session.id,
++          assistantMessageID: yield* publisher.startAssistant(),
++          timestamp: yield* DateTime.now,
++          snapshot: { start: baseline, worktree: next },
++        })
++        startSnapshot = baseline
++        snapshotAuthority = next
++      }))
+@@ -511,1 +539,2 @@
+-                   goalTurn: continuation.goalTurn,
++                   loadGoalTurn: () => loadGoalTurn,
++                   captureWorktree,
+@@ -604,15 +633,20 @@
+           const stepSettlement = publisher.stepSettlement()
++          // 文件收尾不依赖确认用量；失败仍可保留已完成副作用，中断按source跳过慢Git扫描。
++          const aborted = stream._tag === "Failure" && Cause.hasInterrupts(stream.cause) || settled._tag === "Failure" && Cause.hasInterrupts(settled.cause)
++          if (startSnapshot && !aborted) {
++            const end = yield* snapshots.capture()
++            const files = end ? yield* snapshots.files({ from: startSnapshot, to: end })
++              .pipe(Effect.catch(() => Effect.succeed(undefined))) : undefined
++            yield* withPublication(events.publish(SessionEvent.Step.SnapshotUpdated, {
++              sessionID: session.id, timestamp: yield* DateTime.now,
++              assistantMessageID: yield* publisher.startAssistant(finalizer),
++              snapshot: { start: startSnapshot, ...(end ? { end } : {}), ...(files ? { files } : {}), ...(snapshotAuthority ? { worktree: snapshotAuthority } : {}) },
++            }, { finalizer }))
++          }
+           // step-finish 已确认的消耗不因随后失败退款；消息和账本保留此前失败身份。
+           if (stepSettlement) {
+-            const endSnapshot = yield* snapshots.capture()
+-            const files =
+-              startSnapshot && endSnapshot
+-                ? yield* snapshots
+-                    .files({ from: startSnapshot, to: endSnapshot })
+-                    .pipe(Effect.catch(() => Effect.succeed(undefined)))
+-                : undefined
+             // 工具fibers已结算并持久化；按Started冻结的请求读取，不受新steer或压缩窗口影响。
+             const summary = yield* ToolDiffs.summarize(db, {
+               sessionID: session.id, assistantMessageID: yield* publisher.startAssistant(finalizer),
+               directory: location.directory, worktree: location.project.directory,
+             })
+@@ -627,2 +664,0 @@
+-                snapshot: endSnapshot,
+-                files,
+
+diff --git a/packages/core/src/session/revert.ts b/packages/core/src/session/revert.ts
+--- a/packages/core/src/session/revert.ts
++++ b/packages/core/src/session/revert.ts
+@@ -54,1 +54,1 @@
+-  const records: Record<string, unknown>[] = []
++  const location = yield* Location.Service
+@@ -59,11 +59,11 @@
+-    records.push(...message.content.flatMap(part => part.type === "tool" && part.state.status === "completed" ? [part.state.structured] : []))
+     if (!message.snapshot?.start) continue
++    // 只用本助手的已完成声明；后一个助手不能授权恢复前一个快照中的旁观文件。
++    const records = message.content.flatMap(part => part.type === "tool" && part.provider?.executed !== true && part.state.status === "completed" ? [part.state.structured] : [])
++    const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
+     for (const file of message.snapshot.files ?? [])
+-      if (!files.has(file)) files.set(file, Snapshot.ID.make(message.snapshot.start))
++      // 旧行保持545的声明交集；只有显式ambient助手可认领自己的完整变化集。
++      if ((message.snapshot.worktree === "ambient" || touched.has(file)) && !files.has(file))
++        files.set(file, Snapshot.ID.make(message.snapshot.start))
+   }
+-  const location = yield* Location.Service
+-  // Snapshot恢复键相对项目根，工具相对项属于当前Location，必须沿共享聚合器统一基准。
+-  const touched = new Set(ToolDiffs.collect(records, location.project.directory, location.directory).map(item => item.file))
+-  // 空声明只撤消息，不恢复快照窗口中的ambient文件；归属仍由两代共用的工具结果合同决定。
+-  return new Map([...files].filter(([file]) => touched.has(file)))
++  return files
+ })
+
+diff --git a/packages/core/test/session-revert.test.ts b/packages/core/test/session-revert.test.ts
+--- a/packages/core/test/session-revert.test.ts
++++ b/packages/core/test/session-revert.test.ts
+@@ -36,1 +36,2 @@
+     const restored: string[][] = []
++    const baselines: string[][] = []
+@@ -40,1 +41,1 @@
+-      restore: ({ files }) => Effect.sync(() => { restored.push([...files.keys()]) }),
++      restore: ({ files }) => Effect.sync(() => { restored.push([...files.keys()]); baselines.push([...files.values()]) }),
+@@ -48,2 +49,3 @@
+       { name: "read", output: {} },
++      { name: "bash", output: {}, worktree: "ambient" as const },
+     ]
+@@ -53,1 +55,1 @@
+-        id: boundary, session_id: session.id, type: "user", seq: index * 2,
++        id: boundary, session_id: session.id, type: "user", seq: index * 3,
+@@ -58,1 +60,10 @@
++      // 前一个助手没有声明，后续工具即使认领同名文件也不能借它的baseline恢复。
++      const unrelated = SessionMessage.ID.create()
++      yield* db.insert(SessionMessageTable).values({
++        id: unrelated, session_id: session.id, type: "assistant", seq: index * 3 + 1,
++        data: Schema.encodeSync(SessionMessage.Assistant)(Schema.decodeUnknownSync(SessionMessage.Assistant)({
++          id: unrelated, type: "assistant", agent: "default", model: { id: "test", providerID: "test" },
++          time: { created: 0 }, snapshot: { start: "unrelated", files: ["scope/owned.txt"] }, content: [],
++        })),
++      }).run().pipe(Effect.orDie)
+       const assistant = SessionMessage.ID.create()
+@@ -62,1 +76,2 @@
+-        time: { created: 0 }, snapshot: { start: "before", end: "after", files: ["scope/owned.txt", "scope/ambient.md"] },
++        time: { created: 0 }, snapshot: { start: "before", end: "after", files: ["scope/owned.txt", "scope/ambient.md"],
++          ...("worktree" in item ? { worktree: item.worktree } : {}) },
+@@ -67,1 +82,1 @@
+-        id: assistant, session_id: session.id, type: "assistant", seq: index * 2 + 1, data,
++        id: assistant, session_id: session.id, type: "assistant", seq: index * 3 + 2, data,
+@@ -76,1 +91,5 @@
+-      if (item.name !== "read") expect(restored.at(-1)).toEqual(["scope/owned.txt"])
++      if (item.name !== "read") {
++        const paths = item.name === "bash" ? ["scope/owned.txt", "scope/ambient.md"] : ["scope/owned.txt"]
++        expect(restored.at(-1)).toEqual(paths)
++        expect(baselines.at(-1)).toEqual(paths.map(() => "before"))
++      }
+
+diff --git a/packages/core/test/session-history.test.ts b/packages/core/test/session-history.test.ts
+--- a/packages/core/test/session-history.test.ts
++++ b/packages/core/test/session-history.test.ts
+@@ -19,1 +19,2 @@
+ import { testEffect } from "./lib/effect"
++import { SessionHistory } from "../src/session/history"
+@@ -187,1 +188,25 @@
+       expect(yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, created.id)).orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)).toEqual(before)
++      // 同毫秒原位修改必须让后缀重载；稳定前缀保留同一解码对象，而非只比较最终文本。
++      const cache = SessionHistory.makeCache()
++      const cold = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
++      const warm = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
++      expect(warm.map(entry => entry.message.id)).toEqual([ids[0], ids[2]])
++      expect(warm[0]?.message).toBe(cold[0]?.message)
++      expect(warm[1]?.message).toBe(cold[1]?.message)
++      yield* db.update(SessionMessageTable).set({ data: Schema.encodeSync(SessionMessage.Synthetic)(SessionMessage.Synthetic.make({
++        id: ids[2], sessionID: created.id, type: "synthetic", text: "changed", time: { created: DateTime.makeUnsafe(2) },
++      })) }).where(eq(SessionMessageTable.id, ids[2])).run().pipe(Effect.orDie)
++      const changed = yield* SessionHistory.entriesForRunner(db, created.id, -1, cache)
++      expect(changed[0]?.message).toBe(cold[0]?.message)
++      expect(changed[1]?.message).not.toBe(cold[1]?.message)
++      expect(changed[1]?.message).toMatchObject({ text: "changed" })
++      // 最新隐藏用户不得消耗limit(2)；普通技术Synthetic也不产生Goal turn。
++      const turns = Array.from({ length: 3 }, () => SessionMessage.ID.create())
++      for (const [index, id] of turns.entries()) yield* db.insert(SessionMessageTable).values({
++        id, session_id: created.id, type: "user", seq: 100 + index,
++        data: Schema.encodeSync(SessionMessage.User)(SessionMessage.User.make({
++          id, type: "user", text: "goal", files: [], agents: [], time: { created: DateTime.makeUnsafe(5) },
++          ...(index === 2 ? { metadata: { hidden: { time: 0, reason: "permission-reviewer-protocol-retry" } } } : {}),
++        })),
++      }).run().pipe(Effect.orDie)
++      expect(yield* SessionHistory.goalTurn(db, created.id)).toEqual({ id: turns[1], previousID: turns[0], userInitiated: true })
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -29,1 +29,1 @@
+-import { AbsolutePath } from "@opencode-ai/core/schema"
++import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
+@@ -52,1 +52,1 @@
+-import { toDecideMessages, toLLMMessages } from "../src/session/runner/to-llm-message"
++import { makeMessageCache, toDecideMessages, toLLMMessages } from "../src/session/runner/to-llm-message"
+@@ -293,1 +293,12 @@
++// 内外两张图使用同一计数fake；不启动Git，仍检查durable快照和真实工具边界。
++let snapshotCaptures = 0
++let snapshotEnabled = false
++const nativeSnapshots = Layer.mock(Snapshot.Service, {
++  capture: () => Effect.sync(() => {
++    snapshotCaptures++
++    return snapshotEnabled ? Snapshot.ID.make(`tree-${snapshotCaptures}`) : undefined
++  }),
++  files: () => Effect.succeed([RelativePath.make("owned.txt")]),
++})
++
+ let runnerMcp: McpTools.Interface | undefined
+@@ -295,1 +307,1 @@
+-  [Snapshot.node, Snapshot.noopLayer],
++  [Snapshot.node, nativeSnapshots],
+@@ -358,1 +370,1 @@
+-      [Snapshot.node, Snapshot.noopLayer],
++      [Snapshot.node, nativeSnapshots],
+@@ -388,1 +400,3 @@
+   response = []
++  snapshotCaptures = 0
++  snapshotEnabled = false
+@@ -1238,1 +1252,3 @@
+-          goalTurn: { id: expect.stringMatching(/^msg_/), previousID: undefined, userInitiated: true },
++          goalTurn: undefined,
++          loadGoalTurn: expect.any(Function),
++          captureWorktree: expect.any(Function),
+@@ -1242,1 +1258,7 @@
++      // loader仍返回同一可信对象；惰性化不削弱应用工具能读取的身份与跨调用引用。
++      const loadTurn = contexts[0]?.loadGoalTurn
++      if (!loadTurn) throw new Error("Missing Native Goal loader")
++      const turn = yield* loadTurn()
++      expect(turn).toEqual({ id: expect.stringMatching(/^msg_/), previousID: undefined, userInitiated: true })
++      expect(yield* loadTurn()).toBe(turn)
+       expect(yield* session.context(sessionID)).toMatchObject([
+@@ -1258,1 +1278,92 @@
++  it.effect("lazily captures Native worktree authority and replays failed-step snapshots", () =>
++    Effect.gen(function* () {
++      yield* setup
++      snapshotEnabled = true
++      const applicationTools = yield* ApplicationTools.Service
++      const session = yield* SessionV2.Service
++      const performed: string[] = []
++      const converter = yield* Effect.promise(() => import("../src/session/runner/to-llm-message"))
++      const convert = converter.toLLMMessages
++      const projected: Array<{ input: SessionMessage.Message | undefined; output: Message | undefined }> = []
++      const observer = spyOn(converter, "toLLMMessages").mockImplementation((...args) => {
++        const output = convert(...args)
++        projected.push({ input: args[0][0], output: output[0] })
++        return output
++      })
++      yield* Effect.addFinalizer(() => Effect.sync(() => observer.mockRestore()))
++      yield* applicationTools.register(Object.fromEntries((["declared", "ambient"] as const).map(worktree => [worktree, Tool.make({
++        description: "Fake local mutation", worktree,
++        input: Schema.Struct({ text: Schema.String }), output: Schema.String,
++        execute: () => Effect.sync(() => {
++          // baseline必须先于所有实际执行，并发调用只捕获一次。
++          expect(snapshotCaptures).toBe(1)
++          performed.push(worktree)
++          return "done"
++        }),
++      })])))
++      const toolEvents = (calls: LLMEvent[]) => [LLMEvent.stepStart({ index: 0 }), ...calls,
++        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" })]
++      const done = fragmentFixture("text", "done", ["Done"]).completeEvents
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Read only" }), resume: false })
++      responses = [toolEvents([
++        LLMEvent.toolCall({ id: "read", name: "echo", input: { text: "read" } }),
++        LLMEvent.toolCall({ id: "invalid", name: "declared", input: { text: 17 } }),
++        LLMEvent.toolCall({ id: "unknown", name: "missing", input: {} }),
++      ]), done]
++      yield* session.resume(sessionID)
++      expect(snapshotCaptures).toBe(0)
++      expect(performed).toEqual([])
++      expect((yield* session.context(sessionID)).filter(message => message.type === "assistant").every(message => !message.snapshot)).toBe(true)
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Mutate" }), resume: false })
++      responses = [toolEvents([
++        LLMEvent.toolCall({ id: "declared-one", name: "declared", input: { text: "a" } }),
++        LLMEvent.toolCall({ id: "ambient", name: "ambient", input: { text: "b" } }),
++        LLMEvent.toolCall({ id: "declared-two", name: "declared", input: { text: "c" } }),
++      ]), done]
++      yield* session.resume(sessionID)
++      expect(snapshotCaptures).toBe(2)
++      expect(performed.toSorted()).toEqual(["ambient", "declared", "declared"])
++      const history = yield* session.context(sessionID)
++      const mutated = history.findLast(message => message.type === "assistant" && message.snapshot)
++      expect(mutated).toMatchObject({ snapshot: { start: "tree-1", end: "tree-2", files: ["owned.txt"], worktree: "ambient" } })
++      // 观察真实转换器的输入/输出；后续Schema消息规范化可复制包装，不能据其对象身份误判缓存。
++      const stable = projected.at(-1)
++      if (!stable?.input || !stable.output) throw new Error("Missing stable Native request prefix")
++      // 转换复用必须信息等价；收缩和模型切换同样经原转换器，未缓存任何提醒或工具广告。
++      const cache = makeMessageCache()
++      const cold = toLLMMessages(history, model, cache)
++      expect(toLLMMessages(history, model, cache)[0]).toBe(cold[0])
++      expect(toLLMMessages(history.slice(0, -1), model, cache)).toEqual(toLLMMessages(history.slice(0, -1), model))
++      expect(toLLMMessages(history, replacementModel, cache)).toEqual(toLLMMessages(history, replacementModel))
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Fail after mutation" }), resume: false })
++      responses = undefined
++      const failure = providerUnavailable()
++      responseStream = Stream.concat(Stream.fromIterable([
++        LLMEvent.stepStart({ index: 0 }),
++        LLMEvent.toolCall({ id: "before-failure", name: "declared", input: { text: "d" } }),
++      ]), Stream.fail(failure))
++      // 失败轮沿同一fake取得基线；没有step-finish时不能伪造确认用量。
++      snapshotCaptures = 0
++      expect(yield* session.resume(sessionID).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
++      expect(snapshotCaptures).toBe(2)
++      expect(projected.at(-1)?.input).toBe(stable.input)
++      expect(projected.at(-1)?.output).toBe(stable.output)
++      expect(requests.at(-1)?.messages[0]?.content[0]).toEqual({ type: "text", text: "Read only" })
++      const failed = (yield* session.context(sessionID)).findLast(message => message.type === "assistant")
++      expect(failed).toMatchObject({ finish: "error", snapshot: { start: "tree-1", end: "tree-2", worktree: "declared" } })
++      expect(failed?.tokens).toBeUndefined()
++      yield* replaySessionProjection(sessionID)
++      expect((yield* session.context(sessionID)).find(message => message.id === failed?.id)).toEqual(failed)
++      expect((yield* session.context(sessionID)).find(message => message.id === mutated?.id)).toEqual(mutated)
++      // 切换Session替换单entry，不能把前一个Session的用户原话或Goal状态带入新请求。
++      yield* insertSession(otherSessionID)
++      yield* session.prompt({ sessionID: otherSessionID, prompt: Prompt.make({ text: "Different Session" }), resume: false })
++      responses = [done]
++      yield* session.resume(otherSessionID)
++      const other = requests.at(-1)
++      if (!other) throw new Error("Missing other Native request")
++      expect(userTexts(other)).toEqual(["Different Session"])
++    }),
++  )
++
+   it.effect("starts a real runner turn after default prompt recording", () =>
+
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -932,7 +932,12 @@ export type SessionsContextOutput = {
+               }
+             }
+         >
+-        readonly snapshot?: { readonly start?: string; readonly end?: string; readonly files?: ReadonlyArray<string> }
++        readonly snapshot?: {
++          readonly start?: string
++          readonly end?: string
++          readonly files?: ReadonlyArray<string>
++          readonly worktree?: "declared" | "ambient"
++        }
+         readonly finish?: string
+         readonly cost?: number
+         readonly tokens?: {
+@@ -1249,6 +1254,24 @@ export type SessionsHistoryOutput = {
+           readonly snapshot?: string
+         }
+       }
++    | {
++        readonly id: string
++        readonly metadata?: { readonly [x: string]: JsonValue }
++        readonly type: "session.next.step.snapshot.updated"
++        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
++        readonly location?: { readonly directory: string; readonly workspaceID?: string }
++        readonly data: {
++          readonly timestamp: number
++          readonly sessionID: string
++          readonly assistantMessageID: string
++          readonly snapshot: {
++            readonly start?: string
++            readonly end?: string
++            readonly files?: ReadonlyArray<string>
++            readonly worktree?: "declared" | "ambient"
++          }
++        }
++      }
+     | {
+         readonly id: string
+         readonly metadata?: { readonly [x: string]: JsonValue }
+@@ -1881,6 +1904,24 @@ export type SessionsEventsOutput =
+         readonly snapshot?: string
+       }
+     }
++  | {
++      readonly id: string
++      readonly metadata?: { readonly [x: string]: unknown }
++      readonly type: "session.next.step.snapshot.updated"
++      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
++      readonly location?: { readonly directory: string; readonly workspaceID?: string }
++      readonly data: {
++        readonly timestamp: number
++        readonly sessionID: string
++        readonly assistantMessageID: string
++        readonly snapshot: {
++          readonly start?: string
++          readonly end?: string
++          readonly files?: ReadonlyArray<string>
++          readonly worktree?: "declared" | "ambient"
++        }
++      }
++    }
+   | {
+       readonly id: string
+       readonly metadata?: { readonly [x: string]: unknown }
+@@ -2405,7 +2446,12 @@ export type SessionsMessageOutput = {
+               }
+             }
+         >
+-        readonly snapshot?: { readonly start?: string; readonly end?: string; readonly files?: ReadonlyArray<string> }
++        readonly snapshot?: {
++          readonly start?: string
++          readonly end?: string
++          readonly files?: ReadonlyArray<string>
++          readonly worktree?: "declared" | "ambient"
++        }
+         readonly finish?: string
+         readonly cost?: number
+         readonly tokens?: {
+@@ -2631,7 +2677,12 @@ export type MessagesListOutput = {
+               }
+             }
+         >
+-        readonly snapshot?: { readonly start?: string; readonly end?: string; readonly files?: ReadonlyArray<string> }
++        readonly snapshot?: {
++          readonly start?: string
++          readonly end?: string
++          readonly files?: ReadonlyArray<string>
++          readonly worktree?: "declared" | "ambient"
++        }
+         readonly finish?: string
+         readonly cost?: number
+         readonly tokens?: {

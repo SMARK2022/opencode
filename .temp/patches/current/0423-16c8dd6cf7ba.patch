@@ -1,17 +1,46 @@
-diff --git a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
---- a/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-+++ b/packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts
-@@ -619,7 +619,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session",
-         -- SQLite group_concat 不保证 GROUP BY 内顺序，需子查询喂入有序行
-         FROM (SELECT * FROM preview_parts ORDER BY part_id)
-         GROUP BY session_id, msg_rn
--        ORDER BY session_id, msg_rn
-+        -- [local-smark] msg_rn 由窗口函数 ORDER BY time_created DESC 赋值：1=最新，2=次新。
-+        -- 此处 DESC 使次新先返回、最新后返回，JS push 随之产出正序（旧→新）数组
-+        ORDER BY session_id, msg_rn DESC
-       `).pipe(
-         Effect.orDie,
-         Effect.map(
+diff --git a/packages/core/src/session/preview.ts b/packages/core/src/session/preview.ts
+--- a/packages/core/src/session/preview.ts
++++ b/packages/core/src/session/preview.ts
+@@ -52,7 +52,8 @@
+       -- 多part先按ID排序再聚合；无可见text的消息不占窗口名额。
+       FROM (SELECT * FROM preview_parts ORDER BY part_id)
+       GROUP BY session_id, msg_rn
+-      ORDER BY session_id, msg_rn
++      -- 排名1是最新消息；选最近N条后反转排名，返回旧到新而不改变part顺序。
++      ORDER BY session_id, msg_rn DESC
+     ` : sql`
+       WITH ranked_messages AS (
+         SELECT ${SessionMessageTable.session_id} as session_id,
+@@ -79,6 +80,7 @@
+       -- 不经SessionHistory的压缩边界：最近用户正文来自完整durable历史。
+       SELECT session_id, joined_text FROM ranked_messages
+       WHERE msg_rn <= ${limit}
+-      ORDER BY session_id, msg_rn
++      -- Native按seq倒序选窗，再按排名倒序输出，保持与V1相同的对话时间方向。
++      ORDER BY session_id, msg_rn DESC
+     `,
+   ).pipe(Effect.orDie)
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -97,3 +97,3 @@
+       expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] })).toEqual({
+-        [a]: ["latest user", "middle"], [b]: ["b latest", "b first"],
++        [a]: ["middle", "latest user"], [b]: ["b first", "b latest"],
+       })
+@@ -102,3 +102,3 @@
+       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 10 })).toEqual({
+-        [a]: ["latest user", "middle", "false marker", "old before compaction"],
++        [a]: ["old before compaction", "false marker", "middle", "latest user"],
+       })
+@@ -127,5 +127,5 @@
+-      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] }, "v1")).toEqual({ [a]: ["second", "part1 part2"] })
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a, b, "ses_missing"] }, "v1")).toEqual({ [a]: ["part1 part2", "second"] })
+       expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 1 }, "v1")).toEqual({ [a]: ["second"] })
+       // 同一Session内的两代表不能互相补查，Native结果不受V1新行影响。
+-      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["latest user", "middle"] })
++      expect(yield* SessionPreview.load(db, { sessionIDs: [a], limit: 2 })).toEqual({ [a]: ["middle", "latest user"] })
+       expect(yield* SessionPreview.load(db, { sessionIDs: [] }, "v1")).toEqual({})
 diff --git a/packages/opencode/test/server/session-preview.test.ts b/packages/opencode/test/server/session-preview.test.ts
 --- a/packages/opencode/test/server/session-preview.test.ts
 +++ b/packages/opencode/test/server/session-preview.test.ts

@@ -7,31 +7,32 @@ Subject: [PATCH] fix(tool): preserve unique substring patch matches
 diff --git a/packages/core/src/patch.ts b/packages/core/src/patch.ts
 --- a/packages/core/src/patch.ts
 +++ b/packages/core/src/patch.ts
-@@ -1,3 +1,4 @@
+@@ -1,5 +1,6 @@
  export * as Patch from "./patch"
+ 
+ import { convertToLineEnding, detectLineEnding, splitLines } from "./util/line-ending"
 +import { closestWindow, lineOffset, locateExact, nextLineOffset } from "./patch-match"
  
  export type Hunk =
-@@ -71,11 +72,12 @@
+@@ -73,12 +74,11 @@
  export function derive(path: string, chunks: ReadonlyArray<UpdateFileChunk>, original: string): FileUpdate {
    const source = splitBom(original)
--  const lines = source.text.split("\n")
+-  // 匹配使用逻辑行，BOM 独立保留；重建后恢复文件级行尾。
 +  // 匹配使用逻辑LF，写回仍保留原CRLF/CR及BOM；字面恢复不引入纯行尾变更。
-+  const ending = source.text.includes("\r\n") ? "\r\n" : source.text.includes("\r") ? "\r" : "\n"
-+  const text = source.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n")
-+  const lines = text.split("\n")
+   const lines = splitLines(source.text)
++  const text = lines.join("\n")
    if (lines.at(-1) === "") lines.pop()
 -  const replacements = computeReplacements(lines, path, chunks)
 -  const updated = [...lines]
 -  for (const [start, remove, insert] of replacements.toReversed()) updated.splice(start, remove, ...insert)
 -  if (updated.at(-1) !== "") updated.push("")
--  const next = splitBom(updated.join("\n"))
+-  const next = splitBom(convertToLineEnding(updated.join("\n"), detectLineEnding(source.text)))
 +  const updated = applyChunks(lines, path, chunks, text)
 +  const normalized = updated.length === 0 ? "" : `${updated.join("\n")}\n`
-+  const next = splitBom(ending === "\n" ? normalized : normalized.replaceAll("\n", ending))
++  const next = splitBom(convertToLineEnding(normalized, detectLineEnding(source.text)))
    return { content: next.text, bom: source.bom || next.bom }
  }
-@@ -132,64 +134,57 @@
+@@ -135,64 +135,57 @@
 -function computeReplacements(lines: ReadonlyArray<string>, path: string, chunks: ReadonlyArray<UpdateFileChunk>) {
 -  const replacements: Array<readonly [start: number, remove: number, insert: ReadonlyArray<string>]> = []
 -  let lineIndex = 0
@@ -154,8 +155,11 @@ diff --git a/packages/core/src/patch.ts b/packages/core/src/patch.ts
 diff --git a/packages/core/src/tool/edit-excerpt.ts b/packages/core/src/tool/edit-excerpt.ts
 --- a/packages/core/src/tool/edit-excerpt.ts
 +++ b/packages/core/src/tool/edit-excerpt.ts
-@@ -1,18 +1,3 @@
--export function closestMatch(content: string, expected: string) {
+@@ -1,20 +1,14 @@
+ import { diffLines, diffChars, type Change } from "diff"
++import { closestWindow } from "../patch-match"
+ 
+ export function closestMatch(content: string, expected: string) {
 -  const first = expected.split("\n").find(line => line.trim().length >= 3)?.trim().toLowerCase()
 -  if (!first) return undefined
 -  const letters = new Set(first)
@@ -168,14 +172,19 @@ diff --git a/packages/core/src/tool/edit-excerpt.ts b/packages/core/src/tool/edi
 -  }).sort((a, b) => b.score - a.score)[0]
 -  if (!best || best.score < 0.3) return undefined
 -  const start = Math.max(0, best.index - 1)
--  return {
--    line: start + 1,
--    excerpt: lines.slice(start, best.index + 4).join("\n").slice(0, 500),
--  }
--}
-+import { closestWindow } from "../patch-match"
-+// 复用共享有序评分及并列拒绝，诊断结果不扩大Edit的字面成功域。
-+export const closestMatch = closestWindow
+-  const fileExcerpt = lines.slice(start, best.index + expected.split("\n").filter(line => line.trim()).length + 2).join("\n")
+-  return { line: start + 1, excerpt: formatClosestMatchExcerpt(expected, fileExcerpt, start + 1) }
++  const closest = closestWindow(content, expected)
++  if (!closest) return undefined
++  const lines = content.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n")
++  const count = expected.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n").length
++  const fileExcerpt = lines.slice(closest.line - 1, closest.line - 1 + count).join("\n")
++  // 短窗口保留source的实际原文；长窗口复用字符差异，避免截断真正的行末错误。
++  return { line: closest.line, excerpt: fileExcerpt.length > 500 ? formatClosestMatchExcerpt(expected, fileExcerpt, closest.line) : closest.excerpt }
+ }
+ 
+-// 两代保留各自候选定位，只共享失败诊断；字符差异不参与真正替换或审批。
++// 两代共用唯一候选及字符差异；诊断不参与真正替换或审批。
 diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
 --- a/packages/core/src/tool/apply-patch.ts
 +++ b/packages/core/src/tool/apply-patch.ts
@@ -183,11 +192,11 @@ diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/appl
 -import { closestMatch } from "./edit-excerpt"
  export * as ApplyPatchTool from "./apply-patch"
  
-@@ -75,5 +74,5 @@
+@@ -84,5 +83,5 @@
            Tool.make({
              description:
--              "Apply one patch containing add, update, and delete file operations. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
-+              "Apply one patch containing add, update, and delete file operations. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
+-              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
++              "Apply one patch containing add, update, delete, and move file operations. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update matches complete exact lines first, then one unique literal substring of the complete old block, preserving surrounding text. Ambiguous or nonliteral matches fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
              input: Input,
              output: Output,
 @@ -157,7 +156,5 @@
@@ -217,22 +226,28 @@ diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
    }
    return count
  }
-@@ -86,3 +87,3 @@
+@@ -80,3 +81,3 @@
  /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
 -// TODO: Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.
 +// 字面匹配现为两代共同合同，不再等待移植已明确弃用的fuzzy成功路径。
- // TODO: Add formatter integration after V2 formatter runtime exists.
-@@ -173,5 +174,5 @@
-                 const oldString = convertToLineEnding(input.oldString, ending)
-                 const newString = convertToLineEnding(input.newString, ending)
+ // TODO: Publish watcher/file-edit events after V2 watcher integration exists.
+@@ -186,5 +187,5 @@
+                 const oldString = convertToLineEnding(normalizeLineEndings(input.oldString), ending)
+                 const newString = convertToLineEnding(normalizeLineEndings(input.newString), ending)
 -                const replacements = countOccurrences(source.text, oldString)
 +                const replacements = countOccurrences(source.text, oldString, input.replaceAll === true)
                  if (replacements === 0) {
                    const closest = closestMatch(source.text, oldString)
+@@ -193,3 +194,3 @@
+-                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation." +
+-                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : ""),
++                      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings." +
++                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+                   })
 diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
 --- a/packages/core/test/patch.test.ts
 +++ b/packages/core/test/patch.test.ts
-@@ -28,8 +28,28 @@
+@@ -28,5 +28,7 @@
 -  test("derives fuzzy line updates while preserving BOM", () => {
 -    const update = Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "\uFEFFold\n")
 +  test("derives exact line updates while preserving BOM", () => {
@@ -241,6 +256,8 @@ diff --git a/packages/core/test/patch.test.ts b/packages/core/test/patch.test.ts
      expect(Patch.joinBom(update.content, update.bom)).toBe("\uFEFFnew\n")
 +    // source明确移除规范化成功，BOM断言仍保留，不能靠fuzzy路径验证它。
 +    expect(() => Patch.derive("update.txt", [{ oldLines: ["  old   "], newLines: ["new"] }], "old\n")).toThrow("Failed to find expected lines")
+     // 同时验证补丁解析、上下文匹配、BOM 与精确行尾，不能只归一后比较正文。
+@@ -45,4 +47,22 @@
    })
  
 +  test("preserves complete unique substring semantics and failed chunk diagnostics", () => {
@@ -277,13 +294,16 @@ diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/to
                        deletions: 1,
 -                      patch: expect.stringContaining("-before\n+after"),
 +                      patch: expect.stringContaining("-prefix before suffix\n+prefix after suffix"),
-@@ -199,3 +199,3 @@
-                 )
+@@ -240,5 +240,5 @@
 -                expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("after\n")
 +                expect(yield* Effect.promise(() => fs.readFile(update, "utf8"))).toBe("prefix after suffix\n")
+                 expect(shown).toContain("+created")
+-                expect(shown).toContain("-before\n+after")
++                expect(shown).toContain("-prefix before suffix\n+prefix after suffix")
+                 expect(shown).toContain("-remove")
                  expect(yield* exists(remove)).toBe(false)
-@@ -324,4 +324,11 @@
-             ).toEqual({ type: "text", value: "Applied patch sequentially:\nA created.txt\n\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.\n\nFailed to update 1 file(s):\nUnable to apply patch at missing.txt" })
+@@ -392,4 +392,11 @@
+             ).toEqual({ type: "text", value: expect.stringMatching(/^Applied patch sequentially:\nA created\.txt\n\nChanged:\n```diff\n[\s\S]*\+created\n[\s\S]*LSP diagnostics unavailable[\s\S]*Failed to update 1 file\(s\):\nUnable to apply patch at missing\.txt$/) })
              expect(yield* exists(path.join(tmp.path, "created.txt"))).toBe(true)
              expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "created.txt"), "utf8"))).toBe("created\n")
 +            // 真实leaf也必须交付第二chunk的诊断，失败文件不提交前一chunk。
@@ -302,12 +322,9 @@ diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit
                    type: "error",
 -                  value:
 -                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation.\n\nClosest match at line 1:\nsame same",
-+                  value: "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
++                  value: "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.",
                  })
-@@ -329,4 +328,12 @@
-                     "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
-                 })
-                 expect(writes).toEqual([])
+@@ -360,1 +359,9 @@
 +                // 重叠literal也是第二候选，不能只按replaceAll的非重叠计数放行。
 +                yield* Effect.promise(() => fs.writeFile(target, "aaaa"))
 +                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple exact matches") })
@@ -316,13 +333,13 @@ diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit
 +                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("Closest match at line 2:\nconst preferred = true") })
 +                expect(writes).toEqual([])
 +                expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("header\nconst preferred = true\n")
-               }),
-@@ -427,3 +435,4 @@
+                 // 真实Native Edit失败必须显示900字符行末差异，不只证明孤立formatter可用。
+@@ -485,3 +492,4 @@
 +  // exact-only合同已生效，移除旧fuzzy移植待办而非恢复已废弃的成功域。
 +  expect(source).not.toContain("TODO: Port V1 fuzzy correction")
    for (const todo of [
 -    "Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.",
-     "Add formatter integration after V2 formatter runtime exists.",
+     "Publish watcher/file-edit events after V2 watcher integration exists.",
 diff --git a/docs/plans/edit-apply-patch-match-recovery.md b/docs/plans/edit-apply-patch-match-recovery.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..2cf30e4c09df111fd9fd306250bcee4b94453683
@@ -3011,7 +3028,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -1,953 +1,342 @@
+@@ -1,848 +1,348 @@
 -// the approaches in this edit tool are sourced from
 -// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
 -// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
@@ -3021,8 +3038,8 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 -import { Effect, Schema, Semaphore } from "effect"
 -import * as Tool from "./tool"
 -import { LSP } from "@/lsp/lsp"
--import { createTwoFilesPatch, diffLines, diffChars } from "diff"
--import type { Change } from "diff"
+-import { createTwoFilesPatch, diffLines } from "diff"
+-import { formatClosestMatchExcerpt } from "@opencode-ai/core/tool/edit-excerpt"
 -import DESCRIPTION from "./edit.txt"
 -import { FileSystem } from "@opencode-ai/core/filesystem"
 -import { Watcher } from "@opencode-ai/core/filesystem/watcher"
@@ -3277,7 +3294,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 -
 -          return {
 -            metadata: {
--              // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
+-              // 未连接时不提供clean摘要；差分数据与formatter后的真实diff各自保留。
 -              diagnostics: { [normalizedFilePath]: newErrorsArr },
 -              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
 -              ...(diagnosticSummary ? { diagnosticSummary } : {}),
@@ -3780,117 +3797,12 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 -    }
 -  }
 -  if (bestLine < 0 || bestScore < 0.3) return undefined
--  // [local-smark] 窗口按 oldString 行数缩放：确保 fileExcerpt 覆盖 oldString 对应区域
--  const oldLineCount = oldLines.length
+-  // 按完整oldString缩放候选窗口，公共长前缀不应遮住行末字符差异。
 -  const fileStart = Math.max(0, bestLine - 1)
--  const fileEnd = Math.min(contentLines.length, bestLine + oldLineCount + 2)
+-  const fileEnd = Math.min(contentLines.length, bestLine + oldLines.length + 2)
 -  const fileExcerpt = contentLines.slice(fileStart, fileEnd).join("\n")
--  // [local-smark] 优先用字符级 diff（信息密度高，只显示差异部分）；
--  // 回退时用 head+tail excerpt（前 200 + 后 200 字符），确保末尾内容可见
--  const diffExcerpt = formatClosestMatchDiff(oldString, fileExcerpt, fileStart + 1, 500)
--  const excerpt = diffExcerpt || (() => {
--    const full = fileExcerpt
--    return full.length <= 500 ? full : full.slice(0, 200) + `\n...[${full.length - 400} chars omitted]...\n` + full.slice(-200)
--  })()
+-  const excerpt = formatClosestMatchExcerpt(oldString, fileExcerpt, fileStart + 1)
 -  return { line: fileStart + 1, excerpt }
--}
--
--// [local-smark] 字符级 diff：diffLines 定位差异行，diffChars 显示字符级差异。
--// 解决长行场景下 .slice(0,500) 截断导致 ]; vs }; 不可见的问题。
--// diffLines 的 change.value 可含多行，用 oneChangePerToken 确保每个 change 一行。
--function formatClosestMatchDiff(
--  oldString: string,
--  fileExcerpt: string,
--  fileStartLine: number,
--  maxChars: number,
--): string {
--  // pendingRemoved 必须在函数内声明——跨调用持久化会导致配对错误
--  const pendingRemoved: string[] = []
--  const changes = diffLines(oldString, fileExcerpt, { oneChangePerToken: true })
--  // 先统计差异行比例，决定是否回退
--  let removedLines = 0
--  let addedLines = 0
--  let unchangedLines = 0
--  for (const c of changes) {
--    const lineCount = c.value.split("\n").filter((l) => l.length > 0).length
--    if (c.removed) removedLines += lineCount
--    else if (c.added) addedLines += lineCount
--    else unchangedLines += lineCount
--  }
--  // [local-smark] 差异行比例：用 max(removed, added) 代表不匹配的行位置数，
--  // 而非 removed+added（一个不匹配产生 1 removed + 1 added = 2，会膨胀比例）。
--  // 总行数用 max(old, file) 行数，避免短 oldString 对长 fileExcerpt 时比例失真。
--  const diffLineCount = Math.max(removedLines, addedLines)
--  const totalLineCount = Math.max(removedLines, addedLines) + unchangedLines
--  // 差异行 > 60% → 结构严重错位，回退 head+tail excerpt
--  if (totalLineCount > 0 && diffLineCount / totalLineCount > 0.6) return ""
--
--  const parts: string[] = []
--  let newIdx = 0
--  let totalChars = 0
--  let omitted = 0
--  for (const change of changes) {
--    const lines = change.value.split("\n").filter((l) => l.length > 0)
--    if (change.added) {
--      // 文件中的行——与上一个 removed 行做 diffChars
--      for (const line of lines) {
--        const oldLine = pendingRemoved.shift()
--        if (oldLine !== undefined) {
--          const formatted = formatCharDiffLine(fileStartLine + newIdx, oldLine, line)
--          if (formatted && totalChars + formatted.length < maxChars) {
--            parts.push(formatted)
--            totalChars += formatted.length + 1
--          } else if (formatted) {
--            omitted++
--          }
--        }
--        newIdx++
--      }
--    } else if (change.removed) {
--      // oldString 中的行——暂存，等待下一个 added 配对
--      for (const line of lines) pendingRemoved.push(line)
--    } else {
--      // 未变化行——跳过（不占用预算），只推进行号
--      newIdx += lines.length
--    }
--  }
--  if (parts.length === 0) return ""
--  // [local-smark] 截断标记：预算耗尽时告知模型还有更多差异
--  if (omitted > 0) parts.push(`...(+${omitted} more diff lines)`)
--  return parts.join("\n")
--}
--
--// [local-smark] 格式化单行字符级 diff：只输出变化点前后 30 字符的 context。
--// 例：行末 }; vs ]; → line 41: "    };" → "    ];"
--// 对 900 字符长行：只显示末尾 30 字符 + 差异，不显示公共前缀。
--function formatCharDiffLine(lineNum: number, oldLine: string, newLine: string): string | undefined {
--  const charDiff: Change[] = diffChars(oldLine, newLine)
--  // 找到第一个变化位置
--  let prefixLen = 0
--  for (const c of charDiff) {
--    if (c.added || c.removed) break
--    prefixLen += c.value.length
--  }
--  // 无差异
--  if (prefixLen >= oldLine.length && prefixLen >= newLine.length) return undefined
--  // 提取变化部分
--  let oldPart = ""
--  let newPart = ""
--  let suffix = ""
--  let inChange = false
--  for (const c of charDiff) {
--    if (c.removed) { oldPart += c.value; inChange = true }
--    else if (c.added) { newPart += c.value; inChange = true }
--    else if (inChange) { suffix = c.value.slice(0, 20); break }
--  }
--  if (!oldPart && !newPart) return undefined
--  // context：变化点前 30 字符 + 变化 + 变化后 20 字符
--  const contextChars = 30
--  const ctxStart = Math.max(0, prefixLen - contextChars)
--  const ctx = oldLine.slice(ctxStart, prefixLen)
--  // 截断过长的 context 和 suffix，控制总输出长度
--  const truncate = (s: string, max: number) => s.length <= max ? s : s.slice(0, max) + "..."
--  return `line ${lineNum}: "${truncate(ctx + oldPart + suffix, 80)}" → "${truncate(ctx + newPart + suffix, 80)}"`
 -}
 -
 -// 计算两个字符串的字符重叠率（0~1），用于 closest match 相似度评估
@@ -3986,7 +3898,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import * as Bom from "@/util/bom"
 +import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
-+import { closestWindow } from "@/patch/match"
++import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
 +// #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
 +
 +const locks = new Map<string, Semaphore.Semaphore>()
@@ -4230,7 +4142,7 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 +
 +          return {
 +            metadata: {
-+              // [local-smark] diagnostics 存新错误数组（delta）+ diagnosticSummary 供 TUI
++              // 未连接时不提供clean摘要；差分数据与formatter后的真实diff各自保留。
 +              diagnostics: { [normalizedFilePath]: newErrorsArr },
 +              // diagnosticSummary 缺失代表 LSP 未可靠完成，TUI 不能显示绿色 clean
 +              ...(diagnosticSummary ? { diagnosticSummary } : {}),
@@ -4286,11 +4198,16 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 +  if (oldString === newString) {
 +    throw new Error("No changes to apply: oldString and newString are identical.")
 +  }
++  if (oldString === "") {
++    throw new Error(
++      "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
++    )
++  }
 +
 +  const first = content.indexOf(oldString)
 +  if (first === -1) {
 +    // closest 只解释失败；即使分数很高也绝不能转成 replacement success。
-+    const closest = closestWindow(content, oldString)
++    const closest = closestMatch(content, oldString)
 +    throw new Error(
 +      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
 +        (closest
@@ -4300,7 +4217,8 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 +  }
 +
 +  // replaceAll 是调用方对多处 exact literal 的显式授权，必须在 ambiguity 拒绝前处理。
-+  if (replaceAll) return content.replaceAll(oldString, newString)
++  // newString 始终是字面文本，不能将 $&、$1 等解释为替换表达式。
++  if (replaceAll) return content.replaceAll(oldString, () => newString)
 +  // 从下一字符寻找可识别重叠 occurrence；未显式 replaceAll 时，任何第二处精确匹配都必须拒绝。
 +  if (content.indexOf(oldString, first + 1) !== -1) {
 +    throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
@@ -5170,13 +5088,7 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
- 
- // [local-smark] 测试与 prompt.ts 通过 MessageV2 命名空间引用 WithParts/Part；
- // 显式 re-export 让命名空间自导出携带这两个类型（SessionV1 为唯一来源）
+@@ -7,1 +7,1 @@
 -export type { WithParts, Part, User, Assistant } from "@opencode-ai/core/v1/session"
 +export type { WithParts, Part, User, Assistant, ToolPart } from "@opencode-ai/core/v1/session"
- import { ProviderV2 } from "@opencode-ai/core/provider"
- import {
-   APIError,
 

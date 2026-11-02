@@ -2213,16 +2213,98 @@ diff --git a/packages/core/schema.json b/packages/core/schema.json
      {
        "columns": [
          {
+diff --git a/packages/core/src/database/migration.ts b/packages/core/src/database/migration.ts
+--- a/packages/core/src/database/migration.ts
++++ b/packages/core/src/database/migration.ts
+@@ -13,4 +13,6 @@
+ export type Migration = {
+   id: string
++  // 旧库完成记录的身份由迁移自身声明，路径或编号变化不能重放已完成的DDL。
++  legacy?: readonly string[]
+   up: (tx: Transaction) => Effect.Effect<void, unknown>
+ }
+@@ -77,3 +79,5 @@
+           for (const entry of entries) {
+-            const migration = input.find((item) => item.id.startsWith(`${entry.prefix}_`))
++            const migration = input.find((item) =>
++              [item.id, ...(item.legacy ?? [])].some((id) => id.startsWith(`${entry.prefix}_`)),
++            )
+             if (!migration) {
+@@ -96,6 +100,7 @@
+     for (const migration of input) {
+       if (completed.has(migration.id)) continue
+       yield* db.transaction((tx) =>
+         Effect.gen(function* () {
+-          yield* migration.up(tx)
++          // 部分新账本也可能来自上次失败启动；原身份已完成时只原子登记新身份。
++          if (!migration.legacy?.some((id) => completed.has(id))) yield* migration.up(tx)
+           yield* tx.run(
+diff --git a/packages/core/test/database-migration-legacy.test.ts b/packages/core/test/database-migration-legacy.test.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/test/database-migration-legacy.test.ts
+@@ -0,0 +1,49 @@
++import { expect, test } from "bun:test"
++import { SqliteClient } from "@effect/sql-sqlite-bun"
++import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
++import { Effect } from "effect"
++import { sql } from "drizzle-orm"
++import { DatabaseMigration } from "@opencode-ai/core/database/migration"
++import requestMigration from "@opencode-ai/core/database/migration/20261009114905_session_request_usage"
++
++test("resumes renamed migrations from named, timestamp-only and partially imported journals", async () => {
++  for (const mode of ["named", "unnamed", "partial"] as const) {
++    await Effect.runPromise(
++      Effect.gen(function* () {
++        const db = yield* EffectDrizzleSqlite.makeWithDefaults()
++        // 用真实生产迁移建立旧表，迁移身份变化不得导致重复建表或丢失费用。
++        yield* db.run(sql`CREATE TABLE session (id text PRIMARY KEY)`)
++        yield* db.transaction(requestMigration.up)
++        yield* db.run(sql`INSERT INTO session (id) VALUES ('session')`)
++        yield* db.run(sql`INSERT INTO request_usage (session_id, request_id, root_request_id, source, status, agent, provider_id, model_id, tokens_total, cost_micros, time_created, time_updated) VALUES ('session', 'request', 'request', 'prompt', 'completed', 'build', 'provider', 'model', 1234, 5678, 1, 2)`)
++        const before = yield* db.all(sql`SELECT * FROM request_usage`)
++        if (mode === "unnamed") {
++          // 旧Drizzle版本仅有时间戳，仍须找到同一条迁移的历史身份。
++          yield* db.run(sql`CREATE TABLE __drizzle_migrations (created_at integer)`)
++          yield* db.run(sql`INSERT INTO __drizzle_migrations VALUES (${Date.UTC(2026, 3, 22, 13, 6, 33)})`)
++        }
++        if (mode !== "unnamed") {
++          yield* db.run(sql`CREATE TABLE __drizzle_migrations (name text)`)
++          yield* db.run(sql`INSERT INTO __drizzle_migrations VALUES ('20260422130633_request_usage_tracking')`)
++        }
++        if (mode === "partial") {
++          // 失败启动已导入旧身份并完成部分新迁移，非空账本同样需要接续。
++          yield* db.run(sql`CREATE TABLE migration (id text PRIMARY KEY, time_completed integer NOT NULL)`)
++          yield* db.run(sql`INSERT INTO migration VALUES ('20260422130633_request_usage_tracking', 1), ('unrelated', 1)`)
++        }
++        yield* DatabaseMigration.applyOnly(db, [requestMigration])
++        expect(yield* db.all(sql`SELECT * FROM request_usage`)).toEqual(before)
++        expect(yield* db.all(sql`SELECT id FROM migration WHERE id = ${requestMigration.id}`)).toEqual([{ id: requestMigration.id }])
++        const completed = yield* db.all(sql`SELECT * FROM migration ORDER BY id`)
++        // 第二次启动既不重跑DDL，也不重写完成时间和原账本。
++        yield* DatabaseMigration.applyOnly(db, [requestMigration])
++        expect(yield* db.all(sql`SELECT * FROM migration ORDER BY id`)).toEqual(completed)
++        expect(yield* db.all(sql`SELECT * FROM request_usage`)).toEqual(before)
++        expect(yield* db.get(sql`SELECT count(*) AS count FROM __drizzle_migrations`)).toEqual({ count: 1 })
++      }).pipe(
++        Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })),
++        Effect.scoped,
++      ),
++    )
++  }
++})
 diff --git a/packages/core/src/database/migration/20261009114905_session_request_usage.ts b/packages/core/src/database/migration/20261009114905_session_request_usage.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/database/migration/20261009114905_session_request_usage.ts
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +
 +export default {
 +  id: "20261009114905_session_request_usage",
++  // 费用表的source身份保持有效，升级保留原请求、助手账本与统计值。
++  legacy: ["20260422130633_request_usage_tracking"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      yield* tx.run(`

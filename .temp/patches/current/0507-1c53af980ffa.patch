@@ -467,17 +467,17 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
 index 13d0ff55b..0932d90e9 100644
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -18,6 +18,10 @@ import { Permission } from "@/permission"
- import path from "path"
+@@ -17,6 +17,10 @@ import { Permission } from "@/permission"
+ import { Database } from "@opencode-ai/core/database/database"
  import { InstanceState } from "@/effect/instance-state"
- import { mergeRanges } from "@/util/range"
+ import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
 +import { formatTaskIdNotice } from "@/util/output-notice"
 +
 +// SessionID 的 Schema 生成器使用固定 26 位 body；完整 ID = "ses_" + body，旧 brand 边界不收紧。
 +const SESSION_ID_BODY_LENGTH = 26
  
- // [local-smark] 从父 session 的 messages 提取已读文件列表，
- // 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
+ // 只适配V1历史形状，聚合、预算与转义均由两代共用的Core owner承担。
+ export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
 @@ -145,10 +149,13 @@ function renderOutput(input: {
    state: "running" | "completed" | "error"
    summary?: string
@@ -592,11 +592,10 @@ index 13d0ff55b..0932d90e9 100644
            }),
          (_, exit) =>
 
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
-index edd2f93fc..39f61b437 100644
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
-@@ -125,6 +125,21 @@ export function formatCompactionClearedNotice() {
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
+@@ -127,5 +127,20 @@ export function formatCompactionClearedNotice() {
    return formatNotice({ type: "compaction_cleared", source: "tool_output", reason: "old_result_pruned" })
  }
  
@@ -615,9 +614,129 @@ index edd2f93fc..39f61b437 100644
 +  })
 +}
 +
- function formatNotice(input: Notice) {
-   // #282：空值属性直接省略，保持单行、稳定属性顺序（对象字面量序）
-   return `<opencode_notice ${Object.entries(input)
+ // 只截模型交付文本；旧单边零上限禁用截断，显式双向预算保留source的零端退化语义。
+ export function truncateForCompaction(text: string, maxChars?: number, tailChars?: number) {
+
+diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
+--- a/packages/opencode/src/util/output-notice.ts
++++ b/packages/opencode/src/util/output-notice.ts
+@@ -1 +1 @@
+-export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, truncateForCompaction, formatLongExecutionNotice, formatShellExecutionNotice, LONG_EXECUTION_NOTICE_MS } from "@opencode-ai/core/util/output-notice"
++export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, formatTaskIdNotice, truncateForCompaction, formatLongExecutionNotice, formatShellExecutionNotice, LONG_EXECUTION_NOTICE_MS } from "@opencode-ai/core/util/output-notice"
+
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -22,6 +22,7 @@ import { Tools } from "./tools"
+ import { ToolRegistry } from "./registry"
+ import { Tool } from "./tool"
+ import { TaskPrompt } from "./task-prompt"
++import { formatTaskIdNotice } from "../util/output-notice"
+ 
+ export const name = "task"
+ export const description = TaskPrompt.description
+@@ -39,1 +40,1 @@ export const Input = Schema.Struct({
+-export const Output = Schema.Struct({ task_id: Schema.String, state: Schema.Literals(["running", "completed"]), output: Schema.String })
++export const Output = Schema.Struct({ task_id: Schema.String, state: Schema.Literals(["running", "completed"]), output: Schema.String, notice: Schema.optional(Schema.String) })
+@@ -70,7 +71,7 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
+   yield* tools.register({ [name]: Tool.make({
+     description: `${description}\n\nBackground mode returns immediately and delivers completion automatically. Do not sleep or poll; continue non-overlapping work.`,
+     input: Input, output: Output,
+-    toModelOutput: ({ output }) => [{ type: "text", text: `task_id: ${output.task_id}\n<task_${output.state === "running" ? "status" : "result"}>\n${output.output}\n</task_${output.state === "running" ? "status" : "result"}>` }],
++    toModelOutput: ({ output }) => [{ type: "text", text: `task_id: ${output.task_id}\n${output.notice ? `${output.notice}\n` : ""}<task_${output.state === "running" ? "status" : "result"}>\n${output.output}\n</task_${output.state === "running" ? "status" : "result"}>` }],
+     execute: (input, context) => Effect.gen(function* () {
+       const agent = (yield* available).find(item => item.id === input.subagent_type)
+       if (!agent) return yield* new ToolFailure({ message: `Unknown agent type: ${input.subagent_type} is not a valid agent type` })
+@@ -93,7 +94,12 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
+-      const existing = input.task_id ? yield* store.get(SessionV2.ID.make(input.task_id)) : undefined
++      // 沿旧 brand 的 ses 前缀构造候选；只有完整26位裸body补一次前缀，不做模糊查找。
++      const candidate = input.task_id?.startsWith("ses") ? input.task_id
++        : input.task_id?.length === 26 ? `ses_${input.task_id}` : undefined
++      const existing = candidate ? yield* store.get(SessionV2.ID.make(candidate)) : undefined
+       // 恢复必须仍属于本父会话与Location，不把任意其他Session当作委派目标。
+-      if (input.task_id && (!existing || existing.parentID !== parent.id || existing.location.directory !== location.directory || existing.location.workspaceID !== location.workspaceID))
++      if (existing && (existing.parentID !== parent.id || existing.location.directory !== location.directory || existing.location.workspaceID !== location.workspaceID))
+         return yield* new ToolFailure({ message: `Unknown task_id: ${input.task_id}` })
++      // 未命中才新建并告知独立上下文；越界命中继续拒绝，DB defect及中断也不能当miss。
++      const notice = input.task_id && !existing ? formatTaskIdNotice({ provided: input.task_id }) : undefined
+       const history = yield* sessions.context(parent.id)
+       const assistant = history.findLast(item => item.type === "assistant" && item.id === context.assistantMessageID)
+       const model = agent.model ?? (assistant?.type === "assistant" ? assistant.model : parent.model)
+@@ -115,7 +121,8 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
+         agent: agent.id, model, permissions: childPermission,
+       }))
+       // 摘录冻结于本次父历史，排队的extension不能改采稍后的其他调用上下文。
+-      const parentContext = (input.inspected_files ?? (input.task_id ? "none" : "summary")) === "summary"
++      // 默认跟实际恢复结果，非法ID导致新建仍须带父已读摘要。
++      const parentContext = (input.inspected_files ?? (existing ? "none" : "summary")) === "summary"
+         ? FileEvidence.parentSummary(history.flatMap(message => message.type === "assistant" ? message.content.flatMap(part =>
+           part.type === "tool" && part.name === "read" && part.provider?.executed !== true && part.time.pruned === undefined && part.state.status === "completed"
+             ? [part.state.structured.read] : []) : []), location.project.directory) : undefined
+@@ -161,6 +168,6 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
+         return sessions.prompt({ sessionID: parent.id, prompt: { text: `<task id="${child.id}" state="${result.info.status}">\n${result.info.output ?? result.info.error ?? ""}\n</task>` } }).pipe(Effect.asVoid)
+       }), Effect.catch(error => Effect.logError("Failed to deliver background task result", error)), Effect.forkIn(scope, { startImmediately: true }), Effect.asVoid)
+-      const running = { task_id: child.id, state: "running" as const, output: "The task is working in the background. You will be notified automatically when it finishes. DO NOT sleep, poll, or duplicate this task's work. Continue non-overlapping work." }
++      const running = { task_id: child.id, state: "running" as const, notice, output: "The task is working in the background. You will be notified automatically when it finishes. DO NOT sleep, poll, or duplicate this task's work. Continue non-overlapping work." }
+       // 子任务可能在start返回前运行；先保证挂接取消责任，再恢复前台等待的可中断性。
+       return yield* Effect.uninterruptibleMask(restore => Effect.gen(function* () {
+       if (yield* background.extend({ id: child.id, run: restore(runTask) })) return running
+@@ -175,5 +182,5 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
+           if (result?.metadata?.background === true) return Effect.succeed(running)
+           if (result?.status === "error" || result?.status === "cancelled") return new ToolFailure({ message: result.error ?? "Task cancelled" })
+-          return Effect.succeed({ task_id: child.id, state: "completed" as const, output: result?.output ?? "" })
++          return Effect.succeed({ task_id: child.id, state: "completed" as const, notice, output: result?.output ?? "" })
+         }),
+         Effect.onInterrupt(() => background.cancel(child.id).pipe(Effect.andThen(sessions.interrupt(child.id)))),
+
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1453,4 +1453,4 @@ describe("SessionRunner", () => {
+       sessionID, agent: AgentV2.ID.make("plan"), assistantMessageID: SessionMessage.ID.make("msg_task_parent"),
+       call: { type: "tool-call", id: task_id ? "call-task-resume" : "call-task-first", name: "task",
+-        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id ? { task_id } : {}), ...(inspected_files ? { inspected_files } : {}) } },
++        input: { description: "Research scoped implementation", prompt: "Inspect the requested module", subagent_type, ...(task_id === undefined ? {} : { task_id }), ...(inspected_files ? { inspected_files } : {}) } },
+     })))
+@@ -1643,6 +1643,39 @@ describe("SessionRunner", () => {
+     yield* Fiber.interrupt(cancelled)
+     expect((yield* jobs.get(childID))?.status).toBe("cancelled")
+     expect(yield* sessions.active).not.toContain(child.id)
+     streamGate = undefined
+     streamStarted = undefined
++
++    // 真实leaf/DB/fake模型验证省略、空串、非法及不存在ID；新建默认summary，裸body恢复不重复提示。
++    for (const provided of [undefined, "", 'not-a-session"<&', "ses_missing", "a".repeat(26)]) {
++      response = fragmentFixture("text", "invalid-task", ["Fresh result"]).completeEvents
++      const created = yield* invoke(provided)
++      const data = Schema.decodeUnknownSync(TaskTool.Output)(created.output?.structured)
++      expect(data.task_id).not.toBe(provided)
++      expect(data.state).toBe("completed")
++      const fresh = SessionV2.ID.make(data.task_id)
++      expect((yield* sessions.context(fresh)).findLast(message => message.type === "user")).toMatchObject({ text: expect.stringContaining("<parent_context>") })
++      if (provided) {
++        expect(data.notice).toContain('reason="invalid_provided"')
++        expect(data.notice).toContain('action="created_new"')
++        expect(created.output?.content[0]).toMatchObject({ type: "text", text: expect.stringContaining('reason="invalid_provided"') })
++      } else {
++        expect(data.notice).toBeUndefined()
++        expect(created.output?.content[0]).toMatchObject({ type: "text", text: expect.not.stringContaining("opencode_notice") })
++      }
++      const body = data.task_id.slice("ses_".length)
++      expect(body).toHaveLength(26)
++      response = fragmentFixture("text", "resume-body", ["Body resumed"]).completeEvents
++      const restored = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(body)).output?.structured)
++      expect(restored.task_id).toBe(fresh)
++      expect(restored.notice).toBeUndefined()
++      expect((yield* sessions.context(fresh)).findLast(message => message.type === "user")).toMatchObject({ text: "Inspect the requested module" })
++    }
++    // 有效ID越界仍拒绝；不能把异Location命中当miss并偷偷新建或推进旧任务。
++    const beforeForeign = yield* sessions.context(child.id)
++    yield* db.update(SessionTable).set({ directory: "/elsewhere" }).where(eq(SessionTable.id, child.id)).run().pipe(Effect.orDie)
++    const wrongLocation = yield* invoke(childID)
++    expect(wrongLocation.result).toMatchObject({ type: "error", value: `Unknown task_id: ${childID}` })
++    expect(yield* sessions.context(child.id)).toEqual(beforeForeign)
++    yield* db.update(SessionTable).set({ directory: "/project" }).where(eq(SessionTable.id, child.id)).run().pipe(Effect.orDie)
+   }).pipe(Effect.provide(Layer.effect(BackgroundJob.Service, BackgroundJob.make))))
 
 diff --git a/packages/opencode/test/tool/task.test.ts b/packages/opencode/test/tool/task.test.ts
 index a50a80ca4..e3efaf17d 100644

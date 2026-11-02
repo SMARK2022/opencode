@@ -12,6 +12,156 @@ finalizeOpenToolParts 终态闭合、三 handler getPart 权威化、RunForEach 
 post-drain finalize）；reviewer-service.test 三 closure .live 用例 + closureFixture + sessionPartStore
 retrofit（3 echo fixture + token-capture getPart）+ openAIReviewPendingStream；httpapi-session.test
 ownership 用例（per-test provide 模式 + TestLLMServer）。
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -165,5 +165,8 @@ const layer = Layer.effect(Service, Effect.gen(function* () {
+             const finalizer = exit._tag === "Failure"
+             yield* publisher.flush(finalizer)
++            // 成功裁决或文本回退也可能遗留其它call的输入，attempt退出必须一并闭合。
++            if (exit._tag === "Success")
++              yield* publisher.failUnsettledTools("Tool execution did not complete before stream ended", false, finalizer)
+             if (exit._tag === "Failure") {
+               const failure = Cause.squash(exit.cause)
+               const reason = failure instanceof Error ? failure.message : "Review cancelled"
+
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -238,16 +238,17 @@ const failUnsettledTools = Effect.fn("SessionRunner.failUnsettledTools")(function* (
+     for (const [callID, tool] of tools) {
+       if (tool.settled || (hostedOnly && !tool.providerExecuted)) continue
+-      tool.settled = true
+       yield* events.publish(SessionEvent.Tool.Failed, {
+         sessionID: input.sessionID,
+         timestamp: yield* timestamp,
+         assistantMessageID: tool.assistantMessageID,
+         callID,
+         error: { type: "unknown", message },
+         provider: {
+           executed: tool.providerExecuted,
+           ...(tool.providerMetadata === undefined ? {} : { metadata: tool.providerMetadata }),
+         },
+       }, { finalizer })
++      // 发布失败仍保留未结算身份；提交后通知中断则由持久投影的终态guard保留winner。
++      tool.settled = true
+     }
+   })
+@@ -378,6 +379,5 @@ const publish = Effect.fnUntraced(function* (event: LLMEvent, outputPaths?: readonly string[]) {
+         if (tool.settled) {
+           if (event.result.type === "error") return
+           return yield* Effect.die(`Duplicate tool result: ${event.id}`)
+         }
+-        tool.settled = true
+         const result = settledOutput(event.output, event.result)
+@@ -395,5 +395,6 @@ const publish = Effect.fnUntraced(function* (event: LLMEvent, outputPaths?: readonly string[]) {
+             result: event.result,
+             provider,
+           })
++          tool.settled = true
+           return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+         }
+@@ -407,5 +408,6 @@ const publish = Effect.fnUntraced(function* (event: LLMEvent, outputPaths?: readonly string[]) {
+           ...(provider.executed ? { result: event.result } : {}),
+           provider,
+         })
++        tool.settled = true
+         return { failed: false, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+       }
+@@ -417,4 +419,3 @@ const publish = Effect.fnUntraced(function* (event: LLMEvent, outputPaths?: readonly string[]) {
+         if (tool.settled) return yield* Effect.die(`Duplicate tool error: ${event.id}`)
+-        tool.settled = true
+         yield* events.publish(SessionEvent.Tool.Failed, {
+           sessionID: input.sessionID,
+@@ -427,5 +428,6 @@ const publish = Effect.fnUntraced(function* (event: LLMEvent, outputPaths?: readonly string[]) {
+             ...(event.providerMetadata === undefined ? {} : { metadata: event.providerMetadata }),
+           },
+         })
++        tool.settled = true
+         return { failed: true, name: tool.name, input: tool.input, assistantMessageID: tool.assistantMessageID, callID: event.id }
+       }
+
+diff --git a/packages/core/test/session-runner-tool-events.test.ts b/packages/core/test/session-runner-tool-events.test.ts
+--- a/packages/core/test/session-runner-tool-events.test.ts
++++ b/packages/core/test/session-runner-tool-events.test.ts
+@@ -15,6 +15,7 @@
+-const capture = () => {
++const capture = (beforePublish = (_type: string) => {}) => {
+   const published: Array<{ readonly type: string; readonly data: unknown }> = []
+   const events = EventV2.Service.of({
+     publish: (definition, data) =>
+       Effect.sync(() => {
++        beforePublish(definition.type)
+         const event = { id: EventV2.ID.create(), type: definition.type, data } as EventV2.Payload<typeof definition>
+@@ -87,3 +88,6 @@ test("local tool success serializes media base64 once and reconstructs from structured content", async () => {
+     ],
+   })
++  // 正常结果已提交后，attempt清理不能另发失败终态。
++  await Effect.runPromise(publisher.failUnsettledTools("stream ended", false, true))
++  expect(published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(0)
+ })
+@@ -113,4 +117,19 @@ test("binary failure emits no success event", async () => {
+   expect(repeated).toBeUndefined()
+   expect(published.some((event) => event.type === "session.next.tool.success.1")).toBe(false)
+   expect(published.some((event) => event.type === "session.next.tool.failed.1")).toBe(true)
++  let rejected = false
++  const retryable = capture(type => {
++    if (type !== SessionEvent.Tool.Failed.type || rejected) return
++    rejected = true
++    throw new Error("terminal commit failed")
++  })
++  await Effect.runPromise(retryable.publisher.publish(call))
++  // 终态写入失败不能先把内存标记为settled，否则退出清理会漏掉持久running。
++  const failed = await Effect.runPromise(retryable.publisher.publish(LLMEvent.toolResult({ id: call.id, name: call.name,
++    result: { type: "error", value: "failed" } })).pipe(Effect.exit))
++  expect(failed._tag).toBe("Failure")
++  await Effect.runPromise(retryable.publisher.failUnsettledTools("stream ended", false, true))
++  expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
++  await Effect.runPromise(retryable.publisher.failUnsettledTools("repeated cleanup", false, true))
++  expect(retryable.published.filter(event => event.type === "session.next.tool.failed.1")).toHaveLength(1)
+ })
+
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -49,3 +49,4 @@
+ let reviewOAuth = false
++let reviewOpenTool = false
+ const reviewBodies: unknown[] = []
+ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
+@@ -71,3 +72,4 @@ const reviewClient = Layer.succeed(LLMClient.Service, LLMClient.Service.of({
+     return Stream.make(
++      ...(reviewOpenTool ? [LLMEvent.toolInputStart({ id: "review-incomplete", name: "permission_review_decision" })] : []),
+       LLMEvent.reasoningStart({ id: "review-reason" }),
+       LLMEvent.reasoningDelta({ id: "review-reason", text: "Actual reviewer reasoning before decision." }),
+@@ -732,3 +734,6 @@
+   it.effect("persists live native review traces and keeps outcomes through tool settlement", () => Effect.gen(function* () {
++    // 只在此真实DB用例注入未完成输入，覆盖正常裁决与取消的自动attempt清理。
++    reviewOpenTool = true
++    yield* Effect.addFinalizer(() => Effect.sync(() => { reviewOpenTool = false }))
+     reviewSettings = new Config.Info({ approvals_reviewer: "auto_review" })
+     assessment = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
+@@ -762,3 +767,15 @@
+     yield* Deferred.succeed(reviewGate, undefined)
+     expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
++    const completedReview = (yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)
++    if (!completedReview || completedReview.type !== "assistant") return yield* Effect.die("Missing completed reviewer")
++    expect(completedReview).toMatchObject({ content: expect.arrayContaining([
++      expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) }),
++      expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
++    ]) })
++    // 模拟已提交Success的通知返回窗口：迟到清理必须尊重真实投影的completed winner。
++    yield* events.publish(SessionEvent.Tool.Failed, { sessionID: SessionV2.ID.make(child.id), assistantMessageID: completedReview.id,
++      timestamp: yield* DateTime.now, callID: "review", error: { type: "unknown", message: "late attempt cleanup" }, provider: { executed: false } })
++    expect((yield* sessions.message(completedReview.id))?.message).toMatchObject({ content: expect.arrayContaining([
++      expect.objectContaining({ id: "review", state: expect.objectContaining({ status: "completed" }) }),
++    ]) })
+     yield* events.publish(SessionEvent.Tool.Progress, {
+@@ -783,2 +801,3 @@
+     expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
++    expect((yield* sessions.context(SessionV2.ID.make(child.id))).at(-1)).toMatchObject({ content: expect.arrayContaining([expect.objectContaining({ id: "review-incomplete", state: expect.objectContaining({ status: "error" }) })]) })
+     expect((yield* sessions.message(assistantMessageID))?.message).toMatchObject({ content: [{ state: { status: "completed" } }, { state: { status: "running", structured: { autoReview: { status: "aborted", sessionID: child.id } } } }] })
+
 diff --git a/docs/plans/session-runner-ownership-tool-closure.md b/docs/plans/session-runner-ownership-tool-closure.md
 new file mode 100644
 --- /dev/null

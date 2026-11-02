@@ -5,9 +5,9 @@ Subject: [PATCH] =?UTF-8?q?feat(vscode):=20=E6=9B=B4=E6=96=B0=E7=AC=94?=
  =?UTF-8?q?=E8=AE=B0=E6=9C=AC=E7=8E=AF=E5=A2=83=E6=8F=8F=E8=BF=B0=EF=BC=8C?=
  =?UTF-8?q?=E5=A2=9E=E5=BC=BA=E5=86=85=E6=A0=B8=E9=80=89=E6=8B=A9=E5=92=8C?=
 
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
 @@ -46,8 +46,8 @@ export const VscodeNotebookDescriptions = {
      "filePath and operation are required. `reason` is an optional brief description shown to the user.",
      "Operations:",
@@ -20,6 +20,35 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packag
      "  save      — persist the notebook document to disk on user request only. Do not save unprompted; let the user review changes first.",
    ].join("\n"),
  }
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -169,7 +169,25 @@
+     // 审批来自各自真实调用ID；被取消编辑不丢失已发生的审批事实。
+     expect(permissions).toMatchObject([
+       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-4" } },
+       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
+       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
+       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
+     ])
++    // 只验证原生五态响应穿过真实CLI，不在fixture重演或伪造内核判态算法。
++    for (const [status, data] of [
++      ["configured", { preCheck: { hasKernel: true, configured: true, probeSucceeded: true } }],
++      ["selected", { selectKernel: { invoked: true, result: true, accepted: true }, probe: { postSelect: { hasKernel: false, configured: false } } }],
++      ["needs-selection", { selectKernel: { invoked: true, result: false, rejectedOrCancelled: true } }],
++      ["selection-requested", { selectKernel: { invoked: true } }],
++      ["failed", { selectKernel: { invoked: false, error: "fixture selection failure" } }],
++    ] as const) {
++      const response = { ran: true, summary: `Operation: configure\nStatus: ${status}`, data: { path: filePath, operation: "configure", status, ...data }, note: "Public-API configure." }
++      environments.configure = response
++      const result = yield* invoke("vscode_notebook_env", { filePath, operation: "configure", reason: status })
++      expect(result.result.type).toBe("text")
++      expect(result.output?.structured).toEqual(response)
++      expect(result.output?.content).toEqual([{ type: "text", text: response.summary }])
++    }
++    expect(received).toHaveLength(15)
++    expect(received.slice(-5).map(item => item.body)).toEqual(["configured", "selected", "needs-selection", "selection-requested", "failed"].map(reason => ({ filePath, operation: "configure", reason })))
++    expect(permissions).toHaveLength(4)
 diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 --- a/sdks/vscode/src/notebook/env.ts
 +++ b/sdks/vscode/src/notebook/env.ts
@@ -94,7 +123,7 @@ diff --git a/sdks/vscode/src/notebook/env.ts b/sdks/vscode/src/notebook/env.ts
 -  return {
 -    ran: true,
 -    summary: ["Operation: configure", hasSelect ? "Kernel selection triggered. The kernel will start on first cell execution." : "notebook.selectKernel not registered; select manually.", reason ? `Reason: ${reason}` : undefined].filter(Boolean).join("\n"),
--    data: { path: primaryPath, operation: "configure", reason, jupyterFound: true, selectKernelCommandFound: hasSelect, durationMs: Date.now() - startedAt },
+-    data: { path: primaryPath, operation: "configure", reason, jupyterFound: true, jupyterActive: jupyter.isActive, selectKernelAvailable: hasSelect, dirty: notebook.isDirty, durationMs: Date.now() - startedAt },
 -    note: "Light-weight best-effort. Cannot read Jupyter's internal controller/kernel state.",
 -  }
 +  const visibility = {

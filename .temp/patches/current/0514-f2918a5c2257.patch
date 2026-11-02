@@ -956,12 +956,14 @@ index 0000000000000000000000000000000000000000..7e74a4a365c6ab0124318086f17c4642
 +- Successful normalized matches may rewrite the recorded `oldString` in tool history
 +  to the actual file text that was replaced (ground truth for later turns).
 
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000
 --- /dev/null
-+++ b/packages/opencode/src/tool/edit-apply.ts
-@@ -0,0 +1,507 @@
++++ b/packages/core/src/tool/edit-apply.ts
+@@ -0,0 +1,541 @@
++export * as EditApply from "./edit-apply"
++
 +/**
 + * edit 文本替换的唯一语义所有者（单条与多条 edits 共用）。
 + *
@@ -1448,7 +1450,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +  // exact：原文 reverse 切串（旧 replace 的推广）；normalized：preserve 触碰行
 +  const contentNew = usedNormalized
 +    ? applyReplacementsPreservingUnchangedLines(content, replacementBase, allRanges)
-+    : applyReplacements(replacementBase, allRanges)
++    : applyReplacements(replacementBase, sorted)
 +
 +  if (content === contentNew) {
 +    throw new Error(
@@ -1469,77 +1471,8 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
 +  return applyEdits(content, [{ oldString, newString, replaceAll }]).contentNew
 +}
-
-diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index 6ca4b061f..951bbb583 100644
---- a/packages/opencode/src/tool/edit.ts
-+++ b/packages/opencode/src/tool/edit.ts
-@@ -1,8 +1,3 @@
--// the approaches in this edit tool are sourced from
--// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
--// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
--// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
--
- import * as path from "path"
- import { Effect, Schema, Semaphore } from "effect"
- import * as Tool from "./tool"
-@@ -20,8 +15,18 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
- import * as Bom from "@/util/bom"
- import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
- import { closestWindow } from "@/patch/match"
-+// #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
-+import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
- // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
- 
-+/**
-+ * #514 兼容导出：单点替换 = edit-apply 单元素路径，保证既有测试与外部调用仍见 replace API。
-+ * 禁止在此重实现第二套匹配算法。
-+ */
-+export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
-+  return applyExactReplace(content, oldString, newString, replaceAll)
-+}
 +
- const locks = new Map<string, Semaphore.Semaphore>()
- 
- function lock(filePath: string) {
-@@ -34,17 +39,69 @@ function lock(filePath: string) {
-   return next
- }
- 
--export const Parameters = Schema.Struct({
--  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
--  oldString: Schema.String.annotate({ description: "The text to replace" }),
--  newString: Schema.String.annotate({
--    description: "The text to replace it with (must be different from oldString)",
-+const EditItem = Schema.Struct({
-+  oldString: Schema.String.annotate({
-+    description:
-+      "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
-   }),
-+  newString: Schema.String.annotate({ description: "Replacement text for this targeted edit." }),
-   replaceAll: Schema.optional(Schema.Boolean).annotate({
--    description: "Replace all occurrences of oldString (default false)",
-+    description: "Replace all occurrences of oldString for this edit (default false)",
-   }),
- })
- 
-+export const Parameters = Schema.Struct({
-+  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
-+  edits: Schema.mutable(Schema.Array(EditItem)).annotate({
-+    description:
-+      "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
-+  }),
-+})
-+
-+export type Parameters = Schema.Schema.Type<typeof Parameters>
-+
-+/**
-+ * #514 decode 前折叠 legacy 入参（Pi #2639 教训）：
-+ * - wire JSON Schema 只广告 filePath + edits[]，避免模型混用双形态
-+ * - 若 edits 缺失且存在顶层 oldString/newString，折成单元素 edits
-+ * - 若 edits 已非空，丢弃顶层字段（edits 权威，不 append）
-+ * - edits 有时被序列化为 JSON 字符串，尽量 parse 成数组
-+ */
++// 两代仅广告 edits；旧单条输入和序列化数组在各自 codec 校验前沿同一规则折叠。
 +export function prepareEditArguments(input: unknown): unknown {
 +  if (!input || typeof input !== "object") return input
 +  const args = { ...(input as Record<string, unknown>) }
@@ -1570,15 +1503,79 @@ index 6ca4b061f..951bbb583 100644
 +  delete args.replaceAll
 +  return args
 +}
+
+diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
+index 6ca4b061f..951bbb583 100644
+--- a/packages/opencode/src/tool/edit.ts
++++ b/packages/opencode/src/tool/edit.ts
+@@ -1,8 +1,3 @@
+-// the approaches in this edit tool are sourced from
+-// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-23-25.ts
+-// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/editCorrector.ts
+-// https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
+-
+ import * as path from "path"
+ import { Effect, Schema, Semaphore } from "effect"
+ import * as Tool from "./tool"
+@@ -20,8 +15,14 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import * as Bom from "@/util/bom"
+ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
+ import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
++import { EditApply } from "@opencode-ai/core/tool/edit-apply"
+ // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
+ 
++// 既有单条导出仍委托共享引擎，不保留第二套匹配实现。
++export function replace(content: string, oldString: string, newString: string, replaceAll = false): string {
++  return EditApply.replace(content, oldString, newString, replaceAll)
++}
 +
-+function isCreate(edits: EditReplacement[]) {
+ const locks = new Map<string, Semaphore.Semaphore>()
+ 
+ function lock(filePath: string) {
+@@ -34,17 +35,36 @@ function lock(filePath: string) {
+   return next
+ }
+ 
+-export const Parameters = Schema.Struct({
+-  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
+-  oldString: Schema.String.annotate({ description: "The text to replace" }),
+-  newString: Schema.String.annotate({
+-    description: "The text to replace it with (must be different from oldString)",
++const EditItem = Schema.Struct({
++  oldString: Schema.String.annotate({
++    description:
++      "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
+   }),
++  newString: Schema.String.annotate({ description: "Replacement text for this targeted edit." }),
+   replaceAll: Schema.optional(Schema.Boolean).annotate({
+-    description: "Replace all occurrences of oldString (default false)",
++    description: "Replace all occurrences of oldString for this edit (default false)",
+   }),
+ })
+ 
++export const Parameters = Schema.Struct({
++  filePath: Schema.String.annotate({ description: "The absolute path to the file to modify" }),
++  edits: Schema.mutable(Schema.Array(EditItem)).annotate({
++    description:
++      "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
++  }),
++})
++
++export type Parameters = Schema.Schema.Type<typeof Parameters>
++
++// 只在原 decode 入口折叠旧形态，Native codec 复用同一个函数。
++export function prepareEditArguments(input: unknown): unknown {
++  return EditApply.prepareEditArguments(input)
++}
++
++function isCreate(edits: EditApply.EditReplacement[]) {
 +  return edits.length === 1 && edits[0].oldString === ""
 +}
 +
  export const EditTool = Tool.define(
    "edit",
    Effect.gen(function* () {
-@@ -56,44 +113,57 @@ export const EditTool = Tool.define(
+@@ -56,44 +76,57 @@ export const EditTool = Tool.define(
      return {
        description: DESCRIPTION,
        parameters: Parameters,
@@ -1596,7 +1593,7 @@ index 6ca4b061f..951bbb583 100644
 +            throw new Error("edits must contain at least one replacement.")
            }
  
-+          const edits = params.edits as EditReplacement[]
++          const edits = params.edits
            const instance = yield* InstanceState.context
            const filePath = path.isAbsolute(params.filePath)
              ? params.filePath
@@ -1657,7 +1654,7 @@ index 6ca4b061f..951bbb583 100644
              )
              if (!hasTouched) {
                throw new Error(
-@@ -107,27 +177,29 @@ export const EditTool = Tool.define(
+@@ -107,27 +140,29 @@ export const EditTool = Tool.define(
              metadata: {
                action_kind: "tool",
                tool: "edit",
@@ -1676,7 +1673,7 @@ index 6ca4b061f..951bbb583 100644
            let contentOld = ""
            let contentNew = ""
 +          // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
-+          let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
++          let syncInput: { filePath: string; edits: EditApply.EditReplacement[] } | undefined
 +
            yield* lock(filePath).withPermits(1)(
              Effect.gen(function* () {
@@ -1694,7 +1691,8 @@ index 6ca4b061f..951bbb583 100644
                  const desiredBom = next.bom
                  contentOld = ""
                  contentNew = next.text
-@@ -148,6 +220,13 @@ export const EditTool = Tool.define(
+@@ -147,10 +182,17 @@ export const EditTool = Tool.define(
+                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
                  if (yield* format.file(filePath)) {
                    contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
                  }
@@ -1708,7 +1706,10 @@ index 6ca4b061f..951bbb583 100644
                  yield* events.publish(FileSystem.Event.Edited, { file: filePath })
                  yield* events.publish(Watcher.Event.Updated, {
                    file: filePath,
-@@ -162,13 +241,37 @@ export const EditTool = Tool.define(
+                   event: "add",
+                 })
+                 return
+@@ -162,13 +204,37 @@ export const EditTool = Tool.define(
                const source = yield* Bom.readFile(afs, filePath)
                contentOld = source.text
  
@@ -1726,12 +1727,12 @@ index 6ca4b061f..951bbb583 100644
 +              let applied
 +              try {
 +                // #514：单/多 edit 同一 applyEdits；失败诊断的 closest 只解释，不参与成功替换。
-+                applied = applyEdits(baseLF, editsLF, filePath)
++                applied = EditApply.applyEdits(baseLF, editsLF, filePath)
 +              } catch (error) {
 +                const message = error instanceof Error ? error.message : String(error)
 +                if (message.includes("Could not find") || message.includes("Could not find oldString")) {
-+                  const probe = editsLF.find((e) => baseLF.indexOf(e.oldString) === -1) ?? editsLF[0]
-+                  const closest = closestWindow(contentOld, convertToLineEnding(probe.oldString, ending))
++                  const probe = editsLF.find((e) => !EditApply.findMatch(baseLF, e.oldString).found) ?? editsLF[0]
++                  const closest = closestMatch(contentOld, convertToLineEnding(probe.oldString, ending))
 +                  throw new Error(
 +                    message +
 +                      (closest
@@ -1751,7 +1752,7 @@ index 6ca4b061f..951bbb583 100644
  
                diff = trimDiff(
                  createTwoFilesPatch(
-@@ -178,6 +281,7 @@ export const EditTool = Tool.define(
+@@ -178,6 +244,7 @@ export const EditTool = Tool.define(
                    normalizeLineEndings(contentNew),
                  ),
                )
@@ -1759,7 +1760,7 @@ index 6ca4b061f..951bbb583 100644
                yield* ctx.ask({
                  permission: "edit",
                  patterns: [path.relative(instance.worktree, filePath)],
-@@ -205,6 +309,19 @@ export const EditTool = Tool.define(
+@@ -205,6 +272,19 @@ export const EditTool = Tool.define(
                    normalizeLineEndings(contentNew),
                  ),
                )
@@ -1779,7 +1780,7 @@ index 6ca4b061f..951bbb583 100644
              }).pipe(Effect.orDie),
            )
  
-@@ -232,7 +349,8 @@ export const EditTool = Tool.define(
+@@ -232,7 +312,8 @@ export const EditTool = Tool.define(
              },
            })
  
@@ -1789,7 +1790,7 @@ index 6ca4b061f..951bbb583 100644
            const normalizedFilePath = FSUtil.normalizePath(filePath)
            // [local-smark] baseline 在写入后、touch 前采集：LSP 此时还不知道新内容
            const beforeIssues = (yield* lsp.diagnostics())[normalizedFilePath] ?? []
-@@ -269,6 +387,8 @@ export const EditTool = Tool.define(
+@@ -269,6 +350,8 @@ export const EditTool = Tool.define(
                ...(diagnosticSummary ? { diagnosticSummary } : {}),
                diff,
                filediff,
@@ -1798,7 +1799,7 @@ index 6ca4b061f..951bbb583 100644
              },
              title: `${path.relative(instance.worktree, filePath)}`,
              output,
-@@ -314,29 +434,3 @@ export function trimDiff(diff: string): string {
+@@ -314,35 +397,3 @@ export function trimDiff(diff: string): string {
  
    return trimmedLines.join("\n")
  }
@@ -1807,11 +1808,16 @@ index 6ca4b061f..951bbb583 100644
 -  if (oldString === newString) {
 -    throw new Error("No changes to apply: oldString and newString are identical.")
 -  }
+-  if (oldString === "") {
+-    throw new Error(
+-      "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
+-    )
+-  }
 -
 -  const first = content.indexOf(oldString)
 -  if (first === -1) {
 -    // closest 只解释失败；即使分数很高也绝不能转成 replacement success。
--    const closest = closestWindow(content, oldString)
+-    const closest = closestMatch(content, oldString)
 -    throw new Error(
 -      `Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.` +
 -        (closest
@@ -1821,7 +1827,8 @@ index 6ca4b061f..951bbb583 100644
 -  }
 -
 -  // replaceAll 是调用方对多处 exact literal 的显式授权，必须在 ambiguity 拒绝前处理。
--  if (replaceAll) return content.replaceAll(oldString, newString)
+-  // newString 始终是字面文本，不能将 $&、$1 等解释为替换表达式。
+-  if (replaceAll) return content.replaceAll(oldString, () => newString)
 -  // 从下一字符寻找可识别重叠 occurrence；未显式 replaceAll 时，任何第二处精确匹配都必须拒绝。
 -  if (content.indexOf(oldString, first + 1) !== -1) {
 -    throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
@@ -1948,7 +1955,7 @@ index 11be770ce..d0f2f59fb 100644
 -            // 这样 DB 中持久化的 input 就是磁盘上的实际内容，后续上下文重放时
 -            // 模型看到的内容与磁盘一致，避免 edit 基于过期内容匹配 oldString 失败。
 -            // 原始 input 不保留——format 后的内容才是真实落盘内容。
--            input: output.metadata?._formattedContent
+-            input: typeof output.metadata?._formattedContent === "string"
 -              ? { ...match.part.state.input, content: output.metadata._formattedContent }
 -              : match.part.state.input,
 +            // #514：_syncInput/_formattedContent 真值回写收敛到 resolveCompletedToolInput；
@@ -2526,3 +2533,363 @@ index a243e10cc..410a1b56c 100644
    test("omits edit diffs until old and new text fields exist", () => {
      expect(
        completedToolContent("write", {
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -13,7 +13,7 @@ import { createTwoFilesPatch, diffLines } from "diff"
+-import { Effect, Layer, Schema } from "effect"
++import { Effect, Layer, Schema, SchemaGetter } from "effect"
+ import { makeLocationNode } from "../effect/app-node"
+ import { FileMutation } from "../file-mutation"
+ import { FSUtil } from "../fs-util"
+ import { LocationMutation } from "../location-mutation"
+ import { Location } from "../location"
+ import { SessionStore } from "../session/store"
+@@ -22,6 +22,7 @@ import { ToolRegistry } from "./registry"
+ import { closestMatch } from "./edit-excerpt"
++import { EditApply } from "./edit-apply"
+ import { Tool } from "./tool"
+ import { Tools } from "./tools"
+ import { Format } from "../format"
+ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "../util/line-ending"
+ 
+@@ -30,16 +31,34 @@ export const name = "edit"
++const EditItem = Schema.Struct({
++  oldString: Schema.String.annotate({
++    description: "Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll) and must not overlap other edits[].oldString in the same call.",
++  }),
++  newString: Schema.String.annotate({ description: "Replacement text for this targeted edit." }),
++  replaceAll: Schema.Boolean.pipe(Schema.optional).annotate({
++    description: "Replace all occurrences of oldString for this edit (default false)",
++  }),
++})
++
+ export const Input = Schema.Struct({
+   path: Schema.String.annotate({
+     description:
+       "File path to edit. Relative paths resolve within the active Location. Absolute paths inside that Location are accepted; external absolute paths require external_directory approval.",
+   }),
+-  oldString: Schema.String.annotate({ description: "Exact text to replace" }),
+-  newString: Schema.String.annotate({ description: "Replacement text, which must differ from oldString" }),
+-  replaceAll: Schema.Boolean.pipe(Schema.optional).annotate({
+-    description: "Replace all exact occurrences of oldString (default false)",
++  edits: Schema.mutable(Schema.Array(EditItem)).annotate({
++    description: "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+   }),
+ })
+ 
++// 折叠只发生在原 codec 中；广告仍用 Input，不增加 registry 执行或通用兼容入口。
++const InvocationInput = Schema.Unknown.pipe(
++  Schema.decodeTo(Schema.Unknown, {
++    decode: SchemaGetter.transform(EditApply.prepareEditArguments),
++    encode: SchemaGetter.passthrough(),
++  }),
++  Schema.decodeTo(Input),
++)
++
+ export const Output = Schema.Struct({
+   files: Schema.Array(FileDiff.Info),
+   replacements: Schema.Number,
++  syncInput: Schema.optional(Input),
+ })
+@@ -56,15 +75,3 @@ const decodeUtf8 = (content: Uint8Array) => {
+-const countOccurrences = (content: string, search: string, replaceAll: boolean) => {
+-  if (search === "") return content.length + 1
+-  let count = 0
+-  let offset = 0
+-  while ((offset = content.indexOf(search, offset)) !== -1) {
+-    count++
+-    // 单次替换也拒绝重叠的第二命中；replaceAll仍按实际非重叠替换数统计。
+-    offset += replaceAll ? search.length : 1
+-  }
+-  return count
+-}
+-
+ export const toModelOutput = (output: Output) =>
+   [
+     `Edited file successfully: ${output.files[0]?.file}`,
+@@ -102,3 +109,20 @@ const layer = Layer.effectDiscard(
+-            description:
+-              "Replace exact text in one file. Relative paths resolve within the active Location. Absolute paths inside the Location are accepted. Explicit external absolute paths require external_directory approval before edit approval.",
+-            input: Input,
++            description: [
++              "Performs string replacements in files. Supports one or more disjoint edits in a single call. Relative paths resolve within the active Location; external absolute paths require external_directory approval before edit approval.",
++              "",
++              "Usage:",
++              "- You must use your Read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.",
++              "- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: line number + colon + space (e.g., `1: `). Everything after that space is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.",
++              "- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.",
++              "- Prefer one call with multiple entries in edits[] for disjoint regions in the same file instead of multiple edit calls.",
++              "- Each edits[].oldString is matched against the original file snapshot, not after earlier edits in the same call. Do not emit overlapping or nested edits; merge nearby changes into one edit.",
++              "- Keep each oldString as small as possible while still unique. Do not pad with large unchanged regions.",
++              "- Matching tries exact unique literal first, then a conservative normalized form (trailing line whitespace and common unicode quote/dash/space variants). Uniqueness and replaceAll both count under that same normalized-aware domain (e.g. ASCII hyphen and en-dash siblings count as multiples).",
++              "- Indent/tab differences and escape artifacts still fail; re-read and copy exact text.",
++              "- The edit will FAIL if oldString is found multiple times without replaceAll. Provide more surrounding context to make it unique or set replaceAll on that edit item.",
++              "- Use replaceAll on an edit item to rename a string across the file.",
++              "- Use Write to create or overwrite files; edits[].oldString must not be empty.",
++              "- If both edits and legacy top-level oldString/newString are sent, edits wins when non-empty.",
++              "- Successful normalized matches may rewrite the recorded oldString in tool history to the actual file text that was replaced.",
++            ].join("\n"),
++            input: InvocationInput,
++            inputSchema: Schema.toJsonSchemaDocument(Input).schema,
+@@ -127,10 +151,15 @@ const layer = Layer.effectDiscard(
+-                if (input.oldString === input.newString) {
++                if (input.edits.length === 0) {
++                  return yield* new ToolFailure({
++                    message: "edits must contain at least one replacement.",
++                  })
++                }
++                if (input.edits.some(edit => edit.oldString === edit.newString)) {
+                   return yield* new ToolFailure({
+                     message: "No changes to apply: oldString and newString are identical.",
+                   })
+                 }
+-                if (input.oldString === "") {
++                if (input.edits.some(edit => edit.oldString === "")) {
+                   return yield* new ToolFailure({
+                     message: "oldString must not be empty. Use write to create or overwrite a file.",
+                   })
+                 }
+@@ -162,6 +191,6 @@ const layer = Layer.effectDiscard(
+                       metadata: {
+                         // 保留原生diff证据，补齐共享reviewer需要的操作与原始替换负载。
+-                        filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }),
++                        filepath: target.canonical, diff: JSON.stringify({ edits: input.edits }),
+                         action_kind: "tool", tool: "edit", operation: "edit",
+-                        oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll === true,
++                        edits: input.edits,
+                       },
+@@ -180,1 +209,1 @@ const layer = Layer.effectDiscard(
+-                      metadata: { filepath: target.canonical, diff: JSON.stringify({ oldString: input.oldString, newString: input.newString, replaceAll: input.replaceAll }) },
++                      metadata: { filepath: target.canonical, diff: JSON.stringify({ edits: input.edits }) },
+@@ -185,25 +214,22 @@ const layer = Layer.effectDiscard(
+                 const ending = detectLineEnding(source.text)
+-                // LF 目标也先归一请求，保留原有 CRLF 请求编辑 LF 文件的匹配能力。
+-                const oldString = convertToLineEnding(normalizeLineEndings(input.oldString), ending)
+-                const newString = convertToLineEnding(normalizeLineEndings(input.newString), ending)
+-                const replacements = countOccurrences(source.text, oldString, input.replaceAll === true)
+-                if (replacements === 0) {
+-                  const closest = closestMatch(source.text, oldString)
+-                  return yield* new ToolFailure({
+-                    message:
+-                      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings." +
+-                      (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
+-                  })
+-                }
+-                if (replacements > 1 && input.replaceAll !== true) {
+-                  return yield* new ToolFailure({
+-                    message:
+-                      "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
+-                  })
+-                }
+-
+-                const replaced =
+-                  input.replaceAll === true
+-                    // newString 是字面文本，不能把 $&、$1 等误执行为替换表达式。
+-                    ? source.text.replaceAll(oldString, () => newString)
+-                    : source.text.replace(oldString, () => newString)
++                const baseLF = normalizeLineEndings(source.text)
++                const editsLF = input.edits.map(edit => ({
++                  oldString: normalizeLineEndings(edit.oldString),
++                  newString: normalizeLineEndings(edit.newString),
++                  replaceAll: edit.replaceAll,
++                }))
++                // 整批先在同一快照匹配；失败候选只解释，绝不参与成功替换。
++                const applied = yield* Effect.try({
++                  try: () => EditApply.applyEdits(baseLF, editsLF, input.path),
++                  catch: (error) => {
++                    const message = error instanceof Error ? error.message : String(error)
++                    if (!message.includes("Could not find")) return new ToolFailure({ message })
++                    const probe = editsLF.find(edit => !EditApply.findMatch(baseLF, edit.oldString).found) ?? editsLF[0]
++                    const closest = closestMatch(source.text, convertToLineEnding(probe.oldString, ending))
++                    return new ToolFailure({
++                      message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
++                    })
++                  },
++                })
++                const replacements = editsLF.reduce((count, edit) => count + (edit.replaceAll ? EditApply.countOccurrences(baseLF, edit.oldString) : 1), 0)
++                const replaced = convertToLineEnding(applied.contentNew, ending)
+@@ -243,5 +269,11 @@ const layer = Layer.effectDiscard(
+                   ],
+                   replacements,
++                  // 仅保存实际旧 needle；非创建编辑不猜测 formatter 后的局部新 needle。
++                  syncInput: { path: input.path, edits: applied.syncEdits.map(edit => ({
++                    oldString: convertToLineEnding(edit.oldString, ending),
++                    newString: convertToLineEnding(edit.newString, ending),
++                    ...(edit.replaceAll === true ? { replaceAll: true } : {}),
++                  })) },
+                 } satisfies Output
+               })
+             },
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -353,15 +353,21 @@ export const update = Effect.fn("SessionMessageUpdater.update")(function* (
+             match.time.completed = event.data.timestamp
++            const sync = event.data.structured.syncInput
++            // 只有本地 Edit 的完整真值回写输入；provider 同名字段不能改写调用历史。
++            const syncInput = match.name === "edit" && !event.data.provider.executed && sync !== null && typeof sync === "object" &&
++              "path" in sync && typeof sync.path === "string" && "edits" in sync && Array.isArray(sync.edits)
++              ? { path: sync.path, edits: sync.edits }
++              : undefined
+             // 只有本地 Write 的格式化真值改写历史输入；空文件同样是有效最终内容。
+             const formattedContent = match.name === "write" && !event.data.provider.executed && typeof event.data.structured.formattedContent === "string"
+               ? event.data.structured.formattedContent
+               : undefined
+             match.state = castDraft(
+               SessionMessage.ToolStateCompleted.make({
+                 status: "completed",
+-                input: formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent },
++                input: syncInput ?? (formattedContent === undefined ? match.state.input : { ...match.state.input, content: formattedContent }),
+                 // 完成投影后去掉临时整文，避免在 input 与 structured 重复保存。
+                 structured: {
+-                  ...(formattedContent === undefined ? event.data.structured : Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => key !== "formattedContent"))),
++                  ...Object.fromEntries(Object.entries(event.data.structured).filter(([key]) => !(key === "formattedContent" && formattedContent !== undefined) && !(key === "syncInput" && syncInput !== undefined))),
+                   // 终态继续保留本轮reviewID/导航/裁决，不由工具返回值抹去或替换审批事实。
+                   ...(match.state.structured.autoReview === undefined ? {} : { autoReview: match.state.structured.autoReview }),
+                 },
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { FileMutation } from "@opencode-ai/core/file-mutation"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
++import { Format } from "@opencode-ai/core/format"
+ import { Location } from "@opencode-ai/core/location"
+ import { LocationMutation } from "@opencode-ai/core/location-mutation"
+ import { PermissionV2 } from "@opencode-ai/core/permission"
+@@ -82,1 +83,1 @@ const filesystem = Layer.effect(
+-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = []) => {
++const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = [], formatter: Format.Interface["file"] = () => Effect.succeed(false)) => {
+@@ -100,6 +101,8 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = []) => {
+           [FSUtil.node, filesystem],
+           [Location.node, activeLocation],
+           [PermissionV2.node, permission],
++          // 仅替换进程型 formatter，文件条件提交及工具真实结算保持原实现。
++          [Format.node, Layer.succeed(Format.Service, { file: formatter })],
+           [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.succeed(id === sessionID ? history : []) })],
+           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+         ],
+@@ -111,1 +114,1 @@ const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: ReturnType<typeof toolHistory> = []) => {
+-const call = (input: typeof EditTool.Input.Type, id = "call-edit") => ({
++const call = (input: typeof EditTool.Input.Type | { path: string; oldString: string; newString: string; replaceAll?: boolean }, id = "call-edit") => ({
+@@ -119,6 +122,50 @@ const it = testEffect(Layer.empty)
+ describe("EditTool", () => {
++  it.live("applies snapshot batches and normalized literals through the same Native leaf", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      tmp => Effect.gen(function* () {
++        reset()
++        const target = path.join(tmp.path, "batch.txt")
++        const run = (edits: typeof EditTool.Input.Type["edits"]) => withTool(tmp.path,
++          registry => settleTool(registry, call({ path: "batch.txt", edits })), toolHistory("batch.txt"))
++        yield* Effect.promise(() => fs.writeFile(target, "alpha\nbeta\ngamma\n"))
++        // 逆序输入且替换长度不同，必须按同一快照坐标倒序写入。
++        const batch = yield* run([{ oldString: "gamma", newString: "long-G" }, { oldString: "alpha", newString: "A" }])
++        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("A\nbeta\nlong-G\n")
++        expect(batch.output?.structured).toMatchObject({ replacements: 2 })
++        expect(writes).toHaveLength(1)
++        for (const example of [
++          { before: "foo", edits: [{ oldString: "foo", newString: "bar" }, { oldString: "bar", newString: "baz" }], reason: "Could not find" },
++          { before: "abcdef", edits: [{ oldString: "abcd", newString: "X" }, { oldString: "cdef", newString: "Y" }], reason: "overlap" },
++        ]) {
++          reset()
++          yield* Effect.promise(() => fs.writeFile(target, example.before))
++          expect((yield* run(example.edits)).result).toMatchObject({ type: "error", value: expect.stringContaining(example.reason) })
++          expect(writes).toEqual([])
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
++        }
++        reset()
++        yield* Effect.promise(() => fs.writeFile(target, "pad  \nsay \u201Chello\u201D end\n"))
++        const quoted = yield* run([{ oldString: '"hello"', newString: "$& $1" }])
++        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 end\n")
++        expect(quoted.output?.structured).toMatchObject({ syncInput: { path: "batch.txt", edits: [{ oldString: "\u201Chello\u201D", newString: "$& $1" }] } })
++        // formatter 真正改写磁盘后，回执展示最终 diff，历史局部 newString 仍保留用户意图。
++        const formatted = yield* withTool(tmp.path,
++          registry => settleTool(registry, call({ path: "batch.txt", edits: [{ oldString: "end", newString: "done" }] })),
++          toolHistory("batch.txt", "edit"), filepath => Effect.promise(async () => {
++            await fs.writeFile(filepath, (await fs.readFile(filepath, "utf8")) + "\n")
++            return true
++          }))
++        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 done\n\n")
++        expect(formatted.result).toMatchObject({ type: "text", value: expect.stringContaining("+say $& $1 done") })
++        expect(formatted.output?.structured).toMatchObject({ syncInput: { edits: [{ oldString: "end", newString: "done" }] } })
++      }),
++      tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
++
+   it.live("registers and replaces relative exact text through FileMutation once", () =>
+     Effect.acquireUseRelease(
+       Effect.promise(() => tmpdir()),
+       (tmp) => {
+         reset()
+@@ -153,6 +200,7 @@ describe("EditTool", () => {
+                 expect(settled.output?.structured).toEqual({
+                   replacements: 1,
++                  syncInput: { path: "hello.txt", edits: [{ oldString: "before", newString: "after" }] },
+                   files: [
+                     {
+                       file: "hello.txt",
+                       status: "modified",
+@@ -222,6 +270,6 @@ describe("EditTool", () => {
+                 expect(assertions.map((input) => input.action)).toEqual(["external_directory", "edit"])
+                 // 授权证据保留原始替换串，不通过提前读取外部文件生成第二份内容。
+-                expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "edit", operation: "edit", oldString: "before", newString: "after" })
++                expect(assertions[0]?.metadata).toMatchObject({ action_kind: "tool", tool: "edit", operation: "edit", edits: [{ oldString: "before", newString: "after" }] })
+                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after")
+                 expect(writes).toHaveLength(1)
+               }),
+@@ -354,12 +402,12 @@ describe("EditTool", () => {
+                 ).toEqual({
+                   type: "error",
+                   value:
+-                    "Found multiple exact matches for oldString. Provide more surrounding context or set replaceAll to true.",
++                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.",
+                 })
+                 // 重叠literal也是第二候选，不能只按replaceAll的非重叠计数放行。
+                 yield* Effect.promise(() => fs.writeFile(target, "aaaa"))
+-                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple exact matches") })
++                expect(yield* executeTool(registry, call({ path: "matches.txt", oldString: "aa", newString: "x" }))).toMatchObject({ type: "error", value: expect.stringContaining("multiple matches") })
+                 // 候选行号是实际窗口起点，而非带上一行context的起点。
+                 yield* Effect.promise(() => fs.writeFile(target, "header\nconst preferred = true\n"))
+                 const missing = yield* executeTool(registry, call({ path: "matches.txt", oldString: "const preferred = false", newString: "x" }))
+                 expect(missing).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const preferred = true"') })
+@@ -489,6 +537,6 @@ test("keeps the locked edit schema, semantics docstring, and deferred TODOs visible", async () => {
+   const schema = definition[0]?.inputSchema as { readonly properties?: Record<string, unknown> }
+ 
+-  expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["newString", "oldString", "path", "replaceAll"])
++  expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["edits", "path"])
+   expect(source).toContain(
+     "absolute external paths retain mutation capability through a separate\n * external_directory approval before edit approval.",
+   )
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -296,10 +296,12 @@ describe("SessionProjector", () => {
+-      const complete = (id: SessionMessage.ID, callID: string, name: string, structured: Record<string, unknown>) => Effect.gen(function* () {
++      const complete = (id: SessionMessage.ID, callID: string, name: string, structured: Record<string, unknown>, input: Record<string, unknown> = {}) => Effect.gen(function* () {
+         yield* events.publish(SessionEvent.Tool.Input.Started, { sessionID, assistantMessageID: id, callID, name, timestamp: created })
+-        yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID: id, callID, tool: name, input: {}, provider: { executed: false }, timestamp: created })
++        yield* events.publish(SessionEvent.Tool.Called, { sessionID, assistantMessageID: id, callID, tool: name, input, provider: { executed: false }, timestamp: created })
+         yield* events.publish(SessionEvent.Tool.Success, { sessionID, assistantMessageID: id, callID, structured, content: [{ type: "text", text: "native output ".repeat(600) }], provider: { executed: false }, timestamp: created })
+       })
+       // 真实完成投影同时覆盖三种工具形状、嵌套Location和最终格式化diff，不使用展示正文反推。
+-      yield* complete(assistantMessageID, "edit", "edit", { files: [{ file: "a.ts", patch: "+edit\n", additions: 1, deletions: 0, status: "modified" }] })
++      const truth = { path: "a.ts", edits: [{ oldString: "\u201Cbefore\u201D", newString: "after" }] }
++      yield* complete(assistantMessageID, "edit", "edit", { files: [{ file: "a.ts", patch: "+edit\n", additions: 1, deletions: 0, status: "modified" }], syncInput: truth },
++        { path: "a.ts", oldString: '"before"', newString: "after" })
+       yield* complete(assistantMessageID, "patch", "apply_patch", { files: [
+         { file: "a.ts", patch: "+patch\n", additions: 1, deletions: 0, status: "modified" },
+         { file: "gone.ts", patch: "-gone\n", additions: 0, deletions: 1, status: "deleted" },
+@@ -309,5 +311,9 @@ describe("SessionProjector", () => {
+       const expected = (yield* SessionHistory.load(db, sessionID)).find(message => message.id === assistantMessageID)
+       if (!expected || expected.type !== "assistant") return yield* Effect.die("Missing native tool fixture")
++      // 整参数面替换旧字段，暂态真值不在 structured 与历史输入重复保存。
++      const edited = expected.content.find(part => part.type === "tool" && part.id === "edit")
++      expect(edited).toMatchObject({ state: { input: truth } })
++      expect(edited && "state" in edited && edited.state.status === "completed" ? edited.state.structured : undefined).not.toHaveProperty("syncInput")
+       const before = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get()
+       // 两次独立冻结分别检验普通history和runner入口，不能把第二次热读冒充恢复。
+       for (const runner of [false, true]) {

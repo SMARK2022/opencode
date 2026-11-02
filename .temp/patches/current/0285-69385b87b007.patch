@@ -8,6 +8,241 @@ Content-Transfer-Encoding: 8bit
 
 
 
+diff --git a/packages/core/src/shell-permission.ts b/packages/core/src/shell-permission.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/shell-permission.ts
+@@ -0,0 +1,53 @@
++export * as ShellPermission from "./shell-permission"
++
++import type { Node } from "web-tree-sitter"
++
++type Part = { type: string; text: string }
++
++export function parts(node: Node) {
++  const out: Part[] = []
++  for (let i = 0; i < node.childCount; i++) {
++    const child = node.child(i)
++    if (!child) continue
++    if (child.type === "command_elements") {
++      for (let j = 0; j < child.childCount; j++) {
++        const item = child.child(j)
++        if (!item || item.type === "command_argument_sep" || item.type === "redirection") continue
++        out.push({ type: item.type, text: item.text })
++      }
++      continue
++    }
++    // 赋值节点不属于命令；数字实参不能随赋值一起漏掉。
++    if (
++      child.type !== "command_name" &&
++      child.type !== "command_name_expr" &&
++      child.type !== "number" &&
++      child.type !== "word" &&
++      child.type !== "string" &&
++      child.type !== "raw_string" &&
++      child.type !== "concatenation"
++    ) continue
++    out.push({ type: child.type, text: child.text })
++  }
++  return out
++}
++
++// 两代共用规则键，去掉POSIX赋值前缀时仍完整保留重定向。
++export function permissionPattern(node: Node, tokens: string[]) {
++  const command = tokens.join(" ")
++  const redirect = node
++    .descendantsOfType("redirection")
++    .filter((item): item is Node => Boolean(item))
++    .map((item) => item.text.trim())
++    .join(" ") || redirectedSuffix(node)
++  return redirect ? `${command} ${redirect}` : command
++}
++
++export function rawPattern(node: Node) {
++  return (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
++}
++
++function redirectedSuffix(node: Node) {
++  if (node.parent?.type !== "redirected_statement") return ""
++  return node.parent.text.slice(node.endIndex - node.parent.startIndex).trim()
++}
+diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
+--- a/packages/core/src/tool/bash.ts
++++ b/packages/core/src/tool/bash.ts
+@@ -19,1 +19,2 @@
+ import { Shell } from "../shell"
++import { ShellPermission } from "../shell-permission"
+@@ -193,27 +194,38 @@
+-              const heads = process.platform === "win32" && Shell.ps(shell)
+-                ? yield* Effect.gen(function* () {
++              const scan = Shell.name(shell) === "cmd" ? { patterns: [], raw: [], heads: [] } : yield* Effect.gen(function* () {
+                     const tree = yield* Effect.acquireRelease(
+                       Effect.tryPromise({
+-                        try: () => Shell.parse(input.command, true),
++                        try: () => Shell.parse(input.command, Shell.ps(shell)),
+                         catch: () => new ToolFailure({ message: `Unable to execute command: ${input.command}` }),
+                       }),
+                       (tree) => Effect.sync(() => tree.delete()),
+                     )
+-                    return tree.rootNode
++                    const nodes = tree.rootNode
+                       .descendantsOfType("command")
+-                      .flatMap((node) => {
+-                        if (!node) return []
+-                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return []
++                      .filter((node) => {
++                        if (!node) return false
++                        if (remote.some((range) => range.start <= node.startIndex && node.startIndex < range.end)) return false
++                        if (!Shell.ps(shell)) return true
+                         // 引号与内部 ERROR 恢复出的远程脚本片段不是本地 PowerShell 命令。
+                         let parent = node.parent
+                         while (parent && parent.id !== tree.rootNode.id) {
+-                          if (parent.type === "ERROR" || parent.type.includes("string")) return []
++                          if (parent.type === "ERROR" || parent.type.includes("string")) return false
+                           parent = parent.parent
+                         }
+                         // 根 ERROR 仍承载真实主机命令，不能因此绕过本地管道的拒绝检查。
+                         // grammar 会误拆已转义分隔符；奇数个反引号表示参数仍属前一命令。
+                         const escaped = input.command.slice(0, node.startIndex).match(/(`+)[;|&][ \t]*$/)?.[1]
+-                        return escaped && escaped.length % 2 ? [] : [...Shell.commandHeads(node.text, Shell.name(shell))]
++                        return !escaped || escaped.length % 2 === 0
+                       })
+-                  }).pipe(Effect.scoped)
+-                : Shell.commandHeads(input.command, Shell.name(shell))
++                    // 同一棵AST同时提供规则键和原始拒绝证据；不改执行串或保存审批资源。
++                    const commands = nodes.flatMap((node) => {
++                      if (!node) return []
++                      const tokens = ShellPermission.parts(node).map((part) => part.text)
++                      return tokens.length ? [{ pattern: ShellPermission.permissionPattern(node, tokens), raw: ShellPermission.rawPattern(node) }] : []
++                    })
++                    return {
++                      patterns: [...new Set(commands.map((command) => command.pattern))],
++                      raw: [...new Set(commands.flatMap((command) => command.raw !== command.pattern ? [command.raw] : []))],
++                      heads: nodes.flatMap((node) => node ? [...Shell.commandHeads(node.text, Shell.name(shell))] : []),
++                    }
++                  }).pipe(Effect.scoped)
++              const heads = process.platform === "win32" && Shell.ps(shell) ? scan.heads : Shell.commandHeads(input.command, Shell.name(shell))
+@@ -250,1 +267,6 @@
+-                metadata: { action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent },
++                metadata: {
++                  action_kind: "shell", command: input.command, cwd: target.canonical, shell, agent: context.agent,
++                  // 只有leaf产生的AST证据参与规则匹配；原资源与save继续表示整条原始调用。
++                  ...(scan.patterns.length && (scan.patterns.length !== 1 || scan.patterns[0] !== input.command) ? { canonical_patterns: scan.patterns } : {}),
++                  ...(scan.raw.length ? { raw_patterns: scan.raw } : {}),
++                },
+diff --git a/packages/core/src/permission.ts b/packages/core/src/permission.ts
+--- a/packages/core/src/permission.ts
++++ b/packages/core/src/permission.ts
+@@ -167,3 +167,14 @@
+     function denied(input: AssertInput, rules: Permission.Ruleset) {
+-      return input.resources.some((resource) => evaluate(input.action, resource, rules).effect === "deny")
++      // 原始差异只作具体deny证据，不让宽allow、已保存审批或always释放覆盖它。
++      const raw = input.action === "bash" ? input.metadata?.raw_patterns : undefined
++      return patterns(input).some((resource) => evaluate(input.action, resource, rules).effect === "deny") ||
++        Array.isArray(raw) && raw.some((resource) => typeof resource === "string" && rules.some((rule) =>
++          rule.effect === "deny" && rule.resource !== "*" && Wildcard.match(input.action, rule.action) && Wildcard.match(resource, rule.resource),
++        ))
++    }
++
++    function patterns(input: AssertInput) {
++      const value = input.action === "bash" ? input.metadata?.canonical_patterns : undefined
++      const canonical = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
++      return canonical.length ? canonical : input.resources
+     }
+@@ -178,3 +190,7 @@
+-      const all = [...rules, ...(yield* savedRules())]
+-      const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+-      const resources = input.resources.filter((_, index) => effects[index] === "auto")
++      const remembered = yield* savedRules()
++      const all = [...rules, ...remembered]
++      const canonical = patterns(input)
++      // 既有持久审批保存的是原命令；只有配置deny通过后才可复用该明确批准。
++      const approved = canonical !== input.resources && input.resources.every((resource) => evaluate(input.action, resource, remembered).effect === "allow")
++      const effects = canonical.map((resource) => approved ? "allow" : evaluate(input.action, resource, all).effect)
++      const resources = canonical.filter((_, index) => effects[index] === "auto")
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -344,3 +344,34 @@
+       })
++      // 旧raw审批仍可使用；canonical规则和原始凭证deny都保持实际裁决权。
++      const command = "GITHUB_TOKEN=x git push --force"
++      const bash = assertion({ action: "bash", resources: [command], save: [command], metadata: {
++        command, canonical_patterns: ["git push --force"], raw_patterns: [command],
++      } })
++      yield* saved.add({ projectID: Project.ID.global, action: "bash", resources: [command] })
++      yield* setRules([])
++      expect(yield* service.ask(bash)).toMatchObject({ effect: "allow" })
++      for (const effect of ["allow", "auto", "ask"] as const) {
++        yield* setRules([{ action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" }, { action: "bash", resource: "*", effect }])
++        expect(yield* service.ask(bash)).toMatchObject({ effect: "deny" })
++      }
++      yield* setRules([{ action: "bash", resource: "*", effect: "allow" }, { action: "bash", resource: "git push --force*", effect: "deny" }])
++      expect(yield* service.ask(bash)).toMatchObject({ effect: "deny" })
++      // 原始证据不参与普通allow/ask匹配；这些仍按canonical规则last-match-wins。
++      const fresh = { ...bash, resources: ["CI=true git push --force"], metadata: { command: "CI=true git push --force", canonical_patterns: ["git push --force"], raw_patterns: ["CI=true git push --force"] } }
++      yield* setRules([{ action: "bash", resource: "*", effect: "deny" }, { action: "bash", resource: "git push --force*", effect: "allow" }])
++      expect(yield* service.ask(fresh)).toMatchObject({ effect: "allow" })
++      yield* setRules([{ action: "bash", resource: "git push --force*", effect: "ask" }])
++      expect(yield* service.ask(fresh)).toMatchObject({ effect: "ask" })
++      yield* service.reply({ requestID: PermissionV2.ID.create("per_test"), reply: "once" })
++      reviewSettings = new Config.Info({})
++      reviewRequests.length = 0
++      malformed = false
++      reviewGate = undefined
++      reviewStarted = undefined
++      yield* setRules([{ action: "bash", resource: "git push --force*", effect: "auto" }])
++      expect(yield* service.ask(fresh)).toMatchObject({ effect: "allow" })
++      expect(reviewRequests).toHaveLength(1)
++      expect(JSON.stringify(reviewRequests[0])).toContain("force push requires explicit approval")
++      expect(yield* service.list()).toEqual([])
+     }),
+   )
+@@ -407,2 +438,19 @@
+       expect(yield* saved.list()).toEqual([])
++      // always只释放仍然有效的批准：挂起后新增raw硬拒不能被同一次保存的通配授权跨过。
++      const command = "GITHUB_TOKEN=x git push --force"
++      const permit = PermissionV2.ID.create("per_bash_permit")
++      const blocked = PermissionV2.ID.create("per_bash_blocked")
++      const plain = PermissionV2.ID.create("per_bash_plain")
++      yield* setRules([])
++      expect(yield* service.ask(assertion({ id: permit, action: "bash", resources: ["pwd"], save: ["*"] }))).toMatchObject({ effect: "ask" })
++      expect(yield* service.ask(assertion({ id: blocked, action: "bash", resources: [command], metadata: {
++        command, canonical_patterns: ["git push --force"], raw_patterns: [command],
++      } }))).toMatchObject({ effect: "ask" })
++      expect(yield* service.ask(assertion({ id: plain, action: "bash", resources: ["git status"] }))).toMatchObject({ effect: "ask" })
++      yield* setRules([{ action: "bash", resource: "GITHUB_TOKEN=*", effect: "deny" }, { action: "bash", resource: "*", effect: "allow" }])
++      yield* service.reply({ requestID: permit, reply: "always" })
++      expect((yield* service.list()).map((request) => request.id)).toEqual([blocked])
++      expect(yield* service.get(plain)).toBeUndefined()
++      yield* service.reply({ requestID: blocked, reply: "reject" })
++      expect(yield* service.list()).toEqual([])
+     }),
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -310,1 +310,21 @@
++            // 危险命令仅作为审批输入；在实际进程替身之前拒绝，复用两代同一AST投影。
++            const bash = path.join(tmp.path, "bash.exe")
++            yield* Effect.promise(() => fs.writeFile(bash, "fixture executable is never invoked"))
++            yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
++              for (const [command, canonical, raw] of [
++                ["CI=true git push --force", ["git push --force"], ["CI=true git push --force"]],
++                ["FOO=1 BAR=2 echo hello", ["echo hello"], ["FOO=1 BAR=2 echo hello"]],
++                ["CI=true git log --oneline -5 > output.txt", ["git log --oneline -5 > output.txt"], ["CI=true git log --oneline -5 > output.txt"]],
++                ["echo before && CI=true git push --force", ["echo before", "git push --force"], ["CI=true git push --force"]],
++              ] as const) {
++                reset()
++                denyAction = "bash"
++                expect((yield* settleTool(registry, call({ command }))).result.type).toBe("error")
++                const request = assertions.find((request) => request.action === "bash")
++                expect(request).toMatchObject({ resources: [command], save: [command], metadata: {
++                  command, canonical_patterns: canonical, raw_patterns: raw,
++                } })
++                expect(runs).toEqual([])
++              }
++            }), appProcess, bash)
+             if (process.platform !== "win32") return
 diff --git a/packages/opencode/src/permission/index.ts b/packages/opencode/src/permission/index.ts
 --- a/packages/opencode/src/permission/index.ts
 +++ b/packages/opencode/src/permission/index.ts
@@ -106,7 +341,10 @@ diff --git a/packages/core/src/permission/precheck.ts b/packages/core/src/permis
 diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
 --- a/packages/opencode/src/tool/shell.ts
 +++ b/packages/opencode/src/tool/shell.ts
-@@ -131,6 +131,8 @@
+@@ -14,1 +14,2 @@
+ import { ShellRemote } from "@opencode-ai/core/shell-remote"
++import { parts, permissionPattern, rawPattern } from "@opencode-ai/core/shell-permission"
+@@ -123,6 +124,8 @@
  type Scan = {
    dirs: Set<string>
    patterns: Set<string>
@@ -115,46 +353,40 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
    always: Set<string>
  }
  
-@@ -150,3 +151,5 @@
-       child.type !== "command_name" &&
-       child.type !== "command_name_expr" &&
-+      // Bash将-5等实参标为number，canonical pattern必须保留完整参数。
-+      child.type !== "number" &&
-       child.type !== "word" &&
-@@ -192,10 +195,32 @@
-   return out
- }
+@@ -134,33 +137,3 @@
+-function parts(node: Node) {
+-  const out: Part[] = []
+-  for (let i = 0; i < node.childCount; i++) {
+-    const child = node.child(i)
+-    if (!child) continue
+-    if (child.type === "command_elements") {
+-      for (let j = 0; j < child.childCount; j++) {
+-        const item = child.child(j)
+-        if (!item || item.type === "command_argument_sep" || item.type === "redirection") continue
+-        out.push({ type: item.type, text: item.text })
+-      }
+-      continue
+-    }
+-    if (
+-      child.type !== "command_name" &&
+-      child.type !== "command_name_expr" &&
+-      child.type !== "word" &&
+-      child.type !== "string" &&
+-      child.type !== "raw_string" &&
+-      child.type !== "concatenation"
+-    ) {
+-      continue
+-    }
+-    out.push({ type: child.type, text: child.text })
+-  }
+-  return out
+-}
  
 -function source(node: Node) {
-+function permissionPattern(node: Node, tokens: string[]) {
-+  const command = tokens.join(" ")
-+  // #285：permission patterns 是规则匹配键，不是原始 shell 证据。POSIX
-+  // 前导 env 赋值被 parts() 跳过，避免隐藏实际命令；重定向作为后缀保留。
-+  const redirect =
-+  // #285：重定向后缀在去除 env 赋值后必须保留——> output.txt 属于命令语义，
-+  // 拆掉会让 pattern 无法复现真实命令
-+    node
-+      .descendantsOfType("redirection")
-+      .filter((item): item is Node => Boolean(item))
-+      .map((item) => item.text.trim())
-+      .join(" ") || redirectedSuffix(node)
-+  if (!redirect) return command
-+  // #285：无重定向时直接返回纯命令文本；permissionPattern 与旧 source() 行为对齐
-+  return `${command} ${redirect}`
-+}
-+
-+function rawPattern(node: Node) {
-   return (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
- }
+-  return (node.parent?.type === "redirected_statement" ? node.parent.text : node.text).trim()
+-}
  
-+function redirectedSuffix(node: Node) {
-+  if (node.parent?.type !== "redirected_statement") return ""
-+  return node.parent.text.slice(node.endIndex - node.parent.startIndex).trim()
-+}
-+
  function commands(node: Node) {
-   return node.descendantsOfType("command").filter((child): child is Node => Boolean(child))
- }
 @@ -374,6 +394,9 @@
      metadata: {
        action_kind: "shell",

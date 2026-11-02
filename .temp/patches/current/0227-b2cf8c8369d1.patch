@@ -5,14 +5,111 @@ Subject: 0227
 
 ---
 
+diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/session-message.ts
+--- a/packages/schema/src/session-message.ts
++++ b/packages/schema/src/session-message.ts
+@@ -24,1 +24,8 @@
++// 协议修复只改变可见性，原文、错误及用量继续保存在原消息上。
++export interface Hidden extends Schema.Schema.Type<typeof Hidden> {}
++export const Hidden = Schema.Struct({
++  time: NonNegativeInt,
++  reason: Schema.Literal("permission-reviewer-protocol-retry"),
++}).annotate({ identifier: "Session.Message.Hidden" })
++
+ const Base = {
+diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
+--- a/packages/schema/src/session-event.ts
++++ b/packages/schema/src/session-event.ts
+@@ -493,1 +493,10 @@
++// 当前Session事件，供真实history/SSE重放同一失败轮次的可见性，不借用V1消息事件。
++export const MessagesHidden = Event.define({
++  type: "session.next.messages.hidden",
++  ...options,
++  schema: {
++    ...Base, messageIDs: Schema.Array(SessionMessage.ID), hidden: SessionMessage.Hidden,
++  },
++})
++
+ export const DurableDefinitions = Event.inventory(
+@@ -503,1 +512,2 @@
+   Synthetic,
++  MessagesHidden,
+@@ -538,1 +548,2 @@
+   Synthetic,
++  MessagesHidden,
+diff --git a/packages/core/src/session/message-updater.ts b/packages/core/src/session/message-updater.ts
+--- a/packages/core/src/session/message-updater.ts
++++ b/packages/core/src/session/message-updater.ts
+@@ -16,1 +16,3 @@
+   readonly appendMessage: (message: SessionMessage.Message) => Effect.Effect<void>
++  readonly getMessage: (messageID: SessionMessage.ID) => Effect.Effect<SessionMessage.Message | undefined>
++  readonly updateMessage: (message: SessionMessage.Message) => Effect.Effect<void>
+@@ -27,1 +29,10 @@
+   return {
++    getMessage(messageID) {
++      return Effect.sync(() => state.messages.find((message) => message.id === messageID))
++    },
++    updateMessage(message) {
++      return Effect.sync(() => {
++        const index = assistantIndex(message.id)
++        if (index >= 0) state.messages[index] = message
++      })
++    },
+@@ -167,1 +178,8 @@
++      "session.next.messages.hidden": (event) =>
++        Effect.forEach(event.data.messageIDs, (messageID) => Effect.gen(function* () {
++          const message = yield* adapter.getMessage(messageID)
++          if (!message) return
++          // 合并标记而非替换metadata，保留审查关联、真实正文与已有终态。
++          yield* adapter.updateMessage({ ...message, metadata: { ...message.metadata, hidden: event.data.hidden } })
++        }), { discard: true }),
+       "session.next.shell.started": (event) => {
+diff --git a/packages/core/src/session/projector.ts b/packages/core/src/session/projector.ts
+--- a/packages/core/src/session/projector.ts
++++ b/packages/core/src/session/projector.ts
+@@ -180,1 +180,8 @@
++      getMessage(messageID) {
++        return db.select().from(SessionMessageTable).where(and(eq(SessionMessageTable.id, messageID), eq(SessionMessageTable.session_id, event.data.sessionID))).get().pipe(
++          Effect.orDie,
++          Effect.map((row) => row ? decodeRow(row) : undefined),
++        )
++      },
++      updateMessage,
+       getCurrentAssistant() {
+@@ -532,1 +539,2 @@
+     yield* events.project(SessionEvent.Synthetic, (event) => run(db, event))
++    yield* events.project(SessionEvent.MessagesHidden, (event) => run(db, event))
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -11,1 +11,2 @@
+ const decode = Schema.decodeUnknownEffect(SessionMessage.Message)
++const hidden = Schema.is(SessionMessage.Hidden)
+@@ -79,1 +80,2 @@
+-  return yield* Effect.forEach(yield* messageRows(db, sessionID, compaction, epoch?.baselineSeq), decodeMessageRow)
++  // 普通模型历史排除失败协议轮次；原始message/messages读取仍可检查它们。
++  return (yield* Effect.forEach(yield* messageRows(db, sessionID, compaction, epoch?.baselineSeq), decodeMessageRow)).filter((message) => !hidden(message.metadata?.hidden))
+@@ -96,3 +98,3 @@
+-  return yield* Effect.forEach(rows, (row) =>
++  return (yield* Effect.forEach(rows, (row) =>
+     decodeMessageRow(row).pipe(Effect.map((message) => ({ seq: row.seq, message }))),
+-  )
++  )).filter((entry) => !hidden(entry.message.metadata?.hidden))
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -438,1 +438,2 @@
+     hasAssistantStarted: () => assistantMessageID !== undefined,
++    peekAssistantMessageID: () => assistantMessageID,
 diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
 --- a/packages/core/src/permission/reviewer/prompt.ts
 +++ b/packages/core/src/permission/reviewer/prompt.ts
-@@ -25,10 +25,11 @@
+@@ -25,10 +25,12 @@
  export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
++export const PROTOCOL_RETRY_TEXT = "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown."
  
  // #206：输出合约增加 transcript 用途限定——仅用于推断用户意图、范围、授权和本地证据，不作为策略指令
-+// 流式审查提供决策工具；原生generateObject仍接收JSON契约，两者共享同一决策结构。
++// 两代均声明相同裁决工具；严格JSON仅为运行时兼容接受路径，提示仍坚持工具协议。
 -const OUTPUT_CONTRACT_PROMPT = `\
 +const OUTPUT_CONTRACT_PROMPT = (protocol: "json" | "tool") => `\
 -Decide from the supplied transcript, planned action, and policy. Use transcript only to establish user intent, scope, authorization, and local evidence. Your final message must be strict JSON.
@@ -23,13 +120,653 @@ diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src
  {
    "risk_level": "low" | "medium" | "high" | "critical",
    "user_authorization": "unknown" | "low" | "medium" | "high",
-@@ -39,4 +40,4 @@
+@@ -39,4 +41,4 @@
  // #198：模板替换而非拼接——保证策略在模板的正确位置，而非附加在末尾可能被忽略
 -export function buildSystemPrompt(tenantPolicy: string) {
 -  return POLICY_TEMPLATE.replace("{tenant_policy_config}", tenantPolicy.trim()) + "\n\n" + OUTPUT_CONTRACT_PROMPT
-+export function buildSystemPrompt(tenantPolicy: string, protocol: "json" | "tool" = "json") {
++export function buildSystemPrompt(tenantPolicy: string, protocol: "json" | "tool" = "tool") {
 +  return POLICY_TEMPLATE.replace("{tenant_policy_config}", tenantPolicy.trim()) + "\n\n" + OUTPUT_CONTRACT_PROMPT(protocol)
  }
+diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
+--- a/packages/core/src/permission/reviewer.ts
++++ b/packages/core/src/permission/reviewer.ts
+@@ -5,1 +5,1 @@
+-import { Cause, Context, DateTime, Effect, FileSystem, Layer, Schema, Semaphore, Stream } from "effect"
++import { Cause, Clock, Context, DateTime, Effect, FileSystem, Layer, Option, Schema, Semaphore, Stream } from "effect"
+@@ -91,53 +91,88 @@
+-      const reviewerRequestID = SessionMessage.ID.create()
+-      // 协议文本可持久检查，但使用synthetic事件，不能在后续审查中充当人类授权。
+-      yield* events.publish(SessionEvent.Synthetic, {
+-        sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
+-        text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${prompt}`,
+-      }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
+       yield* updateToolAutoReview(input, { status: "reviewing", sessionID: reviewerSession })
+-      const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
+-        permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
+-      })
+-      let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
+-      // 只声明裁决协议：一次真实provider流，不接业务工具registry或会话执行循环。
+-      const result = yield* client.stream(LLM.request({
+-        model: selected.model, system, prompt,
+-        tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
+-          description: "Submit the structured allow/deny decision for this permission review.",
+-          parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
+-        }) }),
+-      })).pipe(
+-        Stream.runForEach((event) => Effect.gen(function* () {
+-          yield* publisher.publish(event)
+-          if (event.type === "provider-error" || event.type === "tool-error") return yield* new Failed({ reason: event.message })
+-          if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
+-          // 真实reasoning/text在裁决前已经落盘；同一Schema验证最终输入，绝不执行该工具。
+-          assessment = yield* Schema.decodeUnknownEffect(PermissionReviewerSchema.Assessment)(event.input).pipe(Effect.mapError((error) => new Failed({ reason: error.message })))
+-          yield* publisher.publish(LLMEvent.toolResult({
+-            id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
+-            output: { structured: { ...assessment, reviewID: input.reviewID }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
+-          }))
+-        })),
+-        Effect.flatMap(() => assessment ? Effect.succeed(assessment) : Effect.fail(new Failed({ reason: "reviewer did not call permission_review_decision" }))),
+-        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
+-        Effect.onExit((exit) => Effect.gen(function* () {
+-          const finalizer = exit._tag === "Failure"
+-          yield* publisher.flush(finalizer)
+-          if (exit._tag === "Failure") {
+-            const failure = Cause.squash(exit.cause)
+-            const reason = failure instanceof Error ? failure.message : "Review cancelled"
+-            // 失败/取消闭合真实残片和工具，沿退出安全通知模式，不伪造成功助手。
+-            yield* publisher.failUnsettledTools(reason, false, true)
+-            yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
+-          }
+-          const settlement = publisher.stepSettlement()
+-          if (exit._tag === "Success" || settlement) {
+-            const usage = settlement?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+-            // 已确认消耗留在审查子会话；失败不能退款，也不能算进父请求的账本。
+-            yield* events.publish(SessionEvent.Step.Ended, {
+-              sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.startAssistant(finalizer),
+-              finish: settlement?.finish ?? "tool-calls", cost: SessionRunnerModel.cost(selected.pricing, usage), tokens: usage,
+-            }, { finalizer })
+-          }
+-        })),
++      const protocolError = new Failed({ reason: "reviewer did not call permission_review_decision" })
++      const deadline = (yield* Clock.currentTimeMillis) + (options.timeout_ms ?? 90_000)
++      const decodeAssessment = Schema.decodeUnknownOption(PermissionReviewerSchema.Assessment)
++      const decodeJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
++      const runReviewerAttempt = (attemptPrompt: string, hideProtocolFailure: boolean) => Effect.gen(function* () {
++        const reviewerRequestID = SessionMessage.ID.create()
++        // 每次尝试保留真实请求；相同reviewID不代替请求/助手的独立身份。
++        yield* events.publish(SessionEvent.Synthetic, {
++          sessionID: reviewerSession, messageID: reviewerRequestID, timestamp: yield* DateTime.now,
++          text: `reviewID=${input.reviewID}\ntool=${JSON.stringify(input.tool ?? null)}\n\nsystem: ${system}\n\nuser: ${attemptPrompt}`,
++        }, { metadata: { permissionReviewerRequest: true, reviewID: input.reviewID } })
++        const publisher = createLLMEventPublisher(events, { sessionID: reviewerSession, agent: "permission-reviewer", model }, {
++          permissionReviewerRequestID: reviewerRequestID, reviewID: input.reviewID,
++        })
++        let assessment: typeof PermissionReviewerSchema.Assessment.Type | undefined
++        let textOutput = ""
++        return yield* client.stream(LLM.request({
++          model: selected.model, system, prompt: attemptPrompt,
++          tools: Tool.toDefinitions({ permission_review_decision: Tool.make({
++            description: "Submit the structured allow/deny decision for this permission review.",
++            parameters: PermissionReviewerSchema.Assessment, success: Schema.Unknown,
++          }) }),
++        })).pipe(
++          Stream.runForEach((event) => Effect.gen(function* () {
++            if (event.type === "tool-error") return yield* protocolError
++            yield* publisher.publish(event)
++            if (event.type === "provider-error") return yield* new Failed({ reason: event.message })
++            if (event.type === "text-delta") textOutput += event.text
++            if (event.type !== "tool-call" || event.name !== "permission_review_decision") return
++            assessment = Option.getOrUndefined(decodeAssessment(event.input))
++            if (!assessment) return
++            yield* publisher.publish(LLMEvent.toolResult({
++              id: event.id, name: event.name, result: { type: "text", value: JSON.stringify(assessment) },
++              output: { structured: { ...assessment, reviewID: input.reviewID, source: "tool_call" }, content: [{ type: "text", text: JSON.stringify(assessment) }] },
++            }))
++          })),
++          Effect.flatMap(() => Effect.gen(function* () {
++            if (assessment) return assessment
++            // 仅接受整段Schema合法JSON，不从解释或Markdown中抽取片段。
++            const fallback = Option.getOrUndefined(Option.flatMap(decodeJson(textOutput.trim()), decodeAssessment))
++            if (!fallback) return yield* protocolError
++            const callID = `json_fallback_${input.reviewID}`
++            yield* publisher.publish(LLMEvent.toolCall({ id: callID, name: "permission_review_decision", input: fallback }))
++            yield* publisher.publish(LLMEvent.toolResult({
++              id: callID, name: "permission_review_decision", result: { type: "text", value: JSON.stringify(fallback) },
++              output: { structured: { ...fallback, reviewID: input.reviewID, source: "json_fallback" }, content: [{ type: "text", text: JSON.stringify(fallback) }] },
++            }))
++            return fallback
++          })),
++          // 两次尝试共享原有总期限；收尾在超时竞争之外，取消返回前必须完成投影。
++          Effect.timeoutOrElse({ duration: Math.max(0, deadline - (yield* Clock.currentTimeMillis)), orElse: () => Effect.fail(timedOut) }),
++          Effect.onExit((exit) => Effect.gen(function* () {
++            const finalizer = exit._tag === "Failure"
++            yield* publisher.flush(finalizer)
++            if (exit._tag === "Failure") {
++              const failure = Cause.squash(exit.cause)
++              const reason = failure instanceof Error ? failure.message : "Review cancelled"
++              yield* publisher.failUnsettledTools(reason, false, true)
++              yield* publisher.failAssistant(reason, Cause.hasInterrupts(exit.cause), true)
++            }
++            const settlement = publisher.stepSettlement()
++            if (exit._tag === "Success" || settlement) {
++              const usage = settlement?.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
++              // 每次真实消耗独立结算；隐藏失败轮次不退款，也不算入父请求。
++              yield* events.publish(SessionEvent.Step.Ended, {
++                sessionID: reviewerSession, timestamp: yield* DateTime.now, assistantMessageID: yield* publisher.startAssistant(finalizer),
++                finish: settlement?.finish ?? "tool-calls", cost: SessionRunnerModel.cost(selected.pricing, usage), tokens: usage,
++              }, { finalizer })
++            }
++          })),
++          Effect.tapError((error) => {
++            if (error !== protocolError || !hideProtocolFailure) return Effect.void
++            return Effect.gen(function* () {
++              const timestamp = yield* DateTime.now
++              const assistantID = publisher.peekAssistantMessageID()
++              yield* events.publish(SessionEvent.MessagesHidden, {
++                sessionID: reviewerSession, timestamp,
++                messageIDs: assistantID ? [reviewerRequestID, assistantID] : [reviewerRequestID],
++                hidden: { time: DateTime.toEpochMillis(timestamp), reason: "permission-reviewer-protocol-retry" },
++              })
++            })
++          }),
++        )
++      })
++      const result = yield* runReviewerAttempt(prompt, true).pipe(
++        Effect.catchIf((error) => error === protocolError, () => runReviewerAttempt(`${prompt}\n\n${PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT}`, false)),
+       )
+diff --git a/packages/app/src/utils/session-message.ts b/packages/app/src/utils/session-message.ts
+--- a/packages/app/src/utils/session-message.ts
++++ b/packages/app/src/utils/session-message.ts
+@@ -9,1 +9,2 @@
+ import { Option, Schema } from "effect"
++import { SessionMessage } from "@opencode-ai/schema/session-message"
+@@ -13,1 +14,2 @@
+ const decodeToolInput = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
++const hidden = Schema.is(SessionMessage.Hidden)
+@@ -15,1 +17,11 @@
++export function sessionMessageHidden(message: SessionMessageInfo) {
++  return "metadata" in message && message.metadata?.hidden !== undefined && hidden(message.metadata.hidden)
++}
++
++export function preserveMessageHidden(current: SessionMessageInfo | undefined, incoming: SessionMessageInfo) {
++  const marker = current && "metadata" in current ? current.metadata?.hidden : undefined
++  if (!hidden(marker)) return incoming
++  return { ...incoming, metadata: { ...("metadata" in incoming ? incoming.metadata : {}), hidden: marker } }
++}
++
+ export function compareMessages(a: Pick<Message, "id" | "time">, b: Pick<Message, "id" | "time">) {
+@@ -49,1 +61,1 @@
+-  if (message.type !== "assistant" || message.agent !== "permission-reviewer") return
++  if (message.type !== "assistant" || message.agent !== "permission-reviewer" || sessionMessageHidden(message)) return
+@@ -56,1 +68,1 @@
+-  if (message.type !== "synthetic") return
++  if (message.type !== "synthetic" || sessionMessageHidden(message)) return
+@@ -71,1 +83,3 @@
+   source.forEach((message) => {
++    // 两条失败消息仍在源缓存/原始API，只有普通显示投影排除它们。
++    if (sessionMessageHidden(message)) return
+diff --git a/packages/app/src/context/native-session-event.ts b/packages/app/src/context/native-session-event.ts
+--- a/packages/app/src/context/native-session-event.ts
++++ b/packages/app/src/context/native-session-event.ts
+@@ -11,1 +11,1 @@
+-export function nativeSessionEvent(source: readonly SessionMessageInfo[], event: OpenCodeEvent | NativeSessionEvent, pending: Map<string, SessionPendingMessage>): DisplayEvent | Missing | undefined {
++export function nativeSessionEvent(source: readonly SessionMessageInfo[], event: OpenCodeEvent | NativeSessionEvent, pending: Map<string, SessionPendingMessage>): DisplayEvent | Omit<Missing, "missing"> | Missing | undefined {
+@@ -20,1 +20,11 @@
++    case "session.next.messages.hidden": {
++      const ids = new Set<string>(event.data.messageIDs)
++      const absent = event.data.messageIDs.find((id) => !source.some((message) => message.id === id))
++      // 保留隐藏事实的源缓存，缺失消息仍通过既有hydration读取，不删除审计对象。
++      return { sessionID, touched: [...ids], ...(absent ? { missing: absent } : {}), messages: source.map((message) => ids.has(message.id)
++        ? { ...message, metadata: metadata({ ...("metadata" in message ? message.metadata : {}), hidden: event.data.hidden }) }
++        : message),
++      }
++    }
++
+     case "session.next.prompted":
+diff --git a/packages/app/src/context/server-session.ts b/packages/app/src/context/server-session.ts
+--- a/packages/app/src/context/server-session.ts
++++ b/packages/app/src/context/server-session.ts
+@@ -21,1 +21,1 @@
+-import { compareMessages, messageKey, normalizeSessionMessages, reviewerRequestID, syntheticTurn } from "@/utils/session-message"
++import { compareMessages, messageKey, normalizeSessionMessages, preserveMessageHidden, reviewerRequestID, sessionMessageHidden, syntheticTurn } from "@/utils/session-message"
+@@ -36,4 +36,5 @@
+ function needsOlderTurnRoot(source: readonly SessionMessageInfo[]) {
++  const visible = source.filter((message) => !sessionMessageHidden(message))
+   // 页内已有较新的请求也不代表包含并发助手实际引用的较旧请求。
+-  if (source.some((message) => {
++  if (visible.some((message) => {
+     const id = reviewerRequestID(message)
+@@ -40,4 +41,4 @@
+-    return id !== undefined && !source.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
++    return id !== undefined && !visible.some((root) => root.id === id && syntheticTurn(root)?.reviewer)
+   })) return true
+-  const boundary = source.find(
++  const boundary = visible.find(
+     (message) =>
+@@ -692,1 +693,1 @@
+-            (message) => (load?.touchedSource.has(message.id) ? (live.get(message.id) ?? message) : message),
++            (message) => preserveMessageHidden(live.get(message.id), load?.touchedSource.has(message.id) ? (live.get(message.id) ?? message) : message),
+@@ -894,1 +895,2 @@
+     const touched = new Set(reduction.touched)
++    const concealed = new Set<string>()
+@@ -896,1 +898,5 @@
+     for (const message of reduction.messages) {
++      if (sessionMessageHidden(message)) {
++        if (touched.has(message.id)) concealed.add(message.id)
++        continue
++      }
+@@ -911,1 +917,6 @@
+     batch(() => {
++      if (concealed.size) setData(produce((draft) => {
++        draft.message[reduction.sessionID] = (draft.message[reduction.sessionID] ?? []).filter((message) => !concealed.has(message.id))
++        // 仅移除显示及片段；原始session_message和隐藏metadata继续保留。
++        for (const messageID of concealed) deleteMessageParts(draft, messageID)
++      }))
+@@ -940,1 +951,1 @@
+-        const messages = [...current.filter((item) => item.id !== message.id), message].sort(compareMessages)
++        const messages = [...current.filter((item) => item.id !== message.id), preserveMessageHidden(current.find((item) => item.id === message.id), message)].sort(compareMessages)
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -143,7 +143,7 @@ export type AgentsListOutput = {
+     readonly permissions: ReadonlyArray<{
+       readonly action: string
+       readonly resource: string
+-      readonly effect: "allow" | "deny" | "ask"
++      readonly effect: "allow" | "deny" | "ask" | "auto"
+     }>
+   }>
+ }
+@@ -268,6 +268,15 @@ export type SessionsListOutput = {
+             readonly attachments: number
+             readonly total: number
+           }
++          readonly media?: {
++            readonly rawChars: number
++            readonly textChars: number
++            readonly tokens: number
++            readonly count: number
++            readonly imageTokens: number
++            readonly pdfTokens: number
++            readonly otherTokens: number
++          }
+         }
+         readonly afterPartID?: string
+         readonly contextLimit?: number
+@@ -365,6 +374,15 @@ export type SessionsCreateOutput = {
+             readonly attachments: number
+             readonly total: number
+           }
++          readonly media?: {
++            readonly rawChars: number
++            readonly textChars: number
++            readonly tokens: number
++            readonly count: number
++            readonly imageTokens: number
++            readonly pdfTokens: number
++            readonly otherTokens: number
++          }
+         }
+         readonly afterPartID?: string
+         readonly contextLimit?: number
+@@ -438,6 +456,15 @@ export type SessionsGetOutput = {
+             readonly attachments: number
+             readonly total: number
+           }
++          readonly media?: {
++            readonly rawChars: number
++            readonly textChars: number
++            readonly tokens: number
++            readonly count: number
++            readonly imageTokens: number
++            readonly pdfTokens: number
++            readonly otherTokens: number
++          }
+         }
+         readonly afterPartID?: string
+         readonly contextLimit?: number
+@@ -711,6 +738,15 @@ export type SessionsContextOutput = {
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -963,6 +999,15 @@ export type SessionsHistoryOutput = {
+                 readonly attachments: number
+                 readonly total: number
+               }
++              readonly media?: {
++                readonly rawChars: number
++                readonly textChars: number
++                readonly tokens: number
++                readonly count: number
++                readonly imageTokens: number
++                readonly pdfTokens: number
++                readonly otherTokens: number
++              }
+             }
+             readonly afterPartID?: string
+             readonly contextLimit?: number
+@@ -995,6 +1040,19 @@ export type SessionsHistoryOutput = {
+           readonly text: string
+         }
+       }
++    | {
++        readonly id: string
++        readonly metadata?: { readonly [x: string]: JsonValue }
++        readonly type: "session.next.messages.hidden"
++        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
++        readonly location?: { readonly directory: string; readonly workspaceID?: string }
++        readonly data: {
++          readonly timestamp: number
++          readonly sessionID: string
++          readonly messageIDs: ReadonlyArray<string>
++          readonly hidden: { readonly time: number; readonly reason: "permission-reviewer-protocol-retry" }
++        }
++      }
+     | {
+         readonly id: string
+         readonly metadata?: { readonly [x: string]: JsonValue }
+@@ -1053,6 +1111,15 @@ export type SessionsHistoryOutput = {
+                 readonly attachments: number
+                 readonly total: number
+               }
++              readonly media?: {
++                readonly rawChars: number
++                readonly textChars: number
++                readonly tokens: number
++                readonly count: number
++                readonly imageTokens: number
++                readonly pdfTokens: number
++                readonly otherTokens: number
++              }
+             }
+             readonly afterPartID?: string
+             readonly contextLimit?: number
+@@ -1544,6 +1611,15 @@ export type SessionsEventsOutput =
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -1576,6 +1652,19 @@ export type SessionsEventsOutput =
+         readonly text: string
+       }
+     }
++  | {
++      readonly id: string
++      readonly metadata?: { readonly [x: string]: unknown }
++      readonly type: "session.next.messages.hidden"
++      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
++      readonly location?: { readonly directory: string; readonly workspaceID?: string }
++      readonly data: {
++        readonly timestamp: number
++        readonly sessionID: string
++        readonly messageIDs: ReadonlyArray<string>
++        readonly hidden: { readonly time: number; readonly reason: "permission-reviewer-protocol-retry" }
++      }
++    }
+   | {
+       readonly id: string
+       readonly metadata?: { readonly [x: string]: unknown }
+@@ -1634,6 +1723,15 @@ export type SessionsEventsOutput =
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -2058,6 +2156,15 @@ export type SessionsMessageOutput = {
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+@@ -2253,6 +2360,15 @@ export type MessagesListOutput = {
+               readonly attachments: number
+               readonly total: number
+             }
++            readonly media?: {
++              readonly rawChars: number
++              readonly textChars: number
++              readonly tokens: number
++              readonly count: number
++              readonly imageTokens: number
++              readonly pdfTokens: number
++              readonly otherTokens: number
++            }
+           }
+           readonly afterPartID?: string
+           readonly contextLimit?: number
+diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
+--- a/packages/core/test/permission.test.ts
++++ b/packages/core/test/permission.test.ts
+@@ -42,1 +42,2 @@
+ let reviewArrivals: Deferred.Deferred<void> | undefined
++let reviewScript: Stream.Stream<LLMEvent>[] | undefined
+@@ -47,1 +48,7 @@
+     reviewRequests.push(request)
++    // 只脚本化模型运输边界，协议、落盘、隐藏和权限裁决均执行真实实现。
++    if (reviewScript) {
++      const next = reviewScript.shift()
++      if (!next) return yield* Effect.die("Unexpected reviewer retry")
++      return next
++    }
+@@ -612,1 +619,95 @@
++
++  it.effect("repairs native reviewer protocol once while preserving hidden audit and usage", () => Effect.gen(function* () {
++    yield* setup([{ action: "*", resource: "*", effect: "auto" }])
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true }) })
++    yield* Effect.addFinalizer(() => Effect.sync(() => {
++      reviewScript = undefined
++      reviewSettings = new Config.Info({})
++    }))
++    const service = yield* PermissionV2.Service
++    const sessions = yield* SessionStore.Service
++    const events = yield* EventV2.Service
++    const database = yield* Database.Service
++    const hiddenIDs: SessionMessage.ID[] = []
++    const unsubscribe = yield* events.listen((event) => Schema.is(SessionEvent.MessagesHidden)(event)
++      ? Effect.sync(() => { hiddenIDs.push(...event.data.messageIDs) }) : Effect.void)
++    yield* Effect.addFinalizer(() => unsubscribe)
++    const accepted = { outcome: "allow", rationale: "bounded protocol fixture", risk_level: "low", user_authorization: "high" }
++    const text = (value: string) => Stream.make(
++      LLMEvent.textStart({ id: "reply" }), LLMEvent.textDelta({ id: "reply", text: value }), LLMEvent.textEnd({ id: "reply" }),
++      LLMEvent.stepFinish({ index: 0, reason: "stop", usage: { nonCachedInputTokens: 2, outputTokens: 1 } }),
++      LLMEvent.finish({ reason: "stop" }),
++    )
++    const tool = (input: unknown) => Stream.make(
++      LLMEvent.toolCall({ id: "decision", name: "permission_review_decision", input }),
++      LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }), LLMEvent.finish({ reason: "tool-calls" }),
++    )
++    let sequence = 0
++    const run = (script: Stream.Stream<LLMEvent>[]) => {
++      reviewScript = script
++      reviewRequests.length = 0
++      return service.ask(assertion({ action: "edit", resources: ["src/protocol.ts"], metadata: { diff: `protocol-${++sequence}` } }))
++    }
++    expect(yield* run([text(JSON.stringify(accepted))])).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(1)
++    const children = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).all().pipe(Effect.orDie)
++    expect(children).toHaveLength(1)
++    const child = children[0]
++    if (!child) return yield* Effect.die("Expected reviewer child")
++    const childID = SessionV2.ID.make(child.id)
++    const jsonAudit = yield* sessions.context(childID)
++    expect(jsonAudit.flatMap((message) => message.type === "assistant" ? message.content : []).find((part) => part.type === "tool")).toMatchObject({
++      name: "permission_review_decision", state: { status: "completed", structured: { ...accepted, source: "json_fallback" } },
++    })
++    // 合法deny不属于协议失败，不能以重试把拒绝变为放行。
++    expect(yield* run([text(JSON.stringify({ ...accepted, outcome: "deny" }))])).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(1)
++    expect(hiddenIDs).toHaveLength(0)
++    const malformedText = "I forgot to submit the decision tool."
++    expect(yield* run([text(malformedText), tool(accepted)])).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(2)
++    const prompts = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"))
++    expect(prompts[1]).toBe(`${prompts[0]}\n\nProtocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.`)
++    expect(hiddenIDs).toHaveLength(2)
++    const hidden = yield* Effect.forEach(hiddenIDs, (id) => sessions.message(id))
++    expect(hidden.map((record) => record?.message)).toMatchObject([
++      { type: "synthetic", metadata: { permissionReviewerRequest: true, hidden: { reason: "permission-reviewer-protocol-retry" } } },
++      { type: "assistant", finish: "error", tokens: { input: 2, output: 1 }, metadata: { permissionReviewerRequestID: hiddenIDs[0], hidden: { reason: "permission-reviewer-protocol-retry" } } },
++    ])
++    // 隐藏只影响普通历史；原始读取保留原文与已确认用量，runner也不能重放失败轮次。
++    expect(JSON.stringify(hidden[1]?.message)).toContain(malformedText)
++    expect((yield* sessions.context(childID)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
++    expect((yield* sessions.runnerContext(childID, 0)).some((message) => hiddenIDs.includes(message.id))).toBe(false)
++    expect((yield* sessions.context(childID)).flatMap((message) => message.type === "assistant" ? message.content : []).some((part) => part.type === "tool" && part.state.status === "completed" && part.state.structured?.source === "tool_call")).toBe(true)
++    expect(yield* run([tool({ outcome: "allow" }), tool(accepted)])).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(2)
++    // 未完成参数的tool-error也须先闭合真实残片，再按同一协议修复一次。
++    expect(yield* run([Stream.make(
++      LLMEvent.toolInputStart({ id: "broken", name: "permission_review_decision" }),
++      LLMEvent.toolInputDelta({ id: "broken", name: "permission_review_decision", text: "{bad" }),
++      LLMEvent.toolError({ id: "broken", name: "permission_review_decision", message: "malformed input" }),
++    ), tool(accepted)])).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(2)
++    // Markdown中的合法对象仍不是整段JSON；第二次畸形保持可见且不发起第三次。
++    const hiddenBeforeFailure = hiddenIDs.length
++    expect(yield* run([text(`\`\`\`json\n${JSON.stringify(accepted)}\n\`\`\``), text("second malformed reply")])).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(2)
++    expect(hiddenIDs).toHaveLength(hiddenBeforeFailure + 2)
++    const visible = JSON.stringify(yield* sessions.context(childID))
++    expect(visible).not.toContain("```json")
++    expect(visible).toContain("second malformed reply")
++    const hiddenBeforeProviderFailure = hiddenIDs.length
++    expect(yield* run([Stream.make(LLMEvent.providerError({ message: "provider unavailable" }))])).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(1)
++    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure)
++    // 取消第二次真实流仍由退出owner收尾，不产生第三次尝试或人工pending。
++    const retryStarted = yield* Deferred.make<void>()
++    const cancelled = yield* run([text("cancel before repair"), Stream.unwrap(Deferred.succeed(retryStarted, undefined).pipe(Effect.as(Stream.never)))]).pipe(Effect.forkScoped)
++    yield* Deferred.await(retryStarted)
++    yield* Fiber.interrupt(cancelled)
++    expect((yield* sessions.context(childID)).at(-1)).toMatchObject({ type: "assistant", finish: "error" })
++    expect(reviewRequests).toHaveLength(2)
++    expect(hiddenIDs).toHaveLength(hiddenBeforeProviderFailure + 2)
++    expect(yield* service.list()).toEqual([])
++  }))
+ })
+diff --git a/packages/opencode/test/permission/reviewer-prompt.test.ts b/packages/opencode/test/permission/reviewer-prompt.test.ts
+--- a/packages/opencode/test/permission/reviewer-prompt.test.ts
++++ b/packages/opencode/test/permission/reviewer-prompt.test.ts
+@@ -82,1 +82,3 @@
+-    expect(prompt).toContain("Use this JSON schema for every decision")
++    // 227把首选协议改为真实裁决工具；纯JSON只在运行时兼容，不再向模型宣传。
++    expect(prompt).toContain("Use this tool input schema for every decision")
++    expect(prompt).toContain("Submit the decision by calling permission_review_decision exactly once. Do not answer in prose, markdown, or a plain final JSON message.")
+diff --git a/packages/schema/test/event-manifest.test.ts b/packages/schema/test/event-manifest.test.ts
+--- a/packages/schema/test/event-manifest.test.ts
++++ b/packages/schema/test/event-manifest.test.ts
+@@ -12,2 +12,2 @@
+-    expect(EventManifest.ServerDefinitions.length).toBe(55)
+-    expect(EventManifest.Definitions.length).toBe(85)
++    expect(EventManifest.ServerDefinitions.length).toBe(67)
++    expect(EventManifest.Definitions.length).toBe(97)
+@@ -26,2 +26,2 @@
+-    expect(EventManifest.Latest.size).toBe(85)
+-    expect(EventManifest.Durable.size).toBe(32)
++    expect(EventManifest.Latest.size).toBe(97)
++    expect(EventManifest.Durable.size).toBe(40)
+@@ -35,1 +35,3 @@
+     expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
++    // 隐藏是当前Session可重放事件，必须同时进入实时与durable契约。
++    expect(EventManifest.Latest.get("session.next.messages.hidden")).toBe(SessionEvent.MessagesHidden)
+@@ -45,1 +47,1 @@
+-    expect(EventManifest.Definitions.slice(40, 43)).toEqual([
++    expect(EventManifest.Definitions.slice(48, 51)).toEqual([
+@@ -51,1 +53,2 @@
+     expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
++    expect(EventManifest.Durable.get("session.next.messages.hidden.1")).toBe(SessionEvent.MessagesHidden)
+diff --git a/packages/app/src/context/server-session.test.ts b/packages/app/src/context/server-session.test.ts
+--- a/packages/app/src/context/server-session.test.ts
++++ b/packages/app/src/context/server-session.test.ts
+@@ -238,1 +238,10 @@
+     expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
++    // 隐藏只清显示投影；同一child的并行B和A的原始关联/正文仍保留。
++    applyNative("session.next.messages.hidden", { messageIDs: ["msg_native_request", "msg_native_answer"], hidden: { time: 20, reason: "permission-reviewer-protocol-retry" } })
++    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request_b", "msg_native_answer_b"])
++    expect(ctx.store.data.part.msg_native_answer).toBeUndefined()
++    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ metadata: { permissionReviewerRequestID: "msg_native_request", hidden: { reason: "permission-reviewer-protocol-retry" } }, content: [{ text: "Actual live explanation" }] })
++    applyNative("session.next.step.ended", { assistantMessageID: "msg_native_answer", finish: "stop", cost: 2, tokens: { input: 3, output: 4, reasoning: 0, cache: { read: 0, write: 0 } } })
++    expect(ctx.store.data.message[target]?.map((message) => message.id)).toEqual(["msg_native_request_b", "msg_native_answer_b"])
++    expect(ctx.store.data.session_message[target]?.find((message) => message.id === "msg_native_answer")).toMatchObject({ cost: 2, tokens: { input: 3, output: 4 }, metadata: { hidden: { reason: "permission-reviewer-protocol-retry" } } })
++    expect(ctx.store.data.message[target]?.some((message) => message.role === "assistant" && message.id === "msg_native_answer_b" && message.time.completed === undefined)).toBe(true)
+@@ -788,1 +797,35 @@
++
++    // Native在缺失片段时发出的旧hydration和旧历史页，也不能覆盖已落地隐藏标记。
++    const request = { id: "msg_hidden_request", type: "synthetic" as const, text: "review", time: { created: 1 }, metadata: { permissionReviewerRequest: true } }
++    const answer = { id: "msg_hidden_answer", type: "assistant" as const, agent: "permission-reviewer", model: { id: "review", providerID: "test" }, content: [{ type: "text" as const, id: "reply", text: "malformed reply" }], time: { created: 2 }, metadata: { permissionReviewerRequestID: request.id } }
++    const stalePage = { data: [answer, request], cursor: { previous: null, next: null } }
++    const pendingPage = Promise.withResolvers<typeof stalePage>()
++    const pendingHydration = Promise.withResolvers<typeof answer>()
++    let nativeCalls = 0
++    const nativeApi = {
++      list: async () => ++nativeCalls === 1 ? { data: [request], cursor: { previous: null, next: "older" } } : pendingPage.promise,
++    } as unknown as MessageApi
++    const native = createServerSession({} as OpencodeClient, { message: () => pendingHydration.promise } as unknown as SessionApi, nativeApi)
++    native.remember(session("ses_native"))
++    await native.sync("ses_native")
++    const decode = Schema.decodeUnknownSync(Schema.toEncoded(SessionEvent.All))
++    let sequence = 0
++    const applyNative = (type: string, data: Record<string, unknown>) => native.applyV2(decode({ id: `evt_hidden_${++sequence}`, type, data: { sessionID: "ses_native", timestamp: sequence, ...data } }))
++    applyNative("session.next.text.delta", { assistantMessageID: answer.id, textID: "reply", delta: "late fragment" })
++    applyNative("session.next.step.started", { assistantMessageID: answer.id, agent: "permission-reviewer", model: answer.model })
++    applyNative("session.next.text.started", { assistantMessageID: answer.id, textID: "reply" })
++    applyNative("session.next.text.delta", { assistantMessageID: answer.id, textID: "reply", delta: "malformed reply" })
++    expect(native.data.message.ses_native).toHaveLength(2)
++    applyNative("session.next.messages.hidden", { messageIDs: [request.id, answer.id], hidden: { time: 20, reason: "permission-reviewer-protocol-retry" } })
++    expect(native.data.message.ses_native).toEqual([])
++    const loading = native.history.loadMore("ses_native")
++    pendingPage.resolve(stalePage)
++    await loading
++    expect(native.data.message.ses_native).toEqual([])
++    pendingHydration.resolve(answer)
++    await Bun.sleep(0)
++    expect(native.data.message.ses_native).toEqual([])
++    expect(native.data.session_message.ses_native.map((message) => "metadata" in message ? message.metadata?.hidden : undefined)).toEqual([{ time: 20, reason: "permission-reviewer-protocol-retry" }, { time: 20, reason: "permission-reviewer-protocol-retry" }])
++    expect(native.data.part[answer.id]).toBeUndefined()
++    expect(nativeCalls).toBe(2)
+   })
 diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/opencode/src/permission/reviewer/service.ts
 --- a/packages/opencode/src/permission/reviewer/service.ts
 +++ b/packages/opencode/src/permission/reviewer/service.ts
@@ -62,7 +799,7 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
 +  // The retry prompt deliberately asks only for the tool/function-call protocol.
 +  // JSON text fallback is a runtime compatibility layer, not behavior we should
 +  // advertise to the model after it already missed the preferred contract.
-+  text: "Protocol retry: the previous response did not submit the required permission_review_decision tool/function call. Reassess the same evidence and call permission_review_decision exactly once. Do not answer in prose or markdown.",
++  text: PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT,
 +}
  const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
    mergeDeep(target, source ?? {}) as Record<string, any>

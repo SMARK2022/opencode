@@ -5,6 +5,274 @@ Subject: [PATCH] =?UTF-8?q?feat(session):=20=E6=B7=BB=E5=8A=A0=E5=B7=A5?=
  =?UTF-8?q?=E5=85=B7=E5=AE=8C=E6=88=90=E7=8A=B6=E6=80=81=E6=9B=B4=E6=96=B0?=
  =?UTF-8?q?=E5=92=8C=E6=89=8B=E5=8A=A8=E5=8E=8B=E7=BC=A9=E5=8A=9F=E8=83=BD?=
 
+diff --git a/packages/core/src/session/execution.ts b/packages/core/src/session/execution.ts
+--- a/packages/core/src/session/execution.ts
++++ b/packages/core/src/session/execution.ts
+@@ -13,1 +13,2 @@
+-  readonly resume: (sessionID: SessionSchema.ID) => Effect.Effect<void, SessionRunner.RunError>
++  // 手动维护仍由同一个 Session 所有权串行执行，不借用普通续跑来触发摘要。
++  readonly resume: (sessionID: SessionSchema.ID, maintenance?: "compact") => Effect.Effect<void, SessionRunner.RunError>
+diff --git a/packages/core/src/session/execution/local.ts b/packages/core/src/session/execution/local.ts
+--- a/packages/core/src/session/execution/local.ts
++++ b/packages/core/src/session/execution/local.ts
+@@ -17,1 +17,1 @@
+-      drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force) {
++      drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force, maintenance) {
+@@ -20,1 +20,1 @@
+-        return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force })).pipe(
++        return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force, maintenance })).pipe(
+diff --git a/packages/core/src/session/run-coordinator.ts b/packages/core/src/session/run-coordinator.ts
+--- a/packages/core/src/session/run-coordinator.ts
++++ b/packages/core/src/session/run-coordinator.ts
+@@ -10,1 +10,1 @@
+-  readonly run: (key: Key) => Effect.Effect<void, E>
++  readonly run: (key: Key, maintenance?: "compact") => Effect.Effect<void, E>
+@@ -18,1 +18,2 @@
+   readonly done: Deferred.Deferred<void, E>
++  readonly maintenance?: "compact"
+@@ -25,1 +26,1 @@
+-  readonly drain: (key: Key, force: boolean) => Effect.Effect<void, E>
++  readonly drain: (key: Key, force: boolean, maintenance?: "compact") => Effect.Effect<void, E>
+@@ -31,2 +32,3 @@
+-    const makeEntry = (): Entry<E> => ({
++    const makeEntry = (maintenance?: "compact"): Entry<E> => ({
+       done: Deferred.makeUnsafe<void, E>(),
++      maintenance,
+@@ -41,1 +43,1 @@
+-          Effect.andThen(Effect.suspend(() => options.drain(key, force))),
++          Effect.andThen(Effect.suspend(() => options.drain(key, force, entry.maintenance))),
+@@ -52,1 +54,2 @@
+-      if (Exit.isSuccess(exit) && !entry.stopping && entry.pendingWake) {
++      // 维护结束只允许真实新 wake 启动普通 drain，不能再次执行摘要或恢复旧工作。
++      if (Exit.isSuccess(exit) && !entry.stopping && entry.pendingWake && entry.maintenance === undefined) {
+@@ -67,1 +70,1 @@
+-    const run = (key: Key): Effect.Effect<void, E> =>
++    const run = (key: Key, maintenance?: "compact"): Effect.Effect<void, E> =>
+@@ -71,2 +74,5 @@
+-          if (entry.stopping) return restore(Deferred.await(entry.done).pipe(Effect.andThen(run(key))))
++          if (entry.stopping) return restore(Deferred.await(entry.done).pipe(Effect.andThen(run(key, maintenance))))
++          // 异类请求等待当前所有权释放；其结果不充当本次维护的结果。
++          if (entry.maintenance !== maintenance)
++            return restore(Deferred.await(entry.done).pipe(Effect.exit, Effect.andThen(run(key, maintenance))))
+           return restore(Deferred.await(entry.done))
+@@ -75,3 +81,3 @@
+-        const next = makeEntry()
++        const next = makeEntry(maintenance)
+         active.set(key, next)
+         start(key, next, true)
+diff --git a/packages/core/src/session/runner/index.ts b/packages/core/src/session/runner/index.ts
+--- a/packages/core/src/session/runner/index.ts
++++ b/packages/core/src/session/runner/index.ts
+@@ -24,1 +24,2 @@
+     readonly force: boolean
++    readonly maintenance?: "compact"
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -165,1 +165,2 @@
+   tokens: number,
++  manual = false,
+@@ -174,1 +175,3 @@
+     const next = total + Token.estimate(conversation[index])
++    // 短会话也能手动摘要，但仍保留其余完整近期消息，而不是丢掉工具 tail。
++    if (manual && index === 0) break
+@@ -204,3 +207,3 @@
+-  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input) {
++  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input, reason: "auto" | "manual" = "auto") {
+     const context = input.model.route.defaults.limits?.context
+-    if (context === undefined || context <= 0) return false
++    if (reason === "auto" && (context === undefined || context <= 0)) return false
+@@ -208,1 +211,1 @@
+-    const selected = select(input.entries, config.tokens)
++    const selected = select(input.entries, config.tokens, reason === "manual")
+@@ -217,1 +220,1 @@
+-    if (Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
++    if (context !== undefined && context > 0 && Token.estimate(summaryPrompt) > Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
+@@ -243,1 +246,1 @@
+-      reason: "auto",
++      reason,
+@@ -272,1 +275,2 @@
+-        Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
++        // 显式维护必须向调用者保留提供者失败，不能用 false 伪装成功。
++        Effect.catchTag("LLM.Error", (error) => reason === "manual" ? Effect.fail(error) : Effect.succeed(false)),
+@@ -283,1 +287,1 @@
+-      reason: "auto",
++      reason,
+@@ -311,1 +315,2 @@
+     compactIfNeeded,
++    compact: (input: Input) => compactAfterOverflow(input, "manual"),
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -4,1 +4,2 @@
+   LLMError,
++  InvalidProviderOutputReason,
+@@ -529,1 +530,30 @@
++      readonly maintenance?: "compact"
+     }) {
++      if (input.maintenance === "compact") {
++        const session = yield* getSession(input.sessionID)
++        if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
++          return yield* Effect.interrupt
++        const agent = yield* agents.select(session.agent)
++        const prepared = yield* prepareTurn(session.id, agent)
++        const initialized = yield* SessionContextEpoch.initialize(db, prepared.context, session.id)
++        const system = initialized ?? (yield* SessionContextEpoch.prepare(db, events, prepared.context, session.id))
++        const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
++        if (entries.length === 0) return
++        const selection = yield* models.resolve(session)
++        const request = LLM.request({
++          model: selection.model,
++          messages: [],
++          http: { headers: {
++            "x-session-affinity": session.id,
++            "X-Session-Id": session.id,
++            ...(session.parentID ? { "x-parent-session-id": session.parentID } : {}),
++          } },
++        })
++        // 只执行一次共享摘要；不提升 inbox，也不进入普通工具/续跑循环。
++        if (yield* compaction.compact({ sessionID: session.id, entries, model: selection.model, pricing: selection.pricing, variant: session.model?.variant, request })) return
++        return yield* new LLMError({
++          module: "SessionCompaction",
++          method: "compact",
++          reason: new InvalidProviderOutputReason({ message: "Compaction did not produce a usable summary" }),
++        })
++      }
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -172,1 +172,1 @@
+-  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | OperationUnavailableError>
++  readonly compact: (input: CompactInput) => Effect.Effect<void, NotFoundError | SessionRunner.RunError>
+@@ -434,1 +434,2 @@
+-        return yield* new OperationUnavailableError({ operation: "compact" })
++        // 维护意图经过同一进程级所有权和 Location 路由，不能直接启动第二个 runner。
++        yield* execution.resume(input.sessionID, "compact")
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -178,16 +178,6 @@
+-            Effect.catchTag("Session.NotFoundError", (error) =>
+-              Effect.fail(
+-                new SessionNotFoundError({
+-                  sessionID: error.sessionID,
+-                  message: `Session not found: ${error.sessionID}`,
+-                }),
+-              ),
+-            ),
+-            Effect.catchTag("Session.OperationUnavailableError", (error) =>
+-              Effect.fail(
+-                new ServiceUnavailableError({
+-                  message: `Session ${error.operation} is not available yet`,
+-                  service: `session.${error.operation}`,
+-                }),
+-              ),
+-            ),
++            // 已接通的维护失败返回真实诊断，不能仍报告“尚未实现”。
++            Effect.catch((error) => Effect.fail(
++              error instanceof SessionV2.NotFoundError
++                ? new SessionNotFoundError({ sessionID: error.sessionID, message: `Session not found: ${error.sessionID}` })
++                : new ServiceUnavailableError({ message: error.message, service: "session.compact" }),
++            )),
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -289,1 +289,1 @@
+-      drain: (sessionID, force) => sessionRunner.run({ sessionID, force }),
++      drain: (sessionID, force, maintenance) => sessionRunner.run({ sessionID, force, maintenance }),
+@@ -1645,1 +1645,54 @@
++  it.live("manual compaction stops after summarizing retained tool tail", () =>
++    Effect.gen(function* () {
++      yield* setup
++      const session = yield* SessionV2.Service
++      response = fragmentFixture("text", "manual-earlier", ["Earlier answer"]).completeEvents
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
++      yield* session.resume(sessionID)
++      responses = [
++        [
++          LLMEvent.stepStart({ index: 0 }),
++          LLMEvent.toolCall({ id: "manual-tail", name: "echo", input: { text: "tail output" } }),
++          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++          LLMEvent.finish({ reason: "tool-calls" }),
++        ],
++        fragmentFixture("text", "manual-tail-done", ["Done"]).completeEvents,
++      ]
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep recent tool turn" }), resume: false })
++      yield* session.resume(sessionID)
++      requests.length = 0
++      executions.length = 0
++      const pending = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Later queued request" }), delivery: "queue", resume: false })
++      responses = undefined
++      response = fragmentFixture("text", "manual-summary", ["Summary"]).completeEvents
++      yield* session.compact({ sessionID })
++      expect(requests).toHaveLength(1)
++      expect(requests[0].tools).toEqual([])
++      const context = yield* session.context(sessionID)
++      expect(context).toHaveLength(1)
++      expect(context[0]).toMatchObject({ type: "compaction", summary: "Summary" })
++      if (context[0].type !== "compaction") return yield* Effect.die("Missing manual summary")
++      expect(context[0].recent).toContain("[User]: Keep recent tool turn")
++      expect(context[0].recent).toContain("[Tool result]: tail output")
++      expect(executions).toHaveLength(0)
++      const db = (yield* Database.Service).db
++      expect(yield* db.select({ promoted: SessionInputTable.promoted_seq }).from(SessionInputTable).where(eq(SessionInputTable.id, pending.id)).get().pipe(Effect.orDie)).toEqual({ promoted: null })
++      yield* replaySessionProjection(sessionID)
++      expect(yield* session.context(sessionID)).toEqual(context)
++      const history = yield* session.history({ sessionID, limit: 100 })
++      expect(history.events.filter(event => event.type === SessionEvent.Compaction.Ended.type).map(event => event.data)).toMatchObject([{ reason: "manual", text: "Summary" }])
++      response = fragmentFixture("text", "manual-later", ["Later answer"]).completeEvents
++      yield* session.resume(sessionID)
++      expect(requests).toHaveLength(2)
++      expect(userTexts(requests[1]).join("\n")).toContain("<summary>\nSummary\n</summary>")
++      expect(executions).toHaveLength(0)
++      requests.length = 0
++      const failure = providerUnavailable()
++      streamFailure = failure
++      expect(yield* session.compact({ sessionID }).pipe(Effect.flip)).toBe(failure)
++      expect(requests).toHaveLength(1)
++      expect((yield* session.context(sessionID)).some(message => message.type === "compaction" && message.summary === "Summary")).toBe(true)
++    }),
++  )
++
+   it.live("automatically compacts into a completed summary and retained recent turn", () =>
+diff --git a/packages/core/test/session-run-coordinator.test.ts b/packages/core/test/session-run-coordinator.test.ts
+--- a/packages/core/test/session-run-coordinator.test.ts
++++ b/packages/core/test/session-run-coordinator.test.ts
+@@ -27,1 +27,34 @@
++        // 同一维护可 join，普通运行与维护不能互相冒充；只有真实 wake 才驱动后续工作。
++        const started = yield* Deferred.make<void>()
++        const release = yield* Deferred.make<void>()
++        const compactStarted = yield* Deferred.make<void>()
++        const compactRelease = yield* Deferred.make<void>()
++        const woken = yield* Deferred.make<void>()
++        const modes: ("compact" | undefined)[] = []
++        const serial = yield* SessionRunCoordinator.make<string, never>({ drain: (_key, _force, maintenance) => Effect.gen(function* () {
++          modes.push(maintenance)
++          if (modes.length === 1) {
++            yield* Deferred.succeed(started, undefined)
++            return yield* Deferred.await(release)
++          }
++          if (maintenance === "compact") {
++            yield* Deferred.succeed(compactStarted, undefined)
++            return yield* Deferred.await(compactRelease)
++          }
++          yield* Deferred.succeed(woken, undefined)
++        }) })
++        const draining = yield* serial.run("session").pipe(Effect.forkChild)
++        yield* Deferred.await(started)
++        const compacting = yield* serial.run("session", "compact").pipe(Effect.forkChild)
++        yield* Effect.yieldNow
++        expect(modes).toEqual([undefined])
++        yield* Deferred.succeed(release, undefined)
++        yield* Deferred.await(compactStarted)
++        const joined = yield* serial.run("session", "compact").pipe(Effect.forkChild)
++        yield* Effect.yieldNow
++        yield* serial.wake("session")
++        yield* Deferred.succeed(compactRelease, undefined)
++        yield* Effect.all([Fiber.join(draining), Fiber.join(compacting), Fiber.join(joined)])
++        yield* Deferred.await(woken)
++        expect(modes).toEqual([undefined, "compact", undefined])
+       }),
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 index e6bfb8f72c..aa83a95cb5 100644
 --- a/packages/opencode/src/session/prompt.ts

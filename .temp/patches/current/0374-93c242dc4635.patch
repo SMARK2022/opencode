@@ -16,6 +16,180 @@ fallback 字符串补充 resume 提示引导主 agent 用 task_id 恢复。
 
 新增 4 个行为级测试覆盖 nudge 触发/不触发/fallback/abort guard。
 
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -1,8 +1,11 @@
+ export * as TaskTool from "./task"
+ 
+ import { ToolFailure } from "@opencode-ai/llm"
+-import { ConfigProvider, Effect, Layer, Schema, Scope } from "effect"
++import { ConfigProvider, DateTime, Effect, Layer, Schema, Scope } from "effect"
+ import { AgentV2 } from "../agent"
+ import { BackgroundJob } from "../background-job"
+ import { Config } from "../config"
++import { EventV2 } from "../event"
++import { SessionEvent } from "../session/event"
++import { SessionMessage } from "../session/message"
+ import { makeLocationNode } from "../effect/app-node"
+@@ -39,6 +42,7 @@
+   const tools = yield* Tools.Service
+   const agents = yield* AgentV2.Service
+   const sessions = yield* SessionV2.Service
++  const events = yield* EventV2.Service
+   const store = yield* SessionStore.Service
+   const permission = yield* PermissionV2.Service
+   const background = yield* BackgroundJob.Service
+@@ -119,24 +123,34 @@
+       const runTask = Effect.gen(function* () {
+-        const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
+         // extension在旧段结束后才执行；本次审批身份不能提前改变仍活跃的旧provider轮。
+         if (existing) {
+           // extension真正开始后才替换旧权限；入队时不能改掉仍运行的上一段。
+           yield* sessions.setPermissions({ sessionID: child.id, permissions: childPermission })
+           const current = yield* sessions.get(child.id)
+           if (current.agent !== agent.id) yield* sessions.switchAgent({ sessionID: child.id, agent: agent.id })
+           if (model) yield* sessions.switchModel({ sessionID: child.id, model })
+         }
+         yield* sessions.prompt({ sessionID: child.id, prompt: { text: prompt }, resume: false })
+-        // 只复用durable runner，退出中断沿现有SessionExecution所有权链传递。
+-        yield* sessions.resume(child.id).pipe(Effect.onInterrupt(() => sessions.interrupt(child.id)))
+-        const latest = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")
+-        // 本轮没有助手输出时不能误返回恢复前的旧结果。
+-        if (latest?.type !== "assistant" || latest.id === before) return ""
+-        if (latest.error) return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${latest.error.message}` })
+-        const failed = latest.content.findLast(item => item.type === "tool" && item.state.status === "error")
+-        if (failed?.type === "tool" && failed.state.status === "error")
+-          return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${failed.state.error.message}` })
+-        return latest.content.filter(item => item.type === "text").map(item => item.text).join("\n")
++        // 两轮共用真实runner及错误检查；每轮重读前像，不能误认上轮旧助手文本。
++        const runOnce = Effect.gen(function* () {
++          const before = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")?.id
++          yield* sessions.resume(child.id).pipe(Effect.onInterrupt(() => sessions.interrupt(child.id)))
++          const latest = (yield* sessions.context(child.id)).findLast(item => item.type === "assistant")
++          if (latest?.type !== "assistant" || latest.id === before) return ""
++          if (latest.error) return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${latest.error.message}` })
++          const failed = latest.content.findLast(item => item.type === "tool" && item.state.status === "error")
++          if (failed?.type === "tool" && failed.state.status === "error")
++            return yield* new ToolFailure({ message: `Subagent failed (task_id: ${child.id}): ${failed.state.error.message}` })
++          return latest.content.filter(item => item.type === "text").map(item => item.text).join("\n")
++        })
++        let text = yield* runOnce
++        if (!text.trim()) {
++          // 只提醒一次，不重派Task/授权或改变子会话身份；取消仍由既有Effect链退出。
++          yield* events.publish(SessionEvent.Synthetic, { sessionID: child.id, messageID: SessionMessage.ID.create(),
++            timestamp: yield* DateTime.now,
++            text: "No text output was produced in your previous turn. Please provide a text response to the task above." })
++          text = yield* runOnce
++        }
++        return text
+       }).pipe(
+         // 父级通知与前台结果共用同一次成功文本归一；错误/取消不会被改成空成功。
+-        Effect.map(text => !text.trim() ? "Subagent produced no output (may have been aborted or lacked required tools)." : text.length > 32_000 ? `${text.slice(0, 32_000)}\n...[truncated]` : text),
++        Effect.map(text => !text.trim() ? "Subagent produced no output (may have been aborted or lacked required tools). You may resume this task with the task_id above to continue." : text.length > 32_000 ? `${text.slice(0, 32_000)}\n...[truncated]` : text),
+@@ -172,4 +186,4 @@
+ export const node: LocationNode<never> = makeLocationNode({
+   name: "tool/task", layer,
+-  deps: [ToolRegistry.node, AgentV2.node, SessionV2.node, SessionStore.node, PermissionV2.node, BackgroundJob.node, Config.node, Location.node, SystemContextRegistry.node],
++  deps: [ToolRegistry.node, AgentV2.node, SessionV2.node, SessionStore.node, PermissionV2.node, BackgroundJob.node, Config.node, Location.node, SystemContextRegistry.node, EventV2.node],
+ })
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1284,6 +1284,7 @@
+     const first = yield* invoke()
+     expect(first.result.type).toBe("text")
++    expect(requests).toHaveLength(1)
+     expect(taskAssertions).toMatchObject([{ action: "task", resources: ["research"], sessionID,
+       agent: "plan", source: { type: "tool", messageID: "msg_task_parent", callID: "call-task-first" } }])
+     const output = Schema.decodeUnknownSync(TaskTool.Output)(first.output?.structured)
+     const childID = output.task_id
+@@ -1342,6 +1343,82 @@
+-    response = fragmentFixture("text", "empty-child", ["   "]).completeEvents
+-    const empty = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
+-    expect(empty.output).toBe("Subagent produced no output (may have been aborted or lacked required tools).")
++    const nudge = "No text output was produced in your previous turn. Please provide a text response to the task above."
++    const fallback = "Subagent produced no output (may have been aborted or lacked required tools). You may resume this task with the task_id above to continue."
++    const blank = fragmentFixture("text", "empty-child", ["   "]).completeEvents
++    const answer = fragmentFixture("text", "nudge-child", ["nudge result"]).completeEvents
++    // 复用有旧答案的child，覆盖无助手、纯空白、二轮空白及二轮无新助手，不能返回历史成功。
++    for (const [first, second, expected] of [[blank, answer, "nudge result"], [[], answer, "nudge result"],
++      [blank, blank, fallback], [blank, [], fallback]] as const) {
++      const history = yield* sessions.context(child.id)
++      const count = requests.length
++      const approvals = taskAssertions.length
++      responses = [Array.from(first), Array.from(second)]
++      const nudged = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(childID, "research", "none")).output?.structured)
++      expect(nudged).toMatchObject({ task_id: childID, state: "completed", output: expected })
++      expect(requests.length - count).toBe(2)
++      expect(taskAssertions.length - approvals).toBe(1)
++      expect(userTexts(requests.at(-1)!).at(-1)).toBe(nudge)
++      const after = yield* sessions.context(child.id)
++      const added = after.filter(message => !history.some(previous => previous.id === message.id))
++      // 提醒是持久synthetic，不是新用户admission；模型、agent和完整权限保持同一子会话。
++      expect(added.filter(message => message.type === "synthetic")).toMatchObject([{ text: nudge }])
++      expect(added.filter(message => message.type === "user")).toHaveLength(1)
++      expect(added.filter(message => message.type === "assistant").every(message => message.agent === child.agent && message.model.id === parentModel.id)).toBe(true)
++      expect((yield* sessions.get(child.id)).model).toEqual(child.model)
++      expect(yield* store.permissions(child.id)).toEqual(inherited)
++    }
++    // 第二轮有部分文本也不能掩盖模型失败或provider已执行工具的失败。
++    for (const toolError of [false, true]) {
++      const count = requests.length
++      responses = [blank, [
++        ...fragmentFixture("text", "nudge-partial", ["partial response"]).partialEvents,
++        LLMEvent.textEnd({ id: "nudge-partial" }),
++        ...(toolError ? [
++          LLMEvent.toolInputStart({ id: "nudge-failed-call", name: "write" }),
++          LLMEvent.toolInputDelta({ id: "nudge-failed-call", name: "write", text: '{"path":"README.md"}' }),
++          LLMEvent.toolInputEnd({ id: "nudge-failed-call", name: "write" }),
++          LLMEvent.toolCall({ id: "nudge-failed-call", name: "write", input: { path: "README.md" }, providerExecuted: true }),
++          LLMEvent.toolError({ id: "nudge-failed-call", name: "write", message: "nudge failed" }),
++          LLMEvent.toolResult({ id: "nudge-failed-call", name: "write", result: { type: "error", value: "nudge failed" } }),
++          LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
++        ] : [LLMEvent.providerError({ message: "nudge failed" })]),
++      ]]
++      const failed = yield* invoke(childID, "research", "none")
++      expect(failed.result).toEqual({ type: "error", value: `Subagent failed (task_id: ${childID}): nudge failed` })
++      expect(requests.length - count).toBe(2)
++    }
++    // 用现有provider门控分别取消首轮及提醒轮；迟到放行不能把cancel改成成功或触发第三轮。
++    for (const round of [0, 1]) {
++      const before = yield* sessions.context(child.id)
++      const count = requests.length
++      const firstGate = yield* Deferred.make<void>()
++      const firstStarted = yield* Deferred.make<void>()
++      const secondGate = yield* Deferred.make<void>()
++      const secondStarted = yield* Deferred.make<void>()
++      streamGate = firstGate
++      streamStarted = firstStarted
++      responses = [blank, answer]
++      const waiting = yield* invoke(childID, "research", "none").pipe(Effect.forkChild)
++      yield* Deferred.await(firstStarted)
++      if (round === 1) {
++        streamGate = secondGate
++        streamStarted = secondStarted
++        yield* Deferred.succeed(firstGate, undefined)
++        yield* Deferred.await(secondStarted)
++      }
++      yield* Fiber.interrupt(waiting)
++      const exit = yield* Fiber.await(waiting)
++      expect(Exit.isFailure(exit)).toBe(true)
++      if (Exit.isFailure(exit)) expect(Cause.hasInterrupts(exit.cause)).toBe(true)
++      yield* Deferred.succeed(firstGate, undefined)
++      yield* Deferred.succeed(secondGate, undefined)
++      const background = yield* BackgroundJob.Service
++      expect((yield* background.get(childID))?.status).toBe("cancelled")
++      expect(yield* sessions.active).not.toContain(child.id)
++      expect(requests.length - count).toBe(round + 1)
++      expect((yield* sessions.context(child.id)).filter(message => message.type === "synthetic" && !before.some(old => old.id === message.id))).toHaveLength(round)
++      streamGate = undefined
++      streamStarted = undefined
++    }
++    responses = undefined
+     response = fragmentFixture("text", "large-child", ["x".repeat(32_001)]).completeEvents
+     const large = Schema.decodeUnknownSync(TaskTool.Output)((yield* invoke(undefined, "research", "none")).output?.structured)
+     expect(large.output).toBe("x".repeat(32_000) + "\n...[truncated]")
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts

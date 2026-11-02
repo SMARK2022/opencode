@@ -1646,13 +1646,16 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
          or(
            eq(MessageTable.id, input.messageID),
            and(
-@@ -926,3 +940,4 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
--  // 已有边界按持久时间/ID截取；缺失边界保留原ID范围合同，raw读取仍不解码冷payload。
--  const before = input.messageID ? anchor ? older(anchor) : lt(MessageTable.id, input.messageID) : undefined
-+  // 显式边界缺失交给 Session admission 拒绝，已有 SQL tuple 前缀及 Part 归属查询保持不变。
+@@ -906,1 +920,1 @@
+-// messageID按同会话的(time_created,id)定位exclusive前缀；不存在的锚点沿用全量可见复制。
++// messageID按同会话持久tuple定位exclusive前缀，显式缺失边界在创建子会话前拒绝。
+@@ -909,4 +923,6 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
+   const anchor = input.messageID ? db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
+     .where(and(...conditions, eq(MessageTable.id, input.messageID))).get() : undefined
++  // 保留同Session、hidden过滤和Part join；不能以缺失边界放大为全量复制。
 +  if (input.messageID && !anchor) return { messages: [], parts: [], missing: true as const }
-+  const before = anchor ? older(anchor) : undefined
-   const conditions = and(eq(MessageTable.session_id, input.sessionID), before)
+   if (anchor) conditions.push(sql`(${MessageTable.time_created}, ${MessageTable.id}) < (${anchor.time}, ${anchor.id})`)
+   const messages = db
 @@ -945,4 +960,4 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionID; messageID?: MessageID }) {
          .all()
      : []
@@ -1741,8 +1744,7 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/storage/cold-storage.ts
 --- a/packages/core/src/storage/cold-storage.ts
 +++ b/packages/core/src/storage/cold-storage.ts
-@@ -937,6 +937,25 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
-   if (!session) return
+@@ -1018,5 +1018,24 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
    // CompactionBoundary 保持目标 db-first 形态（#493），不回退 source 的无参调用。
    const boundary = CompactionBoundary.latest(db, sessionID)
 +  // #0584：marker fallback 仅在 tail 缺失时成立（shipped compatibility）；
@@ -1767,7 +1769,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
    // parent_id 是 task/subagent 权威分类；fork 无 parent，走 root 时钟，禁止用标题匹配。
    const aged = session.parentID
      ? (() => {
-@@ -946,19 +965,44 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
+@@ -1026,25 +1045,50 @@ function eligibility(db: TxOrDb, sessionID: SessionID, now: number, rootOlderTha
      : session.updated <= now - rootOlderThanMs
    return {
      aged,
@@ -1776,6 +1778,7 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
      markerID: boundary?.markerID,
      summaryID: boundary?.summaryID,
 +    messageTimes,
+     nativeBoundarySeq,
    }
  }
  
@@ -1813,6 +1816,11 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 +    .get()
 +  if (!boundary) throw new CorruptionError({ message: `Session summary cursor is not resolvable: ${sessionID}` })
 +  return message.time - boundary.time || Buffer.compare(Buffer.from(messageID), Buffer.from(boundary.id))
+ }
+ 
+ // Native的compaction边界是durable seq；稳定ID只用于维护遍历，不能代替消息顺序。
+ function eligibleSessionMessage(state: ReturnType<typeof eligibility>, seq: number) {
+   return state !== undefined && (state.aged || state.nativeBoundarySeq !== undefined && seq < state.nativeBoundarySeq)
  }
  
  // 单 hash 反算只服务普通 owner update/delete 的强一致检查；批量维护必须使用 ownerCounts 避免 N+1 SQL。
@@ -1861,13 +1869,14 @@ diff --git a/packages/core/src/storage/cold-storage.ts b/packages/core/src/stora
 diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/src/session/summary-cache.ts
 --- a/packages/opencode/src/session/summary-cache.ts
 +++ b/packages/opencode/src/session/summary-cache.ts
-@@ -1,6 +1,6 @@
+@@ -1,7 +1,7 @@
  import { Effect, Schema } from "effect"
  import path from "path"
 -import { and, asc, desc, eq, gt, isNull, lte, sql, type SQL } from "drizzle-orm"
 +import { and, asc, desc, eq, gt, isNull, lte, or, sql, type SQL } from "drizzle-orm"
  // #0500：目标分层——cold owner 在 core；TxOrDb 与 SummaryPayload 由 cold-storage 导出。
  import { Database } from "@opencode-ai/core/database/database"
+ import { ToolDiffs } from "@opencode-ai/core/session/tool-diffs"
  import { ColdStorage, type SummaryPayload, type TxOrDb } from "@opencode-ai/core/storage/cold-storage"
 @@ -28,6 +28,48 @@ type ToolDiffMessage = {
    parts: ToolDiffPart[]
@@ -2589,6 +2598,76 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
          .prompt({
            sessionID: chat.id,
            messageID: latestID,
+
+diff --git a/packages/app/package.json b/packages/app/package.json
+--- a/packages/app/package.json
++++ b/packages/app/package.json
+@@ -18,4 +18,4 @@
+-    "start": "vite",
+-    "dev": "vite",
+-    "build": "vite build",
+-    "serve": "vite preview",
++    "start": "node ../../node_modules/vite/bin/vite.js",
++    "dev": "node ../../node_modules/vite/bin/vite.js",
++    "build": "node ../../node_modules/vite/bin/vite.js build",
++    "serve": "node ../../node_modules/vite/bin/vite.js preview",
+
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -302,6 +302,7 @@
+         const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.void))
+         const modified = info?.mtime.pipe(
+           Option.map((date) => date.getTime()),
+-          Option.getOrElse(() => 0),
++          // 未知mtime不是过期证据；与stat失败一样保留文件，不能伪装为epoch零。
++          Option.getOrUndefined,
+         )
+         if (modified !== undefined && modified < cutoff) yield* fs.remove(file).pipe(Effect.catch(() => Effect.void))
+
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -372,7 +372,17 @@
+-  it.live("cleans expired managed files and preserves unrelated files", () =>
+-    withStore(({ root, store, fs }) =>
++  it.live("cleans expired managed files and preserves unrelated files", () => {
++    // 真实临时FS只在两个指定entry替换stat结果，不污染全局或绕过实际cleanup。
++    const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
++      const fs = yield* FSUtil.Service
++      return FSUtil.Service.of({ ...fs, stat: file => {
++        if (file.endsWith("tool_unreadable")) return fs.stat(path.join(file, "missing"))
++        return fs.stat(file).pipe(Effect.map(info => file.endsWith("tool_unknown") ? { ...info, mtime: Option.none() } : info))
++      } })
++    })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
++    return withStore(({ root, store, fs }) =>
+       Effect.gen(function* () {
+         const old = path.join(root, "tool-output", "tool_old")
+         const recent = path.join(root, "tool-output", "tool_recent")
+         const unrelated = path.join(root, "tool-output", "keep.txt")
++        const unknown = path.join(root, "tool-output", "tool_unknown")
++        const unreadable = path.join(root, "tool-output", "tool_unreadable")
+         yield* fs.ensureDir(path.join(root, "tool-output"))
+@@ -381,11 +391,17 @@
+         yield* fs.writeFileString(unrelated, "keep")
++        yield* fs.writeFileString(unknown, "unknown")
++        yield* fs.writeFileString(unreadable, "unreadable")
+         const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000)
+         yield* fs.utimes(old, expired, expired)
+         yield* store.cleanup()
+         expect(yield* fs.exists(old)).toBe(false)
+         expect(yield* fs.exists(recent)).toBe(true)
+         expect(yield* fs.exists(unrelated)).toBe(true)
++        // mtime缺失与stat失败都不能删，已知过期项仍按原断言删除。
++        expect(yield* fs.exists(unknown)).toBe(true)
++        expect(yield* fs.exists(unreadable)).toBe(true)
+       }),
+-    ),
+-  )
++      undefined, filesystem,
++    )
++  })
+ })
 
 diff --git a/packages/opencode/test/session/compaction.test.ts b/packages/opencode/test/session/compaction.test.ts
 --- a/packages/opencode/test/session/compaction.test.ts

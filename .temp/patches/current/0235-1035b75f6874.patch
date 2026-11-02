@@ -12,75 +12,29 @@ Content-Transfer-Encoding: 8bit
 
 
 diff --git a/packages/core/src/session/activity.ts b/packages/core/src/session/activity.ts
-new file mode 100644
---- /dev/null
+--- a/packages/core/src/session/activity.ts
 +++ b/packages/core/src/session/activity.ts
-@@ -0,0 +1,35 @@
-+import { EventEmitter } from "events"
-+
-+const emitter = new EventEmitter()
+@@ -4,9 +4,11 @@
+ const emitter = new EventEmitter()
+-const active = new Set<string>()
 +const active = new Set<symbol>()
-+
-+// #235：进程内统一跟踪 V1 session/shell 与 Native drain，保留 begin/end 契约。
-+export function begin(id: string) {
+ 
+ // #152：begin 返回 end；进程内跟踪 session/shell 活跃 runner
+ export function begin(id: string) {
+-  active.add(id)
 +  // #235：不同 listener 可并行处理同一 ID，每次登记独占令牌，避免互相提前释放。
 +  const token = Symbol(id)
 +  active.add(token)
-+  emitter.emit("change", active.size)
-+
-+  let done = false
-+  return () => {
-+    if (done) return
-+    done = true
+   emitter.emit("change", active.size)
+ 
+   let done = false
+@@ -14,5 +16,5 @@
+     if (done) return
+     done = true
+-    active.delete(id)
 +    active.delete(token)
-+    emitter.emit("change", active.size)
-+  }
-+}
-+
-+// #152：当前活跃 runner 数量
-+export function count() {
-+  return active.size
-+}
-+
-+// #152：数量变化订阅，供 worker 重武装 idle 计时器
-+export function onChange(cb: (count: number) => void) {
-+  emitter.on("change", cb)
-+  return () => {
-+    emitter.off("change", cb)
-+  }
-+}
-+
-+export * as SessionActivity from "./activity"
-diff --git a/packages/core/src/session/execution/local.ts b/packages/core/src/session/execution/local.ts
---- a/packages/core/src/session/execution/local.ts
-+++ b/packages/core/src/session/execution/local.ts
-@@ -1,5 +1,6 @@
- import { Cause, Effect, Layer } from "effect"
- import { LocationServiceMap } from "../../location-service-map"
- import { makeGlobalNode } from "../../effect/app-node"
-+import { SessionActivity } from "../activity"
- import { SessionRunCoordinator } from "../run-coordinator"
- import { SessionRunner } from "../runner"
-@@ -15,7 +16,12 @@
-     const locations = yield* LocationServiceMap.Service
-     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError>({
-       drain: Effect.fnUntraced(function* (sessionID: SessionSchema.ID, force) {
-+        // #235：登记实际 drain（含 Session 读取），独立 scope 在失败、中断和收尾时释放。
-+        yield* Effect.acquireRelease(
-+          Effect.sync(() => SessionActivity.begin(`native:${sessionID}`)),
-+          (end) => Effect.sync(end),
-+        )
-         const session = yield* store.get(sessionID)
-         if (!session) return yield* Effect.die(`Session not found: ${sessionID}`)
-         return yield* SessionRunner.Service.use((runner) => runner.run({ sessionID, force })).pipe(
-           Effect.provide(locations.get(session.location)),
-@@ -25,5 +31,5 @@
-               : Effect.logError("Failed to drain Session", cause).pipe(Effect.annotateLogs({ sessionID })),
-           ),
-         )
--      }),
-+      }, Effect.scoped),
-     })
+     emitter.emit("change", active.size)
+   }
 diff --git a/packages/core/test/session-execution-local.test.ts b/packages/core/test/session-execution-local.test.ts
 new file mode 100644
 --- /dev/null
@@ -436,45 +390,6 @@ diff --git a/packages/opencode/src/permission/reviewer/service.ts b/packages/ope
  )
  
  // #203：Permission.defaultLayer 消费此 bundled reviewer 层来构建 Permission.Service。
-diff --git a/packages/opencode/src/session/activity.ts b/packages/opencode/src/session/activity.ts
---- a/packages/opencode/src/session/activity.ts
-+++ b/packages/opencode/src/session/activity.ts
-@@ -1,33 +1,2 @@
--import { EventEmitter } from "events"
--
--const emitter = new EventEmitter()
--const active = new Set<string>()
--
--// #152：begin 返回 end；进程内跟踪 session/shell 活跃 runner
--export function begin(id: string) {
--  active.add(id)
--  emitter.emit("change", active.size)
--
--  let done = false
--  return () => {
--    if (done) return
--    done = true
--    active.delete(id)
--    emitter.emit("change", active.size)
--  }
--}
--
--// #152：当前活跃 runner 数量
--export function count() {
--  return active.size
--}
--
--// #152：数量变化订阅，供 worker 重武装 idle 计时器
--export function onChange(cb: (count: number) => void) {
--  emitter.on("change", cb)
--  return () => {
--    emitter.off("change", cb)
--  }
--}
--
--export * as SessionActivity from "./activity"
-+// #235：旧入口显式转发 Core 的同一账本，worker 与 Native drain 共享活动和通知。
-+export { begin, count, onChange, SessionActivity } from "@opencode-ai/core/session/activity"
 diff --git a/packages/opencode/test/cli/cmd/tui/exit.test.tsx b/packages/opencode/test/cli/cmd/tui/exit.test.tsx
 new file mode 100644
 --- /dev/null

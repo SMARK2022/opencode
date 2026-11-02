@@ -2581,22 +2581,18 @@ diff --git a/packages/opencode/src/cli/cmd/stats-render.ts b/packages/opencode/s
      "tools:",
      ...limitRows(report.toolUsage, options.limit).map((t) => `  ${fitVisible(t.id, 24)} ${t.count}`),
    ].join("\n")
-@@ -486,6 +485,6 @@
+@@ -491,4 +490,4 @@
  export const renderModels = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats models"),
 +    ...header(report, "stats models", options.color),
      ...renderRankBars({
-       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
-       rows: limitRows(
-@@ -501,6 +500,6 @@
+@@ -502,4 +501,4 @@
  export const renderProviders = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [
 -    ...header(report, "stats providers"),
 +    ...header(report, "stats providers", options.color),
      ...renderRankBars({
-       // #177：显式 cost 先排序再限行，默认沿用 tokens 榜
-       rows: limitRows(
 @@ -519,6 +518,6 @@
  export const renderTimeline = (report: StatsReport, options: StatsRenderOptions = {}) =>
    [

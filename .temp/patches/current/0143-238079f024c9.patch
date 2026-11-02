@@ -5,6 +5,139 @@ Subject: [PATCH] =?UTF-8?q?feat:=20=E6=9B=B4=E6=96=B0=E6=89=80=E6=9C=89?=
  =?UTF-8?q?=E7=9B=B8=E5=85=B3=E5=8C=85=E7=9A=84=E7=89=88=E6=9C=AC=E5=8F=B7?=
  =?UTF-8?q?=E8=87=B31.14.41=EF=BC=8Csession=E8=B7=AF=E5=BE=84=E7=AE=A1?=
 
+diff --git a/packages/core/src/session/listing.ts b/packages/core/src/session/listing.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/listing.ts
+@@ -0,0 +1,46 @@
++export * as SessionListing from "./listing"
++
++import path from "path"
++import { and, eq, isNull, like, or, sql, type SQL } from "drizzle-orm"
++import { ProjectV2 } from "../project"
++import { SessionTable } from "./sql"
++import { SessionPath } from "./path"
++
++function relatedPath(input: { path: string; directory?: string; global?: boolean; root?: boolean }) {
++  return or(...SessionPath.aliases(input).flatMap(item => {
++    const prefix = item.replace(/\/+$/, "")
++    return [
++      ...SessionPath.ancestors(item, { root: input.root }).map(ancestor => eq(SessionTable.path, ancestor)),
++      like(SessionTable.path, sql.param(prefix ? `${prefix}/%` : "%", SessionTable.path)),
++    ]
++  }))
++}
++
++function relatedDirectory(directory: string) {
++  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
++  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
++  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
++  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
++  return or(...SessionPath.ancestors(value).map(ancestor => eq(comparable, ancestor)), like(comparable, value ? `${value}/%` : "%"))
++}
++
++// 两代共用相关命名空间的唯一 SQL；调用者决定是否请求此语义，精确目录查询不隐式扩大。
++export function related(input: { projectID: ProjectV2.ID; worktree: string; path: string; directory?: string }) {
++  const isGlobal = input.projectID === ProjectV2.ID.global
++  const projectPath = relatedPath({ ...input, global: isGlobal, root: true })
++  const relative = input.directory === undefined ? undefined : SessionPath.relative(input.worktree, input.directory)
++  const wanted = input.path.replaceAll("\\", "/")
++  // directory/path 必须同源，才允许 global 与历史 directory 分支参与同一个查询。
++  const sameLocation = relative !== undefined && (process.platform === "win32" ? relative.toLowerCase() === wanted.toLowerCase() : relative === wanted)
++  const globalPath = sameLocation && input.directory ? relatedPath({
++    path: SessionPath.relative("/", input.directory), directory: input.directory, global: true,
++  }) : undefined
++  const nullPath = input.directory ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory)) : undefined
++  const branches = [
++    and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath) : projectPath),
++    ...(globalPath && !isGlobal ? [and(eq(SessionTable.project_id, ProjectV2.ID.global), nullPath ? or(globalPath, nullPath) : globalPath)] : []),
++    ...(sameLocation && input.directory ? [relatedDirectory(input.directory)] : []),
++  ].filter((branch): branch is SQL => branch !== undefined)
++  // 第一分支始终含 project_id；join 仅去掉 Drizzle 的可选条件类型，不引入第二次取数。
++  return sql`(${sql.join(branches, sql` OR `)})`
++}
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -41,1 +41,2 @@
+ import type { PermissionV2 } from "./permission"
++import { SessionListing } from "./session/listing"
+@@ -285,1 +286,10 @@
+-        if ("project" in input) conditions.push(eq(SessionTable.project_id, input.project))
++        if ("project" in input) {
++          if (input.subpath === undefined) conditions.push(eq(SessionTable.project_id, input.project))
++          if (input.subpath !== undefined) {
++            const project = yield* db.select({ worktree: ProjectTable.worktree }).from(ProjectTable)
++              .where(eq(ProjectTable.id, input.project)).get().pipe(Effect.orDie)
++            if (!project) return []
++            // 已公开的 subpath 进入真实查询；空根与普通 project 仍是不同的筛选意图。
++            conditions.push(SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath) }))
++          }
++        }
+diff --git a/packages/core/test/session-create.test.ts b/packages/core/test/session-create.test.ts
+--- a/packages/core/test/session-create.test.ts
++++ b/packages/core/test/session-create.test.ts
+@@ -3,1 +3,1 @@
+-import { Effect, Layer, Stream } from "effect"
++import { DateTime, Effect, Layer, Stream } from "effect"
+@@ -16,1 +16,2 @@
+-import { AbsolutePath } from "@opencode-ai/core/schema"
++import { AbsolutePath, RelativePath } from "@opencode-ai/core/schema"
++import { SessionPath } from "@opencode-ai/core/session/path"
+@@ -50,1 +51,53 @@
+ describe("SessionV2.create", () => {
++  it.effect("lists related project subpaths without widening exact directories", () => Effect.gen(function* () {
++    const session = yield* SessionV2.Service
++    const db = (yield* Database.Service).db
++    const projectID = ProjectV2.ID.make("1".repeat(40))
++    const otherID = ProjectV2.ID.make("2".repeat(40))
++    const workspaceID = WorkspaceV2.ID.make("wrk_related")
++    const otherWorkspace = WorkspaceV2.ID.make("wrk_other")
++    const outer = path.resolve("/scope")
++    const repo = path.join(outer, "repo")
++    const child = path.join(repo, "packages", "a")
++    const foreign = path.resolve("/unrelated")
++    yield* db.insert(ProjectTable).values([
++      { id: projectID, worktree: AbsolutePath.make(repo), sandboxes: [] },
++      { id: otherID, worktree: AbsolutePath.make(foreign), sandboxes: [] },
++      { id: ProjectV2.ID.global, worktree: AbsolutePath.make(path.parse(repo).root), sandboxes: [] },
++    ]).onConflictDoNothing().run().pipe(Effect.orDie)
++    const rows = [
++      { title: "root", project_id: projectID, directory: repo, path: "" },
++      { title: "parent", project_id: projectID, directory: path.join(repo, "packages"), path: "packages" },
++      { title: "current", project_id: projectID, directory: child, path: "packages/a" },
++      { title: "deeper", project_id: projectID, directory: path.join(child, "src"), path: "packages/a/src" },
++      { title: "sibling", project_id: projectID, directory: path.join(repo, "packages", "b"), path: "packages/b" },
++      { title: "global-parent", project_id: ProjectV2.ID.global, directory: outer, path: SessionPath.relative("/", outer) },
++      { title: "legacy", project_id: projectID, directory: child, path: null },
++      { title: "cross-owner-parent", project_id: otherID, directory: path.join(repo, "packages"), path: null },
++      { title: "global-alias", project_id: ProjectV2.ID.global, directory: foreign, path: SessionPath.relative("/", outer).replace(/^[A-Za-z]:\//, "") },
++      { title: "unrelated", project_id: otherID, directory: foreign, path: "unrelated" },
++      { title: "other-workspace", project_id: projectID, directory: child, path: "packages/a" },
++    ]
++    // 同一创建时间强制验证 ID 破同分和双向 cursor；数据只进入隔离测试数据库。
++    yield* db.insert(SessionTable).values(rows.map((row, index) => ({ ...row,
++      id: SessionV2.ID.make(`ses_related_${String(index).padStart(2, "0")}`), slug: row.title, version: "test",
++      workspace_id: index === rows.length - 1 ? otherWorkspace : workspaceID, time_created: 1000, time_updated: 1000,
++    }))).run().pipe(Effect.orDie)
++    const query = { project: projectID, subpath: RelativePath.make("packages/a"), workspaceID, order: "asc" as const }
++    const all = yield* session.list(query)
++    expect(all.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "global-parent", "legacy", "cross-owner-parent", "global-alias"])
++    expect((yield* session.list({ ...query, search: "current" })).map(item => item.title)).toEqual(["current"])
++    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
++    const wholeProject = yield* session.list({ project: projectID, order: "asc" })
++    expect(wholeProject.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "sibling", "legacy", "other-workspace"])
++    expect((yield* session.list({ ...query, subpath: RelativePath.make("") })).map(item => item.title)).toContain("sibling")
++    const first = yield* session.list({ ...query, limit: 2 })
++    const edge = first.at(-1)
++    if (!edge) return yield* Effect.die("Missing first related page")
++    const next = yield* session.list({ ...query, limit: 2, anchor: { id: edge.id, time: DateTime.toEpochMillis(edge.time.created), direction: "next" } })
++    expect(next.map(item => item.id)).toEqual(all.slice(2, 4).map(item => item.id))
++    const back = next[0]
++    if (!back) return yield* Effect.die("Missing next related page")
++    expect((yield* session.list({ ...query, limit: 2, anchor: { id: back.id, time: DateTime.toEpochMillis(back.time.created), direction: "previous" } })).map(item => item.id)).toEqual(first.map(item => item.id))
++  }))
++
 diff --git a/packages/core/src/session/path.ts b/packages/core/src/session/path.ts
 index 30d87512ac..9e0ec6a16b 100644
 --- a/packages/core/src/session/path.ts
@@ -39,6 +172,8 @@ diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/se
 index 9d92742ac9..77dd412627 100644
 --- a/packages/opencode/src/session/session.ts
 +++ b/packages/opencode/src/session/session.ts
+@@ -0,0 +1,1 @@
++import { SessionListing } from "@opencode-ai/core/session/listing"
 @@ -548,6 +548,8 @@ const layer: Layer.Layer<
        return yield* listByProject(db, {
          projectID: ctx.project.id,
@@ -48,43 +183,7 @@ index 9d92742ac9..77dd412627 100644
          ...input,
        })
      })
-@@ -948,39 +950,103 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
-   )
- })
- 
-+// #143：path 别名祖先 + 子路径 like
-+function relatedPathConditions(input: { path: string; directory?: string; global?: boolean; root?: boolean }) {
-+  return SessionPath.aliases(input).flatMap((item) => {
-+    const prefix = item.replace(/\/+$/, "")
-+    return [
-+      // #143：祖先路径命中（父目录会话）
-+      ...SessionPath.ancestors(item, { root: input.root }).map((ancestor) => eq(SessionTable.path, ancestor)),
-+      // #143：子孙 path
-+      like(SessionTable.path, sql.param(prefix ? `${prefix}/%` : "%", SessionTable.path)),
-+    ]
-+  })
-+}
-+
-+// #143：directory 列命名空间（path 为空的历史行）
-+function relatedDirectoryConditions(directory: string) {
-+  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
-+  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
-+  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
-+  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
-+  return [
-+    ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
-+    like(comparable, value ? `${value}/%` : "%"),
-+  ]
-+}
-+
-+// #143：directory 与 path 是否同一 worktree 相对路径
-+function directoryMatchesPath(input: { directory?: string; path: string; worktree: string }) {
-+  if (!input.directory) return false
-+  const left = SessionPath.relative(input.worktree, input.directory)
-+  const right = input.path.replaceAll("\\", "/")
-+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right
-+}
-+
+@@ -899,36 +900,21 @@
  function listByProject(
    db: Database.Interface["db"],
    input: ListInput & {
@@ -94,7 +193,6 @@ index 9d92742ac9..77dd412627 100644
    },
  ) {
 -  const conditions = [eq(SessionTable.project_id, input.projectID)]
-+  // #143：path 过滤时不预置 project_id，以便 OR 全局父会话
 +  const conditions: ReturnType<typeof eq>[] = []
  
    if (input.workspaceID) {
@@ -104,14 +202,8 @@ index 9d92742ac9..77dd412627 100644
 -    if (input.path) {
 -      // #132：全局会话 path 别名（含历史无盘符行）
 -      const conds = SessionPath.aliases({
-+    // #143：path 只要定义（含 worktree 根 ""）就必须走 related/global OR，禁止回退 project_id
-+
-+    const isGlobal = String(input.projectID) === "global"
-+    // #143：主项目 path 过滤（祖先+子孙）
-+    const projectPath = or(
-+      ...relatedPathConditions({
-         path: input.path,
-         directory: input.directory,
+-        path: input.path,
+-        directory: input.directory,
 -        global: String(input.projectID) === "global",
 -      }).flatMap((item) => [
 -        eq(SessionTable.path, item),
@@ -127,48 +219,12 @@ index 9d92742ac9..77dd412627 100644
 -  } else if (input.scope !== "project") {
 -    if (input.directory) {
 -      conditions.push(eq(SessionTable.directory, input.directory))
-+        global: isGlobal,
-+        root: true,
-+      }),
-+    )!
-+    const useDirectoryFallback = directoryMatchesPath({
-+      directory: input.directory,
-+      path: input.path,
-+      worktree: input.worktree,
-+    })
-+    // #143：全局 path（从 / 相对的 directory）供跨 project 父会话
-+    const globalPath =
-+      useDirectoryFallback && input.directory
-+        ? or(
-+            ...relatedPathConditions({
-+              path: SessionPath.relative("/", input.directory),
-+              directory: input.directory,
-+              global: true,
-+            }),
-+          )
-+        : undefined
-+    const nullPath = input.directory
-+      ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
-+      : undefined
-+    conditions.push(
-+      or(
-+        and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
-+        // #143：非全局项目时并入 global 项目同源 path
-+        // #143：global 项目父会话必须可被 git 子目录 list OR 命中
-+        ...(globalPath && !isGlobal
-+          ? [and(eq(SessionTable.project_id, "global" as ProjectV2.ID), nullPath ? or(globalPath, nullPath)! : globalPath)]
-+          : []),
-+        ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
-+      )!,
-+    )
-+  
+-    }
++    // 已定义的空根也使用共享相关查询，不能被真值判断吞掉。
++    conditions.push(SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory }))
 +  } else {
 +    conditions.push(eq(SessionTable.project_id, input.projectID))
-+    if (input.scope !== "project") {
-+      if (input.directory) {
-+        conditions.push(eq(SessionTable.directory, input.directory))
-+      }
-     }
++    if (input.scope !== "project" && input.directory) conditions.push(eq(SessionTable.directory, input.directory))
    }
    if (input.roots) {
 diff --git a/packages/opencode/src/cli/cmd/session.ts b/packages/opencode/src/cli/cmd/session.ts

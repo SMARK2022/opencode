@@ -3,6 +3,150 @@ From: SMARK2022 <3222301373@qq.com>
 Date: Fri, 22 May 2026 12:48:12 +0800
 Subject: [PATCH] =?UTF-8?q?feat:=20=E5=A2=9E=E5=BC=BA=E9=94=99=E8=AF=AF?=
 
+diff --git a/packages/llm/src/route/transport/http.ts b/packages/llm/src/route/transport/http.ts
+--- a/packages/llm/src/route/transport/http.ts
++++ b/packages/llm/src/route/transport/http.ts
+@@ -1,1 +1,1 @@
+-import { Effect, Stream } from "effect"
++import { Effect, Schedule, Stream } from "effect"
+@@ -8,1 +8,1 @@
+-import { mergeJsonRecords, type LLMRequest } from "../../schema"
++import { LLMError, TransportReason, mergeJsonRecords, type LLMRequest } from "../../schema"
+@@ -130,20 +130,31 @@
+   frames: (prepared, request, runtime) =>
+-    Stream.unwrap(
+-      runtime.http
+-        .execute(prepared.request)
+-        .pipe(
+-          Effect.map((response) =>
+-            prepared.framing.frame(
+-              response.stream.pipe(
+-                Stream.mapError((error) =>
+-                  ProviderShared.eventError(
+-                    `${request.model.provider}/${request.model.route.id}`,
+-                    `Failed to read ${request.model.provider}/${request.model.route.id} stream`,
+-                    ProviderShared.errorText(error),
+-                  ),
+-                ),
+-              ),
+-            ),
+-          ),
+-        ),
+-    ),
++    Stream.suspend(() => {
++      let started = false
++      const frames = Stream.unwrap(
++        runtime.http.execute(prepared.request).pipe(
++          Effect.map((response) =>
++            prepared.framing.frame(
++              response.stream.pipe(
++                // 字节读取失败是运输故障；协议/JSON解码仍在原有不可重试分支。
++                Stream.mapError((error) => new LLMError({
++                  module: "HttpTransport",
++                  method: "frames",
++                  reason: new TransportReason({
++                    message: `Failed to read ${request.model.provider}/${request.model.route.id} stream: ${ProviderShared.errorText(error)}`,
++                    kind: error.reason._tag,
++                  }),
++                })),
++              ),
++            ),
++          ),
++        ),
++      )
++      return frames.pipe(
++        // 已交付的frame可能包含工具副作用，之后绝不自动重放本provider turn。
++        Stream.tap(() => Effect.sync(() => { started = true })),
++        Stream.retry(($) => $(Schedule.exponential(500).pipe(Schedule.take(2))).pipe(
++          // 仅重取此处的body故障，不重复包裹executor已耗尽的建连/status重试。
++          Schedule.while(({ input }) => !started && input.module === "HttpTransport" && input.reason._tag === "Transport"),
++        )),
++      )
++    }),
+diff --git a/packages/llm/src/schema/errors.ts b/packages/llm/src/schema/errors.ts
+--- a/packages/llm/src/schema/errors.ts
++++ b/packages/llm/src/schema/errors.ts
+@@ -128,5 +128,5 @@
+ }) {
+   get retryable() {
+-    // 未取得 HTTP 响应的网络异常交给既有有限 RequestExecutor 重试，不重启已开始的 Session turn。
++    // 运输owner仅在内容交付前有限重试网络故障，不重启已开始的Session turn。
+     return true
+   }
+diff --git a/packages/llm/test/lib/http.ts b/packages/llm/test/lib/http.ts
+--- a/packages/llm/test/lib/http.ts
++++ b/packages/llm/test/lib/http.ts
+@@ -66,13 +66,18 @@
+ export const truncatedStream = (chunks: ReadonlyArray<string>) =>
+   dynamicResponse((input) =>
+     Effect.sync(() => {
+       const encoder = new TextEncoder()
++      // 先让reader取得前序chunk，再报错；start中error会丢弃尚未消费的队列。
++      let index = 0
+       const stream = new ReadableStream({
+-        start(controller) {
+-          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
++        pull(controller) {
++          if (index < chunks.length) {
++            controller.enqueue(encoder.encode(chunks[index++]))
++            return
++          }
+           controller.error(new Error("connection reset"))
+         },
+       })
+       return input.respond(stream, { headers: SSE_HEADERS })
+     }),
+   )
+diff --git a/packages/llm/test/executor.test.ts b/packages/llm/test/executor.test.ts
+--- a/packages/llm/test/executor.test.ts
++++ b/packages/llm/test/executor.test.ts
+@@ -428,2 +428,46 @@
++  it.live("retries response-body transport failure before the first provider frame", () =>
++    Effect.gen(function* () {
++      const attempts = yield* Ref.make(0)
++      const model = OpenAIChat.route.with({ endpoint: { baseURL: "https://api.openai.test/v1" } }).model({ id: "gpt-4o-mini" })
++      const response = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello." })).pipe(
++        Effect.provide(dynamicResponse((input) => Effect.gen(function* () {
++          const attempt = yield* Ref.getAndUpdate(attempts, (value) => value + 1)
++          if (attempt === 0) return input.respond(new ReadableStream({
++            start(controller) {
++              controller.error(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }))
++            },
++          }), { headers: { "content-type": "text/event-stream" } })
++          return input.respond(sseRaw(
++            `data: ${JSON.stringify(deltaChunk({ role: "assistant", content: "Hello" }))}`,
++            `data: ${JSON.stringify(deltaChunk({}, "stop"))}`,
++            "data: [DONE]",
++          ), { headers: { "content-type": "text/event-stream" } })
++        }))),
++      )
++      // 真实协议成功收口且只重取一次，不在Session层另开provider turn。
++      expect(response.events.some((event) => event.type === "finish")).toBe(true)
++      expect(yield* Ref.get(attempts)).toBe(2)
++    }),
++  )
++
++  it.live("bounds response-body retries and preserves their transport classification", () =>
++    Effect.gen(function* () {
++      const attempts = yield* Ref.make(0)
++      const model = OpenAIChat.route.with({ endpoint: { baseURL: "https://api.openai.test/v1" } }).model({ id: "gpt-4o-mini" })
++      const error = yield* LLMClient.generate(LLM.request({ model, prompt: "Say hello." })).pipe(
++        Effect.provide(dynamicResponse((input) => Ref.update(attempts, (value) => value + 1).pipe(
++          Effect.as(input.respond(new ReadableStream({
++            start(controller) { controller.error(new Error("connection reset")) },
++          }), { headers: { "content-type": "text/event-stream" } })),
++        ))),
++        Effect.flip,
++      )
++      // 耗尽仍是真实失败，不伪造完成结果，也不无限重连。
++      expectLLMError(error)
++      expect(error.reason).toMatchObject({ _tag: "Transport" })
++      expect(yield* Ref.get(attempts)).toBe(3)
++    }),
++  )
++
+   it.effect("does not retry after a successful response reaches stream parsing", () =>
+     Effect.gen(function* () {
 diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/provider/provider.ts
 --- a/packages/opencode/src/provider/provider.ts
 +++ b/packages/opencode/src/provider/provider.ts

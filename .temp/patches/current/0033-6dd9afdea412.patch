@@ -53,7 +53,7 @@ diff --git a/packages/opencode/src/agent/agent.ts b/packages/opencode/src/agent/
 diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
 --- a/packages/core/src/plugin/agent.ts
 +++ b/packages/core/src/plugin/agent.ts
-@@ -130,6 +130,27 @@
+@@ -130,6 +130,26 @@
          )
        })
  
@@ -61,8 +61,7 @@ diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.
 +      for (const id of ["interactive", "review"]) {
 +        draft.update(AgentV2.ID.make(id), (item) => {
 +          item.description = "The default agent. Executes tools based on configured permissions."
-+          // 使用 build 的基础系统提示；保留更早注册者提供的提示。
-+          item.system ??= BUILD_SYSTEM
++          // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
 +          item.mode = "primary"
 +          // 配置插件随后追加全局和代理专属规则，保留用户最后覆盖的优先级。
 +          item.permissions.push(
@@ -108,7 +107,7 @@ diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
          Effect.provideService(
            Location.Service,
            Location.Service.of(location({ directory: AbsolutePath.make("/project") })),
-@@ -119,13 +123,49 @@
+@@ -119,13 +123,50 @@
          "compaction",
          "explore",
          "general",
@@ -129,6 +128,7 @@ diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
 +        if (!item) throw new Error(`expected registered ${id} agent`)
 +        expect(item).toMatchObject({ id, mode: "primary", hidden: false })
 +        expect(item.system).toBe((yield* agent.resolve("build"))?.system)
++        expect(item.system).toBeUndefined()
 +        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe("ask")
 +        // 文件修改入口共用 edit；交互代理不应意外收紧普通编辑权限。
 +        expect(PermissionV2.evaluate("edit", "src/index.ts", item.permissions).effect).toBe(

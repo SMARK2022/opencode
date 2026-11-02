@@ -13,30 +13,51 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
 --- a/packages/core/src/session/runner/llm.ts
 +++ b/packages/core/src/session/runner/llm.ts
-@@ -315,2 +315,4 @@
+@@ -381,2 +381,4 @@
              "x-session-affinity": session.id,
 +            // 代理按连字符头识别OpenAI会话；header保留完整身份，不复用缩短的正文缓存键。
 +            ...(model.provider === "openai" ? { "session-id": session.id } : {}),
+             "X-Session-Id": session.id,
+@@ -768,2 +770,4 @@
+             "x-session-affinity": session.id,
++            // 手动摘要独立构造请求，也沿用所选OpenAI模型的完整会话亲和身份。
++            ...(selection.model.provider === "openai" ? { "session-id": session.id } : {}),
              "X-Session-Id": session.id,
 
 diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
 --- a/packages/core/src/permission/reviewer.ts
 +++ b/packages/core/src/permission/reviewer.ts
-@@ -80,1 +80,3 @@
-           model: selected.model, system: PermissionReviewerPrompt.buildSystemPrompt(tenant),
+@@ -121,1 +121,3 @@
+           model: selected.model, prompt: attemptPrompt,
 +          // reviewer直接调用LLM而不经过V1插件，同一OpenAI会话仍需使用相同代理亲和身份。
 +          ...(selected.model.provider === "openai" ? { http: { headers: { "session-id": session.id } } } : {}),
 
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -3446,2 +3446,5 @@
+@@ -2522,1 +2522,3 @@
+-      currentModel = Model.make({ id: model.id, provider: model.provider, route: OpenAIChat.route.with({ limits: { context: 100_000, output: 4_096 } }) })
++      // 使用真实手动压缩入口，运输仍由fixture拦截，验证独立摘要请求也携带代理头。
++      currentModel = Model.make({ id: model.id, provider: "openai", route: OpenAIChat.route.with({ limits: { context: 100_000, output: 4_096 } }) })
++      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
+@@ -2552,1 +2554,3 @@
+       expect(requests[0].tools).toEqual([])
++      expect(requests[0].http?.headers?.["session-id"]).toBe(sessionID)
++      expect(requests[0].http?.headers?.session_id).toBeUndefined()
+@@ -4449,1 +4453,3 @@
++      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
++      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
+       const parentID = SessionV2.ID.make("ses_runner_parent")
+@@ -4462,1 +4468,2 @@
+       expect(requests[0]?.http?.headers?.["x-parent-session-id"]).toBe(parentID)
++      expect(requests[0]?.http?.headers?.["session-id"]).toBe(sessionID)
+@@ -4468,2 +4475,5 @@
        yield* setup
 +      // 正文键保持64字符，而代理header必须区分两个完整的真实Session ID。
 +      currentModel = Model.make({ id: model.id, provider: "openai", route: model.route })
 +      yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
        const longSessionID = SessionV2.ID.make(`ses_${"a".repeat(64)}`)
-@@ -3470,1 +3473,3 @@
+@@ -4492,1 +4502,3 @@
        expect(keys[0]).not.toBe(keys[1])
 +      expect(requests.map(request => request.http?.headers?.["session-id"])).toEqual([longSessionID, otherLongSessionID])
 +      expect(requests.every(request => request.http?.headers?.session_id === undefined)).toBe(true)
@@ -44,19 +65,23 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -62,1 +62,1 @@
--  return Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route }))
-+  return Effect.succeed(Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: OpenAIChat.route }))
-@@ -411,1 +411,2 @@
+@@ -100,1 +100,1 @@
+-    model: Model.make({ id: "review", provider: "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
++    model: Model.make({ id: "review", provider: session.model?.providerID ?? "test", route: reviewOAuth ? OpenAIResponses.route.with({ auth: Auth.none }) : OpenAIChat.route }),
+@@ -551,1 +551,2 @@
      expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
 +    expect(reviewRequests[0]?.http?.headers?.["session-id"]).toBeUndefined()
-@@ -432,1 +433,6 @@
-     expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
+@@ -684,4 +685,10 @@
+     expect(yield* service.list()).toEqual([])
+     expect(yield* sessions.context(SessionV2.ID.make("ses_test"))).toEqual(before)
 +    // 保留原override验证，再经真实reviewer入口确认OpenAI代理头；fake client不发网络请求。
 +    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "openai/reviewer" }) })
 +    expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/openai"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
 +    expect(reviewModels.at(-1)).toMatchObject({ id: "reviewer", providerID: "openai" })
 +    expect(reviewRequests.at(-1)?.http?.headers).toEqual({ "session-id": "ses_test" })
++    expect(reviewRequests.at(-1)?.http?.headers?.session_id).toBeUndefined()
+     reviewSettings = new Config.Info({})
+   }))
 
 diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
 --- a/packages/opencode/test/plugin/codex.test.ts

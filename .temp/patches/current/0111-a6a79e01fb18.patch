@@ -61,7 +61,7 @@ index 433803ed69..cb0c30c970 100644
    // 文件覆写 diff：当 write 工具覆写已有文件时，metadata.diff 包含 git diff 格式的变更
 @@ -2384,7 +2396,7 @@ function Write(props: ToolProps) {
          <BlockTool
-           title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
+           title={"# Wrote " + pathFormatter.format(filepath())}
            part={props.part}
 -          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
 +          onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
@@ -76,4 +76,4 @@ index 433803ed69..cb0c30c970 100644
 +          <Show when={writeCanCollapse()}>
              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
            </Show>
-           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={stringValue(props.input.filePath) ?? ""} />
+           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filepath() ?? ""} />

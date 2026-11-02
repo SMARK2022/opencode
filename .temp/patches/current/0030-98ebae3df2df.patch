@@ -46,8 +46,8 @@ diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -221,2 +221,6 @@
-                 shell,
+@@ -267,2 +267,6 @@
+                 shell: powershell ? false : shell,
 +                // UTF-8 覆盖附着于现有 ChildProcess；保持宿主环境继承，不复制或重跑采集流程。
 +                extendEnv: true,
 +                // V2 尚无插件 shell.env owner；这里只叠加源编码设置，不能恢复 legacy hook。
@@ -56,16 +56,17 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -35,2 +35,4 @@
+@@ -36,3 +36,5 @@
    readonly shell?: string | boolean
+   readonly args?: readonly string[]
 +  readonly env?: ChildProcess.CommandOptions["env"]
 +  readonly extendEnv?: boolean
    readonly options?: AppProcess.RunOptions
-@@ -75,1 +77,3 @@
--        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
+@@ -78,1 +80,3 @@
+-        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell, args: command.args, options })
 +        // 在既有 process 观察边界记录真正交给 spawner 的环境，不重复执行命令。
-+        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell,
-+          env: command.options.env, extendEnv: command.options.extendEnv, options })
++        runs.push({ command: command.args.at(-1) ?? command.command, cwd: command.options.cwd, shell: command.options.shell === false ? command.command : command.options.shell,
++          args: command.args, env: command.options.env, extendEnv: command.options.extendEnv, options })
 @@ -202,2 +206,11 @@
              expect(assertions).toMatchObject([{ sessionID, action: "bash", resources: ["pwd"], save: ["pwd"] }])
 +            // 真实 leaf 的环境必须继承宿主，四项 Windows 覆盖与已有 options 精确对应。

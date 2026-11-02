@@ -30,7 +30,7 @@ index 5a511bb71..da9f2ca36 100644
  type FileChange = {
    filePath: string
    oldContent: string
-@@ -33,83 +33,170 @@ type FileChange = {
+@@ -33,83 +33,172 @@ type FileChange = {
    additions: number
    deletions: number
    bom: boolean
@@ -56,11 +56,12 @@ index 5a511bb71..da9f2ca36 100644
 -  patchText: string,
  ) {
 -  switch (hunk.type) {
-+  const first = group.hunks[0]
++  const rewrite = group.hunks.length === 2 && group.hunks[0].type === "delete" && group.hunks[1].type === "add"
++  const first = rewrite ? group.hunks[1] : group.hunks[0]
 +  switch (first.type) {
      case "add": {
-+      // #518：重复 Add File entry 没有可组合语义（不同于 update 的 cursor 链），拒绝而不是 last-wins 覆盖。
-+      if (group.hunks.length !== 1) throw new Error(`Conflicting operations for ${group.filePath}`)
++      // Delete 后 Add 保留原地重写；重复 Add 仍拒绝，不能静默取最后一项。
++      if (group.hunks.length !== 1 && !rewrite) throw new Error(`Conflicting operations for ${group.filePath}`)
 +      const snapshot = yield* Mutation.read(afs, group.filePath)
 +      // #518：add 的旧 diff 语义继续从空文本计算，但 expected 保留真实 existing/missing state。
 +      if (snapshot.version.state === "other") throw new Error(`Path is not a file: ${group.filePath}`)
@@ -221,7 +222,8 @@ index 5a511bb71..da9f2ca36 100644
 +  // #518：source/destination ownership 在 Permission 前解析；锁排序不能替代语义冲突判断。
 +  for (const group of groups) {
 +    const first = group.hunks[0]
-+    const compatible = group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1)
++    const rewrite = group.hunks.length === 2 && first.type === "delete" && group.hunks[1].type === "add"
++    const compatible = rewrite || group.hunks.every((hunk) => hunk.type === first.type) && (first.type === "update" || group.hunks.length === 1)
 +    // #518：ownership conflict 在 Permission 前拒绝；锁排序只能避免死锁，不能选择语义。
 +    // 同 source 的 update entry 是唯一允许聚合的组合；add/delete 不凭猜测重建新语义。
 +    if (!compatible) throw new Error(`Conflicting operations for ${group.filePath}`)
@@ -251,7 +253,7 @@ index 5a511bb71..da9f2ca36 100644
  export const Parameters = Schema.Struct({
    patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
  })
-@@ -150,17 +237,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -150,17 +239,7 @@ export const ApplyPatchTool = Tool.define(
        const instance = yield* InstanceState.context
  
        // Validate file paths and check permissions
@@ -270,7 +272,7 @@ index 5a511bb71..da9f2ca36 100644
  
        let totalDiff = ""
        // [local-smark] per-file atomicity：收集每个 hunk 的错误而非在第一个失败时立即返回。
-@@ -169,18 +246,31 @@ export const ApplyPatchTool = Tool.define(
+@@ -169,18 +248,31 @@ export const ApplyPatchTool = Tool.define(
        // 用 Effect.exit 捕获每个 hunk 的成功/失败，不中断循环。
        const hunkErrors: string[] = []
  
@@ -311,7 +313,7 @@ index 5a511bb71..da9f2ca36 100644
            continue
          }
          const change = exit.value
-@@ -196,6 +286,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -196,6 +288,7 @@ export const ApplyPatchTool = Tool.define(
        }
  
        // Build per-file metadata for UI rendering (used for both permission and result)
@@ -319,7 +321,7 @@ index 5a511bb71..da9f2ca36 100644
        const files = fileChanges.map((change) => ({
          filePath: change.filePath,
          relativePath: path.relative(instance.worktree, change.movePath ?? change.filePath).replaceAll("\\", "/"),
-@@ -207,6 +298,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -207,6 +300,7 @@ export const ApplyPatchTool = Tool.define(
        }))
  
        // Check permissions if needed
@@ -327,7 +329,7 @@ index 5a511bb71..da9f2ca36 100644
        const relativePaths = fileChanges.map((c) => path.relative(instance.worktree, c.filePath).replaceAll("\\", "/"))
        yield* ctx.ask({
          permission: "edit",
-@@ -220,49 +312,68 @@ export const ApplyPatchTool = Tool.define(
+@@ -220,49 +314,68 @@ export const ApplyPatchTool = Tool.define(
        })
  
        // Apply the changes
@@ -432,7 +434,7 @@ index 5a511bb71..da9f2ca36 100644
        for (const update of updates) {
          yield* events.publish(Watcher.Event.Updated, update)
        }
-@@ -286,6 +397,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -286,6 +399,7 @@ export const ApplyPatchTool = Tool.define(
        const afterAll = yield* lsp.diagnostics()
  
        // Generate output summary
@@ -453,17 +455,15 @@ index 951bbb583..1cd72f9e9 100644
  import * as Tool from "./tool"
  import { LSP } from "@/lsp/lsp"
  import { createTwoFilesPatch, diffLines } from "diff"
-@@ -17,6 +18,8 @@ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/u
- import { closestWindow } from "@/patch/match"
- // #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
- import { applyEdits, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+@@ -17,4 +18,6 @@ import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/u
+ import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
+ import { EditApply } from "@opencode-ai/core/tool/edit-apply"
 +// #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
 +import * as Mutation from "./file-mutation-coordinator"
  // #131：行尾逻辑收敛到 util/line-ending（含 CR-only）
  
- /**
-@@ -27,18 +30,6 @@ export function replace(content: string, oldString: string, newString: string, r
-   return applyExactReplace(content, oldString, newString, replaceAll)
+@@ -23,18 +26,6 @@ export function replace(content: string, oldString: string, newString: string, r
+   return EditApply.replace(content, oldString, newString, replaceAll)
  }
  
 -const locks = new Map<string, Semaphore.Semaphore>()
@@ -481,9 +481,9 @@ index 951bbb583..1cd72f9e9 100644
  const EditItem = Schema.Struct({
    oldString: Schema.String.annotate({
      description:
-@@ -189,57 +180,69 @@ export const EditTool = Tool.define(
+@@ -152,57 +143,69 @@ export const EditTool = Tool.define(
            // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
-           let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
+           let syncInput: { filePath: string; edits: EditApply.EditReplacement[] } | undefined
  
 -          yield* lock(filePath).withPermits(1)(
 -            Effect.gen(function* () {
@@ -601,7 +601,7 @@ index 951bbb583..1cd72f9e9 100644
  
                // #514：匹配在 LF 工作区进行，写回时恢复文件级 CRLF/CR；避免把换行差异当成全文 diff。
                const ending = detectLineEnding(contentOld)
-@@ -292,15 +295,24 @@ export const EditTool = Tool.define(
+@@ -254,15 +257,24 @@ export const EditTool = Tool.define(
                  },
                })
  
@@ -630,7 +630,7 @@ index 951bbb583..1cd72f9e9 100644
                diff = trimDiff(
                  createTwoFilesPatch(
                    filePath,
-@@ -322,8 +334,7 @@ export const EditTool = Tool.define(
+@@ -285,8 +297,7 @@ export const EditTool = Tool.define(
                    ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
                  })),
                }
@@ -640,7 +640,7 @@ index 951bbb583..1cd72f9e9 100644
  
            const diffOld = normalizeLineEndings(contentOld)
            const diffNew = normalizeLineEndings(contentNew)
-@@ -393,7 +404,9 @@ export const EditTool = Tool.define(
+@@ -356,7 +367,9 @@ export const EditTool = Tool.define(
              title: `${path.relative(instance.worktree, filePath)}`,
              output,
            }
@@ -974,7 +974,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..de800c4b1f7ee6ed99c0aabc6a75094a430753af
 --- /dev/null
 +++ b/packages/opencode/test/tool/file-mutation-concurrency.test.ts
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,595 @@
 +import { afterEach, describe, expect } from "bun:test"
 +import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 +import path from "path"
@@ -1136,6 +1136,8 @@ index 0000000000000000000000000000000000000000..de800c4b1f7ee6ed99c0aabc6a75094a
 +
 +      yield* executePatch({ patchText }, context(() => Effect.void))
 +      expect(yield* fs.readFileString(filePath)).toBe("first\nline2\nline3\nlast\n")
++      yield* executePatch({ patchText: "*** Begin Patch\n*** Delete File: repeated-entry.txt\n*** Add File: repeated-entry.txt\n+rewrite\n*** End Patch" }, context(() => Effect.void))
++      expect(yield* fs.readFileString(filePath)).toBe("rewrite\n")
 +    }),
 +  )
 +
@@ -1568,3 +1570,263 @@ index 0000000000000000000000000000000000000000..de800c4b1f7ee6ed99c0aabc6a75094a
 +    }),
 +  )
 +})
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -75,2 +75,7 @@
+ export interface Interface {
++  // 批次先锁定并校验全部前像，再使用同一 owner 的原语提交；不承诺 I/O 回滚。
++  readonly commit: <A, E, R>(input: {
++    readonly expected: readonly { readonly target: Target; readonly content: Uint8Array | undefined }[]
++    readonly execute: (files: Omit<Interface, "commit">) => Effect.Effect<A, E, R>
++  }) => Effect.Effect<A, E | StaleContentError | FSUtil.Error, R>
+   /** Create without replacing an existing target. */
+@@ -157,3 +162,2 @@
+     const write = Effect.fn("FileMutation.write")((input: WriteInput) =>
+-      withTargetLock(input.target)(
+         Effect.gen(function* () {
+@@ -162,8 +166,6 @@
+           return writeResult(input.target, existed)
+         }),
+-      ),
+     )
+ 
+     const writeTextPreservingBom = Effect.fn("FileMutation.writeTextPreservingBom")((input: TextWriteInput) =>
+-      withTargetLock(input.target)(
+         Effect.gen(function* () {
+@@ -179,11 +181,9 @@
+           return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined)
+         }),
+-      ),
+     )
+ 
+     const create = Effect.fn("FileMutation.create")((input: WriteInput) =>
+-      withTargetLock(input.target)(
+         Effect.gen(function* () {
+           const write =
+             typeof input.content === "string"
+               ? fs.writeFileString(input.target.canonical, input.content, { flag: "wx" })
+@@ -201,11 +201,9 @@
+           return writeResult(input.target, false)
+ 
+         }),
+-      ),
+     )
+ 
+     const writeIfUnchanged = Effect.fn("FileMutation.writeIfUnchanged")((input: ConditionalWriteInput) =>
+-      withTargetLock(input.target)(
+         Effect.gen(function* () {
+           const current = yield* fs.readFile(input.target.canonical)
+           if (!sameBytes(current, input.expected)) {
+@@ -219,4 +217,3 @@
+           return writeResult(input.target, true)
+         }),
+-      ),
+     )
+@@ -240,10 +237,5 @@
+-      if (input.destination.canonical === input.target.canonical) return withTargetLock(input.target)(commit)
+-      // 两端按同一顺序取锁，反向Move不会互相持有一半锁而死锁。
+-      const first = input.target.canonical < input.destination.canonical ? input.target : input.destination
+-      const second = first === input.target ? input.destination : input.target
+-      return withTargetLock(first)(withTargetLock(second)(commit))
++      return commit
+     })
+ 
+     const remove = Effect.fn("FileMutation.remove")((input: RemoveInput) =>
+-      withTargetLock(input.target)(
+         Effect.gen(function* () {
+@@ -254,6 +246,34 @@
+           return removeResult(input.target, existed)
+         }),
+-      ),
+     )
+ 
+-    return Service.of({ create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove })
++    const operations = { create, write, writeTextPreservingBom, writeIfUnchanged, moveIfUnchanged, remove }
++    const withTargets = <A, E, R>(targets: readonly Target[], effect: Effect.Effect<A, E, R>) =>
++      [...new Set(targets.map(target => target.canonical))].sort().reduceRight(
++        // 等锁仍可取消；仅全部锁到手后的提交不可中断，formatter 保持其原有退出收尾。
++        (next, key) => locks.withLock(key)(next), Effect.uninterruptible(effect),
++      )
++    const commit: Interface["commit"] = input => withTargets(
++      input.expected.map(item => item.target),
++      Effect.gen(function* () {
++        for (const expected of input.expected) {
++          const current = yield* fs.readFile(expected.target.canonical)
++            .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
++          // undefined 是缺失，空字节是已有空文件；任一漂移都须在首写前拒绝。
++          if (expected.content === undefined ? current !== undefined : current === undefined || !sameBytes(expected.content, current)) {
++            return yield* new StaleContentError({ path: expected.target.canonical })
++          }
++        }
++        return yield* input.execute(operations)
++      }),
++    )
++    // 无锁原语仅交给已持有完整键集的 commit；单文件公开入口仍使用同一组锁。
++    return Service.of({
++      commit,
++      create: input => withTargetLock(input.target)(create(input)),
++      write: input => withTargetLock(input.target)(write(input)),
++      writeTextPreservingBom: input => withTargetLock(input.target)(writeTextPreservingBom(input)),
++      writeIfUnchanged: input => withTargetLock(input.target)(writeIfUnchanged(input)),
++      moveIfUnchanged: input => withTargets([input.target, input.destination], moveIfUnchanged(input)),
++      remove: input => withTargetLock(input.target)(remove(input)),
++    })
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -117,2 +117,21 @@
+                 }
++                // 重复 update 可组合，Delete/Add 可重写；跨源 Move 争用不能靠提交顺序猜测。
++                const groups = new Map<string, typeof targets>()
++                const destinations = new Map<string, string>()
++                for (const item of targets) {
++                  const group = groups.get(item.target.canonical) ?? []
++                  group.push(item)
++                  groups.set(item.target.canonical, group)
++                  const destination = item.destination
++                  if (!destination || destination.canonical === item.target.canonical) continue
++                  const owner = destinations.get(destination.canonical)
++                  if (owner && owner !== item.target.canonical || targets.some(other => other.target.canonical === destination.canonical)) return yield* fail(item.hunk.path)
++                  if (group.some(other => other.destination && other.destination.canonical !== destination.canonical)) return yield* fail(item.hunk.path)
++                  destinations.set(destination.canonical, item.target.canonical)
++                }
++                for (const group of groups.values()) {
++                  const rewrite = group.length === 2 && group[0].hunk.type === "delete" && group[1].hunk.type === "add"
++                  if (group.length > 1 && !rewrite && group.some(item => item.hunk.type !== "update")) return yield* fail(group[0].hunk.path)
++                }
++
+                 // 相同目录和操作仍合并授权；不同操作保留各自语义并携带完整patch。
+@@ -148,6 +167,11 @@
+                 const errors: string[] = []
+                 const prepared: Prepared[] = []
++                const expected = new Map<string, { target: LocationMutation.Target; content: Uint8Array | undefined }>()
++                const failed = new Set<string>()
+                 for (const { hunk, target, destination } of targets) {
++                  if (failed.has(target.canonical)) continue
+                   yield* Effect.gen(function* () {
++                    const snapshot = expected.get(target.canonical) ?? { target, content: yield* fs.readFile(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) }
++                    expected.set(target.canonical, snapshot)
+                     if (hunk.type === "add") {
+                       prepared.push({
+@@ -162,8 +186,10 @@
+                     if ((yield* fs.stat(target.canonical)).type !== "File") yield* fail(hunk.path)
+-                    const source = yield* fs.readFile(target.canonical)
+-                    const original = new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
+-                    const before = original.replace(/^\uFEFF/, "")
++                    const source = snapshot.content
++                    if (source === undefined) return yield* fail(hunk.path)
++                    const previous = prepared.find(change => change.type === "update" && change.target.canonical === target.canonical)
++                    const original = previous?.type === "update" ? previous.content : new TextDecoder("utf-8", { ignoreBOM: true }).decode(source)
++                    const before = previous?.before ?? original.replace(/^\uFEFF/, "")
+                     if (hunk.type === "delete") {
+                       prepared.push({ ...hunk, target, before, after: "" })
+                       return
+                     }
+@@ -175,12 +201,21 @@
+-                    prepared.push({
++                    if (destination && !expected.has(destination.canonical)) {
++                      expected.set(destination.canonical, { target: destination, content: yield* fs.readFile(destination.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined))) })
++                    }
++                    // 每个 parsed entry 重置 Patch cursor，只合并最终写盘，不重复提交同一前像。
++                    const change = {
+                       ...hunk,
+                       target,
+                       source,
+-                      destination,
++                      destination: destination ?? (previous?.type === "update" ? previous.destination : undefined),
+                       content: Patch.joinBom(update.content, update.bom),
+                       before,
+                       after: update.content,
+-                    })
++                    }
++                    if (previous) prepared.splice(prepared.indexOf(previous), 1, change)
++                    else prepared.push(change)
+                   }).pipe(Effect.catch(error => {
++                    failed.add(target.canonical)
++                    const index = prepared.findIndex(change => change.target.canonical === target.canonical)
++                    if (index !== -1) prepared.splice(index, 1)
+                     errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
+                     return Effect.void
+@@ -192,3 +227,5 @@
+-                yield* Effect.forEach(
++                yield* files.commit({
++                  expected: [...expected.values()].filter(item => prepared.some(change => change.target.canonical === item.target.canonical || change.type === "update" && change.destination?.canonical === item.target.canonical)),
++                  execute: files => Effect.forEach(
+                   prepared,
+                   (change) =>
+@@ -237,4 +274,6 @@
+                   { discard: true },
+-                )
++                ) })
+                 return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
+-              }).pipe(Effect.mapError((error) => (error instanceof ToolFailure ? error : fail("patch", error))))
++              }).pipe(Effect.mapError(error => error instanceof FileMutation.StaleContentError
++                ? new ToolFailure({ message: `File changed before commit: ${error.path}. Read the file again and retry.` })
++                : error instanceof ToolFailure ? error : fail("patch", error)))
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -18,2 +18,3 @@
+ import { location } from "./fixture/location"
++import { Format } from "@opencode-ai/core/format"
+ import { tmpdir } from "./fixture/tmpdir"
+@@ -32,2 +33,3 @@
+ let afterEditApproval = (): Effect.Effect<void> => Effect.void
++let beforeRead = (_target: string): Effect.Effect<void> => Effect.void
+ 
+@@ -64,2 +66,3 @@
+   afterEditApproval = () => Effect.void
++  beforeRead = () => Effect.void
+ }
+@@ -76,1 +79,1 @@
+-        }).pipe(Effect.andThen(fs.readFile(target))),
++        }).pipe(Effect.andThen(Effect.suspend(() => beforeRead(target))), Effect.andThen(fs.readFile(target))),
+@@ -109,2 +112,4 @@
+           [Location.node, activeLocation],
++          // 真实文件提交保留；格式化出口显式隔离，不让本套读取用户配置或启动外部命令。
++          [Format.node, Layer.succeed(Format.Service, Format.Service.of({ file: () => Effect.succeed(false) }))],
+           [PermissionV2.node, permission],
+@@ -403,2 +408,5 @@
+             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
++            const repeated = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n*** Update File: retry.txt\n@@\n-missing\n+done\n*** End Patch", "repeated-failure"))
++            expect(repeated.type).toBe("error")
++            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
+           }),
+@@ -528,1 +536,36 @@
++  it.live("coordinates Native patch proposals before committing any target", () =>
++    Effect.acquireUseRelease(
++      Effect.promise(() => tmpdir()),
++      tmp => Effect.gen(function* () {
++        reset()
++        const first = path.join(tmp.path, "first.txt")
++        const second = path.join(tmp.path, "second.txt")
++        yield* Effect.promise(() => Promise.all([fs.writeFile(first, "first\nlast\n"), fs.writeFile(second, "second\n")]))
++        yield* withTool(tmp.path, registry => Effect.gen(function* () {
++          const repeated = yield* settleTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n@@\n-last\n+LAST\n*** Update File: first.txt\n@@\n-first\n+FIRST\n*** End Patch", "repeated-success"))
++          expect(repeated.result.type).toBe("text")
++          expect(Schema.decodeUnknownSync(ApplyPatchTool.Output)(repeated.output?.structured).files).toHaveLength(1)
++          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("FIRST\nLAST\n")
++          yield* Effect.promise(() => fs.writeFile(first, "first\n"))
++          reset()
++          const collision = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n*** Move to: destination.txt\n@@\n-first\n+FIRST\n*** Update File: second.txt\n*** Move to: destination.txt\n@@\n-second\n+SECOND\n*** End Patch", "ownership"))
++          expect(collision.type).toBe("error")
++          expect(assertions).toHaveLength(0)
++          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("first\n")
++          expect(yield* exists(path.join(tmp.path, "destination.txt"))).toBe(false)
++          let secondReads = 0
++          // 第二份前像已取得后，外部 writer 在最终复核中改它；第一份内容也不能先写。
++          beforeRead = target => path.basename(target) === "second.txt" && ++secondReads === 2
++            ? Effect.promise(() => fs.writeFile(second, "external\n")).pipe(Effect.orDie)
++            : Effect.void
++          const stale = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n@@\n-first\n+FIRST\n*** Update File: second.txt\n@@\n-second\n+SECOND\n*** End Patch", "stale-batch"))
++          expect(stale).toMatchObject({ type: "error", value: expect.stringContaining("File changed before commit") })
++          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("first\n")
++          expect(yield* Effect.promise(() => fs.readFile(second, "utf8"))).toBe("external\n")
++          expect(readsBeforeEditApproval).toBe(0)
++        }))
++      }),
++      tmp => Effect.promise(() => tmp[Symbol.asyncDispose]()),
++    ),
++  )
+ })

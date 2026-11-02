@@ -372,7 +372,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 -      releasedTerminalParts.add(part.id)
 -      dropBufferedDeltas((event) => event.properties.partID === part.id)
 -      const parts = store.part[part.messageID] ?? []
--      const index = parts.indexOf(part)
+-      const index = parts.findIndex(item => item.id === part.id)
 -      if (index !== -1) {
 -        setStore(
 -          "part",
@@ -465,7 +465,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 -            releasedTerminalParts.delete(part.id)
 +            releasedTerminalParts.get(part.sessionID)?.get(part.messageID)?.delete(part.id)
            }
-           const parts = store.part[event.properties.part.messageID]
+           const parts = store.part[part.messageID]
            if (!parts) {
 @@ -1106,7 +1121,9 @@ export const {
            // #186：进入队列合并，applyPartDelta 内仍走 #157 raw 路径

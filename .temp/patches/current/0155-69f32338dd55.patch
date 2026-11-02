@@ -26,22 +26,15 @@ index e5e7802858ca5cd2250f8f34c4725a25c7a3221d..31a2f1989cc426c4b6e0c046c9540b76
  import type { SessionID, MessageID } from "../session/schema"
  import * as Truncate from "./truncate"
  import { Agent } from "@/agent/agent"
-+// #155：strip-ansi 去 CSI 序列，配合控制字符转义保证终端可见输出安全
-+import stripAnsi from "strip-ansi"
++// 两代使用同一可见文本规则；领域数据与原始日志不经此投影清理。
++import { sanitizeVisibleText } from "@opencode-ai/core/util/terminal-text"
  
  interface Metadata {
    [key: string]: any
-@@ -96,6 +98,38 @@ export type InferDef<T> =
+@@ -96,6 +98,31 @@ export type InferDef<T> =
        ? Def<P, M>
        : never
  
-+// #155：终端可见文本清理：CRLF→LF，去 ANSI/CSI，C0/C1 控制字符转 \xHH 字面量
-+function sanitizeVisibleText(text: string) {
-+  return stripAnsi(text.replace(/\r\n/g, "\n")).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (char) => {
-+    return `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`
-+  })
-+}
-+
 +// #155：metadata 顶层 string 字段逐项清理，未变化的字段保留原引用
 +function sanitizeMetadata<M extends Metadata>(metadata: M | undefined) {
 +  if (!metadata) return metadata
@@ -97,6 +90,128 @@ index e5e7802858ca5cd2250f8f34c4725a25c7a3221d..31a2f1989cc426c4b6e0c046c9540b76
            if (result.metadata.truncated !== undefined) {
              return result
            }
+diff --git a/packages/core/src/util/terminal-text.ts b/packages/core/src/util/terminal-text.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/util/terminal-text.ts
+@@ -0,0 +1,6 @@
++export function sanitizeVisibleText(text: string) {
++  // 只清理可见投影：保留换行/tab，CRLF归一，移除ANSI并显式转义其余C0/C1。
++  return Bun.stripANSI(text.replace(/\r\n/g, "\n")).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (char) => {
++    return `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`
++  })
++}
+diff --git a/packages/core/src/tool-output-store.ts b/packages/core/src/tool-output-store.ts
+--- a/packages/core/src/tool-output-store.ts
++++ b/packages/core/src/tool-output-store.ts
+@@ -10,1 +10,2 @@
+ import { Identifier } from "./util/identifier"
++import { sanitizeVisibleText } from "./util/terminal-text"
+@@ -226,1 +226,1 @@
+-      const contextual =
++      const raw =
+@@ -233,1 +233,7 @@
++      // 领域structured和媒体不改写，避免formatter真值/文件路径被当作展示metadata消毒。
++      const output = {
++        ...input.output,
++        content: input.output.content.map((item) => item.type === "text" ? { ...item, text: sanitizeVisibleText(item.text) } : item),
++      }
++      const contextual = output.content.length === 0 ? sanitizeVisibleText(raw) : output.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("")
+       const captured = captures.get(captureKey(input))
+@@ -236,3 +243,3 @@
+-      if (fits && !captured?.retain)
++      if (fits && !captured?.retain && raw === contextual)
+         return {
+-          output: input.output,
++          output,
+@@ -243,4 +250,5 @@
+-      const outputPath = captured ? yield* captured.flush() : yield* write(contextual)
++      // 展示清理同样可能丢失原始信息，归档仍保存原文/原字节，不能保存清理后的替身。
++      const outputPath = captured ? yield* captured.flush() : yield* write(raw)
+       const marker = captured
+         ? `... output ${fits ? "presentation changed" : "truncated"}; captured raw output saved to ${outputPath} ...`
+-        : `... output truncated; full content saved to ${outputPath} ...`
++        : `... output ${fits ? "presentation changed" : "truncated"}; full content saved to ${outputPath} ...`
+@@ -256,1 +264,1 @@
+-          content: preserveParts ? [...input.output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
++          content: preserveParts ? [...output.content, { type: "text" as const, text: `\n\n${marker}` }] : [
+diff --git a/packages/core/src/shell.ts b/packages/core/src/shell.ts
+--- a/packages/core/src/shell.ts
++++ b/packages/core/src/shell.ts
+@@ -320,1 +320,3 @@
+       "Use PowerShell syntax; read environment variables with $env:NAME, not export NAME=...; use $null, not /dev/null.",
++      // stderr已由同一个进程handle采集，保留源提示原话而非另行合并流。
++      "Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.",
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -53,1 +53,1 @@
+-        const first = "HEAD-" + "x".repeat(30_000)
++        const first = "HEAD-\u001b[31msafe\u0007end\u001b[0m\r\n" + "x".repeat(30_000)
+@@ -70,1 +70,4 @@
+         expect(Buffer.byteLength(result.output.content[0].text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
++        expect(result.output.content[0].text).toContain("HEAD-safe\\x07end\n")
++        expect(result.output.content[0].text).not.toContain("\u0007")
++        expect(result.output.content[0].text).not.toContain("\u001b")
+@@ -126,1 +129,1 @@
+-          output: { structured: { caption: "pixel" }, content: [{ type: "text", text }, media] },
++          output: { structured: { caption: "pixel", formattedContent: "code\u0007\r\n" }, content: [{ type: "text", text }, media] },
+@@ -129,1 +132,2 @@
+-        expect(result.output.structured).toEqual({ caption: "pixel" })
++        // structured承载后续历史回写真值，不能随正文一起改写真实代码。
++        expect(result.output.structured).toEqual({ caption: "pixel", formattedContent: "code\u0007\r\n" })
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -3911,1 +3911,1 @@
+-        const raw = `READY\n${"x".repeat(size)}\nFINAL_RESULT=42\n完成\n`
++        const raw = `READY\n${"x".repeat(size)}\nFINAL_RESULT=42\u0007\u001b[31m\n完成\u001b[0m\r\n`
+@@ -3960,1 +3960,4 @@
+           expect(text).toContain("FINAL_RESULT=42")
++          expect(text).toContain("FINAL_RESULT=42\\x07")
++          expect(text).not.toContain("\u0007")
++          expect(text).not.toContain("\u001b")
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -170,1 +170,22 @@
+ describe("BashTool", () => {
++  it.live("sanitizes visible Bash controls while preserving captured raw bytes", () =>
++    Effect.acquireUseRelease(Effect.promise(() => tmpdir()), (tmp) => {
++      reset()
++      const raw = Buffer.from("safe\u0007end\r\n\u001b[31mred\u001b[0m\n\t\u0085\u007f")
++      result = { ...result, output: raw }
++      return withTool(tmp.path, (registry) => Effect.gen(function* () {
++        const settled = yield* settleTool(registry, call({ command: "echo ready", compress_output: false }))
++        expect(settled.result.type).not.toBe("error")
++        const visible = settled.output?.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("") ?? ""
++        // 独立oracle覆盖BEL、ANSI、CRLF、tab及C1/DEL，不从生产sanitizer计算期望。
++        expect(visible).toContain("safe\\x07end\nred\n\t\\x85\\x7f")
++        expect(visible).not.toContain("\u0007")
++        expect(visible).not.toContain("\u001b")
++        expect(visible).not.toContain("\r")
++        const file = settled.outputPaths?.[0]
++        if (!file) return yield* Effect.die("Expected retained raw output")
++        expect(Buffer.from(yield* Effect.promise(() => Bun.file(file).arrayBuffer()))).toEqual(raw)
++      }))
++    }, (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]())),
++  )
++
+@@ -233,1 +256,2 @@
+             expect(initialized.baseline).toContain("captured output is decoded as UTF-8")
++            if (Shell.ps(Shell.acceptable())) expect(initialized.baseline).toContain("Do not append `2>&1` to PowerShell commands; the shell tool already captures stderr.")
+@@ -423,1 +445,1 @@
+-              expect(settled.result.value).toHaveLength(2)
++              expect(settled.result.value).toHaveLength(3)
+@@ -428,1 +450,8 @@
+               const actualStatus = second.text
++              // CRLF清理新增原文恢复段；前两段的正文/完整状态契约继续精确验证。
++              const retained = settled.outputPaths?.[0]
++              if (!retained) return yield* Effect.die("Expected retained original PowerShell output")
++              expect(settled.result.value[2]).toEqual({ type: "text", text: `\n\n... output presentation changed; captured raw output saved to ${retained} ...` })
++              const original = yield* Effect.promise(() => fs.readFile(retained, "utf8"))
++              expect(original).toContain("\r\n")
++              expect(text).not.toContain("\r")
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 index 1111111111..2222222222 100644
 --- a/packages/opencode/test/tool/shell.test.ts

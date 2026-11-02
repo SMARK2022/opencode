@@ -2,29 +2,22 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
 index c5d9253352..aa5dd1fe60 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -2,10 +2,21 @@
+@@ -2,10 +2,14 @@
  // Plugin 入口：注册 notebook bridge 工具并转发到 ide/vscode-bridge 客户端
  import { Effect } from "effect"
  import { tool, type ToolContext, type PluginInput, type Hooks } from "@opencode-ai/plugin"
-+import { createTwoFilesPatch } from "diff"
++import { NotebookView } from "@opencode-ai/core/tool/notebook-view"
  import { z } from "zod"
  import * as VscodeBridge from "@/ide/vscode-bridge"
  import { VscodeNotebookDescriptions } from "./vscode-bridge-descriptions"
  
-+// #224：Notebook 工具是 plugin tool，不能直接复用内置 edit/write 的专用 renderer。
-+// 这个 fork-local metadata key 是 TUI 和 VS Code bridge 之间的内部展示契约：
-+// 只让 generic renderer 选择性升级展示，不扩大 public plugin API，也不为每个
-+// vscode_notebook_* 工具在 session/index.tsx 增加分支。
++// Notebook展示契约仍为内部metadata，两代共用纯投影而不复制执行器或渲染器。
 +const NOTEBOOK_METADATA_KEY = "vscodeNotebook"
-+// #224：notebook edit diff 会持久化到 session part metadata；16KB 与现有工具输出
-+// 默认内联上限保持同一量级，超过后只保留统计和摘要，避免大 cell/full replace
-+// 把 notebook 源码整段复制进会话状态。
-+const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
 +
  const requiredFilePath = {
    filePath: z
      .string()
-@@ -91,13 +102,14 @@ const editArgs = {
+@@ -91,13 +95,14 @@ const editArgs = {
      .describe("Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source."),
  }
  
@@ -41,7 +34,7 @@ index c5d9253352..aa5dd1fe60 100644
      cwd: context.directory,
      path: endpoint,
      body: args,
-@@ -105,7 +117,213 @@ async function call(
+@@ -105,7 +110,19 @@ async function call(
      signal: context.abort,
      timeoutMs,
    })
@@ -51,7 +44,7 @@ index c5d9253352..aa5dd1fe60 100644
 +// #224：从 bridge 原始返回值派生 output summary + vscodeNotebook metadata；
 +// metadata 只包含 TUI 展示需要的 compact 字段，不复制完整源码/artifact 文本
 +function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown) {
-+  const view = notebookView(endpoint, args, value)
++  const view = NotebookView.build(endpoint, args, value)
 +  return {
 +    output: VscodeBridge.summaryOnly(value),
 +    metadata: {
@@ -59,10 +52,88 @@ index c5d9253352..aa5dd1fe60 100644
 +      ...(view && { [NOTEBOOK_METADATA_KEY]: view }),
 +    },
 +  }
-+}
+ }
+ 
+ // ask 适配：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise
+@@ -129,18 +146,12 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+     vscode_notebook_summary: tool({
+       description: VscodeNotebookDescriptions.summary,
+       args: requiredFilePath,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/summary", args, context, 10_000),
+-        metadata: { endpoint: "/notebook/summary" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
+     }),
+     vscode_notebook_source: tool({
+       description: VscodeNotebookDescriptions.source,
+       args: sourceArgs,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/source", args, context, 10_000),
+-        metadata: { endpoint: "/notebook/source" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
+     }),
+     vscode_notebook_run: tool({
+       description: VscodeNotebookDescriptions.run,
+@@ -148,20 +159,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+       execute: async (args, context) => {
+         await ask(context, "vscode_notebook_run", args)
+         const timeoutMs = args.timeoutMs ?? 300_000
+-        return {
+-          // run 工具描述：endCellId 为 range 信号，type 仅提示
+-          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
+-          metadata: { endpoint: "/notebook/run" },
+-        }
++        const body = { ...args, timeoutMs }
++        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
+       },
+     }),
+     vscode_notebook_output: tool({
+       description: VscodeNotebookDescriptions.output,
+       args: outputArgs,
+-      execute: async (args, context) => ({
+-        output: await call("/notebook/output", args, context, 30_000),
+-        metadata: { endpoint: "/notebook/output" },
+-      }),
++      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
+     }),
+     vscode_notebook_edit: tool({
+       description: VscodeNotebookDescriptions.edit,
+@@ -176,10 +180,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
+         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
+         await ask(context, "edit", args)
+-        return {
+-          output: await call("/notebook/edit", args, context, 30_000),
+-          metadata: { endpoint: "/notebook/edit" },
+-        }
++        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
+       },
+     }),
+     vscode_notebook_env: tool({
+@@ -193,7 +195,4 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+         await ask(context, "vscode_notebook_env", args)
+-        return {
+-          output: await call("/notebook/env", args, context, 120_000),
+-          metadata: { endpoint: "/notebook/env", operation: args.operation },
+-        }
++        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+       },
+     }),
+diff --git a/packages/core/src/tool/notebook-view.ts b/packages/core/src/tool/notebook-view.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/notebook-view.ts
+@@ -0,0 +1,199 @@
++export * as NotebookView from "./notebook-view"
 +
-+// #224：按 endpoint 分派到具体的 view 构建函数；每个 view 只保留 TUI 需要的字段
-+function notebookView(endpoint: string, args: Record<string, unknown>, value: unknown) {
++import { createTwoFilesPatch } from "diff"
++
++// 展示差分有界，完整原生data及模型summary仍由各自执行链保留。
++const NOTEBOOK_DIFF_METADATA_MAX_CHARS = 16 * 1024
++
++export function build(endpoint: string, args: Record<string, unknown>, value: unknown) {
 +  const data = recordValue(recordValue(value).data)
 +  const path = stringValue(data.path) ?? stringValue(args.filePath)
 +  // #224：summary view——cells 列表 + dirty/runtime 状态
@@ -253,75 +324,84 @@ index c5d9253352..aa5dd1fe60 100644
 +
 +function booleanValue(value: unknown) {
 +  return typeof value === "boolean" ? value : undefined
- }
- 
- // ask 适配：V2 的 ToolContext.ask 返回 Promise<void>，替代 V1 的 Effect.runPromise
-@@ -129,18 +347,12 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-     vscode_notebook_summary: tool({
-       description: VscodeNotebookDescriptions.summary,
-       args: requiredFilePath,
--      execute: async (args, context) => ({
--        output: await call("/notebook/summary", args, context, 10_000),
--        metadata: { endpoint: "/notebook/summary" },
--      }),
-+      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
-     }),
-     vscode_notebook_source: tool({
-       description: VscodeNotebookDescriptions.source,
-       args: sourceArgs,
--      execute: async (args, context) => ({
--        output: await call("/notebook/source", args, context, 10_000),
--        metadata: { endpoint: "/notebook/source" },
--      }),
-+      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
-     }),
-     vscode_notebook_run: tool({
-       description: VscodeNotebookDescriptions.run,
-@@ -148,20 +360,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-       execute: async (args, context) => {
-         await ask(context, "vscode_notebook_run", args)
-         const timeoutMs = args.timeoutMs ?? 300_000
--        return {
--          // run 工具描述：endCellId 为 range 信号，type 仅提示
--          output: await call("/notebook/run", { ...args, timeoutMs }, context, timeoutMs + 5_000),
--          metadata: { endpoint: "/notebook/run" },
--        }
-+        const body = { ...args, timeoutMs }
-+        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
-       },
-     }),
-     vscode_notebook_output: tool({
-       description: VscodeNotebookDescriptions.output,
-       args: outputArgs,
--      execute: async (args, context) => ({
--        output: await call("/notebook/output", args, context, 30_000),
--        metadata: { endpoint: "/notebook/output" },
--      }),
-+      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
-     }),
-     vscode_notebook_edit: tool({
-       description: VscodeNotebookDescriptions.edit,
-@@ -176,10 +381,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
-         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
-         await ask(context, "edit", args)
--        return {
--          output: await call("/notebook/edit", args, context, 30_000),
--          metadata: { endpoint: "/notebook/edit" },
--        }
-+        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
-       },
-     }),
-     vscode_notebook_env: tool({
-@@ -193,7 +396,4 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
-         await ask(context, "vscode_notebook_env", args)
--        return {
--          output: await call("/notebook/env", args, context, 120_000),
--          metadata: { endpoint: "/notebook/env", operation: args.operation },
--        }
-+        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
-       },
-     }),
++}
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -13,1 +13,2 @@
+ import { VscodeNotebookDescriptions } from "./notebook-descriptions"
++import { NotebookView } from "./notebook-view"
+@@ -83,1 +84,6 @@
+-  const common = { output: Output, toModelOutput: ({ output }: { output: typeof Output.Encoded }) => [{ type: "text" as const, text: output.summary }] }
++  const common = (endpoint: string) => ({
++    output: Output, structured: Schema.Record(Schema.String, Schema.Unknown),
++    // 展示投影追加到structured，完整原生响应及模型summary不被压平或替换。
++    toStructuredOutput: ({ input, output }: { input: Record<string, unknown>; output: typeof Output.Encoded }) => ({ ...output, vscodeNotebook: NotebookView.build(endpoint, input, output) }),
++    toModelOutput: ({ output }: { output: typeof Output.Encoded }) => [{ type: "text" as const, text: output.summary }],
++  })
+@@ -85,1 +91,1 @@
+-    vscode_notebook_summary: Tool.make({ ...common, description: VscodeNotebookDescriptions.summary, input: SummaryInput,
++    vscode_notebook_summary: Tool.make({ ...common("/notebook/summary"), description: VscodeNotebookDescriptions.summary, input: SummaryInput,
+@@ -87,1 +93,1 @@
+-    vscode_notebook_source: Tool.make({ ...common, description: VscodeNotebookDescriptions.source, input: SourceInput,
++    vscode_notebook_source: Tool.make({ ...common("/notebook/source"), description: VscodeNotebookDescriptions.source, input: SourceInput,
+@@ -89,1 +95,1 @@
+-    vscode_notebook_run: Tool.make({ ...common, description: VscodeNotebookDescriptions.run, input: RunInput,
++    vscode_notebook_run: Tool.make({ ...common("/notebook/run"), description: VscodeNotebookDescriptions.run, input: RunInput,
+@@ -94,1 +100,1 @@
+-    vscode_notebook_output: Tool.make({ ...common, description: VscodeNotebookDescriptions.output, input: OutputInput,
++    vscode_notebook_output: Tool.make({ ...common("/notebook/output"), description: VscodeNotebookDescriptions.output, input: OutputInput,
+@@ -96,1 +102,1 @@
+-    vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common, description: VscodeNotebookDescriptions.edit, input: EditInput,
++    vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common("/notebook/edit"), description: VscodeNotebookDescriptions.edit, input: EditInput,
+@@ -103,1 +109,1 @@
+-    vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
++    vscode_notebook_env: Tool.make({ ...common("/notebook/env"), description: VscodeNotebookDescriptions.env, input: EnvInput,
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -5,1 +5,1 @@
+-import { Effect, Fiber, Layer } from "effect"
++import { Effect, Fiber, Layer, Schema } from "effect"
+@@ -45,1 +45,2 @@
+   let deniedAction: string | undefined
++  const notebookMetadata = Schema.decodeUnknownSync(Schema.Struct({ vscodeNotebook: Schema.Record(Schema.String, Schema.Unknown) }))
+@@ -57,1 +57,1 @@
+-    "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0 } },
++    "/notebook/edit": { ran: false, summary: "edit", data: { applied: true, editType: "edit", dirty: true, affectedCellIndex: 0, language: "python", beforeSource: "old value\n", afterSource: "new value\n" } },
+@@ -119,1 +119,1 @@
+-      expect(result.output?.structured).toEqual(responses[endpoint])
++      expect(result.output?.structured).toEqual({ ...responses[endpoint], vscodeNotebook: expect.objectContaining({ view: endpoint.slice("/notebook/".length), path: filePath }) })
+@@ -136,1 +136,1 @@
+-    expect(run.output?.structured).toEqual(responses["/notebook/run"])
++    expect(run.output?.structured).toEqual({ ...responses["/notebook/run"], vscodeNotebook: expect.objectContaining({ view: "run", path: filePath, completed: true, cells: [expect.objectContaining({ id: "#VSC-a" })] }) })
+@@ -150,1 +150,9 @@
+-      expect(result.output?.structured).toEqual(expected)
++      expect(result.output?.structured).toEqual({ ...expected, vscodeNotebook: expect.objectContaining({ view: endpoint.slice("/notebook/".length), path: filePath }) })
++      // 检查实际settlement的六类投影，原生响应仍完整比较，不能只声明一个展示字段。
++      if (endpoint === "/notebook/edit") {
++        expect(notebookMetadata(result.output?.structured).vscodeNotebook).toMatchObject({ cellLabel: "c1", added: 1, removed: 1, diff: expect.stringContaining("-old value") })
++      }
++      if (endpoint === "/notebook/output") {
++        expect(notebookMetadata(result.output?.structured).vscodeNotebook).toMatchObject({ artifacts: [{ mime: "application/json", bytes: 7, artifactPath: path.join(tmp.path, "output.json") }] })
++        expect(notebookMetadata(result.output?.structured).vscodeNotebook).not.toHaveProperty("artifacts.0.text")
++      }
+@@ -156,1 +164,1 @@
+-    expect(maximum.output?.structured).toEqual(responses["/notebook/run"])
++    expect(maximum.output?.structured).toEqual({ ...responses["/notebook/run"], vscodeNotebook: expect.objectContaining({ view: "run", path: filePath }) })
+@@ -200,1 +208,1 @@
+-      expect(result.output?.structured).toEqual(response)
++      expect(result.output?.structured).toEqual({ ...response, vscodeNotebook: expect.objectContaining({ view: "env", path: filePath, status }) })
+@@ -218,1 +226,9 @@
+     deniedAction = undefined
++    // 大格源码仍在完整原生data；仅展示差分受原有16Ki字符预算约束。
++    responses["/notebook/edit"] = { ...responses["/notebook/edit"], data: { beforeSource: "old\n", afterSource: "new line\n".repeat(3000), affectedCellIndex: 0, editType: "edit" } }
++    const bounded = yield* invoke("vscode_notebook_edit", { filePath, cellId: "#VSC-a", editType: "edit", newCode: "ignored fixture input" })
++    expect(bounded.result.type).toBe("text")
++    expect(bounded.output?.structured).toMatchObject({ data: { afterSource: "new line\n".repeat(3000) }, vscodeNotebook: { view: "edit", path: filePath, diffOmitted: "too-large", added: 3000, removed: 1 } })
++    expect(notebookMetadata(bounded.output?.structured).vscodeNotebook).toHaveProperty("diff", undefined)
++    expect(JSON.stringify(notebookMetadata(bounded.output?.structured).vscodeNotebook)).not.toContain("new line")
++    expect(bounded.output?.content).toEqual([{ type: "text", text: "edit" }])
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts
 +++ b/packages/opencode/test/plugin/vscode-bridge.test.ts
@@ -672,6 +752,202 @@ diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/open
 +    },
 +  }
 +}
+diff --git a/packages/session-ui/src/components/notebook-tool.ts b/packages/session-ui/src/components/notebook-tool.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/session-ui/src/components/notebook-tool.ts
+@@ -0,0 +1,58 @@
++import { Option, Schema } from "effect"
++
++const record = Schema.Record(Schema.String, Schema.Unknown)
++const decode = Schema.decodeUnknownOption(record)
++const decodeRows = Schema.decodeUnknownOption(Schema.Array(record))
++const views = new Set(["summary", "source", "run", "output", "edit", "env"])
++
++export const notebookTools = {
++  vscode_notebook_summary: "ui.notebook.summary",
++  vscode_notebook_source: "ui.notebook.source",
++  vscode_notebook_run: "ui.notebook.run",
++  vscode_notebook_output: "ui.notebook.output",
++  vscode_notebook_edit: "ui.notebook.edit",
++  vscode_notebook_env: "ui.notebook.env",
++} as const
++
++export const notebookFields = [
++  ["operation", "ui.notebook.operation"],
++  ["editType", "ui.notebook.operation"],
++  ["target", "ui.notebook.target"],
++  ["cellCountBefore", "ui.notebook.beforeCells"],
++  ["cellCountAfter", "ui.notebook.afterCells"],
++  ["added", "ui.notebook.added"],
++  ["removed", "ui.notebook.removed"],
++  ["dirty", "ui.notebook.dirty"],
++  ["language", "ui.notebook.language"],
++  ["returned", "ui.notebook.returned"],
++  ["totalLines", "ui.notebook.totalLines"],
++  ["truncated", "ui.notebook.truncated"],
++  ["completed", "ui.notebook.completed"],
++  ["stoppedAt", "ui.notebook.stoppedAt"],
++  ["status", "ui.notebook.status"],
++  ["saved", "ui.notebook.saved"],
++  ["beforeDirty", "ui.notebook.beforeDirty"],
++  ["afterDirty", "ui.notebook.afterDirty"],
++  ["runtime", "ui.notebook.runtime"],
++] as const
++
++export function notebookMetadata(value: unknown) {
++  const next = Option.getOrUndefined(decode(value))
++  // 只读取既有六类展示信封，不把原始data或工具参数重新解释成执行结果。
++  return next && typeof next.view === "string" && views.has(next.view) ? next : undefined
++}
++
++export function notebookValue(value: unknown) {
++  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : undefined
++}
++
++export function notebookRows(value: unknown) {
++  return Option.getOrUndefined(decodeRows(value)) ?? []
++}
++
++export function notebookLine(value: Record<string, unknown>) {
++  const id = typeof value.i === "number" ? `c${value.i}` : undefined
++  const values = ["id", "kind", "lang", "lines", "exec", "first", "mime", "bytes", "artifactPath", "preview"].map((key) => notebookValue(value[key]))
++  const outputs = Array.isArray(value.existing_outs) ? value.existing_outs.filter((item): item is string => typeof item === "string") : []
++  return [id, ...values, ...outputs].filter((item): item is string => item !== undefined).join("  ")
++}
+diff --git a/packages/session-ui/src/components/notebook-tool-view.tsx b/packages/session-ui/src/components/notebook-tool-view.tsx
+new file mode 100644
+--- /dev/null
++++ b/packages/session-ui/src/components/notebook-tool-view.tsx
+@@ -0,0 +1,47 @@
++import { createMemo, For, Show } from "solid-js"
++import { Dynamic } from "solid-js/web"
++import { useI18n } from "@opencode-ai/ui/context/i18n"
++import { useFileComponent } from "@opencode-ai/ui/context/file"
++import type { ToolProps } from "./message-part"
++import { BasicTool } from "./basic-tool"
++import { resolveFileDiff } from "./session-diff"
++import { notebookFields, notebookLine, notebookMetadata, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
++
++export function NotebookTool(props: ToolProps & { title: (typeof notebookTools)[keyof typeof notebookTools] }) {
++  const i18n = useI18n()
++  const fileComponent = useFileComponent()
++  const view = createMemo(() => notebookMetadata(props.metadata.vscodeNotebook))
++  const path = () => notebookValue(view()?.path ?? props.input.filePath) ?? ""
++  // 与现有文件工具共用diff组件；差分来自实际执行结果，不从newCode重建。
++  const patch = createMemo(() => {
++    const diff = view()?.diff
++    if (typeof diff !== "string" || !diff) return
++    return resolveFileDiff({ file: path(), patch: diff })
++  })
++  const title = () => props.tool === "vscode_notebook_edit" && props.input.editType === "insert" ? i18n.t("ui.notebook.insert") : props.tool === "vscode_notebook_edit" && props.input.editType === "delete" ? i18n.t("ui.notebook.delete") : i18n.t(props.title)
++  const cells = () => [...notebookRows(view()?.cells), ...notebookRows(view()?.cell ? [view()?.cell] : [])].filter((cell) => notebookLine(cell))
++  return (
++    <BasicTool {...props} icon="code-lines" defaultOpen allowOpenWhilePending trigger={{ title: title(), subtitle: path(), args: [notebookValue(view()?.cellLabel ?? props.input.cellId), notebookValue(view()?.editType ?? props.input.operation)].filter((value): value is string => value !== undefined) }}>
++      <div data-component="notebook-tool" class="text-13-regular">
++        <dl style={{ display: "grid", "grid-template-columns": "max-content 1fr", gap: "4px 12px" }}>
++          <For each={notebookFields}>{([key, label]) => <Show when={notebookValue(view()?.[key])}>{(value) => <><dt>{i18n.t(label)}</dt><dd>{value()}</dd></>}</Show>}</For>
++        </dl>
++        <Show when={patch()}>{(diff) => <Dynamic component={fileComponent} mode="diff" fileDiff={diff()} virtualize={props.virtualizeDiff} onRendered={props.onContentRendered} />}</Show>
++        <Show when={view()?.diffOmitted}><p>{i18n.t("ui.notebook.diffOmitted")}</p></Show>
++        <Show when={cells().length}>
++          <h4>{i18n.t("ui.notebook.cells")}</h4>
++          <For each={cells()}>{(cell) => <div>
++            <pre style={{ "white-space": "pre-wrap" }}>{notebookLine(cell)}</pre>
++            <For each={notebookRows(cell.artifacts)}>{(artifact) => <pre style={{ "white-space": "pre-wrap" }}>{notebookLine(artifact)}</pre>}</For>
++          </div>}</For>
++        </Show>
++        <Show when={notebookRows(view()?.artifacts).length}>
++          <h4>{i18n.t("ui.notebook.artifacts")}</h4>
++          <For each={notebookRows(view()?.artifacts)}>{(artifact) => <pre style={{ "white-space": "pre-wrap" }}>{notebookLine(artifact)}</pre>}</For>
++        </Show>
++        <Show when={notebookValue(view()?.guidance)}>{(guidance) => <p style={{ "white-space": "pre-wrap" }}>{guidance()}</p>}</Show>
++        <Show when={!view() || view()?.view === "source"}><pre data-scrollable style={{ "white-space": "pre-wrap" }}>{props.output}</pre></Show>
++      </div>
++    </BasicTool>
++  )
++}
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -69,1 +69,3 @@
+ import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
++import { notebookTools } from "./notebook-tool"
++import { NotebookTool } from "./notebook-tool-view"
+@@ -2121,3 +2123,8 @@
++// 六工具进入实际共享展示入口，不再落入仅预览调用参数的GenericTool。
++Object.entries(notebookTools).forEach(([name, title]) => ToolRegistry.register({
++  name,
++  render: (props) => <NotebookTool {...props} title={title} />,
++}))
+ ToolRegistry.register({
+   name: "permission_review_decision",
+   render(props) {
+diff --git a/packages/session-ui/src/components/message-part.test.ts b/packages/session-ui/src/components/message-part.test.ts
+--- a/packages/session-ui/src/components/message-part.test.ts
++++ b/packages/session-ui/src/components/message-part.test.ts
+@@ -3,1 +3,2 @@
+ import { autoReviewLabel, autoReviewMetadata } from "./auto-review"
++import { notebookLine, notebookMetadata, notebookRows, notebookTools, notebookValue } from "./notebook-tool"
+@@ -49,2 +50,23 @@
+   expect(pending?.sessionID).toBeUndefined()
+ })
++
++test("reads all Notebook display envelopes without recreating execution results", () => {
++  expect(Object.keys(notebookTools)).toEqual(["vscode_notebook_summary", "vscode_notebook_source", "vscode_notebook_run", "vscode_notebook_output", "vscode_notebook_edit", "vscode_notebook_env"])
++  for (const view of ["summary", "source", "run", "output", "edit", "env"]) {
++    expect(notebookMetadata({ view, path: "analysis.ipynb" })?.view).toBe(view)
++  }
++  expect(notebookMetadata(undefined)).toBeUndefined()
++  expect(notebookMetadata({ view: "unknown" })).toBeUndefined()
++  expect(notebookValue(false)).toBe("false")
++  expect(notebookValue(0)).toBe("0")
++  // 原执行状态与artifact路径完整可见，但不把完整artifact正文复制到行预览。
++  const cells = notebookRows([{ i: 2, id: "#VSC-a", kind: "code", lang: "python", lines: 3, exec: "current-run #4 succeeded 12ms", existing_outs: ["text"], first: "df.head()" }])
++  const line = notebookLine(cells[0] ?? {})
++  expect(line).toContain("c2  #VSC-a")
++  expect(line).toContain("current-run #4 succeeded 12ms")
++  expect(line).toContain("df.head()")
++  const artifacts = notebookRows([{ mime: "text/plain", bytes: 12, artifactPath: "output.txt", preview: "bounded", text: "FULL ARTIFACT" }])
++  expect(notebookLine(artifacts[0] ?? {})).toContain("text/plain  12  output.txt  bounded")
++  expect(notebookLine(artifacts[0] ?? {})).not.toContain("FULL ARTIFACT")
++  expect(notebookRows(undefined)).toEqual([])
++})
+diff --git a/packages/ui/src/i18n/en.ts b/packages/ui/src/i18n/en.ts
+--- a/packages/ui/src/i18n/en.ts
++++ b/packages/ui/src/i18n/en.ts
+@@ -170,1 +170,31 @@
++  "ui.notebook.summary": "Notebook summary",
++  "ui.notebook.source": "Notebook source",
++  "ui.notebook.run": "Notebook run",
++  "ui.notebook.output": "Notebook output",
++  "ui.notebook.edit": "Notebook edit",
++  "ui.notebook.insert": "Notebook insert",
++  "ui.notebook.delete": "Notebook delete",
++  "ui.notebook.env": "Notebook env",
++  "ui.notebook.operation": "Operation",
++  "ui.notebook.target": "Target",
++  "ui.notebook.beforeCells": "Cells before",
++  "ui.notebook.afterCells": "Cells after",
++  "ui.notebook.added": "Added",
++  "ui.notebook.removed": "Removed",
++  "ui.notebook.dirty": "Dirty",
++  "ui.notebook.language": "Language",
++  "ui.notebook.returned": "Returned lines",
++  "ui.notebook.totalLines": "Total lines",
++  "ui.notebook.truncated": "Truncated",
++  "ui.notebook.completed": "Completed",
++  "ui.notebook.stoppedAt": "Stopped at",
++  "ui.notebook.status": "Status",
++  "ui.notebook.saved": "Saved",
++  "ui.notebook.beforeDirty": "Dirty before",
++  "ui.notebook.afterDirty": "Dirty after",
++  "ui.notebook.runtime": "Runtime",
++  "ui.notebook.cells": "Cells",
++  "ui.notebook.artifacts": "Artifacts (MIME, bytes, path, preview)",
++  "ui.notebook.diffOmitted": "Diff omitted from metadata because it exceeds the notebook inline display budget.",
++
+   "ui.basicTool.called": "Called `{{tool}}`",
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 index 8a24e2adf5..4d4a6ebfdb 100644
 --- a/packages/tui/src/routes/session/index.tsx

@@ -30,8 +30,8 @@ diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.
 +            return
 +          }
            item.description = "The default agent. Executes tools based on configured permissions."
-           // 使用 build 的基础系统提示；保留更早注册者提供的提示。
-           item.system ??= BUILD_SYSTEM
+           // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
+           item.mode = "primary"
 @@ -147,10 +154,6 @@
                // interactive 的运行与内核操作沿用命令审批，review 规则由前项保留。
                ...(id === "interactive" ? ["vscode_notebook_run", "vscode_notebook_env"].map((action) => ({ action, resource: "*", effect: "ask" as const })) : []),
@@ -46,20 +46,20 @@ diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.
 diff --git a/packages/core/src/session/runner/to-llm-message.ts b/packages/core/src/session/runner/to-llm-message.ts
 --- a/packages/core/src/session/runner/to-llm-message.ts
 +++ b/packages/core/src/session/runner/to-llm-message.ts
-@@ -9,3 +9,5 @@
- } from "@opencode-ai/llm"
+@@ -11,2 +11,4 @@
  import { SessionMessage } from "../message"
  import type { FileAttachment } from "../prompt"
 +import { Token } from "../../util/token"
 +import { SessionOverflowV1 } from "../../v1/session/overflow"
-@@ -204,3 +206,39 @@
+@@ -204,3 +206,40 @@
      return toLLMMessage({ ...message, content }, model)
    })
  }
 +
 +export const DECIDE_PROMPT = `Decide mode is active. Do not execute, modify files, call tools, or ask for tool-based confirmation.
 +Use the available conversation context to produce a decisive recommendation or implementation plan.
-+Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.`
++Prefer a concrete decision over broad option lists. If critical information is missing, state the smallest set of blocking questions in plain text.
++Previously supplied MCP server instructions and skill guidance in this session's baseline or history are inactive in decide mode. Do not follow them; treat their content only as historical context.`
 +
 +export const toDecideMessages = (context: readonly SessionMessage.Message[], model: Model, system: string, reserved?: number) => {
 +  // 只复制交付投影，工具原始状态、推理正文和事件仍留在持久历史中。
@@ -99,45 +99,57 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 -import { toLLMMessages } from "./to-llm-message"
 +import { DECIDE_PROMPT, toDecideMessages, toLLMMessages } from "./to-llm-message"
  import { MAX_STEPS_PROMPT } from "./max-steps"
-@@ -116,3 +116,4 @@
+@@ -122,4 +122,5 @@
      const db = (yield* Database.Service).db
+     const buildReminders = yield* SessionReminders.make
 -    const compaction = SessionCompaction.make({ events, llm, db, config: yield* config.entries() })
 +    const configuration = yield* config.entries()
 +    const compaction = SessionCompaction.make({ events, llm, db, config: configuration })
      const getSession = Effect.fn("SessionRunner.getSession")(function* (sessionID: SessionSchema.ID) {
-@@ -176,4 +177,5 @@
-     const loadSystemContext = (agent: AgentV2.Selection) =>
--      Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
-+      // 既有 Context Epoch 仍归原 owner 管理；decide 本轮不新增技能指令。
-+      Effect.all([systemContext.load(), agent.id === "decide" ? Effect.succeed(SystemContext.empty) : skillGuidance.load(agent), referenceGuidance.load()], {
-         concurrency: "unbounded",
-       }).pipe(Effect.map(SystemContext.combine))
-@@ -254,2 +256,4 @@
-       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
--      const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
+@@ -185,13 +186,15 @@
+     const prepareTurn = Effect.fn("SessionRunner.prepareTurn")(function* (sessionID: SessionSchema.ID, agent: AgentV2.Selection) {
+-      const mcpContextFor = yield* mcpTools.prepare()
++      const decide = agent.id === "decide"
++      // 无工具模式在准备入口跳过连接和技能；不能只清广告，也不能注销其他会话共享的工具。
++      const mcpContextFor = decide ? undefined : yield* mcpTools.prepare()
+       // 工具与说明使用同一轮权限/选择快照，不能共享另一Session的可见工具列表。
+       const sessionPermissions = yield* store.permissions(sessionID)
+-      const materialization = yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions], sessionPermissions)
++      const materialization = decide ? undefined : yield* tools.materialize([...(agent.info?.permissions ?? []), ...sessionPermissions], sessionPermissions)
+       return {
+         materialization,
+         context: Effect.all([
+-          systemContext.load(), skillGuidance.load(agent), referenceGuidance.load(),
+-          Effect.succeed(mcpContextFor(materialization.definitions.map(tool => tool.name))),
++          systemContext.load(), decide ? Effect.succeed(SystemContext.empty) : skillGuidance.load(agent), referenceGuidance.load(),
++          Effect.succeed(mcpContextFor && materialization ? mcpContextFor(materialization.definitions.map(tool => tool.name)) : SystemContext.empty),
+         ], { concurrency: "unbounded" }).pipe(Effect.map(SystemContext.combine)),
+       }
+     })
+@@ -275,1 +278,3 @@
+-      const toolMaterialization = isLastStep ? undefined : prepared.materialization
 +      const decide = agent.id === "decide"
 +      // 与最大步数共用原禁用路径，不构建第二套执行器或只依赖权限过滤。
-+      const toolMaterialization = isLastStep || decide ? undefined : yield* tools.materialize(agent.info?.permissions)
-@@ -259,4 +263,10 @@
-       const cutoff = SystemContextBuiltIns.knowledgeCutoff(String(model.id))
++      const toolMaterialization = isLastStep || decide ? undefined : prepared.materialization
+@@ -281,4 +286,9 @@
+-      const reminders = yield* buildReminders(agent.id, session.id, context)
++      const reminders = decide ? [] : yield* buildReminders(agent.id, session.id, context)
        const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
-+      const systemParts = [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
-+        toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
++      const systemParts = [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
 +        ...(decide ? [DECIDE_PROMPT] : []),
 +        `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
 +        .filter((part): part is string => part !== undefined && part.length > 0)
 +        .map(SystemPart.make)
        const request = LLM.request({
          model,
-@@ -277,13 +287,9 @@
--        system: [toolGuidance, agent.info?.system ?? SystemContextBuiltIns.provider(String(model.id), String(model.provider),
--          toolMaterialization?.definitions.map((tool) => tool.name) ?? []), system.baseline,
+@@ -298,12 +308,9 @@
+-        system: [toolGuidance, agent.info?.system ?? SessionPrompts.provider(String(model.id), String(model.provider)), system.baseline,
 -          `You are powered by the model named ${model.id}. The exact model ID is ${model.provider}/${model.id}${cutoff ? `\nKnowledge cutoff: ${cutoff}` : ""}`]
 -          .filter((part): part is string => part !== undefined && part.length > 0)
 -          .map(SystemPart.make),
--        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+-        messages: [...toLLMMessages(context, model), ...reminders.map(text => Message.user(text)), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
 +        system: systemParts,
-+        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
++        messages: [...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model)), ...reminders.map(text => Message.user(text)), ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
          tools: toolMaterialization?.definitions ?? [],
 -        toolChoice: isLastStep ? "none" : undefined,
 +        toolChoice: isLastStep || decide ? "none" : undefined,
@@ -205,7 +217,18 @@ diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -1094,1 +1094,59 @@
+@@ -1,1 +1,2 @@
+-import { describe, expect } from "bun:test"
++import { describe, expect, spyOn } from "bun:test"
++import { McpTools } from "@opencode-ai/core/mcp/tools"
+@@ -278,1 +279,2 @@
+-const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
++let runnerMcp: McpTools.Interface | undefined
++const runnerLayer = AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
+@@ -292,1 +294,2 @@
++    runnerMcp = yield* McpTools.Service
+     const sessionRunner = yield* SessionRunner.Service
+@@ -1094,1 +1097,76 @@
 +  it.effect("decide bounds recent context and preserves durable tool history", () =>
 +    Effect.gen(function* () {
 +      yield* setup
@@ -213,9 +236,15 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      const events = yield* EventV2.Service
 +      const agents = yield* AgentV2.Service
 +      yield* agents.transform((draft) => draft.update(AgentV2.ID.make("decide"), (agent) => { agent.mode = "primary" }))
++      skillBaselines.set(AgentV2.ID.make("build"), "Build-only skill instructions")
++      yield* session.switchAgent({ sessionID, agent: "build" })
 +      // 先用实际 runner 生成历史，再切换决定模式；不向投影表伪造工具结果。
 +      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "old-marker " + "x".repeat(80_000) }), resume: false })
 +      yield* session.resume(sessionID)
++      if (!runnerMcp) throw new Error("expected runner MCP service")
++      // 首次drain已创建实际Location服务；观察真实prepare，再用普通轮证明观察有效。
++      const prepare = spyOn(runnerMcp, "prepare")
++      yield* Effect.addFinalizer(() => Effect.sync(() => prepare.mockRestore()))
 +      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "recent-marker" }), resume: false })
 +      const reasoning = "prefix-" + "a".repeat(193) + "-middle-" + "z".repeat(193) + "-suffix"
 +      response = [
@@ -232,6 +261,8 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      yield* events.publish(SessionEvent.AgentSwitched, {
 +        sessionID, messageID: SessionMessage.ID.create(), timestamp: DateTime.makeUnsafe(1), agent: "decide",
 +      })
++      expect(prepare).toHaveBeenCalled()
++      prepare.mockClear()
 +      skillBaselines.set(AgentV2.ID.make("decide"), "Must not load decide skills")
 +      currentModel = Model.make({ id: "fake-model", provider: "fake", route: OpenAIChat.route.with({ limits: { context: 20_000, input: 10_000, output: 1_000 } }) })
 +      response = fragmentFixture("text", "decide-answer", ["Decision"]).completeEvents
@@ -244,7 +275,10 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      if (!request) throw new Error("expected decide request")
 +      expect(request.tools).toEqual([])
 +      expect(request.toolChoice).toMatchObject({ type: "none" })
-+      expect(request.system.map((part) => part.text).join("\n")).toContain("Decide mode is active")
++      const system = request.system.map((part) => part.text).join("\n")
++      expect(system).toContain("Decide mode is active")
++      expect(system).toContain("Previously supplied MCP server instructions and skill guidance")
++      expect(system).toContain("Build-only skill instructions")
 +      const serialized = JSON.stringify(request.messages)
 +      expect(serialized).toContain("recent-marker")
 +      expect(serialized).not.toContain("old-marker")
@@ -256,6 +290,12 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      expect(serialized).not.toContain('"type":"tool-call"')
 +      expect(serialized).not.toContain("Must not load decide skills")
 +      expect(executions).toEqual([])
++      // 下一决定轮即使裁掉一次撤销消息，仍逐轮停用旧指导且不准备MCP。
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "confirm the decision" }), resume: false })
++      yield* session.resume(sessionID)
++      expect(requests).toHaveLength(2)
++      expect(requests[1]?.system.map((part) => part.text).join("\n")).toContain("Previously supplied MCP server instructions and skill guidance")
++      expect(prepare).not.toHaveBeenCalled()
 +      // 发送窗口的裁剪不能删除历史，也不能让原生投影中的工具变成文本。
 +      const history = yield* session.context(sessionID)
 +      expect(history.some((message) => message.type === "user" && message.text.startsWith("old-marker"))).toBe(true)
@@ -280,7 +320,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..243ff405edaa1576b5923bf2876a745588f2408b
 --- /dev/null
 +++ b/packages/core/src/database/migration/20260725100000_migrate_review_agent.ts
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,45 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +
@@ -289,6 +329,8 @@ index 0000000000000000000000000000000000000000..243ff405edaa1576b5923bf2876a7455
 +// 六处 UPDATE 覆盖列字段与 JSON 载荷，避免 UI/统计/事件残留 review
 +export default {
 +  id: "20260725100000_migrate_review_agent",
++  // source已完成的代理迁移不能因编号变化再次改写历史载荷。
++  legacy: ["20260517000000_migrate_review_agent"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      // session.agent 列：会话级当前代理
@@ -786,8 +828,8 @@ index f5484b8e9ba455edd3808c8b8823ac9298c77f13..63710999598bb9b631bfc5fc0fe9ebf7
 +  }
 +
    if (!flags.experimentalPlanMode) {
-     if (input.agent.name === "plan") {
-       userMessage.parts.push({
+     const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
+     // 正文和普通模式的选择规则共用，实验计划文件分支仍沿用原来的持久化责任。
 diff --git a/packages/opencode/test/agent/agent.test.ts b/packages/opencode/test/agent/agent.test.ts
 index 9f650279f3aa2ddceefc76c33dbcbf4c8f455534..8edff772a984faa2dc37c919b431fdd75a29caa8 100644
 --- a/packages/opencode/test/agent/agent.test.ts

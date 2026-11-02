@@ -12,7 +12,7 @@ Content-Transfer-Encoding: 8bit
 
 成功后附一句提醒（直接 Add 即可），apply_patch.txt 的 Add File 条目与 remember 列表补齐覆写语义。
 
-适配说明：apply_patch Delete+Add 同文件顺序对折叠为覆写，3 文件按 0621 态重锚（HunkGroup.rewrite 字段、processHunkGroup oldContent 真实旧基线、execute 内 rewritten 折叠环先于 validateOwnership、成功 Note 移至 let output 声明之后——fuzz 曾将其置于声明前；txt 两条目 verbatim；两个新测试与 INV-10 断言扩展按目标 fixture 上下文落位）。语义与 original 逐 hunk 等价。
+适配说明：原始八hunk完整接续；V1按canonical组折叠并使用真实旧基线，成功Note仅依据已准备的覆写。Native保留既有Add覆盖、Move、全目标snapshot/CAS及锁内formatter，仅将同一折叠计划交审批/准备，提交成功后记录rewrite事实；不恢复create-only接口或第二份旧bytes读取。模型提醒沿source原话，测试保留独立Add覆写与全部原有提交边界。
 
 diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
 --- a/packages/core/src/tool/apply-patch.ts
@@ -23,84 +23,69 @@ diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/appl
    target: Schema.String,
 +  rewrite: Schema.optional(Schema.Boolean),
  })
-@@ -44,3 +45,6 @@
-     // 原生批量修改同样尚无 LSP 结果，不能把操作成功作为诊断通过。
+@@ -54,3 +55,6 @@
+     // 批次最终 diff 与诊断状态独立，不用不可用提示替代真实改动。
      "\nLSP diagnostics unavailable (no language server running). Run bun typecheck to verify type safety.",
 +    ...(output.applied.some((item) => item.rewrite)
-+      ? ["\nNote: a *** Delete File + *** Add File pair was applied as an in-place rewrite without a delete. A standalone *** Add File still only creates a missing file."]
++      ? ["\nNote: a *** Delete File + *** Add File pair on the same path was applied as an in-place rewrite; the delete was redundant. Use *** Add File alone to rewrite a file."]
 +      : []),
      ...(output.errors?.length ? [`\nFailed to update ${output.errors.length} file(s):`, ...output.errors] : []),
-@@ -51,3 +55,5 @@
+@@ -61,3 +65,4 @@
        readonly target: LocationMutation.Target
        readonly before: string
        readonly after: string
-+      readonly source?: Uint8Array
 +      readonly rewrite?: boolean
-@@ -77 +83 @@
--              "Apply one patch containing add, update, and delete file operations. Create a new file only when the user explicitly requires it. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
-+              "Apply one patch containing add, update, and delete file operations. Create a new file only when the user explicitly requires it. A standalone Add File never replaces an existing file. An exact Delete File then Add File pair for the same canonical path rewrites in place without deleting; reverse order and other mixed operations conflict. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All targets are resolved and approved before target contents are read. Distinct file operations apply sequentially; if a later operation fails, earlier operations remain applied and the failure reports them explicitly. Moves and atomic rollback are not supported yet.",
-@@ -105,3 +111,20 @@
--                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target }> = []
--                for (const hunk of hunks)
--                  targets.push({ hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) })
-+                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly rewrite?: boolean }> = []
-+                const byTarget = new Map<string, typeof targets>()
-+                for (const hunk of hunks) {
-+                  const entry = { hunk, target: yield* mutation.resolve({ path: hunk.path, kind: "file" }) }
-+                  const group = byTarget.get(entry.target.canonical)
-+                  if (group) group.push(entry)
-+                  else byTarget.set(entry.target.canonical, [entry])
-+                }
-+                // 完整canonical组确认意图后才授权，Delete不成为外部目录或edit审批的额外操作。
-+                for (const group of byTarget.values()) {
+@@ -95,3 +100,4 @@
+               "- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.",
++              "- To fully rewrite an existing file, use *** Add File alone with the complete new content — it overwrites in place. A *** Delete File + *** Add File pair on the same path is treated as the rewrite; the Delete is redundant.",
+             ].join("\n"),
+             input: Input,
+@@ -122,1 +128,1 @@
+-                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target }> = []
++                const targets: Array<{ readonly hunk: Patch.Hunk; readonly target: LocationMutation.Target; readonly destination?: LocationMutation.Target; readonly rewrite?: boolean }> = []
+@@ -143,4 +149,13 @@
++                // 完整ownership检查后归一化canonical组；Move两端约束和批准前零正文读取保持。
++                const normalized: typeof targets = []
+                 for (const group of groups.values()) {
+-                  const rewrite = group.length === 2 && group[0].hunk.type === "delete" && group[1].hunk.type === "add"
+-                  if (group.length > 1 && !rewrite && group.some(item => item.hunk.type !== "update")) return yield* fail(group[0].hunk.path)
 +                  const [first, second] = group
 +                  if (group.length === 2 && first.hunk.type === "delete" && second.hunk.type === "add") {
-+                    targets.push({ hunk: second.hunk, target: first.target, rewrite: true })
++                    normalized.push({ ...second, target: first.target, rewrite: true })
 +                    continue
 +                  }
-+                  if (group.length > 1 && group.some((entry) => entry.hunk.type !== "update")) {
++                  if (group.length > 1 && group.some(entry => entry.hunk.type !== "update")) {
 +                    return yield* new ToolFailure({ message: `Conflicting operations for ${first.hunk.path}` })
 +                  }
-+                  targets.push(...group)
-+                }
-@@ -159,9 +182,17 @@
++                  normalized.push(...group)
+                 }
+@@ -150,1 +165,1 @@
+-                for (const { hunk, target, destination } of targets) {
++                for (const { hunk, target, destination } of normalized) {
+@@ -169,2 +184,2 @@
+-                  metadata: { files: targets.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
+-                  resources: [...new Set(targets.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
++                  metadata: { files: normalized.flatMap(item => [{ type: item.destination ? "move" : item.hunk.type, relativePath: item.target.resource }, ...(item.destination ? [{ type: "add", relativePath: item.destination.resource }] : [])]), patchText: input.patchText },
++                  resources: [...new Set(normalized.flatMap(({ target, destination }) => [target.resource, ...(destination ? [destination.resource] : [])]))],
+@@ -179,1 +194,1 @@
+-                const grouped = targets.flatMap((entry): typeof targets => {
++                const grouped = normalized.flatMap((entry): typeof targets => {
+@@ -194,1 +209,1 @@
 -                for (const { hunk, target } of grouped) {
 +                for (const { hunk, target, rewrite } of grouped) {
-                   yield* Effect.gen(function* () {
+@@ -201,5 +216,6 @@
                      if (hunk.type === "add") {
-+                      // 只为显式配对在批准后取旧bytes；同一份bytes同时拥有审计基线和条件写入版本。
-+                      const stat = rewrite
-+                        ? yield* fs.stat(target.canonical).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
-+                        : undefined
-+                      if (stat && stat.type !== "File") return yield* fail(hunk.path)
-+                      const source = stat ? yield* fs.readFile(target.canonical) : undefined
                        prepared.push({
                          ...hunk,
                          target,
--                        before: "",
-+                        source,
-+                        rewrite,
-+                        before: source ? new TextDecoder("utf-8", { ignoreBOM: true }).decode(source).replace(/^\uFEFF/, "") : "",
-                         after:
-                           hunk.contents.endsWith("\n") || hunk.contents === "" ? hunk.contents : `${hunk.contents}\n`,
-@@ -204,12 +235,9 @@
-                       if (change.type === "add") {
--                        const result = yield* files.create({
--                          target: change.target,
--                          content:
--                            change.contents.endsWith("\n") || change.contents === ""
--                              ? change.contents
--                              : `${change.contents}\n`,
--                        })
++                        ...(rewrite ? { rewrite: true } : {}),
+                         before: "",
+@@ -263,4 +279,4 @@
+                           format: format.file,
+                         })
 -                        applied.push({ type: change.type, resource: result.resource, target: result.target })
-+                        // Add-alone继续wx创建；显式覆写用原有同锁比较写，不改变底层create和顺序提交合同。
-+                        const result = yield* change.source === undefined
-+                          ? files.create({ target: change.target, content: change.after })
-+                          : files.writeIfUnchanged({ target: change.target, expected: change.source, content: change.after })
 +                        applied.push({ type: change.type, resource: result.resource, target: result.target, ...(change.rewrite ? { rewrite: true } : {}) })
-                         return
-                       }
-                       if (change.type === "delete") {
+                         // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
@@ -181,9 +166,9 @@ diff --git a/packages/opencode/src/tool/apply_patch.txt b/packages/opencode/src/
 diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
 --- a/packages/core/test/tool-apply-patch.test.ts
 +++ b/packages/core/test/tool-apply-patch.test.ts
-@@ -355,3 +355,51 @@
+@@ -451,3 +451,51 @@
  
-+  it.live("collapses exact canonical delete/add pairs without a remove or exclusive-add regression", () =>
++  it.live("collapses exact canonical delete/add pairs without a remove or Add overwrite regression", () =>
 +    Effect.acquireUseRelease(
 +      Effect.promise(() => tmpdir()),
 +      (tmp) => {
@@ -212,7 +197,7 @@ diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/to
 +              applied: [{ type: "add", resource: "rewrite.txt", rewrite: true }, { type: "add", resource: "side.txt" }],
 +              files: [{ patch: expect.stringContaining("-old line one"), additions: 1, deletions: 2 }, { file: "side.txt", additions: 1, deletions: 0 }],
 +            })
-+            expect(result.result).toMatchObject({ type: "text", value: expect.stringContaining("in-place rewrite without a delete") })
++            expect(result.result).toMatchObject({ type: "text", value: expect.stringContaining("the delete was redundant. Use *** Add File alone") })
 +            expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("replacement\n")
 +            for (const patchText of [
 +              "*** Begin Patch\n*** Add File: rewrite.txt\n+wrong\n*** Delete File: rewrite.txt\n*** End Patch",
@@ -231,8 +216,16 @@ diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/to
 +    ),
 +  )
 +
-   it.live("rejects add hunks targeting an existing file without replacing it", () =>
+   it.live("replaces an existing Add target and supports Delete then Add rewrites", () =>
      Effect.acquireUseRelease(
+@@ -470,4 +518,5 @@
+                 const output = Schema.decodeUnknownSync(ApplyPatchTool.Output)(rewrite.output?.structured)
+-                expect(output.applied).toMatchObject([{ type: "delete", resource: "existing.txt" }, { type: "add", resource: "existing.txt" }])
+-                expect(output.files).toMatchObject([{ status: "deleted", additions: 0, deletions: 1 }, { status: "added", additions: 1, deletions: 0 }])
++                expect(output.applied).toMatchObject([{ type: "add", resource: "existing.txt", rewrite: true }])
++                expect(output.files).toMatchObject([{ status: "modified", additions: 1, deletions: 1 }])
++                expect(output.files[0]?.patch).toContain("-replacement")
+                 expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("complete rewrite\n")
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts

@@ -24,6 +24,500 @@ active/blocked 状态，消息面板以 '↻ Goal continuation' 标签渲染续�
 experimental.goal_max_turns 控制（默认 10）。subagent session 和 decide
 agent 不参与 goal 续跑。
 
+diff --git a/packages/protocol/src/groups/session.ts b/packages/protocol/src/groups/session.ts
+--- a/packages/protocol/src/groups/session.ts
++++ b/packages/protocol/src/groups/session.ts
+@@ -1,6 +1,7 @@
+ import { SessionMessage } from "@opencode-ai/schema/session-message"
+ import { SessionInput } from "@opencode-ai/schema/session-input"
+ import { PromptInput } from "@opencode-ai/schema/prompt-input"
+ import { Session } from "@opencode-ai/schema/session"
++import { SessionGoal } from "@opencode-ai/schema/session-goal"
+ import { Project } from "@opencode-ai/schema/project"
+ import { AbsolutePath, NonNegativeInt, PositiveInt, RelativePath, statics } from "@opencode-ai/schema/schema"
+@@ -174,3 +175,27 @@
++    .add(
++      // 沿既有Session归属中间件读取同一Goal，缺少目标不等于Session不存在。
++      HttpApiEndpoint.get("session.goal", "/api/session/:sessionID/goal", {
++        params: { sessionID: Session.ID },
++        success: Schema.Struct({ goal: Schema.NullOr(SessionGoal.Goal) }),
++        error: SessionNotFoundError,
++      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal", summary: "Get session goal" })),
++      HttpApiEndpoint.post("session.goal.set", "/api/session/:sessionID/goal", {
++        params: { sessionID: Session.ID },
++        payload: Schema.Struct({
++          objective: Schema.optional(Schema.String),
++          status: Schema.optional(SessionGoal.Status),
++          // 缺省保留预算，null清除，数值由唯一存储owner校验。
++          tokenBudget: Schema.optional(Schema.NullOr(Schema.Number)),
++        }),
++        success: Schema.Struct({ goal: SessionGoal.Goal }),
++        error: [InvalidRequestError, SessionNotFoundError],
++      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.set", summary: "Set session goal" })),
++      HttpApiEndpoint.delete("session.goal.clear", "/api/session/:sessionID/goal", {
++        params: { sessionID: Session.ID },
++        success: Schema.Struct({ cleared: Schema.Boolean }),
++        error: SessionNotFoundError,
++      }).middleware(sessionLocationMiddleware).annotateMerge(OpenApi.annotations({ identifier: "v2.session.goal.clear", summary: "Clear session goal" })),
++    )
+     .add(
+       HttpApiEndpoint.post("session.switchAgent", "/api/session/:sessionID/agent", {
+         params: { sessionID: Session.ID },
+diff --git a/packages/server/src/handlers/session.ts b/packages/server/src/handlers/session.ts
+--- a/packages/server/src/handlers/session.ts
++++ b/packages/server/src/handlers/session.ts
+@@ -1,6 +1,7 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionGoal } from "@opencode-ai/core/session/goal"
+ import { DateTime, Effect, Stream } from "effect"
+ import { HttpApiBuilder, HttpApiSchema } from "effect/unstable/httpapi"
+ import { Api } from "../api"
+ import { SessionsCursor } from "@opencode-ai/protocol/groups/session"
+ import {
+@@ -7,6 +8,7 @@
+   ConflictError,
+   InvalidCursorError,
++  InvalidRequestError,
+   MessageNotFoundError,
+   ServiceUnavailableError,
+   SessionNotFoundError,
+   UnknownError,
+@@ -21,6 +23,7 @@
+   Effect.gen(function* () {
+     const session = yield* SessionV2.Service
+     const clients = yield* EventClients.Service
++    const goals = yield* SessionGoal.Service
+ 
+     return handlers
+       .handle(
+@@ -109,3 +112,27 @@
++      .handle(
++        "session.goal",
++        Effect.fn(function* (ctx) {
++          const goal = yield* goals.get(ctx.params.sessionID)
++          return { goal: goal._tag === "Some" ? goal.value : null }
++        }),
++      )
++      .handle(
++        "session.goal.set",
++        Effect.fn(function* (ctx) {
++          // 仅领域校验映射400；数据库defect及取消保持原有错误语义。
++          const goal = yield* goals.set(ctx.params.sessionID, ctx.payload).pipe(
++            Effect.mapError(error => new InvalidRequestError({ message: error.message })),
++          )
++          return { goal }
++        }),
++      )
++      .handle(
++        "session.goal.clear",
++        Effect.fn(function* (ctx) {
++          // Session存在性由中间件校验；重复清除仍返回false而非404。
++          return { cleared: yield* goals.clear(ctx.params.sessionID) }
++        }),
++      )
+       .handle(
+         "session.switchAgent",
+         Effect.fn(function* (ctx) {
+diff --git a/packages/server/src/routes.ts b/packages/server/src/routes.ts
+--- a/packages/server/src/routes.ts
++++ b/packages/server/src/routes.ts
+@@ -7,6 +7,7 @@
+ import { PermissionSaved } from "@opencode-ai/core/permission/saved"
+ import { PtyTicket } from "@opencode-ai/core/pty/ticket"
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionGoal } from "@opencode-ai/core/session/goal"
+ import { SessionExecution } from "@opencode-ai/core/session/execution"
+ import { LocationServiceMap } from "@opencode-ai/core/location-service-map"
+ import { SessionExecutionLocal } from "@opencode-ai/core/session/execution/local"
+@@ -30,6 +31,7 @@
+   httpClient,
+   ToolOutputStore.cleanupNode,
+   SessionV2.node,
++  SessionGoal.node,
+   PermissionSaved.node,
+   PtyTicket.node,
+   Credential.node,
+diff --git a/packages/client/src/generated-effect/client.ts b/packages/client/src/generated-effect/client.ts
+index 0fa9d564d37bc0df6aaaf4ee1161d6c3ec825edb..239fca9e376c602da140f8e973775955bb603fb5 100644
+--- a/packages/client/src/generated-effect/client.ts
++++ b/packages/client/src/generated-effect/client.ts
+@@ -88,35 +88,58 @@ const Endpoint3_3 = (raw: RawClient["server.session"]) => (input: Endpoint3_3Inp
+     Effect.map((value) => value.data),
+   )
+ 
+-type Endpoint3_4Request = Parameters<RawClient["server.session"]["session.switchAgent"]>[0]
+-type Endpoint3_4Input = {
+-  readonly sessionID: Endpoint3_4Request["params"]["sessionID"]
+-  readonly agent: Endpoint3_4Request["payload"]["agent"]
+-}
++type Endpoint3_4Request = Parameters<RawClient["server.session"]["session.goal"]>[0]
++type Endpoint3_4Input = { readonly sessionID: Endpoint3_4Request["params"]["sessionID"] }
+ const Endpoint3_4 = (raw: RawClient["server.session"]) => (input: Endpoint3_4Input) =>
+-  raw["session.switchAgent"]({ params: { sessionID: input["sessionID"] }, payload: { agent: input["agent"] } }).pipe(
+-    Effect.mapError(mapClientError),
+-  )
++  raw["session.goal"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_5Request = Parameters<RawClient["server.session"]["session.switchModel"]>[0]
++type Endpoint3_5Request = Parameters<RawClient["server.session"]["session.goal.set"]>[0]
+ type Endpoint3_5Input = {
+   readonly sessionID: Endpoint3_5Request["params"]["sessionID"]
+-  readonly model: Endpoint3_5Request["payload"]["model"]
++  readonly objective?: Endpoint3_5Request["payload"]["objective"]
++  readonly status?: Endpoint3_5Request["payload"]["status"]
++  readonly tokenBudget?: Endpoint3_5Request["payload"]["tokenBudget"]
+ }
+ const Endpoint3_5 = (raw: RawClient["server.session"]) => (input: Endpoint3_5Input) =>
++  raw["session.goal.set"]({
++    params: { sessionID: input["sessionID"] },
++    payload: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
++  }).pipe(Effect.mapError(mapClientError))
++
++type Endpoint3_6Request = Parameters<RawClient["server.session"]["session.goal.clear"]>[0]
++type Endpoint3_6Input = { readonly sessionID: Endpoint3_6Request["params"]["sessionID"] }
++const Endpoint3_6 = (raw: RawClient["server.session"]) => (input: Endpoint3_6Input) =>
++  raw["session.goal.clear"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
++
++type Endpoint3_7Request = Parameters<RawClient["server.session"]["session.switchAgent"]>[0]
++type Endpoint3_7Input = {
++  readonly sessionID: Endpoint3_7Request["params"]["sessionID"]
++  readonly agent: Endpoint3_7Request["payload"]["agent"]
++}
++const Endpoint3_7 = (raw: RawClient["server.session"]) => (input: Endpoint3_7Input) =>
++  raw["session.switchAgent"]({ params: { sessionID: input["sessionID"] }, payload: { agent: input["agent"] } }).pipe(
++    Effect.mapError(mapClientError),
++  )
++
++type Endpoint3_8Request = Parameters<RawClient["server.session"]["session.switchModel"]>[0]
++type Endpoint3_8Input = {
++  readonly sessionID: Endpoint3_8Request["params"]["sessionID"]
++  readonly model: Endpoint3_8Request["payload"]["model"]
++}
++const Endpoint3_8 = (raw: RawClient["server.session"]) => (input: Endpoint3_8Input) =>
+   raw["session.switchModel"]({ params: { sessionID: input["sessionID"] }, payload: { model: input["model"] } }).pipe(
+     Effect.mapError(mapClientError),
+   )
+ 
+-type Endpoint3_6Request = Parameters<RawClient["server.session"]["session.prompt"]>[0]
+-type Endpoint3_6Input = {
+-  readonly sessionID: Endpoint3_6Request["params"]["sessionID"]
+-  readonly id?: Endpoint3_6Request["payload"]["id"]
+-  readonly prompt: Endpoint3_6Request["payload"]["prompt"]
+-  readonly delivery?: Endpoint3_6Request["payload"]["delivery"]
+-  readonly resume?: Endpoint3_6Request["payload"]["resume"]
++type Endpoint3_9Request = Parameters<RawClient["server.session"]["session.prompt"]>[0]
++type Endpoint3_9Input = {
++  readonly sessionID: Endpoint3_9Request["params"]["sessionID"]
++  readonly id?: Endpoint3_9Request["payload"]["id"]
++  readonly prompt: Endpoint3_9Request["payload"]["prompt"]
++  readonly delivery?: Endpoint3_9Request["payload"]["delivery"]
++  readonly resume?: Endpoint3_9Request["payload"]["resume"]
+ }
+-const Endpoint3_6 = (raw: RawClient["server.session"]) => (input: Endpoint3_6Input) =>
++const Endpoint3_9 = (raw: RawClient["server.session"]) => (input: Endpoint3_9Input) =>
+   raw["session.prompt"]({
+     params: { sessionID: input["sessionID"] },
+     payload: { id: input["id"], prompt: input["prompt"], delivery: input["delivery"], resume: input["resume"] },
+@@ -125,23 +148,23 @@ const Endpoint3_6 = (raw: RawClient["server.session"]) => (input: Endpoint3_6Inp
+     Effect.map((value) => value.data),
+   )
+ 
+-type Endpoint3_7Request = Parameters<RawClient["server.session"]["session.compact"]>[0]
+-type Endpoint3_7Input = { readonly sessionID: Endpoint3_7Request["params"]["sessionID"] }
+-const Endpoint3_7 = (raw: RawClient["server.session"]) => (input: Endpoint3_7Input) =>
++type Endpoint3_10Request = Parameters<RawClient["server.session"]["session.compact"]>[0]
++type Endpoint3_10Input = { readonly sessionID: Endpoint3_10Request["params"]["sessionID"] }
++const Endpoint3_10 = (raw: RawClient["server.session"]) => (input: Endpoint3_10Input) =>
+   raw["session.compact"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_8Request = Parameters<RawClient["server.session"]["session.wait"]>[0]
+-type Endpoint3_8Input = { readonly sessionID: Endpoint3_8Request["params"]["sessionID"] }
+-const Endpoint3_8 = (raw: RawClient["server.session"]) => (input: Endpoint3_8Input) =>
++type Endpoint3_11Request = Parameters<RawClient["server.session"]["session.wait"]>[0]
++type Endpoint3_11Input = { readonly sessionID: Endpoint3_11Request["params"]["sessionID"] }
++const Endpoint3_11 = (raw: RawClient["server.session"]) => (input: Endpoint3_11Input) =>
+   raw["session.wait"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_9Request = Parameters<RawClient["server.session"]["session.revert.stage"]>[0]
+-type Endpoint3_9Input = {
+-  readonly sessionID: Endpoint3_9Request["params"]["sessionID"]
+-  readonly messageID: Endpoint3_9Request["payload"]["messageID"]
+-  readonly files?: Endpoint3_9Request["payload"]["files"]
++type Endpoint3_12Request = Parameters<RawClient["server.session"]["session.revert.stage"]>[0]
++type Endpoint3_12Input = {
++  readonly sessionID: Endpoint3_12Request["params"]["sessionID"]
++  readonly messageID: Endpoint3_12Request["payload"]["messageID"]
++  readonly files?: Endpoint3_12Request["payload"]["files"]
+ }
+-const Endpoint3_9 = (raw: RawClient["server.session"]) => (input: Endpoint3_9Input) =>
++const Endpoint3_12 = (raw: RawClient["server.session"]) => (input: Endpoint3_12Input) =>
+   raw["session.revert.stage"]({
+     params: { sessionID: input["sessionID"] },
+     payload: { messageID: input["messageID"], files: input["files"] },
+@@ -150,42 +173,42 @@ const Endpoint3_9 = (raw: RawClient["server.session"]) => (input: Endpoint3_9Inp
+     Effect.map((value) => value.data),
+   )
+ 
+-type Endpoint3_10Request = Parameters<RawClient["server.session"]["session.revert.clear"]>[0]
+-type Endpoint3_10Input = { readonly sessionID: Endpoint3_10Request["params"]["sessionID"] }
+-const Endpoint3_10 = (raw: RawClient["server.session"]) => (input: Endpoint3_10Input) =>
++type Endpoint3_13Request = Parameters<RawClient["server.session"]["session.revert.clear"]>[0]
++type Endpoint3_13Input = { readonly sessionID: Endpoint3_13Request["params"]["sessionID"] }
++const Endpoint3_13 = (raw: RawClient["server.session"]) => (input: Endpoint3_13Input) =>
+   raw["session.revert.clear"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_11Request = Parameters<RawClient["server.session"]["session.revert.commit"]>[0]
+-type Endpoint3_11Input = { readonly sessionID: Endpoint3_11Request["params"]["sessionID"] }
+-const Endpoint3_11 = (raw: RawClient["server.session"]) => (input: Endpoint3_11Input) =>
++type Endpoint3_14Request = Parameters<RawClient["server.session"]["session.revert.commit"]>[0]
++type Endpoint3_14Input = { readonly sessionID: Endpoint3_14Request["params"]["sessionID"] }
++const Endpoint3_14 = (raw: RawClient["server.session"]) => (input: Endpoint3_14Input) =>
+   raw["session.revert.commit"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_12Request = Parameters<RawClient["server.session"]["session.context"]>[0]
+-type Endpoint3_12Input = { readonly sessionID: Endpoint3_12Request["params"]["sessionID"] }
+-const Endpoint3_12 = (raw: RawClient["server.session"]) => (input: Endpoint3_12Input) =>
++type Endpoint3_15Request = Parameters<RawClient["server.session"]["session.context"]>[0]
++type Endpoint3_15Input = { readonly sessionID: Endpoint3_15Request["params"]["sessionID"] }
++const Endpoint3_15 = (raw: RawClient["server.session"]) => (input: Endpoint3_15Input) =>
+   raw["session.context"]({ params: { sessionID: input["sessionID"] } }).pipe(
+     Effect.mapError(mapClientError),
+     Effect.map((value) => value.data),
+   )
+ 
+-type Endpoint3_13Request = Parameters<RawClient["server.session"]["session.history"]>[0]
+-type Endpoint3_13Input = {
+-  readonly sessionID: Endpoint3_13Request["params"]["sessionID"]
+-  readonly limit?: Endpoint3_13Request["query"]["limit"]
+-  readonly after?: Endpoint3_13Request["query"]["after"]
++type Endpoint3_16Request = Parameters<RawClient["server.session"]["session.history"]>[0]
++type Endpoint3_16Input = {
++  readonly sessionID: Endpoint3_16Request["params"]["sessionID"]
++  readonly limit?: Endpoint3_16Request["query"]["limit"]
++  readonly after?: Endpoint3_16Request["query"]["after"]
+ }
+-const Endpoint3_13 = (raw: RawClient["server.session"]) => (input: Endpoint3_13Input) =>
++const Endpoint3_16 = (raw: RawClient["server.session"]) => (input: Endpoint3_16Input) =>
+   raw["session.history"]({
+     params: { sessionID: input["sessionID"] },
+     query: { limit: input["limit"], after: input["after"] },
+   }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_14Request = Parameters<RawClient["server.session"]["session.events"]>[0]
+-type Endpoint3_14Input = {
+-  readonly sessionID: Endpoint3_14Request["params"]["sessionID"]
+-  readonly after?: Endpoint3_14Request["query"]["after"]
++type Endpoint3_17Request = Parameters<RawClient["server.session"]["session.events"]>[0]
++type Endpoint3_17Input = {
++  readonly sessionID: Endpoint3_17Request["params"]["sessionID"]
++  readonly after?: Endpoint3_17Request["query"]["after"]
+ }
+-const Endpoint3_14 = (raw: RawClient["server.session"]) => (input: Endpoint3_14Input) =>
++const Endpoint3_17 = (raw: RawClient["server.session"]) => (input: Endpoint3_17Input) =>
+   Stream.unwrap(
+     raw["session.events"]({ params: { sessionID: input["sessionID"] }, query: { after: input["after"] } }).pipe(
+       Effect.mapError(mapClientError),
+@@ -193,17 +216,17 @@ const Endpoint3_14 = (raw: RawClient["server.session"]) => (input: Endpoint3_14I
+     ),
+   )
+ 
+-type Endpoint3_15Request = Parameters<RawClient["server.session"]["session.interrupt"]>[0]
+-type Endpoint3_15Input = { readonly sessionID: Endpoint3_15Request["params"]["sessionID"] }
+-const Endpoint3_15 = (raw: RawClient["server.session"]) => (input: Endpoint3_15Input) =>
++type Endpoint3_18Request = Parameters<RawClient["server.session"]["session.interrupt"]>[0]
++type Endpoint3_18Input = { readonly sessionID: Endpoint3_18Request["params"]["sessionID"] }
++const Endpoint3_18 = (raw: RawClient["server.session"]) => (input: Endpoint3_18Input) =>
+   raw["session.interrupt"]({ params: { sessionID: input["sessionID"] } }).pipe(Effect.mapError(mapClientError))
+ 
+-type Endpoint3_16Request = Parameters<RawClient["server.session"]["session.message"]>[0]
+-type Endpoint3_16Input = {
+-  readonly sessionID: Endpoint3_16Request["params"]["sessionID"]
+-  readonly messageID: Endpoint3_16Request["params"]["messageID"]
++type Endpoint3_19Request = Parameters<RawClient["server.session"]["session.message"]>[0]
++type Endpoint3_19Input = {
++  readonly sessionID: Endpoint3_19Request["params"]["sessionID"]
++  readonly messageID: Endpoint3_19Request["params"]["messageID"]
+ }
+-const Endpoint3_16 = (raw: RawClient["server.session"]) => (input: Endpoint3_16Input) =>
++const Endpoint3_19 = (raw: RawClient["server.session"]) => (input: Endpoint3_19Input) =>
+   raw["session.message"]({ params: { sessionID: input["sessionID"], messageID: input["messageID"] } }).pipe(
+     Effect.mapError(mapClientError),
+     Effect.map((value) => value.data),
+@@ -214,19 +237,22 @@ const adaptGroup3 = (raw: RawClient["server.session"]) => ({
+   create: Endpoint3_1(raw),
+   active: Endpoint3_2(raw),
+   get: Endpoint3_3(raw),
+-  switchAgent: Endpoint3_4(raw),
+-  switchModel: Endpoint3_5(raw),
+-  prompt: Endpoint3_6(raw),
+-  compact: Endpoint3_7(raw),
+-  wait: Endpoint3_8(raw),
+-  stage: Endpoint3_9(raw),
+-  clear: Endpoint3_10(raw),
+-  commit: Endpoint3_11(raw),
+-  context: Endpoint3_12(raw),
+-  history: Endpoint3_13(raw),
+-  events: Endpoint3_14(raw),
+-  interrupt: Endpoint3_15(raw),
+-  message: Endpoint3_16(raw),
++  goal: Endpoint3_4(raw),
++  goalSet: Endpoint3_5(raw),
++  goalClear: Endpoint3_6(raw),
++  switchAgent: Endpoint3_7(raw),
++  switchModel: Endpoint3_8(raw),
++  prompt: Endpoint3_9(raw),
++  compact: Endpoint3_10(raw),
++  wait: Endpoint3_11(raw),
++  stage: Endpoint3_12(raw),
++  clear: Endpoint3_13(raw),
++  commit: Endpoint3_14(raw),
++  context: Endpoint3_15(raw),
++  history: Endpoint3_16(raw),
++  events: Endpoint3_17(raw),
++  interrupt: Endpoint3_18(raw),
++  message: Endpoint3_19(raw),
+ })
+ 
+ type Endpoint4_0Request = Parameters<RawClient["server.message"]["session.messages"]>[0]
+diff --git a/packages/client/src/generated/client.ts b/packages/client/src/generated/client.ts
+index 02049eafdc199dfc9e8b6302964033f8bdf5d2b3..b6418bc8a1d0878d918807560004a4eb121a0bc1 100644
+--- a/packages/client/src/generated/client.ts
++++ b/packages/client/src/generated/client.ts
+@@ -11,6 +11,12 @@ import type {
+   SessionsActiveOutput,
+   SessionsGetInput,
+   SessionsGetOutput,
++  SessionsGoalInput,
++  SessionsGoalOutput,
++  SessionsGoalSetInput,
++  SessionsGoalSetOutput,
++  SessionsGoalClearInput,
++  SessionsGoalClearOutput,
+   SessionsSwitchAgentInput,
+   SessionsSwitchAgentOutput,
+   SessionsSwitchModelInput,
+@@ -344,6 +350,40 @@ export function make(options: ClientOptions) {
+           },
+           requestOptions,
+         ).then((value) => value.data),
++      goal: (input: SessionsGoalInput, requestOptions?: RequestOptions) =>
++        request<SessionsGoalOutput>(
++          {
++            method: "GET",
++            path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
++            successStatus: 200,
++            declaredStatuses: [404, 400, 401],
++            empty: false,
++          },
++          requestOptions,
++        ),
++      goalSet: (input: SessionsGoalSetInput, requestOptions?: RequestOptions) =>
++        request<SessionsGoalSetOutput>(
++          {
++            method: "POST",
++            path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
++            body: { objective: input["objective"], status: input["status"], tokenBudget: input["tokenBudget"] },
++            successStatus: 200,
++            declaredStatuses: [400, 404, 401],
++            empty: false,
++          },
++          requestOptions,
++        ),
++      goalClear: (input: SessionsGoalClearInput, requestOptions?: RequestOptions) =>
++        request<SessionsGoalClearOutput>(
++          {
++            method: "DELETE",
++            path: `/api/session/${encodeURIComponent(input.sessionID)}/goal`,
++            successStatus: 200,
++            declaredStatuses: [404, 400, 401],
++            empty: false,
++          },
++          requestOptions,
++        ),
+       switchAgent: (input: SessionsSwitchAgentInput, requestOptions?: RequestOptions) =>
+         request<SessionsSwitchAgentOutput>(
+           {
+diff --git a/packages/client/src/generated/types.ts b/packages/client/src/generated/types.ts
+index 6ca33c6beaea6de9e39da3117057f8ab1c52d276..32465aa0f29847d4b57ec8fc4adec985f5895151 100644
+--- a/packages/client/src/generated/types.ts
++++ b/packages/client/src/generated/types.ts
+@@ -516,6 +516,63 @@ export type SessionsGetOutput = {
+   }
+ }["data"]
+ 
++export type SessionsGoalInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
++
++export type SessionsGoalOutput = {
++  readonly goal: {
++    readonly sessionID: string
++    readonly id: string
++    readonly objective: string
++    readonly status: "active" | "paused" | "complete" | "blocked"
++    readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
++    readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
++    readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
++    readonly time: {
++      readonly created: number | "Infinity" | "-Infinity" | "NaN"
++      readonly updated: number | "Infinity" | "-Infinity" | "NaN"
++    }
++  } | null
++}
++
++export type SessionsGoalSetInput = {
++  readonly sessionID: { readonly sessionID: string }["sessionID"]
++  readonly objective?: {
++    readonly objective?: string | undefined
++    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
++    readonly tokenBudget?: number | null | undefined
++  }["objective"]
++  readonly status?: {
++    readonly objective?: string | undefined
++    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
++    readonly tokenBudget?: number | null | undefined
++  }["status"]
++  readonly tokenBudget?: {
++    readonly objective?: string | undefined
++    readonly status?: "active" | "paused" | "complete" | "blocked" | undefined
++    readonly tokenBudget?: number | null | undefined
++  }["tokenBudget"]
++}
++
++export type SessionsGoalSetOutput = {
++  readonly goal: {
++    readonly sessionID: string
++    readonly id: string
++    readonly objective: string
++    readonly status: "active" | "paused" | "complete" | "blocked"
++    readonly tokenBudget?: number | "Infinity" | "-Infinity" | "NaN" | null
++    readonly tokensUsed: number | "Infinity" | "-Infinity" | "NaN"
++    readonly timeUsedSeconds: number | "Infinity" | "-Infinity" | "NaN"
++    readonly time: {
++      readonly created: number | "Infinity" | "-Infinity" | "NaN"
++      readonly updated: number | "Infinity" | "-Infinity" | "NaN"
++    }
++  }
++}
++
++export type SessionsGoalClearInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }
++
++export type SessionsGoalClearOutput = { readonly cleared: boolean }
++
+ export type SessionsSwitchAgentInput = {
+   readonly sessionID: { readonly sessionID: string }["sessionID"]
+   readonly agent: { readonly agent: string }["agent"]
+diff --git a/packages/client/src/contract.ts b/packages/client/src/contract.ts
+--- a/packages/client/src/contract.ts
++++ b/packages/client/src/contract.ts
+@@ -40,6 +40,9 @@
+ export const endpointNames = {
+   "session.messages": "list",
++  // 使用既有别名入口，避免Goal清除与revert.clear在同一客户端组重名。
++  "session.goal.set": "goalSet",
++  "session.goal.clear": "goalClear",
+   "integration.connect.key": "connectKey",
+   "integration.connect.oauth": "connectOauth",
+   "integration.attempt.status": "attemptStatus",
+   "integration.attempt.complete": "attemptComplete",
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 index 8b15632c3..22161b587 100644
 --- a/packages/core/src/database/migration.gen.ts
@@ -463,7 +957,7 @@ index 42a2153c7..8c766dc76 100644
              ...(tool.execute ? [tool.execute] : []),
 +            // #364：goal 工具：仅在 experimental.goals 启用时暴露给模型
 +            ...(goalsEnabled ? [tool.goal] : []),
-             ...(flags.experimentalLspTool ? [tool.lsp] : []),
+             // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
              ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
            ],
 @@ -441,6 +451,7 @@
@@ -657,12 +1151,12 @@ index 8a4231da6..52841ca60 100644
            break
          }
          case "session.updated": {
-@@ -1067,7 +1098,18 @@
-              sdk.client.session.diff({ sessionID }),
-              // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
-              sdk.client.session.status({ workspace: project.workspace.current() })
+@@ -1073,9 +1104,20 @@
+               sdk.client.session.diff({ sessionID }),
+               // #153：force sync 同时刷新 status，避免 diff 已更新而 busy 状态过期
+               sdk.client.session.status({ workspace: project.workspace.current() })
                  .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
-            ])
+             ])
 +            // #364：goal fetch：非致命，失败不影响 session sync
 +            // SDK 未重新生成，使用 as any 绕过方法不存在检查
 +            try {
@@ -674,8 +1168,10 @@ index 8a4231da6..52841ca60 100644
 +            } catch {
 +              // goal 端点不可用时不阻塞 session sync
 +            }
+             // 先应用排队片段并标记 touched，再让快照仲裁，避免同一文本被追加两次。
+             flushPartDeltas()
              setStore(
-              produce((draft) => {
+               produce((draft) => {
 diff --git a/packages/tui/src/feature-plugins/builtins.ts b/packages/tui/src/feature-plugins/builtins.ts
 index b67923f3c..d9345bf8e 100644
 --- a/packages/tui/src/feature-plugins/builtins.ts
@@ -897,7 +1393,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..07c2746c33b2b8662d067a3a72d8d8e0cca9ab25
 --- /dev/null
 +++ b/packages/core/src/database/migration/20260726100000_session_goal.ts
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +import { Effect } from "effect"
 +import type { DatabaseMigration } from "../migration"
 +// #364：session goal 表——持久化会话目标、状态与用量。
@@ -905,6 +1401,8 @@ index 0000000000000000000000000000000000000000..07c2746c33b2b8662d067a3a72d8d8e0
 +// FK cascade 保证删除 session 时 goal 自动清理。
 +export default {
 +  id: "20260726100000_session_goal",
++  // 已部署Goal表沿用source完成身份，保留用户目标而非重复建表。
++  legacy: ["20260704053848_session_goal"],
 +  up(tx) {
 +    return Effect.gen(function* () {
 +      yield* tx.run(`CREATE TABLE \`session_goal\` (
@@ -1859,27 +2357,31 @@ diff --git a/packages/core/src/config/experimental.ts b/packages/core/src/config
  import { Policy as PolicyV2 } from "../policy"
  
  // Each core domain exports the policy actions it supports. Adding an action to
-@@ -15,4 +16,7 @@
+@@ -15,6 +16,9 @@
  
  export class Experimental extends Schema.Class<Experimental>("ConfigV2.Experimental")({
    policies: Policy.pipe(Schema.Array, Schema.optional),
 +  // 两代 runner 使用相同开关与自动续跑上限，默认保持关闭。
 +  goals: Schema.optional(Schema.Boolean),
 +  goal_max_turns: Schema.optional(NonNegativeInt),
+   // 子代理配置禁令在派生上限后生效，两代不能只在工具展示中隐藏。
+   primary_tools: Schema.Array(Schema.String).pipe(Schema.optional),
  }) {}
 diff --git a/packages/core/src/v1/config/migrate.ts b/packages/core/src/v1/config/migrate.ts
 --- a/packages/core/src/v1/config/migrate.ts
 +++ b/packages/core/src/v1/config/migrate.ts
-@@ -68,7 +68,11 @@
+@@ -75,10 +75,12 @@
      plugins: info.plugin?.map((plugin) =>
        typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
      ),
--    experimental: info.experimental?.policies && { policies: info.experimental.policies },
+-    // 旧primary_tools必须到达真实Native Task，不能在schema迁移时静默丢弃。
+-    experimental: (info.experimental?.policies || info.experimental?.primary_tools) && {
 +    experimental: info.experimental && {
-+      policies: info.experimental.policies,
++      // Goal开关与原有子代理限制同时透传，不改变已有action归一化。
+       policies: info.experimental.policies, primary_tools: info.experimental.primary_tools?.map(normalizeAction),
 +      goals: info.experimental.goals,
 +      goal_max_turns: info.experimental.goal_max_turns,
-+    },
+     },
      providers: providers(info.provider),
    }
  }
@@ -1887,7 +2389,7 @@ diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/tool/goal.ts
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,52 @@
 +export * as GoalTool from "./goal"
 +
 +import { ToolFailure } from "@opencode-ai/llm"
@@ -1907,7 +2409,17 @@ new file mode 100644
 +  const goals = yield* SessionGoal.Service
 +  yield* tools.register({
 +    goal: Tool.make({
-+      description: "Update the existing goal. Use this tool only to mark the goal achieved or genuinely blocked. Set status to complete only when the objective has actually been achieved and no required work remains. Set status to blocked only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change. If the user resumes a blocked goal, treat the resumed run as a fresh blocked audit. Once the blocked threshold is satisfied, set status to blocked. Do not use blocked merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete merely because the budget is nearly exhausted or you are stopping work. You cannot pause, resume, or clear a goal; those changes are controlled by the user.",
++      description: [
++        "Update the existing goal.",
++        "Use this tool only to mark the goal achieved or genuinely blocked.",
++        "Set status to `complete` only when the objective has actually been achieved and no required work remains.",
++        "Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.",
++        "If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.",
++        "Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.",
++        "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
++        "Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.",
++        "You cannot use this tool to pause, resume, or clear a goal; those status changes are controlled by the user.",
++      ].join("\n"),
 +      input: Schema.Struct({ status: Schema.Literals(["complete", "blocked"]) }),
 +      output: SessionGoal.Goal,
 +      // 原生工具直接调用共享目标服务，不通过 V1 ctx.extra 或旧执行循环。
@@ -1933,20 +2445,22 @@ new file mode 100644
 diff --git a/packages/core/src/tool/builtins.ts b/packages/core/src/tool/builtins.ts
 --- a/packages/core/src/tool/builtins.ts
 +++ b/packages/core/src/tool/builtins.ts
-@@ -6,6 +6,7 @@
+@@ -6,7 +6,8 @@
  import { ApplyPatchTool } from "./apply-patch"
  import { EditTool } from "./edit"
  import { GlobTool } from "./glob"
 +import { GoalTool } from "./goal"
  import { GrepTool } from "./grep"
+ import { NotebookTools } from "./notebook"
  import { QuestionTool } from "./question"
  import { ReadTool } from "./read"
-@@ -36,6 +37,7 @@
+@@ -38,7 +39,8 @@
      BashTool.node,
      EditTool.node,
      GlobTool.node,
 +    GoalTool.node,
      GrepTool.node,
+     NotebookTools.node,
      QuestionTool.node,
      ReadTool.node,
 diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
@@ -1960,17 +2474,16 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
  import { SessionInput } from "../input"
  import { SessionMessage } from "../message"
  import { SessionInputTable } from "../sql"
-@@ -107,6 +108,7 @@
-     const tools = yield* ToolRegistry.Service
+@@ -116,6 +117,7 @@
      const models = yield* SessionRunnerModel.Service
+     const mcpTools = yield* McpTools.Service
      const store = yield* SessionStore.Service
 +    const goals = yield* SessionGoal.Service
      const location = yield* Location.Service
      const systemContext = yield* SystemContextRegistry.Service
      const skillGuidance = yield* SkillGuidance.Service
-@@ -180,10 +182,14 @@
-         concurrency: "unbounded",
-       }).pipe(Effect.map(SystemContext.combine))
+@@ -206,10 +208,14 @@
+     })
  
 +    // 仅当前 drain 持有待注入目标；不新增调度器或崩溃后自动恢复。
 +    type GoalContinuation = { goal?: SessionGoal.Goal; turns: number }
@@ -1983,7 +2496,8 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
        recoverOverflow?: typeof compaction.compactAfterOverflow,
      ) {
        const session = yield* getSession(sessionID)
-@@ -206,7 +212,22 @@
+       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
+@@ -233,7 +239,22 @@
                promoted += Number(yield* SessionInput.promoteNextQueued(db, events, session.id))
                promoted += yield* SessionInput.promoteSteers(db, events, session.id, cutoff)
              }
@@ -2007,22 +2521,14 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 +          }
          })).pipe(Effect.onExit((promotionExit) => Effect.gen(function* () {
            const promoted = yield* db.select({ id: SessionInputTable.id, seq: SessionInputTable.promoted_seq }).from(SessionInputTable)
-@@ -327,6 +348,7 @@
-       const withPublication = Semaphore.makeUnsafe(1).withPermit
-       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
-         withPublication(publisher.publish(event, outputPaths))
-+      const startedAt = DateTime.toEpochMillis(yield* DateTime.now)
-       let overflowFailure: ProviderErrorEvent | undefined
-       const providerStream = llm.stream(request, (body) => Effect.gen(function* () {
-         // 同一次 compile 已合并模型/路由默认值并完成协议 lowering，估算只读取该有效正文。
-@@ -487,11 +509,21 @@
+@@ -582,11 +603,21 @@
            }
            if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
              return yield* Effect.failCause(settled.cause)
 +          if (stepSettlement && !publisher.hasProviderError()) {
 +            // 仅确认的正常轮次累计用量，预算维持记录/提示语义而非硬停止。
 +            const tokens = stepSettlement.tokens
-+            const seconds = Math.max(0, Math.floor((DateTime.toEpochMillis(yield* DateTime.now) - startedAt) / 1000))
++            const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
 +            yield* goals.accountUsage(session.id, tokens.input + tokens.output + tokens.reasoning, seconds).pipe(Effect.ignore)
 +          }
            if (publisher.hasActiveAssistant() && !stepSettlement) {
@@ -2114,9 +2620,10 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 +          }
          }
          shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")
-@@ -571,6 +622,7 @@
+@@ -700,7 +751,8 @@
      ToolRegistry.node,
      SessionRunnerModel.node,
+     McpTools.node,
      SessionStore.node,
 +    SessionGoal.node,
      Location.node,
@@ -2125,12 +2632,13 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
-@@ -29,6 +29,8 @@
+@@ -29,6 +29,9 @@
  import { Snapshot } from "@opencode-ai/core/snapshot"
  import { ContextSnapshotDecodeError } from "@opencode-ai/core/session/error"
  import { SessionEvent } from "@opencode-ai/core/session/event"
 +import { SessionGoal } from "@opencode-ai/core/session/goal"
 +import { GoalTool } from "@opencode-ai/core/tool/goal"
++import GOAL_DESCRIPTION from "../../opencode/src/tool/goal.txt"
  import { SessionInput } from "@opencode-ai/core/session/input"
  import { SessionMessage } from "@opencode-ai/core/session/message"
  import { Prompt } from "@opencode-ai/core/session/prompt"
@@ -2146,16 +2654,17 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
  import { ModelV2 } from "@opencode-ai/core/model"
  import { Location } from "@opencode-ai/core/location"
  import { ProviderV2 } from "@opencode-ai/core/provider"
--import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
-+import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Stream } from "effect"
+-import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, References, Schema, Stream } from "effect"
++import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Logger, Option, Queue, References, Schema, Stream } from "effect"
  import { TestClock } from "effect/testing"
  import { asc, eq } from "drizzle-orm"
-@@ -257,7 +260,7 @@
+@@ -279,8 +282,8 @@
        ]),
    }),
  )
--const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
-+const runnerLayer = (configuration = config) => AppNodeBuilder.build(SessionRunnerLLM.node, [
+ let runnerMcp: McpTools.Interface | undefined
+-const runnerLayer = AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
++const runnerLayer = (configuration = config) => AppNodeBuilder.build(LayerNode.group([SessionRunnerLLM.node, McpTools.node]), [
    [Snapshot.node, Snapshot.noopLayer],
    [LayerNodePlatform.llmClient, client],
    [SessionRunnerModel.node, models],
@@ -2181,16 +2690,17 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
      LayerNode.group([
        Database.node,
        EventV2.node,
-@@ -296,6 +299,8 @@
+@@ -319,7 +322,9 @@
        AgentV2.node,
        ToolRegistry.node,
+       ToolOutputStore.node,
        ToolRegistry.toolsNode,
 +      SessionGoal.node,
 +      GoalTool.node,
        echoNode,
        Catalog.node,
        SessionRunnerModel.node,
-@@ -318,10 +323,10 @@
+@@ -343,10 +348,10 @@
        [ReferenceGuidance.node, referenceGuidance],
        [Snapshot.node, Snapshot.noopLayer],
 -      [SessionExecution.node, execution],
@@ -2198,17 +2708,14 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +      [SessionExecution.node, execution(configuration)],
 +      [Config.node, configuration],
      ],
--  ),
+-  ).pipe(Layer.provide(Layer.succeed(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment)))),
 -)
-+  )
++  ).pipe(Layer.provide(Layer.succeed(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(environment))))
 +const it = testEffect(testLayer())
  const sessionID = SessionV2.ID.make("ses_runner_test")
  const otherSessionID = SessionV2.ID.make("ses_runner_other")
  
-@@ -651,6 +656,63 @@
-     ])
-   })
- 
+@@ -681,3 +687,106 @@
 +const goalConfig = Layer.succeed(Config.Service, Config.Service.of({
 +  entries: () => Effect.succeed([new Config.Document({
 +    type: "document",
@@ -2223,6 +2730,42 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
 +    const session = yield* SessionV2.Service
 +    const goals = yield* SessionGoal.Service
++    // 共享存储直接走内存DB和真实投影，不借Git初始化或产品生命周期证明CRUD。
++    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
++    yield* goals.accountUsage(sessionID, 500, 10)
++    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
++    expect(yield* goals.set(sessionID, { status: "paused" }).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
++    for (const invalid of [{ objective: "   " }, { objective: "a".repeat(4001) }, { objective: "test", tokenBudget: 0 }, { objective: "test", tokenBudget: -100 }]) {
++      expect(yield* goals.set(sessionID, invalid).pipe(Effect.exit)).toMatchObject({ _tag: "Failure" })
++    }
++    const original = yield* goals.set(sessionID, { objective: "  original  ", tokenBudget: 50000 })
++    expect(original).toMatchObject({ status: "active", objective: "original", tokensUsed: 0, timeUsedSeconds: 0 })
++    expect(original.id).toBeTruthy()
++    yield* goals.accountUsage(sessionID, 1000, 30)
++    const revised = yield* goals.set(sessionID, { objective: "revised" })
++    expect(revised).toMatchObject({ id: original.id, objective: "revised", tokensUsed: 1000, timeUsedSeconds: 30, tokenBudget: 50000, time: { created: original.time.created } })
++    // 用户停止态均不计费，恢复后仍沿原目标ID和账目继续，而非另建目标。
++    for (const status of ["paused", "complete", "blocked"] as const) {
++      expect(yield* goals.set(sessionID, { status })).toMatchObject({ objective: "revised", status })
++      yield* goals.accountUsage(sessionID, 999, 99)
++      expect(Option.getOrThrow(yield* goals.get(sessionID))).toMatchObject({ tokensUsed: 1000, timeUsedSeconds: 30 })
++    }
++    yield* goals.set(sessionID, { status: "active" })
++    yield* goals.accountUsage(sessionID, 234, 26)
++    const prompt = SessionGoal.continuationPrompt(Option.getOrThrow(yield* goals.get(sessionID)))
++    for (const text of ["<session-goal-continuation>", "revised", "Tokens used: 1234", "Token budget: 50000", "Tokens remaining: 48766", "call the goal tool with status", "The audit must prove completion, not merely fail to find obvious remaining work."]) expect(prompt).toContain(text)
++    expect(yield* goals.set(sessionID, { tokenBudget: null })).toMatchObject({ tokenBudget: null })
++    expect(yield* goals.set(sessionID, { tokenBudget: 100000 })).toMatchObject({ tokenBudget: 100000 })
++    const escaped = SessionGoal.continuationPrompt(yield* goals.set(sessionID, { objective: "fix <script> & <style> tags" }))
++    expect(escaped).toContain("&lt;script&gt;")
++    expect(escaped).toContain("&amp;")
++    expect(escaped).not.toContain("<script>")
++    expect(escaped).not.toContain("<style>")
++    // 幂等清除后真正移除旧账目，后面的runner用例从新的目标开始。
++    expect(yield* goals.clear(sessionID)).toBe(true)
++    expect(yield* goals.clear(sessionID)).toBe(false)
++    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
++
 +    yield* goals.set(sessionID, { objective: "Finish the native task", tokenBudget: 1 })
 +    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Start working" }), resume: false })
 +    yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Queued input" }), delivery: "queue", resume: false })
@@ -2239,6 +2782,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
 +    expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
 +    expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
++    expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description).toBe(GOAL_DESCRIPTION.trimEnd())
 +    const active = yield* goals.get(sessionID)
 +    expect(Option.getOrThrow(active).status).toBe("active")
 +    expect(Option.getOrThrow(active).tokensUsed).toBe(12)
@@ -2263,11 +2807,20 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    // 无 step-finish 的 EOF 不能被当作正常完成后再自动续跑。
 +    expect(requests).toHaveLength(1)
 +    expect(Option.getOrThrow(yield* goals.get(sessionID)).status).toBe("active")
++    // 删除沿真实共享生命周期事件投影；Goal只能由外键级联清理，不能先clear伪造成功。
++    const events = yield* EventV2.Service
++    yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: SessionV1.SessionInfo.make({
++      id: sessionID, projectID: Project.ID.global, slug: sessionID, directory: "/project", title: "test", version: "test",
++      cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, time: { created: 0, updated: 0 },
++    }) })
++    expect(Option.isNone(yield* goals.get(sessionID))).toBe(true)
++    const database = yield* Database.Service
++    expect(yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)).toBeUndefined()
 +  }),
 +)
 +
  describe("SessionRunnerLLM", () => {
-   it.effect("bounds active provider streams by total timeout and respects explicit timeout or false", () =>
+   it.effect("records Native stream and tool milestones without logging payloads", () =>
      Effect.gen(function* () {
 diff --git a/packages/opencode/test/session/tools.test.ts b/packages/opencode/test/session/tools.test.ts
 --- a/packages/opencode/test/session/tools.test.ts

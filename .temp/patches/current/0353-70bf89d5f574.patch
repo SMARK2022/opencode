@@ -334,65 +334,64 @@ diff --git a/packages/opencode/test/session/file-evidence.test.ts b/packages/ope
 +    expect(text).toContain("[cmd:")
 +  }),
 +)
-diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
---- a/packages/opencode/src/session/file-evidence.ts
-+++ b/packages/opencode/src/session/file-evidence.ts
+diff --git a/packages/core/src/session/file-evidence.ts b/packages/core/src/session/file-evidence.ts
+--- a/packages/core/src/session/file-evidence.ts
++++ b/packages/core/src/session/file-evidence.ts
 @@ -3,3 +3,5 @@
  import path from "path"
 +import { createHash } from "crypto"
 +import { mergeRanges } from "../util/range"
  import { Effect, Option, Schema } from "effect"
- import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -24,10 +26,30 @@
-   compactionCount = 1,
-+  directory = worktree,
+ import { FSUtil } from "../fs-util"
+@@ -27,6 +29,13 @@
++export interface CommandReceipt {
++  readonly command: string
++  readonly cwd?: string
++  readonly workdir?: string
++  readonly exit?: number
++}
++
+ export const kind = "compaction_evidence_handoff"
+ 
+ export const render = Effect.fn("FileEvidence.render")(function* (
+   receipts: readonly unknown[], fs: FSUtil.Interface, worktree: string,
+-  context: { readonly searches?: readonly SearchReceipt[]; readonly compactionCount?: number } = {},
++  context: { readonly searches?: readonly SearchReceipt[]; readonly commands?: readonly CommandReceipt[]; readonly directory?: string; readonly compactionCount?: number } = {},
  ) {
-   const files = new Map<string, typeof Receipt.Type & { ranges: { start: number; end: number }[] }>()
-   const searches = new Map<string, { tool: string; pattern: string; path: string; matches: number }>()
+@@ -42,11 +51,4 @@
+-    const ranges = [...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }]
+-      .sort((a, b) => a.start - b.start || a.end - b.end)
+-      .reduce<{ start: number; end: number }[]>((result, range) => {
+-        const last = result.at(-1)
+-        if (!last || range.start > last.end + 1) result.push({ ...range })
+-        else last.end = Math.max(last.end, range.end)
+-        return result
+-      }, [])
++    const ranges = mergeRanges([...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }])
+     // 删除再插入让Map顺序代表最近读取，避免文件修改时间影响证据优先级。
+     files.delete(key)
+     files.set(key, { ...read, canonicalPath: absolute, ranges })
+@@ -62,3 +64,18 @@
 +  const commands = new Map<string, { command: string; cwd: string; exit: string }>()
-   for (const message of messages) {
-     for (const part of message.parts) {
-+      if (part.type === "tool" && part.tool === "bash" && part.state.status === "completed") {
-+        const command = part.state.input.command
-+        if (typeof command === "string" && command.trim()) {
-+          const input = part.state.input
-+          const cwd = typeof input.cwd === "string" ? path.resolve(directory, input.cwd)
-+            : path.resolve(directory, typeof input.workdir === "string" ? input.workdir : ".")
-+          let normalized = command.trim()
-+          // 只对去重键剥离环境变量；渲染保留命令原文并独立脱敏，不筛选命令类型。
-+          while (true) {
-+            const match = normalized.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
-+            if (!match) break
-+            normalized = normalized.slice(match[0].length).trimStart()
-+          }
-+          const key = `${process.platform === "win32" ? cwd.toLowerCase() : cwd}\0${normalized}`
-+          commands.delete(key)
-+          commands.set(key, { command, cwd, exit: typeof part.state.metadata.exit === "number" ? String(part.state.metadata.exit) : "unknown" })
-+        }
-+      }
-       if (part.type === "tool" && part.state.status === "completed" && (part.tool === "grep" || part.tool === "glob")) {
-         const pattern = part.state.input.pattern
-         if (typeof pattern === "string" && pattern) {
-           const location = typeof part.state.input.path === "string" ? part.state.input.path : "."
-@@ -49,11 +71,4 @@
--      const ranges = [...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }]
--        .sort((a, b) => a.start - b.start || a.end - b.end)
--        .reduce<{ start: number; end: number }[]>((result, range) => {
--          const last = result.at(-1)
--          if (!last || range.start > last.end + 1) result.push({ ...range })
--          else last.end = Math.max(last.end, range.end)
--          return result
--        }, [])
-+      const ranges = mergeRanges([...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }])
-       // 删除再插入让Map顺序代表最近读取，避免文件修改时间影响证据优先级。
-       files.delete(key)
-       files.set(key, { ...read, canonicalPath: absolute, ranges })
-@@ -62,3 +76,3 @@
++  for (const receipt of context.commands ?? []) {
++    if (!receipt.command.trim()) continue
++    const cwd = path.resolve(context.directory ?? worktree, receipt.cwd ?? receipt.workdir ?? ".")
++    let normalized = receipt.command.trim()
++    // 环境赋值只影响去重键；原文仍展示并独立脱敏，不筛选管道或命令链。
++    while (true) {
++      const match = normalized.match(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+/)
++      if (!match) break
++      normalized = normalized.slice(match[0].length).trimStart()
++    }
++    const key = `${process.platform === "win32" ? cwd.toLowerCase() : cwd}\0${normalized}`
++    commands.delete(key)
++    commands.set(key, { command: receipt.command, cwd, exit: receipt.exit === undefined ? "unknown" : String(receipt.exit) })
++  }
 -  if (files.size === 0 && searches.size === 0) return undefined
 +  if (files.size === 0 && searches.size === 0 && commands.size === 0) return undefined
    // 先裁剪再stat，单次压缩最多访问20个磁盘路径；不回读文件内容。
    const visible = [...files.values()].toReversed().slice(0, 20)
-@@ -90,3 +104,9 @@
+@@ -90,3 +107,9 @@
      ...(files.size > visible.length ? [`Omitted: ${files.size - visible.length} inspected files due to evidence budget.`] : []),
 +    ...(commands.size ? ["", "### Executed Commands", "| command | cwd | exit |", "|---|---|---:|", ...[...commands.values()].toReversed().slice(0, 10).map(item => {
 +      const relative = path.relative(worktree, item.cwd)
@@ -400,11 +399,11 @@ diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/
 +      return `| ${commandDisplay(item.command)} | ${cell(cwd.replaceAll("\\", "/"))} | ${item.exit} |`
 +    })] : []),
 +    ...(commands.size > 10 ? [`Omitted: ${commands.size - 10} executed commands due to evidence budget.`] : []),
-     ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern)} | ${cell(search.path)} | ${search.matches} |`)] : []),
+     ...(searches.size ? ["", "### Search History", "| tool | pattern | path | matches |", "|---|---|---|---:|", ...[...searches.values()].toReversed().slice(0, 10).map(search => `| ${search.tool} | ${cell(search.pattern.slice(0, 60))} | ${cell(search.path)} | ${search.matches}${search.partial ? "+" : ""} |`)] : []),
      ...(searches.size > 10 ? [`Omitted: ${searches.size - 10} searches due to evidence budget.`] : []),
-@@ -104,2 +124,15 @@
+@@ -104,2 +127,15 @@
 +function commandDisplay(input: string) {
-+  // 沿用 source 凭据模式；截断前脱敏，短标记只用于区分被缩短的公开命令。
++  // 沿用source凭据模式；截断前脱敏，短标记只区分被缩短的公开命令。
 +  const redacted = input
 +    .replace(/(authorization:\s*bearer\s+)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
 +    .replace(/((?:api[_-]?key|token|password|secret)=)("[^"]*"|'[^']*'|\S+)/gi, "$1[redacted]")
@@ -418,6 +417,105 @@ diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/
 +
  function formatModified(ms: number) {
    // 与Read输出使用同一种本地时间，不把UTC字符串与历史凭证混比。
+@@ -111,16 +147,18 @@
+-export function parentSummary(receipts: readonly unknown[]) {
+-  const parse = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.String, canonicalPath: Schema.optional(Schema.String), start: Schema.Number, end: Schema.Number, stub: Schema.optional(Schema.Boolean) }))
+-  const files = new Map<string, { path: string; ranges: string[] }>()
++export function parentSummary(receipts: readonly unknown[], worktree: string) {
++  const parse = Schema.decodeUnknownOption(Schema.Struct({ path: Schema.String, canonicalPath: Schema.optional(Schema.String), start: Schema.Number, end: Schema.Number, stub: Schema.optional(Schema.Unknown) }))
++  const files = new Map<string, { path: string; ranges: { start: number; end: number }[] }>()
+   for (const value of receipts) {
+     const parsed = parse(value)
+-    if (Option.isNone(parsed) || parsed.value.stub) continue
++    // 仅完全抑制的true不构成阅读凭证；旧字符串stub仍记录已读事实。
++    if (Option.isNone(parsed) || parsed.value.stub === true) continue
+     const read = parsed.value
+     const key = read.canonicalPath || read.path
+-    const ranges = [...(files.get(key)?.ranges ?? []), `${read.start}-${read.end}`]
++    const ranges = mergeRanges([...(files.get(key)?.ranges ?? []), { start: read.start, end: read.end }])
++    const display = files.get(key)?.path ?? read.path
+     // 此表仅传父级已见位置，不读盘或把历史时间伪装成当前新鲜度证明。
+     files.delete(key)
+-    files.set(key, { path: read.path, ranges })
++    files.set(key, { path: display, ranges })
+   }
+   if (!files.size) return undefined
+   return [
+     "### Parent Session Inspected Files", "| path | ranges |", "|---|---|",
+@@ -127,3 +165,11 @@
+-    ...[...files.values()].toReversed().slice(0, 20).map(file => `| ${cell(file.path.split(/[\\/]/).slice(-3).join("/"))} | ${file.ranges.join(", ")} |`),
++    ...[...files.values()].toReversed().slice(0, 20).map(file => {
++      // 以真实工作树计算路径，不截尾三段；外部或跨盘路径仍完整保留。
++      const absolute = path.resolve(worktree, file.path)
++      const relative = path.relative(worktree, absolute)
++      const name = !relative.startsWith("..") && !path.isAbsolute(relative) ? relative || "." : absolute
++      const shown = file.ranges.slice(0, 8).map(range => `${range.start}-${range.end}`).join(", ")
++      const omitted = Math.max(0, file.ranges.length - 8)
++      return `| ${cell(name.replaceAll("\\", "/"))} | ${shown}${omitted ? `, ...(+${omitted})` : ""} |`
++    }),
+     ...(files.size > 20 ? [`Omitted: ${files.size - 20} files due to budget.`] : []),
+   ].join("\n")
+diff --git a/packages/opencode/src/session/file-evidence.ts b/packages/opencode/src/session/file-evidence.ts
+--- a/packages/opencode/src/session/file-evidence.ts
++++ b/packages/opencode/src/session/file-evidence.ts
+@@ -9,1 +9,1 @@
+-export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1) =>
++export const render = (messages: SessionV1.WithParts[], fs: FSUtil.Interface, worktree: string, compactionCount = 1, directory = worktree) =>
+@@ -19,1 +19,10 @@
+-  })) })
++  })), directory, commands: messages.flatMap(message => message.parts.flatMap(part => {
++    if (part.type !== "tool" || part.tool !== "bash" || part.state.status !== "completed") return []
++    const input = part.state.input
++    if (typeof input.command !== "string" || !input.command.trim()) return []
++    return [{ command: input.command,
++      ...(typeof input.cwd === "string" ? { cwd: input.cwd } : {}),
++      ...(typeof input.workdir === "string" ? { workdir: input.workdir } : {}),
++      ...(typeof part.state.metadata.exit === "number" ? { exit: part.state.metadata.exit } : {}),
++    }]
++  })) })
+diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
+--- a/packages/core/src/session/history.ts
++++ b/packages/core/src/session/history.ts
+@@ -133,5 +133,14 @@
+   const searches: FileEvidence.SearchReceipt[] = []
++  const commands: FileEvidence.CommandReceipt[] = []
+   for (const message of messages) {
+     if (message.type !== "assistant") continue
+     for (const part of message.content) {
+-      if (part.type !== "tool" || part.provider?.executed === true || part.state.status !== "completed" || (part.name !== "grep" && part.name !== "glob")) continue
++      if (part.type !== "tool" || part.provider?.executed === true || part.state.status !== "completed") continue
++      // 只采本边界内真正settle的本地Bash，展示命令文本不再次执行。
++      if (part.name === "bash" && typeof part.state.input.command === "string") {
++        commands.push({ command: part.state.input.command,
++          ...(typeof part.state.input.workdir === "string" ? { workdir: part.state.input.workdir } : {}),
++          ...(typeof part.state.structured.exit === "number" ? { exit: part.state.structured.exit } : {}),
++        })
++      }
++      if (part.name !== "grep" && part.name !== "glob") continue
+@@ -149,1 +158,1 @@
+-  return { receipts, searches, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
++  return { receipts, searches, commands, compactionCount: messages.filter(message => message.type === "compaction").length + 1 }
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -104,1 +104,2 @@
+   readonly worktree: string
++  readonly directory?: string
+@@ -332,1 +333,1 @@
+-    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, evidence)
++    const fileEvidence = yield* FileEvidence.render(evidence.receipts, dependencies.fs, dependencies.worktree, { ...evidence, directory: dependencies.directory })
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -133,1 +133,1 @@
+-    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.directory })
++    const compaction = SessionCompaction.make({ events, llm, db, config: configuration, fs: fileSystem, worktree: location.project.directory, directory: location.directory })
+diff --git a/packages/core/src/tool/task.ts b/packages/core/src/tool/task.ts
+--- a/packages/core/src/tool/task.ts
++++ b/packages/core/src/tool/task.ts
+@@ -117,1 +117,1 @@
+-            ? [part.state.structured.read] : []) : [])) : undefined
++            ? [part.state.structured.read] : []) : []), location.project.directory) : undefined
 diff --git a/packages/opencode/src/session/compaction.ts b/packages/opencode/src/session/compaction.ts
 --- a/packages/opencode/src/session/compaction.ts
 +++ b/packages/opencode/src/session/compaction.ts
@@ -439,81 +537,68 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/task.ts
 --- a/packages/opencode/src/tool/task.ts
 +++ b/packages/opencode/src/tool/task.ts
-@@ -15,13 +15,18 @@ import { EffectBridge } from "@/effect/bridge"
+@@ -15,3 +15,5 @@
  import { RuntimeFlags } from "@/effect/runtime-flags"
  import { Permission } from "@/permission"
  import { Database } from "@opencode-ai/core/database/database"
-+import path from "path"
 +import { InstanceState } from "@/effect/instance-state"
-+import { mergeRanges } from "@/util/range"
- 
- // [local-smark] 从父 session 的 messages 提取已读文件列表，
- // 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
- // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
++import { FileEvidence } from "@opencode-ai/core/session/file-evidence"
+@@ -19,47 +21,7 @@
+-// [local-smark] 从父 session 的 messages 提取已读文件列表，
+-// 生成紧凑的 markdown 表格作为子 agent 的 parent_context。
+-// 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
 -// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致）。
 -function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): string | undefined {
 -  const files = new Map<string, { path: string; ranges: string[]; lastRead: number }>()
-+// 上限 20 个文件（与 Evidence Handoff EVIDENCE_FILE_LIMIT 一致），
-+// 每个文件最多 8 个 range，range 经过 mergeRanges 合并重叠/相邻区间后输出。
-+/** @internal — 导出仅供测试直接调用 */
-+export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
-+  const files = new Map<string, { path: string; ranges: Array<{ start: number; end: number }>; lastRead: number }>()
-   let seq = 0
-   for (const msg of messages) {
-     if (msg.info.role !== "assistant") continue
-@@ -29,6 +34,7 @@ function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): stri
-       if (part.type !== "tool" || part.tool !== "read") continue
-       if (part.state.status !== "completed") continue
-       if (part.state.time.compacted) continue
-+      // 压缩后的旧 read part 不再代表有效证据，跳过
-       seq++
-       const meta = part.state.metadata?.read
-       if (!meta || typeof meta !== "object") continue
-@@ -36,28 +42,38 @@ function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]): stri
-       const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
-       const filePath = typeof m.path === "string" ? m.path : ""
-       if (!filePath) continue
-+      // stub: true 表示 read 被完全抑制（如 high overlap suppress），跳过；
-+      // stub: "high_overlap_visible" 保留——它记录了文件已被读过的事实
-       if (m.stub === true) continue
-       const start = typeof m.start === "number" ? m.start : 0
-       const end = typeof m.end === "number" ? m.end : 0
-       const existing = files.get(canonicalPath || filePath)
-       if (existing) {
+-  let seq = 0
+-  for (const msg of messages) {
+-    if (msg.info.role !== "assistant") continue
+-    for (const part of msg.parts) {
+-      if (part.type !== "tool" || part.tool !== "read") continue
+-      if (part.state.status !== "completed") continue
+-      if (part.state.time.compacted) continue
+-      seq++
+-      const meta = part.state.metadata?.read
+-      if (!meta || typeof meta !== "object") continue
+-      const m = meta as Record<string, unknown>
+-      const canonicalPath = typeof m.canonicalPath === "string" ? m.canonicalPath : ""
+-      const filePath = typeof m.path === "string" ? m.path : ""
+-      if (!filePath) continue
+-      if (m.stub === true) continue
+-      const start = typeof m.start === "number" ? m.start : 0
+-      const end = typeof m.end === "number" ? m.end : 0
+-      const existing = files.get(canonicalPath || filePath)
+-      if (existing) {
 -        existing.ranges.push(`${start}-${end}`)
-+        existing.ranges.push({ start, end })
-         existing.lastRead = seq
-       } else {
+-        existing.lastRead = seq
+-      } else {
 -        files.set(canonicalPath || filePath, { path: filePath, ranges: [`${start}-${end}`], lastRead: seq })
-+        files.set(canonicalPath || filePath, { path: filePath, ranges: [{ start, end }], lastRead: seq })
-       }
-     }
-   }
-   if (files.size === 0) return undefined
-   const sorted = [...files.values()].sort((a, b) => b.lastRead - a.lastRead).slice(0, 20)
-+  const RANGE_LIMIT = 8
-   const lines = [
-     "### Parent Session Inspected Files",
-     "| path | ranges |",
-     "|---|---|",
-     ...sorted.map((f) => {
+-      }
+-    }
+-  }
+-  if (files.size === 0) return undefined
+-  const sorted = [...files.values()].sort((a, b) => b.lastRead - a.lastRead).slice(0, 20)
+-  const lines = [
+-    "### Parent Session Inspected Files",
+-    "| path | ranges |",
+-    "|---|---|",
+-    ...sorted.map((f) => {
 -      // [local-smark] 显示相对路径而非 basename，避免多包仓库中同名文件歧义
 -      const rel = f.path.split(/[\\/]/).slice(-3).join("/")
 -      return `| ${rel} | ${f.ranges.join(", ")} |`
-+      // 合并重叠/相邻区间，避免向子 agent 传递混乱的未聚合 range 列表
-+      const merged = mergeRanges(f.ranges)
-+      const shown = merged.slice(0, RANGE_LIMIT).map((r) => `${r.start}-${r.end}`)
-+      const omittedRanges = Math.max(0, merged.length - RANGE_LIMIT)
-+      // path 显示：worktree 内用相对路径（跨盘符或 worktree 外保持绝对路径）；
-+      // 转义 | 和换行，避免路径中的特殊字符破坏 markdown 表格结构
-+      const relative = path.relative(worktree, f.path).replaceAll("\\", "/")
-+      const display = (relative === "" ? "." : !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : f.path.replaceAll("\\", "/"))
-+        .replaceAll("|", "\\|").replace(/\r?\n/g, " ")
-+      return `| ${display} | ${shown.join(", ")}${omittedRanges ? `, ...(+${omittedRanges})` : ""} |`
-     }),
-   ]
-   if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
-@@ -273,9 +289,11 @@ export const TaskTool = Tool.define(
+-    }),
+-  ]
+-  if (files.size > 20) lines.push(`Omitted: ${files.size - 20} files due to budget.`)
+-  return lines.join("\n")
+-}
++// 只适配V1历史形状，聚合、预算与转义均由两代共用的Core owner承担。
++export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[], worktree: string): string | undefined {
++  return FileEvidence.parentSummary(messages.flatMap(message => message.info.role === "assistant"
++    ? message.parts.flatMap(part => part.type === "tool" && part.tool === "read" && part.state.status === "completed" && !part.state.time.compacted
++      ? [part.state.metadata.read] : [])
++    : []), worktree)
++}
+@@ -273,9 +235,11 @@ export const TaskTool = Tool.define(
          // 新 subagent 默认 "summary"，resume 默认 "none"（子 session 已有自己的 read 历史）。
          // 从 ctx.messages 提取 read tool parts 的文件路径和 range，
          // 不做 fs.stat（避免 I/O），stale 由子 agent 的 read size+modifiedMs 门控处理。
@@ -526,24 +611,29 @@ diff --git a/packages/opencode/src/tool/task.ts b/packages/opencode/src/tool/tas
            : undefined
  
          const result = yield* ops.prompt({
-diff --git a/packages/opencode/src/util/range.ts b/packages/opencode/src/util/range.ts
+diff --git a/packages/core/src/util/range.ts b/packages/core/src/util/range.ts
 new file mode 100644
 --- /dev/null
-+++ b/packages/opencode/src/util/range.ts
-@@ -0,0 +1,13 @@
-+// [local-smark] 区间合并工具：将重叠或相邻（start <= last.end + 1）的区间合并为一个。
-+// 标准 interval-merge 算法：先按 start 排序，再线性扫描合并。
-+// 不变量：输出区间按 start 升序排列，且任意两个区间不相邻（gap >= 2）。
-+export function mergeRanges(ranges: Array<{ start: number; end: number }>) {
++++ b/packages/core/src/util/range.ts
+@@ -0,0 +1,11 @@
++// 排序后合并重叠或相邻区间，压缩交接与两代父上下文共用同一规则。
++export function mergeRanges(ranges: readonly { start: number; end: number }[]) {
 +  const sorted = ranges.toSorted((a, b) => a.start - b.start || a.end - b.end)
 +  return sorted.reduce<Array<{ start: number; end: number }>>((result, range) => {
 +    const last = result.at(-1)
-+    // 不相邻（gap > 1）时新建区间；相邻或重叠时扩展上一个区间的 end
++    // 复制新区间，避免合并修改调用者保存的历史凭证。
 +    if (!last || range.start > last.end + 1) return [...result, { ...range }]
 +    last.end = Math.max(last.end, range.end)
 +    return result
 +  }, [])
 +}
+diff --git a/packages/opencode/src/util/range.ts b/packages/opencode/src/util/range.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/opencode/src/util/range.ts
+@@ -0,0 +1,2 @@
++// 保留后续V1调用入口，算法只在Core维护。
++export { mergeRanges } from "@opencode-ai/core/util/range"
 diff --git a/packages/opencode/test/tool/task.inspected-files.test.ts b/packages/opencode/test/tool/task.inspected-files.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..ce603aafc7d7164841795b0db76e5e7a44d96e92
@@ -787,3 +877,50 @@ index 0000000000000000000000000000000000000000..ce603aafc7d7164841795b0db76e5e7a
 +    expect(result).toBeUndefined()
 +  })
 +})
+diff --git a/packages/core/test/session-compaction.test.ts b/packages/core/test/session-compaction.test.ts
+--- a/packages/core/test/session-compaction.test.ts
++++ b/packages/core/test/session-compaction.test.ts
+@@ -126,2 +126,18 @@
+     expect(inspected).toHaveLength(untouched)
++    // 命令只作为已完成凭证进入共享渲染器，不能执行其管道或环境赋值。
++    const commands = Array.from({ length: 12 }, (_, index) => ({ command: `node --check file-${index}.js`, exit: 0 }))
++    const commandHandoff = yield* FileEvidence.render([], observed, tmp.path, {
++      commands: [...commands,
++        { command: "ENV=changed node --check file-4.js", exit: 1 },
++        { command: "TOKEN=sk-secret node --check piped.js | tee output.txt" },
++      ], directory: path.join(tmp.path, "src"), compactionCount: 2,
++    })
++    expect(commandHandoff).toContain("### Executed Commands")
++    expect(commandHandoff).toContain("| ENV=changed node --check file-4.js | src | 1 |")
++    expect(commandHandoff).toContain("| TOKEN=[redacted] node --check piped.js \\| tee output.txt | src | unknown |")
++    expect(commandHandoff).not.toContain("sk-secret")
++    expect(commandHandoff).not.toContain("| node --check file-0.js |")
++    expect(commandHandoff).toContain("Omitted: 3 executed commands due to evidence budget.")
++    expect(commandHandoff).toContain("This is compaction #2.")
++    expect(inspected).toHaveLength(untouched)
+   }).pipe(Effect.provide(LayerNode.compile(FSUtil.node))))
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -1084,2 +1084,17 @@
++    // 同一父step内的重叠读取经真实投影进入Native Task，不能只测孤立helper。
++    yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "read-parent-second", name: "read" })
++    yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "read-parent-second", tool: "read", input: { path: "/project/src/module.ts" }, provider: { executed: false } })
++    yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "read-parent-second", structured: { read: { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 7, end: 12 } }, content: [], provider: { executed: false } })
++    yield* parentEvents.publish(SessionEvent.Tool.Input.Started, { ...parentRead, callID: "bash-parent", name: "bash" })
++    yield* parentEvents.publish(SessionEvent.Tool.Called, { ...parentRead, callID: "bash-parent", tool: "bash", input: { command: "node --check module.ts | tee check.log", workdir: "src" }, provider: { executed: false } })
++    yield* parentEvents.publish(SessionEvent.Tool.Success, { ...parentRead, callID: "bash-parent", structured: { exit: 7 }, content: [], provider: { executed: false } })
+     yield* parentEvents.publish(SessionEvent.Step.Ended, { ...parentRead, finish: "stop", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })
+-    expect((yield* sessions.context(sessionID)).find(message => message.id === parentRead.assistantMessageID)).toMatchObject({ content: [{ type: "tool", name: "read", state: { status: "completed", structured: { read: { start: 4, end: 8 } } } }] })
++    const parentHistory = (yield* sessions.context(sessionID)).find(message => message.id === parentRead.assistantMessageID)
++    expect(parentHistory?.type === "assistant" ? parentHistory.content.flatMap(part =>
++      part.type === "tool" && part.name === "read" && part.state.status === "completed" ? [part.state.structured.read] : []) : []).toEqual([
++      { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 4, end: 8 },
++      { path: "/project/src/module.ts", canonicalPath: "/project/src/module.ts", start: 7, end: 12 },
++    ])
++    expect((yield* SessionHistory.evidence(db, sessionID, Number.MAX_SAFE_INTEGER)).commands).toEqual([
++      { command: "node --check module.ts | tee check.log", workdir: "src", exit: 7 },
++    ])
+@@ -1137,1 +1152,1 @@
+-    expect(userTexts(actual!).join("\n")).toContain("| project/src/module.ts | 4-8 |")
++    expect(userTexts(actual!).join("\n")).toContain("| src/module.ts | 4-12 |")

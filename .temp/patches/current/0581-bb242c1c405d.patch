@@ -8,7 +8,7 @@ Content-Transfer-Encoding: 8bit
 
 write/edit-create/apply_patch Add-overwrite 对 existing 文件继承磁盘行尾（missing 逐字保留）；formatter 只拥有文本变化，commit lock 内恢复 proposal EOL 并回读最终真值；applyEdits 返回 normalizedMismatchIndices，edit 产出 public metadata inputProvenance.rewrites（UTF-8 byteLength + SHA-256 指纹，取模型提交的 LF oldString）+ 预算内 warning 尾段；_syncInput 保持 LF logical form 不再回写物理行尾；trimDiff 恒等保留公共缩进；output 预算重构为 warning 尾段预算（bytes/lines 同串计算、fingerprint 完整行或省略标记、LSP 段按剩余预算）。
 
-适配说明：目标 edit.ts create 分支保留上游拒绝门（existing 文件禁止空 oldString 覆写，0514 裁定）——source 的 create-overwrite 行尾继承两个切片与对应两测试裁记（分支不可达），保留 missing-file LF 防回退用例与 syncInput LF 化；其余全部 hunk 按目标真实锚点落地（#518/#514/#521/#533 注释夹层同步、edit else 分支 +2 缩进、AppFileSystem→FSUtil、测试 layer 改 LayerNode.compile/group 形态、write formatter 块按目标花括号形态重写为 restore+early-return+exists 兜底）。
+适配说明：保留上游禁止空needle覆盖现存文件的约束及全部有效测试，重锚共享Core matcher；两代复用同一provenance和完整指纹warning预算函数，历史保持LF。Native EOL在原FileMutation锁/formatter/BOM最终回读中收口，Move继承source而非destination，缺失文件不猜默认；保留真实旧正文diff及失败/取消的字节收尾，不改通用限幅或恢复LSP。
 
 
 diff --git a/docs/plans/tool-edit-write-line-ending-and-provenance-repair.md b/docs/plans/tool-edit-write-line-ending-and-provenance-repair.md
@@ -643,9 +643,15 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
                editedFiles.push(edited)
              }
 
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
---- a/packages/opencode/src/tool/edit-apply.ts
-+++ b/packages/opencode/src/tool/edit-apply.ts
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
+--- a/packages/core/src/tool/edit-apply.ts
++++ b/packages/core/src/tool/edit-apply.ts
+@@ -1,4 +1,5 @@
+ export * as EditApply from "./edit-apply"
++import { createHash } from "crypto"
+ import { normalizeForMatch } from "../util/normalize-for-match"
+ export { normalizeForMatch } from "../util/normalize-for-match"
+ 
 @@ -26,6 +26,8 @@ export type ApplyEditsResult = {
    usedNormalized: boolean
    /** 历史真值：每条 oldString 为 pre-edit baseLF 上的连续 needle，不是 preserve 整行块。 */
@@ -713,7 +719,7 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
        newString: edit.newString,
        ...(edit.replaceAll === true ? { replaceAll: true } : {}),
      })
-@@ -519,7 +531,7 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -519,7 +531,59 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
      )
    }
  
@@ -721,21 +727,67 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
 +  return { contentNew, usedNormalized, syncEdits, normalizedMismatchIndices }
  }
  
++// 只记录matcher确认的真实覆写；哈希对象是模型提交的LF needle，两代不能各自猜测命中内容。
++export function provenance(edits: EditReplacement[], indices: readonly number[]) {
++  return indices.flatMap(editIndex => {
++    const original = edits[editIndex]
++    if (!original) return []
++    return [{ editIndex, original: {
++      byteLength: Buffer.byteLength(original.oldString, "utf-8"),
++      sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
++    } }]
++  })
++}
++
++export function warningTail(input: {
++  rewrites: ReadonlyArray<ReturnType<typeof provenance>[number]>
++  unchanged: number
++  total: number
++  maxBytes: number
++  maxLines: number
++  channel: "metadata" | "structured"
++}) {
++  const lines: string[] = []
++  // 两维预算检查同一完整串，任何SHA行都不能被切半；字段通道由真正持久化owner明确提供。
++  const fits = (value: string[]) => {
++    const text = `\n\n${value.join("\n")}`
++    return Buffer.byteLength(text, "utf-8") <= input.maxBytes && text.split("\n").length - 1 <= input.maxLines
++  }
++  const noOp = `Warning: ${input.unchanged} of ${input.total} edit(s) were no-ops (oldString equals newString) and did not change the file.`
++  if (input.unchanged > 0 && fits([noOp])) lines.push(noOp)
++  const header = "Warning: normalized oldString truth rewrites were recorded:"
++  if (input.rewrites.length > 0 && fits([...lines, header])) {
++    lines.push(header)
++    const shown: string[] = []
++    const marker = (count: number) => `- ... ${count} more rewrite fingerprint(s) stored in ${input.channel}.inputProvenance`
++    for (const rewrite of input.rewrites) {
++      const line = `- edits[${rewrite.editIndex}]: original=${rewrite.original.byteLength} UTF-8 bytes sha256=${rewrite.original.sha256}`
++      const remaining = input.rewrites.length - shown.length - 1
++      // 先为真实余量保留省略行，否则最后一条指纹可能挤掉全部省略事实。
++      if (!fits([...lines, ...shown, line, ...(remaining ? [marker(remaining)] : [])])) break
++      shown.push(line)
++    }
++    let omitted = input.rewrites.length - shown.length
++    while (shown.length > 0 && omitted > 0 && !fits([...lines, ...shown, marker(omitted)])) {
++      // 回收一整行必须同时增加省略计数；完整取证数组不受展示预算影响。
++      shown.pop()
++      omitted++
++    }
++    lines.push(...shown)
++    if (omitted > 0 && fits([...lines, marker(omitted)])) lines.push(marker(omitted))
++  }
++  return lines.length ? `\n\n${lines.join("\n")}` : ""
++}
++
  /**
 
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
-@@ -1,4 +1,5 @@
- import * as path from "path"
-+import { createHash } from "crypto"
- // #518：私有 Semaphore 锁移除——edit/write/apply_patch 共享 file-mutation-coordinator
- import { Effect, Schema } from "effect"
- import * as Tool from "./tool"
 @@ -183,6 +184,11 @@ export const EditTool = Tool.define(
            let contentNew = ""
            // #514 INV-16：成功后的历史真值（整参数面 { filePath, edits }），由 processor 整表替换 state.input
-           let syncInput: { filePath: string; edits: EditReplacement[] } | undefined
+           let syncInput: { filePath: string; edits: EditApply.EditReplacement[] } | undefined
 +          const provenanceRewrites: Array<{
 +            editIndex: number
 +            original: { byteLength: number; sha256: string }
@@ -796,28 +848,12 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
                  }),
                }).pipe(Effect.orDie)
                // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
-@@ -323,15 +347,34 @@ export const EditTool = Tool.define(
+@@ -323,15 +347,18 @@ export const EditTool = Tool.define(
                  file: filePath,
                  event: "change",
                })
-+
-+              provenanceRewrites.push(
-+                ...applied.normalizedMismatchIndices.flatMap((editIndex) => {
-+                  const original = editsLF[editIndex]
-+                  if (!original) return []
-+                  // 只披露模型提交 LF oldString 的 UTF-8 fingerprint，不把磁盘实际切片复制进上下文。
-+                  // editIndex 保留原始参数顺序，避免多 edit 场景把 fingerprint 错归给相邻条目。
-+                  return [
-+                    {
-+                      editIndex,
-+                      original: {
-+                        byteLength: Buffer.byteLength(original.oldString, "utf-8"),
-+                        sha256: createHash("sha256").update(original.oldString, "utf-8").digest("hex"),
-+                      },
-+                    },
-+                  ]
-+                }),
-+              )
++              // 两代共享matcher给出的覆写索引及原LF输入指纹，不能用actual oldString替代提交证据。
++              provenanceRewrites.push(...EditApply.provenance(editsLF, applied.normalizedMismatchIndices))
 +
                // #514 INV-16：成功后始终发完整参数面 { filePath, edits }，
                // processor 用其整表替换 state.input，清掉 stream 遗留的顶层 oldString。
@@ -835,61 +871,12 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
                    ...(edit.replaceAll === true ? { replaceAll: true as const } : {}),
                  })),
                }
-@@ -417,6 +460,60 @@ export const EditTool = Tool.define(
+@@ -417,6 +460,11 @@ export const EditTool = Tool.define(
              }
            }
  
-+          const warningBudgetBytes = Math.min(reserveBytes, Math.max(0, limitBytes - consumedBytes))
-+          const warningBudgetLines = Math.min(reserveLines, Math.max(0, limitLines - consumedLines))
-+          const warningLines: string[] = []
-+          // bytes 与 lines 必须由同一候选串计算；分别裁剪会让 UTF-8 长行或空行绕过另一维上限。
-+          const fitsWarning = (lines: string[]) => {
-+            if (lines.length === 0) return true
-+            const candidate = `\n\n${lines.join("\n")}`
-+            return (
-+              Buffer.byteLength(candidate, "utf-8") <= warningBudgetBytes &&
-+              candidate.split("\n").length - 1 <= warningBudgetLines
-+            )
-+          }
-+          const noOpWarning =
-+            unchangedEntries > 0
-+              ? `Warning: ${unchangedEntries} of ${edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`
-+              : ""
-+          if (noOpWarning && fitsWarning([noOpWarning])) warningLines.push(noOpWarning)
-+          if (provenanceRewrites.length > 0) {
-+            const header = "Warning: normalized oldString truth rewrites were recorded:"
-+            const showsProvenance = fitsWarning([...warningLines, header])
-+            if (showsProvenance) warningLines.push(header)
-+            const fingerprintLines: string[] = []
-+            let omittedRewrites = 0
-+            // header 放不下时不孤立展示 fingerprint；完整记录仍在 metadata，不会丢失取证事实。
-+            for (const [index, rewrite] of showsProvenance ? provenanceRewrites.entries() : []) {
-+              const line = `- edits[${rewrite.editIndex}]: original=${rewrite.original.byteLength} UTF-8 bytes sha256=${rewrite.original.sha256}`
-+              const remaining = provenanceRewrites.length - index - 1
-+              const marker = remaining
-+                ? `- ... ${remaining} more rewrite fingerprint(s) stored in metadata.inputProvenance`
-+                : ""
-+              if (fitsWarning([...warningLines, ...fingerprintLines, line, ...(marker ? [marker] : [])])) {
-+                fingerprintLines.push(line)
-+                continue
-+              }
-+              // 从当前条目起全部省略，marker 必须在回收已选行后重新计算真实数量。
-+              omittedRewrites = provenanceRewrites.length - index
-+              break
-+            }
-+            if (omittedRewrites > 0) {
-+              let marker = `- ... ${omittedRewrites} more rewrite fingerprint(s) stored in metadata.inputProvenance`
-+              while (fingerprintLines.length > 0 && !fitsWarning([...warningLines, ...fingerprintLines, marker])) {
-+                // 每弹出一条完整 fingerprint，就把它并入 marker 的省略计数，避免模型低估隐藏记录。
-+                fingerprintLines.pop()
-+                omittedRewrites++
-+                marker = `- ... ${omittedRewrites} more rewrite fingerprint(s) stored in metadata.inputProvenance`
-+              }
-+              if (fitsWarning([...warningLines, ...fingerprintLines, marker])) fingerprintLines.push(marker)
-+            }
-+            warningLines.push(...fingerprintLines)
-+          }
-+          const warningTail = warningLines.length > 0 ? `\n\n${warningLines.join("\n")}` : ""
++          // 两代复用完整行预算与精确省略数；仅展示预算内摘要，metadata仍保存全部原始取证。
++          const warningTail = EditApply.warningTail({ rewrites: provenanceRewrites, unchanged: unchangedEntries, total: edits.length, maxBytes: Math.min(reserveBytes, Math.max(0, limitBytes - consumedBytes)), maxLines: Math.min(reserveLines, Math.max(0, limitLines - consumedLines)), channel: "metadata" })
 +          const warningBytes = Buffer.byteLength(warningTail, "utf-8")
 +          const warningLinesCount = warningTail ? warningTail.split("\n").length - 1 : 0
 +
@@ -1400,24 +1387,28 @@ diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/
  const init = Effect.fn("WriteToolTest.init")(function* () {
    const info = yield* WriteTool
    return yield* info.init()
-@@ -347,6 +377,8 @@ describe("tool.write", () => {
+@@ -350,8 +380,9 @@ describe("tool.write", () => {
          const diff = result.metadata?.diff ?? ""
          expect(diff).not.toContain("-Line 1")
          expect(diff).not.toContain("+Line 1")
-+        // 覆写参数表示逻辑行，已有文件的 CRLF 是磁盘属性；断言磁盘字节而非归一化 diff。
+         expect(diff).toContain("Index:")
+         expect(diff).not.toContain("-Line 2")
+         expect(diff).not.toContain("+Line 2")
+-        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical)
++        // 真实CRLF字节与既有Index/两行diff oracle同时保留，不能以展示归一化冒充写盘保真。
 +        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical.replaceAll("\n", "\r\n"))
        }),
-     )
- 
-@@ -361,6 +393,8 @@ describe("tool.write", () => {
+@@ -368,8 +399,9 @@ describe("tool.write", () => {
          const diff = result.metadata?.diff ?? ""
          expect(diff).not.toContain("-Line 1")
          expect(diff).not.toContain("+Line 1")
-+        // CR-only 也属于已有文件的物理属性，不能因模型统一提交 LF 而被静默清洗。
+         expect(diff).toContain("Index:")
+         expect(diff).not.toContain("-Line 2")
+         expect(diff).not.toContain("+Line 2")
+-        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical)
++        // CR-only同样继承前像；行尾修正不删除已验证的diff完整性断言。
 +        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe(logical.replaceAll("\n", "\r"))
        }),
-     )
-   })
 @@ -371,6 +405,21 @@ describe("tool.write", () => {
    // _formattedContent 由 processor 的 completeToolCall 消费，用于覆盖 state.input.content，
    // 使 DB 中持久化的 input 与磁盘实际内容一致。
@@ -1440,3 +1431,247 @@ diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/
      // 格式化改变了内容（末尾追加换行）→ metadata 应包含 _formattedContent
      itFormatted.instance("sets _formattedContent when format changes content", () =>
        Effect.gen(function* () {
+
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -6,7 +6,7 @@
+ import { dirname } from "path"
+ import { KeyedMutex } from "./effect/keyed-mutex"
+ import { FSUtil } from "./fs-util"
+-import { normalizeLineEndings } from "./util/line-ending"
++import { convertToLineEnding, detectLineEnding, normalizeLineEndings, type LineEnding } from "./util/line-ending"
+ 
+ export interface Target {
+   readonly canonical: string
+@@ -115,7 +115,7 @@ const layer = Layer.effect(
+       existed,
+     })
+ 
+-    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean) {
++    const finishText = Effect.fn("FileMutation.finishText")(function* (input: TextWriteInput, previous: string, bom: boolean, existed: boolean, ending?: LineEnding) {
+       // 外部格式化可中断；最终回读与 BOM 修复始终受目标锁和退出收尾保护。
+       const readFinal = Effect.gen(function* () {
+         const final = yield* fs.readFile(input.target.canonical)
+@@ -134,8 +134,12 @@ const layer = Layer.effect(
+         Effect.interruptible,
+         Effect.onExit((exit) => Exit.isFailure(exit) ? readFinal.pipe(Effect.asVoid) : Effect.void),
+       ) : false
+-      const text = yield* readFinal
++      const formattedText = yield* readFinal
++      // 仅成功文本收尾恢复已继承的EOL；失败/取消仍走原始字节BOM修复，不重编码半写内容。
++      const restoredText = ending ? convertToLineEnding(normalizeLineEndings(formattedText), ending) : formattedText
++      if (restoredText !== formattedText) yield* fs.writeFileString(input.target.canonical, joinBom(restoredText, bom))
++      const text = restoredText !== formattedText ? yield* readFinal : formattedText
+       const before = normalizeLineEndings(previous)
+       const after = normalizeLineEndings(text)
+       const submitted = normalizeLineEndings(splitBom(input.content).text)
+       return {
+@@ -172,11 +176,14 @@ const layer = Layer.effect(
+           const next = splitBom(input.content)
+           const current = yield* fs
+             .readFile(input.target.canonical)
+             .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
++          // Write和Add-overwrite共享前像属性；缺失文件不从邻近目录或提交内容猜默认行尾。
++          const ending = current === undefined ? undefined : detectLineEnding(new TextDecoder().decode(current))
++          const content = ending ? convertToLineEnding(normalizeLineEndings(next.text), ending) : next.text
+           yield* fs.writeWithDirs(
+             input.target.canonical,
+-            joinBom(next.text, Boolean(current && hasUtf8Bom(current)) || next.bom),
++            joinBom(content, Boolean(current && hasUtf8Bom(current)) || next.bom),
+           )
+           if (current === undefined && !input.format) return writeResult(input.target, false)
+-          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined)
++          return yield* finishText(input, current ? splitBom(new TextDecoder().decode(current)).text : "", Boolean(current && hasUtf8Bom(current)) || next.bom, current !== undefined, ending)
+         }),
+@@ -213,5 +220,5 @@ const layer = Layer.effect(
+             ? fs.writeFileString(input.target.canonical, input.content)
+             : fs.writeFile(input.target.canonical, input.content)
+           if (input.format && typeof input.content === "string")
+-            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true)
++            return yield* finishText({ ...input, content: input.content }, splitBom(new TextDecoder().decode(current)).text, splitBom(input.content).bom, true, detectLineEnding(new TextDecoder().decode(current)))
+           return writeResult(input.target, true)
+@@ -226,7 +233,8 @@ const layer = Layer.effect(
+           .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
+         // 目的地继承源BOM，格式化与最终回读沿用唯一文本收尾路径。
+         yield* fs.writeWithDirs(input.destination.canonical, input.content)
+-        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined)
++        // Move的EOL来自source，不能用为了真实diff读取的destination前像覆盖内容属性。
++        const result = yield* finishText({ ...input, target: input.destination }, previous ? splitBom(new TextDecoder().decode(previous)).text : "", splitBom(input.content).bom, previous !== undefined, detectLineEnding(new TextDecoder().decode(source)))
+         if (input.destination.canonical !== input.target.canonical) {
+           yield* fs.remove(input.target.canonical).pipe(Effect.mapError(error => new MoveIncompleteError({
+             path: input.target.canonical, destination: input.destination.canonical, reason: error.message,
+
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -19,6 +19,7 @@
+ import { SessionStore } from "../session/store"
+ import { PermissionV2 } from "../permission"
+ import { ToolRegistry } from "./registry"
++import { ToolOutputStore } from "../tool-output-store"
+ import { closestMatch } from "./edit-excerpt"
+ import { EditApply } from "./edit-apply"
+ import { Tool } from "./tool"
+@@ -62,6 +63,11 @@ export const Output = Schema.Struct({
+   replacements: Schema.Number,
+   syncInput: Schema.optional(Input),
+   // 模型回执与结构化结果共用同一跳写事实，不从 formatter 后的 diff 猜测无操作数量。
+   warning: Schema.optional(Schema.String),
++  // 与V1 public metadata同义；完整取证随Native structured持久化，不只放在有限模型预览。
++  inputProvenance: Schema.optional(Schema.Struct({ rewrites: Schema.Array(Schema.Struct({
++    editIndex: Schema.Number,
++    original: Schema.Struct({ byteLength: Schema.Number, sha256: Schema.String }),
++  })) })),
+ })
+ export type Output = typeof Output.Type
+@@ -103,5 +109,6 @@ const layer = Layer.effectDiscard(
+     const format = yield* Format.Service
+     const location = yield* Location.Service
+     const sessions = yield* SessionStore.Service
++    const outputStore = yield* ToolOutputStore.Service
+ 
+     yield* tools
+@@ -258,6 +265,11 @@ const layer = Layer.effectDiscard(
+                     format: format.file,
+                   }),
+                 )
++                const rewrites = EditApply.provenance(editsLF, applied.normalizedMismatchIndices)
++                const limits = yield* outputStore.limits()
++                // 限制尾段在通用head+tail的保留范围内，默认仍为2KiB/10行；不改变通用owner。
++                const warning = EditApply.warningTail({ rewrites, unchanged: unchangedEntries, total: input.edits.length, maxBytes: Math.min(2048, Math.floor(limits.maxBytes / 4)), maxLines: Math.min(10, Math.floor(limits.maxLines / 4)), channel: "structured" }).slice(2)
++                // slice只移除共享尾段固定的两个分隔换行；每条SHA仍完整，历史参数统一为LF。
+                 return {
+                   files: [
+                     {
+@@ -276,11 +288,9 @@ const layer = Layer.effectDiscard(
+                   replacements,
+-                  // 此处只能由整批有真实变化的成功路径抵达，warning 不会把全 no-op 伪装成成功。
+-                  ...(unchangedEntries > 0 ? {
+-                    warning: `Warning: ${unchangedEntries} of ${input.edits.length} edit(s) were no-ops (oldString equals newString) and did not change the file.`,
+-                  } : {}),
+-                  // 仅保存实际旧 needle；非创建编辑不猜测 formatter 后的局部新 needle。
++                  ...(rewrites.length > 0 ? { inputProvenance: { rewrites } } : {}),
++                  ...(warning ? { warning } : {}),
++                  // 真实旧needle与提交replacement保留逻辑LF，不把物理行尾或formatter整文件伪装成局部参数。
+                   syncInput: { path: input.path, edits: applied.syncEdits.map(edit => ({
+-                    oldString: convertToLineEnding(edit.oldString, ending),
+-                    newString: convertToLineEnding(edit.newString, ending),
++                    oldString: edit.oldString,
++                    newString: edit.newString,
+                     ...(edit.replaceAll === true ? { replaceAll: true } : {}),
+                   })) },
+@@ -298,5 +309,5 @@ export const node = makeLocationNode({
+ export const node = makeLocationNode({
+   name: "tool/edit",
+   layer,
+-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node, ToolOutputStore.node],
+ })
+
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -134,6 +134,7 @@ describe("EditTool", () => {
+         const batch = yield* run([{ oldString: "gamma", newString: "long-G" }, { oldString: "alpha", newString: "A" }])
+         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("A\nbeta\nlong-G\n")
+         expect(batch.output?.structured).toMatchObject({ replacements: 2 })
++        expect(batch.output?.structured).not.toHaveProperty("inputProvenance")
+         expect(writes).toHaveLength(1)
+         for (const example of [
+           { before: "foo", edits: [{ oldString: "foo", newString: "bar" }, { oldString: "bar", newString: "baz" }], reason: "Could not find" },
+@@ -150,6 +151,12 @@ describe("EditTool", () => {
+         const quoted = yield* run([{ oldString: '"hello"', newString: "$& $1" }])
+         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("pad  \nsay $& $1 end\n")
+         expect(quoted.output?.structured).toMatchObject({ syncInput: { path: "batch.txt", edits: [{ oldString: "\u201Chello\u201D", newString: "$& $1" }] } })
++        // 使用source独立常量验证原ASCII提交指纹，而非实际弯引号slice或production自行生成的期望。
++        const original = { byteLength: 7, sha256: "5aa762ae383fbb727af3c7a36d4940a5b8c40a989452d2304fc958ff3f354e7a" }
++        expect(quoted.output?.structured).toMatchObject({ inputProvenance: { rewrites: [{ editIndex: 0, original }] } })
++        const quotedText = quoted.result.type === "text" ? quoted.result.value : ""
++        expect(quotedText).toContain(`original=7 UTF-8 bytes sha256=${original.sha256}`)
++        expect(quotedText).toContain("normalized oldString truth rewrites")
+         // formatter 真正改写磁盘后，回执展示最终 diff，历史局部 newString 仍保留用户意图。
+         const formatted = yield* withTool(tmp.path,
+           registry => settleTool(registry, call({ path: "batch.txt", edits: [{ oldString: "end", newString: "done" }] })),
+@@ -166,6 +172,7 @@ describe("EditTool", () => {
+         const mixedEdits = [{ oldString: "x", newString: "y" }, { oldString: "foo - bar", newString: "foo - bar" }]
+         yield* Effect.promise(() => fs.writeFile(target, "x\nfoo \u2013 bar\n"))
+         const mixed = yield* run(mixedEdits)
++        expect(mixed.output?.structured).not.toHaveProperty("inputProvenance")
+         expect(mixed.result).toMatchObject({ type: "text", value: expect.stringContaining("Warning: 1 of 2 edit(s) were no-ops") })
+         expect(mixed.output?.structured).toMatchObject({ replacements: 1, syncInput: { edits: mixedEdits } })
+         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nfoo \u2013 bar\n")
+@@ -187,6 +194,24 @@ describe("EditTool", () => {
+         const repeated = yield* run([{ oldString: "x", newString: "y" }, { oldString: "same", newString: "same", replaceAll: true }])
+         expect(repeated.output?.structured).toMatchObject({ replacements: 1 })
+         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("y\nsame same")
++        yield* Effect.promise(() => fs.writeFile(target, "x-y and x\u2013y"))
++        const hybrid = yield* run([{ oldString: "x-y", newString: "z", replaceAll: true }])
++        // 异构replaceAll虽不能把所有actual塞入一个oldString，真实覆写事实仍须保留。
++        expect(hybrid.output?.structured).toMatchObject({ inputProvenance: { rewrites: [{ editIndex: 0, original: { byteLength: 3, sha256: "cc96fed8b030120e59a6a0372a92de2d6abebf40d83d57012d449419c6799b7f" } }] } })
++        yield* Effect.promise(() => fs.writeFile(target, "before\r\nline\r\n"))
++        const physical = yield* run([{ oldString: "before\r\nline", newString: "new\nline" }])
++        expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("new\r\nline\r\n")
++        expect(physical.output?.structured).toMatchObject({ syncInput: { edits: [{ oldString: "before\nline", newString: "new\nline" }] } })
++        const rewrites = Array.from({ length: 14 }, (_, index) => ({ oldString: `"v${index}"`, newString: `"n${index}"` }))
++        yield* Effect.promise(() => fs.writeFile(target, rewrites.map((_, index) => `say \u201Cv${index}\u201D`).join("\n") + "\nstable"))
++        const many = yield* run([...rewrites, { oldString: "stable", newString: "stable" }])
++        // 完整数组独立于有限模型尾段，SHA必须整行展示且省略数可见。
++        expect(many.output?.structured).toHaveProperty("inputProvenance.rewrites.length", 14)
++        const manyText = many.result.type === "text" ? many.result.value : ""
++        expect(manyText).toMatch(/- edits\[0\]: original=4 UTF-8 bytes sha256=[0-9a-f]{64}/)
++        expect(manyText).toMatch(/- \.\.\. \d+ more rewrite fingerprint\(s\) stored in structured\.inputProvenance/)
++        expect(manyText).toContain("Warning: 1 of 15 edit(s) were no-ops")
++        expect(Schema.decodeUnknownSync(EditTool.Output)(many.output?.structured).warning?.split("\n").length).toBeLessThanOrEqual(10)
+         // 超过通用默认预算仍必须在实际模型结果尾部看到 warning，原文保留沿用既有 owner。
+         const long = "z".repeat(20000)
+         yield* Effect.promise(() => fs.writeFile(target, `${long}\nkeep`))
+
+diff --git a/packages/core/test/file-mutation.test.ts b/packages/core/test/file-mutation.test.ts
+--- a/packages/core/test/file-mutation.test.ts
++++ b/packages/core/test/file-mutation.test.ts
+@@ -90,3 +90,44 @@ describe("FileMutation", () => {
+   )
+ 
++  it.live("preserves text endings through overwrite, conditional edit, and formatted move", () =>
++    withTmp(directory =>
++      Effect.gen(function* () {
++        const mutation = yield* LocationMutation.Service
++        const files = yield* FileMutation.Service
++        const format = (file: string) => Effect.promise(async () => {
++          const text = await fs.readFile(file, "utf8")
++          await fs.writeFile(file, text.replace("new", "formatted").replace(/\r\n?/g, "\n"))
++          return true
++        })
++        for (const ending of ["\r\n", "\r"]) {
++          const target = yield* mutation.resolve({ path: `eol-${ending.length}.txt` })
++          const before = `\uFEFFold${ending}line${ending}`
++          yield* Effect.promise(() => fs.writeFile(target.canonical, before))
++          // 无formatter的覆写也继承既有EOL/BOM；有formatter时语义变化与物理属性必须同时保留。
++          yield* files.writeTextPreservingBom({ target, content: "new\nline\n" })
++          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFnew${ending}line${ending}`)
++          const formatted = yield* files.writeTextPreservingBom({ target, content: "new\nline\n", format })
++          expect(formatted.text).toBe(`formatted${ending}line${ending}`)
++          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
++          const expected = yield* Effect.promise(() => fs.readFile(target.canonical))
++          yield* files.writeIfUnchanged({ target, expected, content: "\uFEFFnew\nline\n", format })
++          expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
++          const destination = yield* mutation.resolve({ path: `dest-${ending.length}.txt` })
++          yield* Effect.promise(() => fs.writeFile(destination.canonical, "destination\n"))
++          const moved = yield* files.moveIfUnchanged({ target, destination, expected: yield* Effect.promise(() => fs.readFile(target.canonical)), content: "\uFEFFnew\nline\n", format })
++          // destination已有LF只负责真实diff前像，不得接管source的CRLF/CR内容属性。
++          expect(moved.text).toBe(`formatted${ending}line${ending}`)
++          expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
++          expect(moved.diff).toContain("-destination")
++          expect(yield* Effect.promise(() => fs.access(target.canonical).then(() => true, () => false))).toBe(false)
++        }
++        const fresh = yield* mutation.resolve({ path: "new.txt" })
++        const missing = yield* files.create({ target: fresh, content: "new\r\nline\r\n", format })
++        // 缺失文件没有可继承属性，formatter选择LF仍是合法最终真值。
++        expect(missing.text).toBe("formatted\nline\n")
++        expect(yield* Effect.promise(() => fs.readFile(fresh.canonical, "utf8"))).toBe("formatted\nline\n")
++      }).pipe(provide(directory)),
++    ),
++  )
++
+   it.live("rejects create when a prospective target appears after resolution", () =>

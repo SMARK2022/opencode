@@ -48,6 +48,18 @@ diff --git a/packages/opencode/src/provider/provider.ts b/packages/opencode/src/
 diff --git a/packages/opencode/src/session/llm/native-runtime.ts b/packages/opencode/src/session/llm/native-runtime.ts
 --- a/packages/opencode/src/session/llm/native-runtime.ts
 +++ b/packages/opencode/src/session/llm/native-runtime.ts
+@@ -12,1 +12,2 @@
+   LLMError,
++  HttpOptions,
+@@ -120,1 +121,7 @@
+-  const advertised = LLMRequest.update(request, { tools: [...request.tools, ...toDefinitions(tools)] })
++  const chunkTimeout = input.provider.options.chunkTimeout
++  const advertised = LLMRequest.update(request, {
++    tools: [...request.tools, ...toDefinitions(tools)],
++    // 运输选项留在HTTP合同，原headers/body/query不能因增加期限而被覆盖。
++    http: HttpOptions.make({ ...request.http,
++      chunkTimeout: chunkTimeout === false || typeof chunkTimeout === "number" ? chunkTimeout : undefined }),
++  })
 @@ -131,1 +131,2 @@
 -            Stream.interruptWhen(timeout === false ? Effect.never : Effect.sleep(typeof timeout === "number" ? timeout : 300_000).pipe(
 +            // 同一provider的native入口也使用十分钟缺省，显式值与false不变。
@@ -60,20 +72,24 @@ diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/openco
 +import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
 +import { TestClock } from "effect/testing"
  import { FetchHttpClient } from "effect/unstable/http"
-@@ -606,1 +607,45 @@
+@@ -606,1 +607,49 @@
 +  it.effect("native provider deadlines default to ten minutes and honor overrides", () =>
 +    Effect.gen(function* () {
 +      for (const timeout of [undefined, 120_000, false] as const) {
 +        const started = yield* Deferred.make<void>()
 +        const state = { ended: false }
++        const chunkTimeout = timeout === false ? false : 42_000
 +        const native = LLMNativeRuntime.stream({
 +          model: baseModel,
-+          provider: { ...providerInfo, options: { ...providerInfo.options, timeout } },
++          provider: { ...providerInfo, options: { ...providerInfo.options, timeout, chunkTimeout } },
 +          auth: undefined,
 +          llmClient: {
 +            prepare: () => Effect.die("unused"),
 +            // 只替换运输：让真实native期限包裹一个已开始、尚未结束的provider流。
-+            stream: () => Stream.fromEffect(Deferred.succeed(started, undefined)).pipe(Stream.flatMap(() => Stream.never)),
++            stream: (request) => {
++              expect(request.http?.chunkTimeout).toBe(chunkTimeout)
++              return Stream.fromEffect(Deferred.succeed(started, undefined)).pipe(Stream.flatMap(() => Stream.never))
++            },
 +            generate: () => Effect.die("unused"),
 +          },
 +          messages: [], tools: {}, headers: {}, abort: new AbortController().signal,
@@ -125,6 +141,129 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 -          duration: model.timeout ?? 300_000,
 +          // 原生provider turn与AISDK使用相同的十分钟缺省总期限。
 +          duration: model.timeout ?? 600_000,
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -144,1 +144,3 @@
+     http: {
++      // Catalog的运输设置经唯一HTTP合同传递，显式false不落入协议body。
++      chunkTimeout: model.api.settings?.chunkTimeout === false || typeof model.api.settings?.chunkTimeout === "number" ? model.api.settings.chunkTimeout : undefined,
+diff --git a/packages/llm/src/schema/options.ts b/packages/llm/src/schema/options.ts
+--- a/packages/llm/src/schema/options.ts
++++ b/packages/llm/src/schema/options.ts
+@@ -56,1 +56,3 @@
+   query: Schema.optional(Schema.Record(Schema.String, Schema.String)),
++  // SSE原始字节空闲期限；false关闭，省略由唯一transport采用默认值。
++  chunkTimeout: Schema.optional(Schema.Union([Schema.Number, Schema.Literal(false)])),
+@@ -69,3 +71,4 @@
+   const query = mergeStringRecords(...items.map((item) => item?.query))
+-  if (!body && !headers && !query) return undefined
+-  return new HttpOptions({ body, headers, query })
++  const chunkTimeout = items.findLast(item => item?.chunkTimeout !== undefined)?.chunkTimeout
++  if (!body && !headers && !query && chunkTimeout === undefined) return undefined
++  return new HttpOptions({ body, headers, query, chunkTimeout })
+diff --git a/packages/llm/src/route/transport/http.ts b/packages/llm/src/route/transport/http.ts
+--- a/packages/llm/src/route/transport/http.ts
++++ b/packages/llm/src/route/transport/http.ts
+@@ -2,1 +2,1 @@
+-import { Headers, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
++import { Headers, HttpClientError, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
+@@ -12,2 +12,11 @@
+   const timing = FetchTiming.responses.get(response)
+-  if (!timing || !response.headers["content-type"]?.includes("text/event-stream")) return response.stream
++  if (!response.headers["content-type"]?.includes("text/event-stream")) return response.stream
++  const chunkTimeout = request.http?.chunkTimeout ?? 180_000
++  // 必须在framing前按原始字节计时，心跳/注释也续期，且不依赖是否采集timing。
++  const stream = chunkTimeout === false ? response.stream : response.stream.pipe(Stream.timeoutOrElse({
++    duration: chunkTimeout,
++    orElse: () => Stream.fail(new HttpClientError.HttpClientError({ reason: new HttpClientError.TransportError({
++      request: response.request, cause: new Cause.TimeoutError(),
++    }) })),
++  }))
++  if (!timing) return stream
+@@ -28,1 +37,1 @@
+-    return response.stream.pipe(
++    return stream.pipe(
+diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/test/session-runner-model.test.ts
+--- a/packages/core/test/session-runner-model.test.ts
++++ b/packages/core/test/session-runner-model.test.ts
+@@ -52,1 +52,1 @@
+-          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
++          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1", settings: { chunkTimeout: false } }),
+@@ -64,1 +64,1 @@
+-          http: { body: { custom_extension: { enabled: true } } },
++          http: { body: { custom_extension: { enabled: true } }, chunkTimeout: false },
+@@ -69,1 +69,3 @@
+       expect(prepared.body).toHaveProperty("parallel_tool_calls", true)
++      // 关闭空闲期限只影响运输，不能作为OpenAI协议字段发出。
++      expect(prepared.body).not.toHaveProperty("chunkTimeout")
+diff --git a/packages/llm/test/executor.test.ts b/packages/llm/test/executor.test.ts
+--- a/packages/llm/test/executor.test.ts
++++ b/packages/llm/test/executor.test.ts
+@@ -2,1 +2,1 @@
+-import { Cause, Effect, Fiber, Layer, Logger, Random, Ref, References, Stream } from "effect"
++import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Random, Ref, References, Stream } from "effect"
+@@ -501,1 +501,47 @@
+       expect(yield* Ref.get(attempts)).toBe(1)
++      const encoder = new TextEncoder()
++      // 无timing元数据的真实HTTP body也需空闲失败，不能只测试日志或解析后的frame。
++      for (const chunkTimeout of [undefined, 50, false] as const) {
++        const raw = yield* Queue.unbounded<Uint8Array, Cause.Done>()
++        const consumed = yield* Queue.unbounded<void>()
++        const ready = yield* Deferred.make<void>()
++        const state = { ended: false, cancelled: false, attempts: 0 }
++        const body = yield* Stream.fromQueue(raw).pipe(
++          Stream.tap(() => Queue.offer(consumed, undefined)),
++          Stream.ensuring(Effect.sync(() => { state.cancelled = true })),
++          stream => Stream.toReadableStreamEffect(stream),
++        )
++        const native = LLM.request({ model, prompt: "idle", http: { chunkTimeout } })
++        const response = HttpClientResponse.fromWeb(request, new Response(body, { headers: { "content-type": "text/event-stream" } }))
++        const running = yield* HttpTransport.sseJson.with<unknown>().frames({ request, framing: Framing.sse }, native, {
++          http: { execute: () => Effect.sync(() => { state.attempts++; return response }) },
++        }).pipe(
++          Stream.tap(() => Deferred.succeed(ready, undefined)),
++          Stream.runDrain,
++          Effect.exit,
++          Effect.ensuring(Effect.sync(() => { state.ended = true })),
++          Effect.forkChild,
++        )
++        yield* Queue.offer(raw, encoder.encode("data: ready\n\n"))
++        yield* Deferred.await(ready)
++        yield* Queue.take(consumed)
++        const window = chunkTimeout === false ? 180_000 : chunkTimeout ?? 180_000
++        yield* TestClock.adjust(window - 1)
++        expect(state.ended).toBe(false)
++        // 注释没有provider frame，仍必须重置唯一原始字节期限。
++        yield* Queue.offer(raw, encoder.encode(": heartbeat\n\n"))
++        yield* Queue.take(consumed)
++        yield* Effect.yieldNow
++        yield* TestClock.adjust(window - 1)
++        expect(state.ended).toBe(false)
++        if (chunkTimeout === false) {
++          yield* Fiber.interrupt(running)
++        } else {
++          yield* TestClock.adjust(1)
++          const exit = yield* Fiber.join(running)
++          expect(Exit.isFailure(exit)).toBe(true)
++          if (Exit.isFailure(exit)) expect(Cause.squash(exit.cause)).toMatchObject({ reason: { _tag: "Transport" } })
++        }
++        expect(state.attempts).toBe(1)
++        expect(state.cancelled).toBe(true)
++      }
+diff --git a/packages/llm/test/llm.test.ts b/packages/llm/test/llm.test.ts
+--- a/packages/llm/test/llm.test.ts
++++ b/packages/llm/test/llm.test.ts
+@@ -34,1 +34,1 @@
+-    const updated = LLM.updateRequest(base, {
++    const updated = LLM.updateRequest(LLM.updateRequest(base, { http: { chunkTimeout: 180_000 } }), {
+@@ -36,1 +36,2 @@
+       messages: [...base.messages, Message.assistant("Hi.")],
++      http: { chunkTimeout: false },
+@@ -43,1 +44,3 @@
+     expect(updated.messages.map((message) => message.role)).toEqual(["user", "assistant"])
++    // 单独的false也必须通过HTTP merge，不能因没有body/header/query而被丢弃。
++    expect(updated.http?.chunkTimeout).toBe(false)
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts

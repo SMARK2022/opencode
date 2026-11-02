@@ -6,8 +6,9 @@ Subject: [PATCH] feat(codex): Codex TUI headers + unconditional configured UA (#
 diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/src/plugin/openai/codex.ts
 --- a/packages/opencode/src/plugin/openai/codex.ts
 +++ b/packages/opencode/src/plugin/openai/codex.ts
-@@ -1,8 +1,6 @@
+@@ -1,8 +1,7 @@
  import { NetworkProxy } from "@opencode-ai/core/network-proxy"
++import { CodexHeaders } from "@opencode-ai/core/plugin/provider/codex-headers"
  import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 -import { InstallationVersion } from "@opencode-ai/core/installation/version"
  import { OAUTH_DUMMY_KEY } from "../../auth"
@@ -15,27 +16,14 @@ diff --git a/packages/opencode/src/plugin/openai/codex.ts b/packages/opencode/sr
  import { setTimeout as sleep } from "node:timers/promises"
  import { createServer } from "http"
  import { OpenAIWebSocketPool } from "./ws-pool"
-@@ -14,6 +12,23 @@ const ISSUER = "https://auth.openai.com"
+@@ -14,6 +13,10 @@ const ISSUER = "https://auth.openai.com"
  const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
  const OAUTH_PORT = 1455
  const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
-+// #169：固定 Codex TUI 指纹，后端按 originator/UA 识别官方客户端
-+// #169：版本字符串故意钉死，不跟 opencode 发行版漂移
-+export const CODEX_USER_AGENT = "codex-tui/0.130.0 (Mac OS 15.7.2; arm64) Apple_Terminal/455.1 (codex-tui; 0.130.0)"
-+// #169：JSON 请求默认头；chat/oauth/API 共用
-+// #169：Content-Type 固定 json，避免调用方漏设
-+export const CODEX_HEADERS = {
-+  "Content-Type": "application/json",
-+  originator: "codex-tui",
-+  "User-Agent": CODEX_USER_AGENT,
-+}
-+// #169：form token 交换头，originator/UA 与 JSON 路径一致
-+// #169：form 路径不得回落成仅 Content-Type，否则丢 originator
-+const CODEX_FORM_HEADERS = {
-+  "Content-Type": "application/x-www-form-urlencoded",
-+  originator: CODEX_HEADERS.originator,
-+  "User-Agent": CODEX_USER_AGENT,
-+}
++// 两代使用同一固定身份；保留 V1 的常量出口供现有插件和测试消费。
++export const CODEX_USER_AGENT = CodexHeaders.USER_AGENT
++export const CODEX_HEADERS = CodexHeaders.JSON_HEADERS
++const CODEX_FORM_HEADERS = CodexHeaders.FORM_HEADERS
  const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"])
  const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
  
@@ -334,3 +322,179 @@ diff --git a/packages/opencode/test/session/llm-native.test.ts b/packages/openco
 -        headers: {},
 +        headers: { "user-agent": "codex-tui" },
          abort: new AbortController().signal,
+diff --git a/packages/core/src/plugin/provider/codex-headers.ts b/packages/core/src/plugin/provider/codex-headers.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/plugin/provider/codex-headers.ts
+@@ -0,0 +1,19 @@
++export * as CodexHeaders from "./codex-headers"
++
++// 固定客户端身份不随本地发行版本或宿主平台变化，认证与模型请求必须同源。
++export const USER_AGENT = "codex-tui/0.130.0 (Mac OS 15.7.2; arm64) Apple_Terminal/455.1 (codex-tui; 0.130.0)"
++export const JSON_HEADERS = {
++  "Content-Type": "application/json",
++  originator: "codex-tui",
++  "User-Agent": USER_AGENT,
++}
++
++// 令牌交换仍用表单编码，不能因复用身份改成 JSON 请求。
++export const FORM_HEADERS = { ...JSON_HEADERS, "Content-Type": "application/x-www-form-urlencoded" }
++
++export function request(overrides: Record<string, string> = {}) {
++  const headers = new Headers(JSON_HEADERS)
++  // 按字段覆盖而非追加，大小写不同的配置 UA 也只发送一个最终值。
++  Object.entries(overrides).forEach(([key, value]) => headers.set(key, value))
++  return Object.fromEntries(headers)
++}
+diff --git a/packages/core/src/plugin/provider/openai.ts b/packages/core/src/plugin/provider/openai.ts
+--- a/packages/core/src/plugin/provider/openai.ts
++++ b/packages/core/src/plugin/provider/openai.ts
+@@ -4,7 +4,7 @@
+ import { Deferred, Effect } from "effect"
+ import type { Scope } from "effect"
+ import { Credential } from "../../credential"
+-import { InstallationVersion } from "../../installation/version"
++import { CodexHeaders } from "./codex-headers"
+ import { NetworkProxy } from "../../network-proxy"
+ import { Integration } from "../../integration"
+ import { ModelV2 } from "../../model"
+@@ -193,3 +193,4 @@
+ function headers(contentType: string) {
+-  return { "Content-Type": contentType, "User-Agent": `opencode/${InstallationVersion}` }
++  // browser 交换、device-auth 与刷新沿原生命周期，只统一实际发出的身份和编码。
++  return CodexHeaders.request({ "Content-Type": contentType })
+ }
+diff --git a/packages/core/src/session/runner/model.ts b/packages/core/src/session/runner/model.ts
+--- a/packages/core/src/session/runner/model.ts
++++ b/packages/core/src/session/runner/model.ts
+@@ -12,6 +12,7 @@
+ import { Credential } from "../../credential"
+ import { Integration } from "../../integration"
+ import { ModelV2 } from "../../model"
++import { CodexHeaders } from "../../plugin/provider/codex-headers"
+ import { ProviderV2 } from "../../provider"
+ import { SessionSchema } from "../schema"
+ 
+@@ -134,4 +135,6 @@
+     // protocol-owned 字段在 typed lowering 中处理，不能从 http.body 绕过校验覆盖 system/thinking。
++    // 固定身份仅适用真实 OpenAI provider；显式配置保留优先级，不污染兼容服务。
+     headers: claudecode ? Object.fromEntries(Object.entries(model.request.headers).filter(([key]) =>
+-      !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) : model.request.headers,
++      !["anthropic-beta", "user-agent", "x-app", "x-claude-code-session-id"].includes(key.toLowerCase()))) :
++      model.providerID === ProviderV2.ID.openai ? CodexHeaders.request(model.request.headers) : model.request.headers,
+     http: { body: httpBody },
+diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/test/session-runner-model.test.ts
+--- a/packages/core/test/session-runner-model.test.ts
++++ b/packages/core/test/session-runner-model.test.ts
+@@ -8,6 +8,7 @@
+ import { Integration } from "@opencode-ai/core/integration"
+ import { ModelV2 } from "@opencode-ai/core/model"
++import { CodexHeaders } from "@opencode-ai/core/plugin/provider/codex-headers"
+ import { ProviderV2 } from "@opencode-ai/core/provider"
+ import { ProjectV2 } from "@opencode-ai/core/project"
+ import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
+ import { SessionV2 } from "@opencode-ai/core/session"
+@@ -73,3 +74,25 @@
+       expect(serial.body).toHaveProperty("parallel_tool_calls", false)
+       expect(serial.body).not.toHaveProperty("parallelToolCalls")
++      // 上面的第三方路由保持原头；真实 OpenAI 的默认身份和显式 UA 均走同一 resolver。
++      for (const userAgent of [undefined, "configured-agent"]) {
++        const openai = yield* SessionRunnerModel.fromCatalogModel(ModelV2.Info.make({
++          ...model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" }),
++          providerID: ProviderV2.ID.openai,
++          request: {
++            headers: Object.fromEntries([["x-custom", "kept"], ...(userAgent ? [["uSeR-aGeNt", userAgent]] : [])]),
++            body: { apiKey: "secret" },
++          },
++        }))
++        expect(openai.route.defaults.headers).toMatchObject({
++          "content-type": "application/json",
++          originator: "codex-tui",
++          "user-agent": userAgent ?? CodexHeaders.USER_AGENT,
++          "x-custom": "kept",
++        })
++        // 配置的身份不进入协议正文，也不会变成两个仅大小写不同的 UA 字段。
++        expect(Object.keys(openai.route.defaults.headers ?? {}).filter(key => key.toLowerCase() === "user-agent")).toHaveLength(1)
++        const prepared = yield* LLMClient.prepare(LLM.request({ model: openai, prompt: "Hello" }))
++        expect(prepared.body).not.toHaveProperty("originator")
++        expect(prepared.body).not.toHaveProperty("headers")
++      }
+     }),
+diff --git a/packages/core/test/plugin/provider-openai.test.ts b/packages/core/test/plugin/provider-openai.test.ts
+--- a/packages/core/test/plugin/provider-openai.test.ts
++++ b/packages/core/test/plugin/provider-openai.test.ts
+@@ -1,10 +1,12 @@
+ import { AISDK } from "@opencode-ai/core/aisdk"
+-import { describe, expect } from "bun:test"
++import { describe, expect, spyOn } from "bun:test"
+ import type { LanguageModelV3 } from "@ai-sdk/provider"
+ import { Effect } from "effect"
+ import { Catalog } from "@opencode-ai/core/catalog"
+ import { Integration } from "@opencode-ai/core/integration"
+ import { ModelV2 } from "@opencode-ai/core/model"
++import { NetworkProxy } from "@opencode-ai/core/network-proxy"
+ import { PluginV2 } from "@opencode-ai/core/plugin"
+ import { PluginHost } from "@opencode-ai/core/plugin/host"
++import { CodexHeaders } from "@opencode-ai/core/plugin/provider/codex-headers"
+ import { OpenAIPlugin } from "@opencode-ai/core/plugin/provider/openai"
+@@ -60,3 +62,60 @@
+   )
+ 
++  it.live("uses Codex identity for device authorization, exchange and refresh", () =>
++    Effect.gen(function* () {
++      const calls: Request[] = []
++      // 只隔离外部 HTTP 边界；实际注册方法、异步 admission 和凭据刷新仍由 Integration 执行。
++      yield* Effect.acquireRelease(
++        Effect.sync(() => spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
++          const request = new Request(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, init)
++          calls.push(request)
++          expect(init?.purpose).toBe("plugin")
++          const pathname = new URL(request.url).pathname
++          if (pathname === "/api/accounts/deviceauth/usercode")
++            return Response.json({ device_auth_id: "device", user_code: "1234", interval: "1" })
++          if (pathname === "/api/accounts/deviceauth/token")
++            return Response.json({ authorization_code: "code", code_verifier: "verifier" })
++          if (pathname === "/oauth/token")
++            return Response.json({ id_token: "fixture", access_token: "access", refresh_token: "refresh", expires_in: 0 })
++          throw new Error(`Unexpected auth request: ${request.url}`)
++        })),
++        spy => Effect.sync(() => spy.mockRestore()),
++      )
++      yield* addPlugin()
++      const integration = yield* Integration.Service
++      const integrationID = Integration.ID.make("openai")
++      const attempt = yield* integration.connection.oauth({
++        integrationID, methodID: Integration.MethodID.make("chatgpt-headless"), inputs: {},
++      })
++      // 失败时先关闭自动轮询的 scope，再恢复网络边界，避免迟到回调触及真实网络。
++      yield* Effect.addFinalizer(() => integration.attempt.cancel(attempt.attemptID))
++      const connection = yield* Effect.gen(function* () {
++        while (true) {
++          const active = yield* integration.connection.active(integrationID)
++          if (active) return active
++          yield* Effect.promise(() => Bun.sleep(1))
++        }
++      }).pipe(Effect.timeout(5000))
++      const refreshed = yield* integration.connection.resolve(connection)
++      expect(refreshed).toMatchObject({ type: "oauth", access: "access", refresh: "refresh" })
++      expect(calls.map(request => new URL(request.url).pathname)).toEqual([
++        "/api/accounts/deviceauth/usercode", "/api/accounts/deviceauth/token", "/oauth/token", "/oauth/token",
++      ])
++      for (const request of calls) {
++        expect(request.headers.get("originator")).toBe("codex-tui")
++        expect(request.headers.get("user-agent")).toBe(CodexHeaders.USER_AGENT)
++      }
++      // 交换和刷新验证实际编码与 grant，不把统一身份误做成统一 JSON 请求体。
++      expect(calls.map(request => request.headers.get("content-type"))).toEqual([
++        "application/json", "application/json", "application/x-www-form-urlencoded", "application/x-www-form-urlencoded",
++      ])
++      const exchange = new URLSearchParams(yield* Effect.promise(() => required(calls[2]).text()))
++      const refresh = new URLSearchParams(yield* Effect.promise(() => required(calls[3]).text()))
++      expect(exchange.get("grant_type")).toBe("authorization_code")
++      expect(exchange.get("code_verifier")).toBe("verifier")
++      expect(refresh.get("grant_type")).toBe("refresh_token")
++      expect(refresh.get("refresh_token")).toBe("refresh")
++    }),
++  )
++
+   it.effect("creates an OpenAI SDK for @ai-sdk/openai using the provider ID as SDK name", () =>

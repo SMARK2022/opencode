@@ -1,21 +1,42 @@
-diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
---- a/packages/opencode/src/util/output-notice.ts
-+++ b/packages/opencode/src/util/output-notice.ts
-@@ -26,6 +26,13 @@ type ExecutionNotice = {
+diff --git a/packages/core/test/tool-output-store.test.ts b/packages/core/test/tool-output-store.test.ts
+--- a/packages/core/test/tool-output-store.test.ts
++++ b/packages/core/test/tool-output-store.test.ts
+@@ -75,5 +75,7 @@
+         const visible = result.output.content[0].text
+         expect(visible).toContain('type="output_truncated" source="tool"')
+-        expect(visible).toContain(`path="${result.outputPaths[0]}" />`)
++        expect(visible).toContain(`path="${result.outputPaths[0]}" guidance="`)
++        // 真实Native结算正文必须带完整原话，新增指导仍占用既有notice预算而不是吞掉原文恢复入口。
++        expect(visible).toContain('guidance="Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."')
+         expect(visible).toMatch(/total="2L\/59KB"/)
+         const excerpt = visible.replace(/\n\n<opencode_notice[^>]+ \/>\n\n/, "\n")
+@@ -192,4 +194,4 @@
+         expect(notice).toContain('total="78KB"')
+         expect(notice).not.toContain('total="1L/')
+-        expect(notice).toContain(`path="${captured.outputPaths[0]}" />`)
++        expect(notice).toContain(`path="${captured.outputPaths[0]}" guidance="`)
+         expect(Buffer.byteLength(notice)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
+@@ -361,3 +363,3 @@
+           expect(text).toContain('total="3L/13B" shown="head 0L/0B"')
+-          expect(text).toContain(`path="${result.outputPaths[0]}" />`)
++          expect(text).toContain(`path="${result.outputPaths[0]}" guidance="`)
+           expect(text).toStartWith("<opencode_notice ")
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
+@@ -23,6 +23,11 @@ type ExecutionNotice = {
  
  type Notice = Record<string, string | number | undefined>
  
-+// 这段文本是模型可见的截断恢复策略，而不是 UI 文案：它必须足够短，
-+// 同时明确先用保存文件做 grep 定位，再用 read offset/limit 读取局部上下文。
-+// 保持为单个 attribute 可以复用现有 XML-like notice 解析和展示路径，
-+// 避免为了增强提示性而改变 shell/tool 截断输出的前后位置不变量。
++// 这是模型可见的恢复原话：先grep保存文件，再read offset/limit读取局部，避免无必要整读。
++// 单个attribute复用既有notice转义和展示，不改变shell/tool截断正文的前后位置。
 +const OUTPUT_TRUNCATED_GUIDANCE =
 +  "Before making decisions that depend on omitted output, use grep on path first, then read relevant ranges with read offset/limit. Avoid reading the full file unless necessary."
 +
  export function outputStats(text: string): Required<OutputAmount> {
    return {
      // #282：工具输出经常以最终换行结束；按人类查看保存文件时的行数统计，
-@@ -44,6 +51,7 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
+@@ -41,6 +46,7 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
      total: formatOutputAmount(input.total),
      shown: [input.shown.direction, formatOutputAmount(input.shown)].filter(Boolean).join(" "),
      path: input.path,

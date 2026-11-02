@@ -1,11 +1,4 @@
 From d9c92e000c7747f2f3108c1c4e681257cee0582b Mon Sep 17 00:00:00 2001
-     "pattern",
-   "required": [
--            path: path.resolve(
--              requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
--              item.entry.path,
--            ),
-From d9c92e000c7747f2f3108c1c4e681257cee0582b Mon Sep 17 00:00:00 2001
 From: SMARK2022 <3222301373@qq.com>
 Date: Thu, 28 May 2026 04:08:49 +0800
 Subject: [PATCH] =?UTF-8?q?feat(grep):=20=E6=B7=BB=E5=8A=A0=E8=B6=85?=
@@ -21,104 +14,70 @@ Content-Transfer-Encoding: 8bit
 diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
 --- a/packages/core/src/ripgrep.ts
 +++ b/packages/core/src/ripgrep.ts
-@@ -81,18 +81,41 @@ export interface GlobInput {
+@@ -83,16 +83,21 @@
  export interface GrepInput {
    readonly cwd: string
    readonly pattern: string
-+  // #244：单文件目标不受 include/exclude glob 影响，在 search 内部单独传给 rg
    readonly file?: string
 -  readonly include?: string
-+  // #244：include/exclude 允许单个 glob 或 glob 列表，保持同一形态避免两参数定义分叉
++  // 未传预算的内部调用保持原行为；交互工具使用同一入口展开过滤与受控中止。
 +  readonly include?: string | readonly string[]
 +  readonly exclude?: string | readonly string[]
++  readonly timeout?: number | false
    readonly limit: number
    // #138：false 关闭候选上限
    readonly maxFiles?: number | false
-+  // #244：默认 undefined 保持既有调用方行为；只有显式传入 timeout 的调用
-+  // 才启用受控终止，避免改变 find/glob 等内部搜索语义。
-+  readonly timeout?: number | false
-+  // #244：false 是显式关闭（与 undefined 未设置区分），供调用方声明「本路径永不超时」
    readonly signal?: AbortSignal
  }
  
-+export interface SearchResult {
-+  // #244：items 已按调用方 limit 截断；展示层需要自行决定是否提示 "N+"
-+  readonly items: readonly Match[]
-+  // #138：达到 limit 时为 true，并且进程已被主动终止以避免无谓的全量扫描
-+  readonly truncated: boolean
-+  // #244：partial 来自 rg 的 exit code 2，表示部分路径不可访问但搜索本身完成
-+  readonly partial: boolean
-+  // #244：true 表示 rg 已被时间预算主动终止；调用方应把 items 当作不完整结果，
-+  // 不能把空 items 解释成“全量搜索确认没有匹配”。
+ export interface SearchResult {
+   readonly items: readonly Match[]
+   readonly truncated: boolean
+   readonly partial: boolean
++  // 时间截断独立于数量截断，空items不能被解释为完整搜索无匹配。
 +  readonly timedOut?: boolean
-+}
-+
- export interface Interface {
-   readonly find: (input: FindInput) => Effect.Effect<readonly Entry[], Error>
-   readonly glob: (input: GlobInput) => Effect.Effect<readonly Entry[], Error>
-   readonly grep: (input: GrepInput) => Effect.Effect<readonly Match[], Error | InvalidPatternError | SearchTooBroadError>
-+  // #244：grep 工具需要 timedOut/truncated/partial 元数据来判断「空结果」与「受控截断」；
-+  // grep() 保留纯匹配列表形状给既有 HTTP/debug 调用方。
-+  // search 与 grep 由同一 searchImpl 支撑，仅返回投影不同，不存在双实现漂移。
-+  readonly search: (input: GrepInput) => Effect.Effect<SearchResult, Error | InvalidPatternError | SearchTooBroadError>
  }
- 
- export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Ripgrep") {}
-@@ -113,6 +136,9 @@ const layer = Layer.effect(
+@@ -123,5 +128,6 @@
        readonly args: string[]
        readonly limit: number
        readonly signal?: AbortSignal
-+      // #244：与 GrepInput.timeout 同形；仅 search 通道透传，
-+      // find/glob/grep 调用方不传即保持零行为变化
 +      readonly timeout?: number | false
        readonly parse: (line: string) => Effect.Effect<A | undefined, Error>
        readonly pattern?: string
-       readonly onItem?: (item: A) => Effect.Effect<void>
-@@ -122,15 +148,42 @@ const layer = Layer.effect(
+@@ -132,15 +138,31 @@
            const handle = yield* process.spawn(
              ChildProcess.make(yield* binary.filepath, input.args, { cwd: input.cwd, extendEnv: true, stdin: "ignore" }),
            )
-+          // #244：搜索超时是「受控截断」而不是工具错误：调用方仍需要已解析的匹配项，
-+          // 同时必须确定性终止 rg，避免低命中大目录扫描无限等待；forceKillAfter
-+          // 先给 rg 正常退出机会再升级强杀（与 shell 工具同一升级窗口）。
++          // 预算仅终止本次rg，保留已解析结果；用户取消仍由原race与作用域清理负责。
 +          let timedOut = false
 +          if (input.timeout !== false && input.timeout !== undefined && input.timeout > 0) {
 +            yield* Effect.forkScoped(
 +              Effect.sleep(`${input.timeout} millis`).pipe(
-+                Effect.tap(() => Effect.sync(() => (timedOut = true))),
++                Effect.tap(() => Effect.sync(() => { timedOut = true })),
 +                Effect.flatMap(() => handle.kill({ forceKillAfter: "3 seconds" })),
-+                // #244：kill 失败（进程已自然退出）无需恢复——此刻 timedOut 已置位，
-+                // 结果仍按受控截断返回，不让竞态尾部污染主流程
 +                Effect.ignore,
 +              ),
 +            )
 +          }
-+          // #244：stderr 采集与 timeout 独立并行——超时 kill 后仍要 join 到完整 stderr，
-+          // 用于区分「被中断扫描的噪音」与「真实的正则/参数错误」
            const stderrFiber = yield* collectStream(handle.stderr, ERROR_BYTES).pipe(
              Effect.map((output) => output.buffer.toString("utf8")),
              Effect.forkScoped,
            )
            let observed = 0
-+          // #244：rows 采集与 timeout fiber 并发推进——kill 触发后 stdout 流自然 EOF，
-+          // 已入流的完整行仍会被解析入结果，这就是「受控截断保留部分匹配」的实现基础；
-+          // observed 计数只服务 onItem 回调限流，与 rows 截断判定无关
            const rows = yield* Stream.decodeText(handle.stdout).pipe(
              Stream.splitLines,
              Stream.filter((line) => line.length > 0),
 -            Stream.mapEffect(input.parse),
 +            Stream.mapEffect((line) =>
 +              input.parse(line).pipe(
-+                // #244：timeout 可能在 rg 写出最后一行 JSON 中途杀进程；半行残渣
-+                // 只表示输出被受控截断，不能丢掉此前已解析的匹配。非超时的解析
-+                // 错误仍然上抛，继续暴露真实 rg 输出异常。
-+                Effect.catch((err) => (timedOut ? Effect.succeed(undefined) : Effect.fail(err))),
++                // 超时kill可能截断末行JSON；普通解析失败依旧暴露，不丢此前完整匹配。
++                Effect.catch((err) => timedOut ? Effect.succeed(undefined) : Effect.fail(err)),
 +              ),
 +            ),
              Stream.filter((row): row is A => row !== undefined),
              Stream.tap((row) => {
                if (!input.onItem || observed++ >= input.limit) return Effect.void
-@@ -144,18 +197,36 @@ const layer = Layer.effect(
+@@ -154,20 +176,32 @@
            if (truncated) {
              // #138：达到结果上限后主动 kill，避免超大仓库继续全量扫描
              yield* handle.kill().pipe(Effect.ignore)
@@ -127,25 +86,22 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
            }
  
 -          const code = yield* handle.exitCode
-+          // #244：timeout 主动 kill 是成功的有界搜索；POSIX 上被信号终止的
-+          // exitCode 会以错误出现，不能让受控截断伪装成进程失败。
-+          // 用户 abort（signal 通道）不在此列：它必须保持原始错误语义，
-+          // 否则调用方无法区分「我取消的」和「搜索自己结束的」。
 +          const code = yield* handle.exitCode.pipe(
-+            Effect.catch((err) => (timedOut ? Effect.succeed(0) : Effect.fail(err))),
++            // 主动预算中止不是运输失败，外部取消和其他进程故障保持原错误通道。
++            Effect.catch((err) => timedOut ? Effect.succeed(0) : Effect.fail(err)),
 +          )
            const stderr = yield* Fiber.join(stderrFiber)
-+          // #244：非超时路径的正则错误检查；超时后 stderr 可能包含被中断扫描的
-+          // 无关诊断，只有无匹配可保留时才升级为失败（见下方超时分支）
            if (input.pattern && code === 2 && isInvalidPattern(stderr)) {
              return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
            }
+           // 原 source 对无匹配且带诊断的 exit2 判为失败，不能伪装成 partial 空结果。
+-          if (code === 2 && rows.length === 0 && stderr.trim()) return yield* failure(stderr.trim())
++          if (code === 2 && rows.length === 0 && stderr.trim() && !timedOut) return yield* failure(stderr.trim())
            if (code !== 0 && code !== 1 && code !== 2) {
              return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
            }
 -          return { items: code === 1 ? [] : rows, truncated: false, partial: code === 2 }
-+          // #244：极小 timeout 可能先触发 kill 再等到正则错误 stderr；没有可保留
-+          // 匹配时暴露真实错误，不伪装成空的超时结果。
++          // kill与正则诊断可能竞态，空结果仍须暴露已确认的无效表达式。
 +          if (timedOut && rows.length === 0 && input.pattern && isInvalidPattern(stderr)) {
 +            return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
 +          }
@@ -158,125 +114,34 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
          }),
        )
        const abortable = input.signal ? program.pipe(Effect.raceFirst(waitForAbort(input.signal))) : program
-@@ -168,80 +239,29 @@ const layer = Layer.effect(
-       )
-     }
- 
--    return Service.of({
--      glob: (input) =>
--        run<string>({
--          cwd: input.cwd,
--          limit: input.limit,
--          signal: input.signal,
--          args: [
--            "--no-config",
--            "--files",
--            ...(input.hidden ? ["--hidden"] : []),
--            ...(input.follow ? ["--follow"] : []),
--            `--glob=${input.pattern}`,
--            "--glob=!**/.git/**",
--            ".",
--          ],
--          parse: (line) =>
--            Effect.succeed(
--              line
--                .replace(/^(?:\.[\\/])+/u, "")
--                .replace(/^[\\/]+/u, "")
--                .replaceAll("\\", "/"),
--            ),
--        }).pipe(
--          Effect.map((result) =>
--            result.items.map((relative) =>
--              Entry.make({
--                path: RelativePath.make(relative),
--                type: "file",
--              }),
--            ),
--          ),
--          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
--        ),
--      find: (input) =>
--        run<Entry>({
--          cwd: input.cwd,
--          limit: input.limit,
--          signal: input.signal,
--          args: [
--            "--no-config",
--            "--files",
--            ...(input.hidden ? ["--hidden"] : []),
--            ...(input.follow ? ["--follow"] : []),
--            ...(input.pattern === "*" ? [] : [`--glob=${input.pattern}`]),
--            "--glob=!**/.git/**",
--            ".",
--          ],
--          parse: (line) => {
--            const relative = line
--              .replace(/^(?:\.[\\/])+/u, "")
--              .replace(/^[\\/]+/u, "")
--              .replaceAll("\\", "/")
--            return Effect.succeed(
--              Entry.make({
--                path: RelativePath.make(relative),
--                type: "file",
--              }),
--            )
--          },
--          onItem: input.onEntry,
--        }).pipe(
--          Effect.map((result) => result.items),
--          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
--        ),
--      grep: (input) =>
-+    // #244：空 glob 没有明确搜索语义，作为 no-op 忽略；真实 pattern 的必填校验仍在工具入口。
-+    // 复制入参为数组，避免调用方传入的 readonly 数组被下游意外变更。
+@@ -183,1 +217,5 @@
++    // 空glob不改变搜索语义，复制数组后复用同一service及既有find/glob布局。
 +    const patterns = (input?: string | readonly string[]) =>
 +      !input ? [] : (Array.isArray(input) ? [...input] : [input]).filter((item) => item.length > 0)
 +
-+    const searchImpl = (input: GrepInput) =>
+     const service: Interface = {
+@@ -247,6 +285,11 @@
+       // 既有 V1/HTTP 调用保留数组契约，原生工具消费同一次搜索的完整状态。
+       grep: (input) => service.search(input).pipe(Effect.map((result) => result.items)),
+       search: (input) =>
          Effect.gen(function* () {
--          // #138：先限制候选文件数
-+          // #244：include 原样入选，exclude 统一加 ! 负向 glob；两者都是空时退回
-+          // 默认只排除 .git 的行为。已带 ! 的 exclude 原样透传避免双重取反，
-+          // 与工具层 patterns() 的过滤语义一致
++          // 排除项放在包含项之后收窄候选，已有!保持原意，两个扫描阶段共用顺序。
 +          const globs = [
 +            ...patterns(input.include),
-+            ...patterns(input.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
++            ...patterns(input.exclude).map((item) => item.startsWith("!") ? item : `!${item}`),
 +          ]
-+          // #138：先限制候选文件数；grep 工具传 maxFiles:false 关闭预扫，改用时间预算
+           // #138：先限制候选文件数
            const maxFiles = input.maxFiles === false ? undefined : (input.maxFiles ?? MAX_SEARCH_FILES)
-           if (maxFiles !== undefined) {
-             // #138：显式单文件目标不走目录候选计数
-             if (input.file) {
-               // single file target is always within bound
-             } else {
--              // #138：--files 预扫候选，超过 maxFiles 则拒绝
-+              // #138：--files 预扫候选，超过 maxFiles 则拒绝；exclude 同样收窄候选，
-+              // 否则被排除目录仍会占满候选额度造成误拒
-               const candidates = yield* run<string>({
-                 cwd: input.cwd,
-                 limit: maxFiles + 1,
-@@ -250,7 +270,10 @@ const layer = Layer.effect(
+@@ -266,7 +309,7 @@
                    "--no-config",
                    "--files",
                    "--hidden",
 -                  ...(input.include ? [`--glob=${input.include}`] : []),
-+                  ...patterns(input.include).map((item) => `--glob=${item}`),
-+                  ...patterns(input.exclude).map((item) => `--glob=${item.startsWith("!") ? item : `!${item}`}`),
-+                  // #244：.git 兑底排除放在用户 glob 之后——用户排除永不失效，
-+                  // 且 rg 的多 glob 语义是并集匹配，顺序不影响正确性
++                  ...globs.map((item) => `--glob=${item}`),
                    "--glob=!**/.git/**",
-                   ".",
+                   input.file ?? ".",
                  ],
-@@ -270,6 +293,8 @@ const layer = Layer.effect(
-           }
-           // #138：结果条数默认 MAX_SEARCH_RESULTS
-           const limit = input.limit && input.limit > 0 ? input.limit : MAX_SEARCH_RESULTS
-+          // #244：...input 透传 include/exclude/timeout/signal——search 的全部预算
-+          // 与过滤语义都经由这一处进入底层执行器
-           return yield* run<RawMatchData>({
-           ...input,
-           limit,
-@@ -278,7 +303,7 @@ const layer = Layer.effect(
+@@ -294,7 +337,7 @@
              "--json",
              "--hidden",
              "--no-messages",
@@ -285,118 +150,6 @@ diff --git a/packages/core/src/ripgrep.ts b/packages/core/src/ripgrep.ts
              "--glob=!**/.git/**",
              "--",
              input.pattern,
-@@ -306,8 +331,8 @@ const layer = Layer.effect(
-               }),
-             ),
-         }).pipe(
--          Effect.map((result) =>
--            result.items.map((match) => {
-+          Effect.map((result) => ({
-+            items: result.items.map((match) => {
-               const relative = match.path.text
-                 .replace(/^(?:\.[\\/])+/u, "")
-                 .replace(/^[\\/]+/u, "")
-@@ -319,9 +344,11 @@ const layer = Layer.effect(
-                 }),
-                 line: match.line_number,
-                 offset: match.absolute_offset,
-+                // #244：行预览截断与 timeout 截断独立——超时返回的部分匹配
-+                // 仍按同一线预览上限裁剪，不因截断来源不同而放大单行体积
-                 text:
-                   match.lines.text.length > 2_000
-                     ? match.lines.text.slice(0, 2_000).replace(/[\uD800-\uDBFF]$/, "") + "..."
-                     : match.lines.text,
-                 submatches: match.submatches.map((submatch) => ({
-                   text: submatch.match.text,
-@@ -327,9 +354,86 @@ const layer = Layer.effect(
-                 })),
-               })
-             }),
--          ),
-+            truncated: result.truncated,
-+            partial: result.partial,
-+            timedOut: result.timedOut,
-+          })),
-           )
--        }),
-+        })
-+    return Service.of({
-+      glob: (input) =>
-+        // #244：glob/find 不接受 timeout——内部诊断路径保持既有的无预算语义，
-+        // 时间预算只面向面向用户交互的 search 通道
-+        run<string>({
-+          cwd: input.cwd,
-+          limit: input.limit,
-+          signal: input.signal,
-+          args: [
-+            "--no-config",
-+            "--files",
-+            ...(input.hidden ? ["--hidden"] : []),
-+            ...(input.follow ? ["--follow"] : []),
-+            `--glob=${input.pattern}`,
-+            "--glob=!**/.git/**",
-+            ".",
-+          ],
-+          parse: (line) =>
-+            Effect.succeed(
-+              line
-+                .replace(/^(?:\.[\\/])+/u, "")
-+                .replace(/^[\\/]+/u, "")
-+                .replaceAll("\\", "/"),
-+            ),
-+        }).pipe(
-+          Effect.map((result) =>
-+            result.items.map((relative) =>
-+              Entry.make({
-+                path: RelativePath.make(relative),
-+                type: "file",
-+              }),
-+            ),
-+          ),
-+          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
-+        ),
-+      find: (input) =>
-+        run<Entry>({
-+          cwd: input.cwd,
-+          limit: input.limit,
-+          signal: input.signal,
-+          args: [
-+            "--no-config",
-+            "--files",
-+            ...(input.hidden ? ["--hidden"] : []),
-+            ...(input.follow ? ["--follow"] : []),
-+            ...(input.pattern === "*" ? [] : [`--glob=${input.pattern}`]),
-+            "--glob=!**/.git/**",
-+            // #244：与 glob 通道同序：用户过滤先命中，git 元数据兑底排除
-+            ".",
-+          ],
-+          parse: (line) => {
-+            const relative = line
-+              .replace(/^(?:\.[\\/])+/u, "")
-+              .replace(/^[\\/]+/u, "")
-+              .replaceAll("\\", "/")
-+            return Effect.succeed(
-+              Entry.make({
-+                path: RelativePath.make(relative),
-+                type: "file",
-+              }),
-+            )
-+          },
-+          onItem: input.onEntry,
-+        }).pipe(
-+          Effect.map((result) => result.items),
-+          Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
-+        ),
-+      search: searchImpl,
-+      // #244：grep 薄壳保持 Service 早入调用方的返回形状，避免协议层连锁修改；
-+      // HTTP file API 与 debug 命令的既有行为由这条薄壳完整保留
-+      grep: (input) =>
-+        // #244：既有 HTTP/debug 调用方只要匹配列表；受控截断元数据走 search 通道。
-+        // 错误通道逐字透传，保持 SearchTooBroadError 在 file API 的既有映射行为。
-+        Effect.map(searchImpl(input), (result) => result.items),
-     })
-   }),
- )
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
@@ -409,7 +162,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
  // #138：grep 结果上限与过宽候选处理
  import { assertExternalDirectoryEffect } from "./external-directory"
  import DESCRIPTION from "./grep.txt"
-@@ -11,14 +13,37 @@ import * as Tool from "./tool"
+@@ -11,14 +13,32 @@ import * as Tool from "./tool"
  // #138：工具输出匹配上限（有界搜索）
  // #138：工具默认 64 条匹配上限（与 source 一致）
  const RESULT_LIMIT = 64
@@ -422,11 +175,6 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +// 避免两参数定义分叉后出现 include 支持数组而 exclude 不支持的回归
 +const PatternList = Schema.Union([Schema.String, Schema.Array(Schema.String)])
 +
-+// #244：空 glob 没有明确搜索语义，作为 no-op 忽略；pattern 必填校验仍在执行入口保留
-+function patterns(input?: string | readonly string[]) {
-+  if (!input) return []
-+  return (Array.isArray(input) ? input : [input]).filter((item) => item.length > 0)
-+}
  
  export const Parameters = Schema.Struct({
    pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
@@ -480,7 +228,7 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
              },
            })
  
-@@ -65,51 +98,83 @@
+@@ -65,51 +98,76 @@
            const search = FSUtil.resolve(requested)
            const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
            const cwd = info?.type === "Directory" ? search : path.dirname(search)
@@ -516,12 +264,6 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +          // #244：用户未传 timeout 也启用默认预算——grep 工具是需要时间边界的交互入口；
 +          // 默认值在执行层而非 schema 层兜底，避免 wire schema 对未传字段产生隐式值
 +          const timeout = params.timeout ?? DEFAULT_TIMEOUT
-+          // #244：glob 顺序即匹配优先级：include 先展开、exclude 补 ! 负向；
-+          // 已带 ! 的 exclude 原样透传，避免双重取反
-+          const globs = [
-+            ...patterns(params.include),
-+            ...patterns(params.exclude).map((item) => (item.startsWith("!") ? item : `!${item}`)),
-+          ]
 +          const emptyTimedOut = () => ({
 +            // #244：title 沿用 pattern 与普通结果对齐，调用方按 title 聚合时不受影响
 +            title: params.pattern,
@@ -561,7 +303,6 @@ diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/gre
 +          if (result.items.length === 0) return empty
  
 -          const rows = result.map((item) => ({
-+          // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文
 +          // #244：绝对路径化在工具边界完成——core 返回的相对路径不带会话目录上下文；
 +          // path.resolve 锚点是 rg 的实际扫描 cwd，两者必须同一基准输出才稳定
 +          const rows = result.items.map((item) => ({
@@ -655,7 +396,50 @@ diff --git a/packages/opencode/src/tool/grep.txt b/packages/opencode/src/tool/gr
 diff --git a/packages/core/test/ripgrep.test.ts b/packages/core/test/ripgrep.test.ts
 --- a/packages/core/test/ripgrep.test.ts
 +++ b/packages/core/test/ripgrep.test.ts
-@@ -96,4 +96,54 @@ describe("Ripgrep", () => {
+@@ -30,3 +30,5 @@
+         const limits: number[] = []
+         const sizes: number[] = []
++        const searches: Ripgrep.GrepInput[] = []
++        let forced: Ripgrep.SearchResult | undefined
+         const assertions: PermissionV2.AssertInput[] = []
+@@ -54,4 +56,4 @@
+-            // 单文件保留正式默认预算；目录用小候选门限验证真实拒绝和模型纠正提示。
+-            search: (input) => Effect.sync(() => limits.push(input.limit)).pipe(
+-              Effect.andThen(native.search({ ...input, maxFiles: input.file ? input.maxFiles : 1 })),
++            // 交互工具必须显式关闭候选预算；内部调用仍以小门限验证原拒绝语义。
++            search: (input) => Effect.sync(() => { limits.push(input.limit); searches.push(input) }).pipe(
++              Effect.andThen(Effect.suspend(() => forced ? Effect.succeed(forced) : native.search({ ...input, maxFiles: input.maxFiles === false ? false : input.file ? input.maxFiles : 1 }))),
+               Effect.tap((result) => Effect.sync(() => sizes.push(result.items.length))),
+@@ -94,6 +96,23 @@
+-          const broad = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "grep-broad", name: "grep", input: { pattern: "needle", path: "." } } })
+-          const failure = broad.result.type === "error" ? String(broad.result.value) : ""
+-          expect(failure).toContain("more than 1 candidate files")
+-          expect(failure).toContain("Use a narrower path or include pattern before searching file contents.")
+-          expect(assertions).toHaveLength(5)
++          // 真实过滤与Native显式limit共同生效，交互搜索不再按文件数拒绝。
++          const broad = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: "grep-broad", name: "grep", input: { pattern: "needle", path: ".", include: ["*.txt"], exclude: ["exact.txt"], limit: 3 } } })
++          const filtered = Schema.decodeUnknownSync(GrepTool.Output)(broad.output?.structured)
++          expect(filtered.items).toHaveLength(3)
++          expect(filtered.items.every((match) => match.entry.path === "matches.txt")).toBe(true)
++          expect(searches.at(-1)).toMatchObject({ include: ["*.txt"], exclude: ["exact.txt"], timeout: 10_000, maxFiles: false })
++          const internal = yield* Ripgrep.Service.use((rg) => rg.grep({ cwd: tmp.path, pattern: "needle", limit: 3, maxFiles: 1 })).pipe(Effect.provide(LayerNode.compile(Ripgrep.node)), Effect.flip)
++          expect(internal).toBeInstanceOf(Ripgrep.SearchTooBroadError)
++          // 只替换搜索结果来验证真实leaf投影；空和部分超时均不能伪装为无匹配。
++          for (const items of [[], filtered.items.slice(0, 1)]) {
++            forced = { items, partial: false, truncated: false, timedOut: true }
++            const timed = yield* settleTool(registry, { sessionID, ...toolIdentity, call: { type: "tool-call", id: `grep-timeout-${items.length}`, name: "grep", input: { pattern: "needle", path: ".", timeout: 1 } } })
++            const output = Schema.decodeUnknownSync(GrepTool.Output)(timed.output?.structured)
++            expect(output.timedOut).toBe(true)
++            expect(output.timeout).toBe(1)
++            const text = timed.result.type === "text" ? timed.result.value : ""
++            expect(text).toContain("timed out after 1 ms")
++            expect(text).not.toContain("No files found")
++            if (items.length) expect(text).toContain("Line 1: needle")
++            expect(searches.at(-1)).toMatchObject({ timeout: 1, maxFiles: false })
++          }
++          expect(assertions).toHaveLength(7)
+           expect(assertions.every((input) => input.action === "grep" && input.source?.type === "tool")).toBe(true)
+@@ -222,4 +241,54 @@ describe("Ripgrep", () => {
      ),
    )
  
@@ -1008,3 +792,97 @@ diff --git a/packages/opencode/test/tool/__snapshots__/parameters.test.ts.snap b
    },
    "required": [
      "pattern",
+diff --git a/packages/core/src/tool/grep.ts b/packages/core/src/tool/grep.ts
+--- a/packages/core/src/tool/grep.ts
++++ b/packages/core/src/tool/grep.ts
+@@ -12,1 +12,1 @@
+-import { RelativePath } from "../schema"
++import { PositiveInt, RelativePath } from "../schema"
+@@ -19,16 +19,26 @@
+ const RESULT_LIMIT = 64
++// 与V1使用同一默认预算和上限，Native显式limit仍保留原有结果条数语义。
++const DEFAULT_TIMEOUT = 10_000
++const MAX_TIMEOUT = 120_000
++const PatternList = Schema.Union([Schema.String, Schema.Array(Schema.String)])
+ 
+ export const Input = Schema.Struct({
+   pattern: FileSystem.GrepInput.fields.pattern.annotate({
+-    description: "Regex pattern to search for in file contents",
++    description: "The regex pattern to search for in file contents",
+   }),
+   path: RelativePath.pipe(Schema.optional).annotate({
+     description: "Relative directory to search. Defaults to the active Location.",
+   }),
+-  include: FileSystem.GrepInput.fields.include.annotate({
+-    description: 'File glob to include in the search (for example, "*.js" or "*.{ts,tsx}")',
++  include: Schema.optional(PatternList).annotate({
++    description: 'File pattern(s) to include in the search (e.g. "*.js", ["*.ts", "*.tsx"])',
++  }),
++  exclude: Schema.optional(PatternList).annotate({
++    description: 'File pattern(s) to exclude from the search (e.g. "node_modules/**", ["dist/**", "*.lock"])',
++  }),
++  timeout: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(MAX_TIMEOUT))).annotate({
++    description: `Optional timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT}, maximum ${MAX_TIMEOUT}.`,
+   }),
+   limit: FileSystem.GrepInput.fields.limit.annotate({
+     description: `Maximum matches to return (default ${RESULT_LIMIT})`,
+   }),
+ })
+@@ -36,5 +46,7 @@
+ export const Output = Schema.Struct({
+   items: Schema.Array(FileSystem.Match),
+   partial: Schema.Boolean,
+   truncated: Schema.Boolean,
++  timedOut: Schema.optional(Schema.Boolean),
++  timeout: Schema.optional(PositiveInt),
+ })
+@@ -43,4 +55,7 @@
+-/** Format raw search matches into the familiar concise model output. */
++// 保留真实数量截断，预算耗尽单独提示，不能把少量部分结果谎报成64+。
+ export const toModelOutput = (output: ModelOutput) => {
+   // 截断来自真实 producer 状态，不能仅因条数恰好等于预算就猜测有更多结果。
+-  const lines = output.items.length === 0 ? ["No files found"] : [`Found ${output.items.length}${output.truncated ? "+" : ""} matches${output.truncated ? ` (showing first ${output.items.length})` : ""}`]
++  const timeout = output.timeout ?? DEFAULT_TIMEOUT
++  const lines = output.items.length === 0
++    ? output.timedOut ? [`Search timed out after ${timeout} ms before finding matches.`, "Results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout."] : ["No files found"]
++    : [`Found ${output.items.length}${output.truncated ? "+" : ""} matches${output.truncated ? ` (showing first ${output.items.length})` : ""}${output.timedOut ? ` before timing out after ${timeout} ms` : ""}`]
+@@ -56,3 +71,6 @@
+   if (output.truncated) lines.push("", `(Results truncated: showing first ${output.items.length} matches. Consider using a more specific path or pattern.)`)
++  if (output.timedOut) lines.push("",
++    `(Search timed out after ${timeout} ms; results may be incomplete. Use a narrower path/include/exclude pattern or increase timeout.)`,
++  )
+   if (output.partial) lines.push("Some paths could not be accessed; results may be incomplete.")
+   return lines.join("\n")
+@@ -73,3 +91,3 @@
+           description:
+-            "Search file contents by regular expression within the active Location or an absolute managed tool-output file. Use a path to narrow the search, include to filter files by glob, and limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.",
++            "Search file contents by regular expression within the active Location or an absolute managed tool-output file. Use limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.\n- Filter files by pattern with the include and exclude parameters (eg. include \"*.js\", exclude \"dist/**\")\n- For large workspaces, pass path, include, and exclude to narrow the candidate files before searching contents\n- Searches are time-bounded; if the timeout is reached, partial results may be returned instead of claiming there are no matches",
+           input: Input,
+@@ -95,5 +113,7 @@
+                   root: ".",
+                   path: input.path,
+                   include: input.include,
++                  exclude: input.exclude,
++                  timeout: input.timeout,
+                   limit: input.limit,
+                 },
+@@ -106,9 +126,13 @@
+               return yield* ripgrep
+                 .search({
+                   cwd: info?.type === "Directory" ? target : path.dirname(target),
+                   pattern: input.pattern,
+                   file: info?.type === "File" ? path.basename(target) : undefined,
+                   include: input.include,
++                  exclude: input.exclude,
++                  // 交互工具用时间而非候选数拒绝，内部搜索的maxFiles策略保持。
++                  timeout: input.timeout ?? DEFAULT_TIMEOUT,
++                  maxFiles: false,
+                   // 默认预算进入流式收集之前；显式正数 limit 不被默认值夹紧。
+                   limit: input.limit ?? RESULT_LIMIT,
+                 })
+@@ -116,3 +140,5 @@
+                   Effect.map((result) => ({
+                     ...result,
++                    // 仅超时时携带真实预算，不改变普通结果的既有形状。
++                    ...(result.timedOut ? { timeout: input.timeout ?? DEFAULT_TIMEOUT } : {}),
+                     items: result.items.map((match) =>

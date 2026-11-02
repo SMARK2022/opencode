@@ -1,0 +1,285 @@
+From 9f52803e680e9bba24c5c5dfe6ce98abfb6d7f57 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 16 Oct 2026 15:29:50 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20=E5=A4=8D=E7=94=A8=E7=8E=B0?=
+ =?UTF-8?q?=E6=9C=89=E9=87=8D=E8=AF=95=E5=A4=84=E7=90=86=20Cloudflare=20?=
+ =?UTF-8?q?=E6=8B=A6=E6=88=AA=E4=B8=8E=E9=99=90=E6=B5=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将可识别的 Cloudflare HTML 403 和 HTTP 429 纳入 SessionRetry，即使 SDK 标记为不可重试也沿用原有无限重试、退避和 Retry-After 处理；不限定 Provider，不新增重试计数或次数上限。
+
+保留普通鉴权、权限及内容策略错误的既有判定，增加跨 Provider 拦截与 429 回归测试，避免间歇性网关拦截直接终止会话。
+
+diff --git a/packages/core/src/session/retry.ts b/packages/core/src/session/retry.ts
+index 91dab73ee391977d3015bf21cd16ac2bb41c0422..1b0e098b74ebae821b6ef3e276d4f787075430ac 100644
+--- a/packages/core/src/session/retry.ts
++++ b/packages/core/src/session/retry.ts
+@@ -1,6 +1,7 @@
+ import type { NamedError } from "../util/error"
+ import { SessionV1 } from "../v1/session"
+ import { Cause, Clock, Duration, Effect, Schedule } from "effect"
++import { isCloudflareBlock } from "@opencode-ai/llm"
+ import { iife } from "../util/iife"
+ import { GO_UPSELL_MESSAGE, GO_UPSELL_URL } from "./retry-constants"
+ export { GO_UPSELL_MESSAGE, GO_UPSELL_URL }
+@@ -94,9 +95,12 @@
+     // 5xx errors are transient server failures and should always be retried,
+     // even when the provider SDK doesn't explicitly mark them as retryable.
+     // #191：移除 status !== undefined 守卫——无 statusCode 的可重试错误（transport）也应重试
++    // SDK的不可重试标志不能覆盖明确429或Cloudflare拦截，退避与既有文本识别仍归原policy。
+     if (
+       !error.data.isRetryable &&
++      status !== 429 &&
++      !isCloudflareBlock(status, error.data.responseHeaders, error.data.responseBody ?? "") &&
+       !(status !== undefined && status >= 500) &&
+       !matchesRetryableMessage(error.data.message) &&
+       !matchesRetryableMessage(error.data.responseBody)
+     )
+diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/test/session/retry.test.ts
+index 2aa6e64c4fbf141235577bcdec7281661b7835b5..2b7607069e24f8bb191fc8ab0d237c247ed41c0e 100644
+--- a/packages/opencode/test/session/retry.test.ts
++++ b/packages/opencode/test/session/retry.test.ts
+@@ -17,6 +17,9 @@
+ const providerID = ProviderV2.ID.make("test")
+ const retryProvider = "test"
+ const it = testEffect(LayerNode.compile(LayerNode.group([SessionStatus.node, CrossSpawnSpawner.node])))
++const cloudflareHeaders = { server: "cloudflare", "cf-ray": "test-HKG" }
++const cloudflareBody =
++  '<html>Unable to load site. Please try again later. <a href="https://status.openai.com/">Status</a></html>'
+ 
+ function apiError(headers?: Record<string, string>): SessionV1.APIError {
+   return Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+@@ -287,6 +290,45 @@ describe("session.retry.retryable", () => {
+     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+   })
+ 
++  test.each(["openai", "anthropic", "smark-codex", "custom-provider"])(
++    "retries Cloudflare HTML blocks for %s even when the SDK marks them non-retryable",
++    (provider) => {
++      // 保留source的outage页，并用无通用重试措辞的challenge锁定新增指纹路径。
++      for (const responseBody of [cloudflareBody, '<html><script>window._cf_chl_opt={};</script>/cdn-cgi/challenge-platform/</html>']) {
++        const error = MessageV2.fromError(
++          new APICallError({
++            message: "Forbidden",
++            url: "https://example.com/v1/responses",
++            requestBodyValues: {},
++            statusCode: 403,
++            responseHeaders: cloudflareHeaders,
++            responseBody,
++            isRetryable: false,
++          }),
++          { providerID: ProviderV2.ID.make(provider) },
++        )
++        if (!SessionV1.APIError.isInstance(error)) throw new Error("expected APIError")
++        expect(error.data.isRetryable).toBe(false)
++        expect(SessionRetry.retryable(error, provider)).toEqual({ message: error.data.message })
++      }
++    },
++  )
++
++  test("retries 429 errors even when isRetryable is false", () => {
++    // 中性message排除旧文本正则提前命中，仍保留source原始输入和七秒Retry-After断言。
++    for (const message of ["Too many requests", "Wait"]) {
++      const error = new SessionV1.APIError({
++        message,
++        isRetryable: false,
++        statusCode: 429,
++        responseHeaders: { "retry-after": "7" },
++      }).toObject()
++
++      expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message })
++      expect(SessionRetry.delay(1, error)).toBe(7000)
++    }
++  })
++
+   test("retries 500 errors even when isRetryable is false", () => {
+     const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+       new SessionV1.APIError({
+diff --git a/packages/llm/src/provider-error.ts b/packages/llm/src/provider-error.ts
+--- a/packages/llm/src/provider-error.ts
++++ b/packages/llm/src/provider-error.ts
+@@ -1,6 +1,19 @@
+ import { Schema } from "effect"
+ import { LLMError, ProviderErrorEvent } from "./schema"
+ 
++// 来源头、HTML和页面指纹缺一不可，不能把普通鉴权或JSON策略拒绝误判为拦截。
++export const isCloudflareBlock = (status: number | undefined, headers: Readonly<Record<string, string>> | undefined, body: string) =>
++  status === 403 &&
++  headers?.server?.trim().toLowerCase() === "cloudflare" &&
++  !!headers["cf-ray"]?.trim() &&
++  /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(body) &&
++  (headers["cf-mitigated"]?.trim().toLowerCase() === "challenge" ||
++    (body.includes("window._cf_chl_opt") && body.includes("/cdn-cgi/challenge-platform/")) ||
++    (/\bid\s*=\s*["']cf-error-details["']/i.test(body) && body.includes("/cdn-cgi/styles/cf.errors.css")) ||
++    (body.includes("Unable to load site") &&
++      body.includes("Please try again later") &&
++      body.includes("https://status.openai.com/")))
++
+ const patterns = [
+   /prompt is too long/i,
+   /request_too_large/i,
+diff --git a/packages/llm/src/index.ts b/packages/llm/src/index.ts
+--- a/packages/llm/src/index.ts
++++ b/packages/llm/src/index.ts
+@@ -1,7 +1,7 @@
+ export { LLMClient } from "./route/client"
+ export { Auth } from "./route/auth"
+ export { Provider } from "./provider"
+-export { isContextOverflow, isContextOverflowFailure } from "./provider-error"
++export { isCloudflareBlock, isContextOverflow, isContextOverflowFailure } from "./provider-error"
+ export type {
+   RouteModelInput,
+   RouteRoutedModelInput,
+diff --git a/packages/llm/src/route/executor.ts b/packages/llm/src/route/executor.ts
+--- a/packages/llm/src/route/executor.ts
++++ b/packages/llm/src/route/executor.ts
+@@ -22,8 +22,8 @@
+   TransportReason,
+   UnknownProviderReason,
+ } from "../schema"
+-import { isContextOverflow } from "../provider-error"
++import { isCloudflareBlock, isContextOverflow } from "../provider-error"
+ import { FetchTiming } from "./http-timing"
+ 
+ export interface Interface {
+   readonly execute: (
+@@ -227,6 +227,7 @@
+   readonly message: string
+   readonly retryAfterMs?: number | undefined
+   readonly rateLimit?: HttpRateLimitDetails | undefined
++  readonly cloudflare: boolean
+   readonly http: HttpContext
+ }) => {
+   const body = input.http.body ?? ""
+@@ -236,6 +237,10 @@
+   if (input.status === 401) {
+     return new AuthenticationReason({ message: input.message, kind: "invalid", http: input.http })
+   }
++  // 既有policy拒绝优先；拦截页复用请求建立阶段重试，不重放已接受的流。
++  if (input.cloudflare) return new ProviderInternalReason({
++    message: input.message, status: input.status, retryAfterMs: input.retryAfterMs, http: input.http,
++  })
+   if (input.status === 403) {
+     return new AuthenticationReason({ message: input.message, kind: "insufficient-permissions", http: input.http })
+   }
+@@ -289,6 +294,8 @@
+         method: "execute",
+         reason: statusReason({
+           status: response.status,
++          // 诊断副本已截断脱敏，指纹必须读取同次请求的完整响应，不另存原文。
++          cloudflare: isCloudflareBlock(response.status, headers, body ?? ""),
+           message: providerMessage(response.status, details),
+           retryAfterMs: retryAfter,
+           rateLimit,
+diff --git a/packages/llm/test/executor.test.ts b/packages/llm/test/executor.test.ts
+--- a/packages/llm/test/executor.test.ts
++++ b/packages/llm/test/executor.test.ts
+@@ -248,6 +248,69 @@
+     ),
+   )
+ 
++  it.effect("retries only identified Cloudflare blocks and preserves cancellation", () =>
++    Effect.gen(function* () {
++      const headers = { server: " CloudFlare ", "cf-ray": "test-HKG", "retry-after-ms": "0" }
++      const challenge = '<html>window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>'
++      // 四种source指纹都走真实executor；第五例把标记放在诊断截断边界之后。
++      for (const [body, extra] of [
++        ["<!DOCTYPE HTML><html>challenge</html>", { "cf-mitigated": "challenge" }],
++        [challenge, {}],
++        ['<html><div id="cf-error-details"></div>/cdn-cgi/styles/cf.errors.css</html>', {}],
++        ['<html>Unable to load site. Please try again later. https://status.openai.com/</html>', {}],
++        [`<html>${"x".repeat(17000)}window._cf_chl_opt={};/cdn-cgi/challenge-platform/</html>`, {}],
++      ] as const) {
++        const attempts = yield* Ref.make(0)
++        const response = yield* Effect.gen(function* () {
++          const executor = yield* RequestExecutor.Service
++          return yield* executor.execute(request)
++        }).pipe(Effect.provide(countedResponsesLayer(attempts, [
++          new Response(body, { status: 403, headers: { ...headers, ...extra } }),
++          new Response("ok", { status: 200 }),
++        ])))
++        expect(response.status).toBe(200)
++        expect(yield* Ref.get(attempts)).toBe(2)
++      }
++      // 缺来源、缺ray、非HTML、错状态与普通权限页不扩大为网关重试；policy/quota仍优先。
++      for (const [status, body, responseHeaders, tag] of [
++        [403, challenge, { server: "other", "cf-ray": "test" }, "Authentication"],
++        [403, challenge, { server: "cloudflare" }, "Authentication"],
++        [403, '{"error":"window._cf_chl_opt /cdn-cgi/challenge-platform/"}', headers, "Authentication"],
++        [400, challenge, headers, "InvalidRequest"],
++        [403, "<html>Permission denied</html>", headers, "Authentication"],
++        [401, challenge, headers, "Authentication"],
++        [403, '<html>content_policy window._cf_chl_opt /cdn-cgi/challenge-platform/</html>', headers, "ContentPolicy"],
++        [429, '{"error":"insufficient_quota"}', headers, "QuotaExceeded"],
++      ] as const) {
++        const attempts = yield* Ref.make(0)
++        const error = yield* Effect.gen(function* () {
++          const executor = yield* RequestExecutor.Service
++          return yield* executor.execute(request).pipe(Effect.flip)
++        }).pipe(Effect.provide(countedResponsesLayer(attempts, [
++          new Response(body, { status, headers: responseHeaders }),
++          new Response("unexpected retry", { status: 200 }),
++        ])))
++        expectLLMError(error)
++        expect(error.reason._tag).toBe(tag)
++        expect(error.retryable).toBe(false)
++        expect(yield* Ref.get(attempts)).toBe(1)
++      }
++      // 取消仍中断既有sleep；推进整个等待窗口也不得再发请求。
++      const attempts = yield* Ref.make(0)
++      const fiber = yield* Effect.gen(function* () {
++        const executor = yield* RequestExecutor.Service
++        return yield* executor.execute(request)
++      }).pipe(Effect.provide(countedResponsesLayer(attempts, [
++        new Response(challenge, { status: 403, headers: { server: "cloudflare", "cf-ray": "test", "retry-after": "7" } }),
++      ])), Effect.forkChild)
++      yield* Effect.yieldNow
++      expect(yield* Ref.get(attempts)).toBe(1)
++      yield* Fiber.interrupt(fiber)
++      yield* TestClock.adjust(8000)
++      expect(yield* Ref.get(attempts)).toBe(1)
++    }),
++  )
++
+   it.effect("retries retryable status responses before returning the stream", () =>
+     Effect.gen(function* () {
+       const executor = yield* RequestExecutor.Service
+@@ -358,31 +421,34 @@
+   it.effect("honors Retry-After delta seconds before retrying", () =>
+     Effect.gen(function* () {
++      for (const status of [503, 403, 429]) {
+       const attempts = yield* Ref.make(0)
+-      return yield* Effect.gen(function* () {
++      yield* Effect.gen(function* () {
+         const executor = yield* RequestExecutor.Service
+         const fiber = yield* executor.execute(request).pipe(Effect.forkChild)
+ 
+         yield* Effect.yieldNow
+         expect(yield* Ref.get(attempts)).toBe(1)
+ 
+         yield* TestClock.adjust(1_999)
+         yield* Effect.yieldNow
+         expect(yield* Ref.get(attempts)).toBe(1)
+ 
+         yield* TestClock.adjust(1)
+         const response = yield* Fiber.join(fiber)
+ 
+         expect(response.status).toBe(200)
+         expect(yield* Ref.get(attempts)).toBe(2)
+       }).pipe(
+         Effect.provide(
+           countedResponsesLayer(attempts, [
+-            new Response("busy", { status: 503, headers: { "retry-after": "2" } }),
++            // 只替换失败证据，仍使用真实时钟/请求数断言验证503、403和429的同一退避入口。
++            new Response(status === 403 ? "<html>challenge</html>" : "busy", { status, headers: { "retry-after": "2", "server": "cloudflare", "cf-ray": "test", "cf-mitigated": "challenge" } }),
+             new Response("ok", { status: 200 }),
+           ]),
+         ),
+       )
++      }
+     }),
+   )
+ 
+   it.effect("uses exponential jittered delay when retry-after is absent", () =>

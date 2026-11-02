@@ -520,27 +520,23 @@ diff --git a/packages/opencode/test/permission/reviewer-service.test.ts b/packag
 diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
 --- a/packages/core/src/permission/reviewer.ts
 +++ b/packages/core/src/permission/reviewer.ts
-@@ -42,6 +42,7 @@
+@@ -42,6 +42,12 @@
        const session = yield* sessions.get(SessionSchema.ID.make(sessionID))
        if (!session) return yield* new Failed({ reason: "Review session was not found" })
        const target = options.model ? ModelV2.parse(options.model) : undefined
        // 独立审查复用真实 Catalog/认证解析，不运行 Session 或任何工具。
 -      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : undefined })
 +      // 未显式指定 reviewer 模型时保留父会话选择，避免漂移到其他默认提供者。
-+      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : session.model })
++      const selected = yield* models.resolve({ ...session, model: target ? { id: target.modelID, providerID: target.providerID } : session.model }).pipe(
++        // 仅source规定的失效隐式候选回退一次；显式配置及认证、取消等其它失败继续报错。
++        Effect.catchTag("SessionRunnerModel.ModelUnavailableError", (error) => target
++          ? Effect.fail(error)
++          : models.resolve({ ...session, model: undefined })),
++      )
        const history = yield* sessions.context(session.id)
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -12,6 +12,8 @@
- import { ConfigAutoReview } from "@opencode-ai/core/config/auto-review"
- import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
- import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
-+import { ModelV2 } from "@opencode-ai/core/model"
-+import { ProviderV2 } from "@opencode-ai/core/provider"
- import { LLMClient, LLMEvent, LLMRequest, LLMResponse, Message, Model } from "@opencode-ai/llm"
- import { OpenAIChat } from "@opencode-ai/llm/protocols/openai-chat"
- import { PermissionReviewerSchema } from "@opencode-ai/core/permission/reviewer/schema"
 @@ -32,5 +34,6 @@
  let assessment: typeof PermissionReviewerSchema.Assessment.Type = { outcome: "allow", rationale: "bounded requested change", risk_level: "low", user_authorization: "high" }
  const reviewRequests: LLMRequest[] = []
@@ -548,10 +544,14 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
  let reviewGate: Deferred.Deferred<void> | undefined
  let reviewStarted: Deferred.Deferred<void> | undefined
  let malformed = false
-@@ -49,3 +52,6 @@
+@@ -49,3 +52,10 @@
 -const reviewModel = SessionRunnerModel.layerWith(() => Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route })))
 +const reviewModel = SessionRunnerModel.layerWith((session) => {
 +  reviewModels.push(session.model)
++  // 真实reviewer仍执行，只在模型目录边界模拟已删除条目；默认解析及合法显式模型保持成功。
++  if (session.model?.id === "removed-model") return Effect.fail(new SessionRunnerModel.ModelUnavailableError({
++    providerID: session.model.providerID, modelID: session.model.id,
++  }))
 +  return Effect.succeed(Model.make({ id: "review", provider: "test", route: OpenAIChat.route }))
 +})
  const reviewConfig = Layer.succeed(Config.Service, Config.Service.of({ entries: () => Effect.succeed([new Config.Document({ type: "document", info: reviewSettings })]) }))
@@ -577,13 +577,25 @@ diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permissi
 +    expect(reviewModels[0]).toMatchObject({ id: "parent-model", providerID: "parent-provider" })
      expect(progress.map((event) => event.type)).toEqual(["permission.review.started", "permission.review.completed"])
      expect(progress[0]?.reviewID).toBeDefined()
-@@ -393,6 +405,9 @@
+@@ -393,6 +409,21 @@
      // 外部目录成为独立谨慎边界，即使同一命令已审查也要评估该路径访问。
 +    // 显式配置仍覆盖父模型；只改变模型来源，不改变外部目录审批语义。
 +    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "override/reviewer" }) })
      expect(yield* service.ask({ ...automatic, action: "external_directory", resources: ["/outside"], metadata: { action_kind: "shell", command: "git add ." } })).toMatchObject({ effect: "allow" })
      expect(reviewRequests).toHaveLength(2)
 +    expect(reviewModels[1]).toMatchObject({ id: "reviewer", providerID: "override" })
++    const stale = { id: ModelV2.ID.make("removed-model"), providerID: ProviderV2.ID.make("parent-provider") }
++    yield* evidence.db.update(SessionTable).set({ model: stale }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
++    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ fallback: "deny" }) })
++    const staleRequest = { ...automatic, action: "external_directory", resources: ["/stale"], metadata: { action_kind: "shell", command: "git add ." } }
++    expect(yield* service.ask(staleRequest)).toMatchObject({ effect: "allow" })
++    expect(reviewModels.at(-2)).toEqual({ ...stale, variant: "default" })
++    expect(reviewModels.at(-1)).toBeUndefined()
++    // 同样的不存在模型若来自显式配置就必须失败，不能悄悄改用默认提供者。
++    reviewSettings = new Config.Info({ auto_review: new ConfigAutoReview.Info({ model: "parent-provider/removed-model", fallback: "deny" }) })
++    expect(yield* service.ask({ ...staleRequest, resources: ["/explicit-stale"] })).toMatchObject({ effect: "deny" })
++    expect(reviewRequests).toHaveLength(3)
++    yield* evidence.db.update(SessionTable).set({ model: { id: ModelV2.ID.make("parent-model"), providerID: ProviderV2.ID.make("parent-provider") } }).where(eq(SessionTable.id, SessionV2.ID.make("ses_test"))).run().pipe(Effect.orDie)
      reviewSettings = new Config.Info({ approvals_reviewer: "user" })
      const user = yield* service.ask({ ...automatic, metadata: { command: "git commit" } })
      expect(user.effect).toBe("ask")

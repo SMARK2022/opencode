@@ -1,3 +1,68 @@
+diff --git a/packages/session-ui/src/components/apply-patch-file.ts b/packages/session-ui/src/components/apply-patch-file.ts
+--- a/packages/session-ui/src/components/apply-patch-file.ts
++++ b/packages/session-ui/src/components/apply-patch-file.ts
+@@ -5,4 +5,7 @@
+ type Raw = {
++  // Native沿canonical FileDiff传值；历史V1形状继续由同一个展示owner接纳。
++  file?: string
++  status?: "added" | "deleted" | "modified"
+   filePath?: string
+   relativePath?: string
+   type?: Kind
+@@ -41,6 +44,7 @@
+   const value = raw as Raw
+-  const type = kind(value.type)
+-  const filePath = typeof value.filePath === "string" ? value.filePath : undefined
++  // 删除diff已经存在，不能因为字段改名把正文和统计一起过滤。
++  const type = kind(value.type) ?? (value.status === "added" ? "add" : value.status === "deleted" ? "delete" : value.status === "modified" ? "update" : undefined)
++  const filePath = typeof value.filePath === "string" ? value.filePath : typeof value.file === "string" ? value.file : undefined
+   const relativePath = typeof value.relativePath === "string" ? value.relativePath : filePath
+   const patch = typeof value.patch === "string" ? value.patch : typeof value.diff === "string" ? value.diff : undefined
+   const before = typeof value.before === "string" ? value.before : undefined
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -2478,5 +2478,7 @@
+                                     <Match when={file.type === "delete"}>
+                                       <span data-slot="apply-patch-change" data-type="removed">
+                                         {i18n.t("ui.patch.action.deleted")}
+                                       </span>
++                                      {/* 多文件删除与单文件标题共用真实计数，不再只显示动作标签。 */}
++                                      <DiffChanges changes={{ additions: file.additions, deletions: file.deletions }} />
+                                     </Match>
+diff --git a/packages/session-ui/src/components/apply-patch-file.test.ts b/packages/session-ui/src/components/apply-patch-file.test.ts
+--- a/packages/session-ui/src/components/apply-patch-file.test.ts
++++ b/packages/session-ui/src/components/apply-patch-file.test.ts
+@@ -3,1 +3,2 @@
+ import { text } from "./session-diff"
++import { normalizeSessionMessages } from "../../../app/src/utils/session-message"
+@@ -5,2 +6,26 @@
+ describe("apply patch file", () => {
++  test("preserves native patch files through real message projection into the patch display", () => {
++    const patch = "--- src/old.ts\t\n+++ src/old.ts\t\n@@ -1,3 +0,0 @@\n-KEEP_THIS_first\n-KEEP_THIS_second\n-KEEP_THIS_third\n"
++    const files = [
++      { file: "src/old.ts", status: "deleted", patch, additions: 0, deletions: 3 },
++      { file: "src/new.ts", status: "added", patch: "--- src/new.ts\t\n+++ src/new.ts\t\n@@ -0,0 +1 @@\n+new\n", additions: 1, deletions: 0 },
++      { file: "src/edit.ts", status: "modified", patch: "--- src/edit.ts\t\n+++ src/edit.ts\t\n@@ -1 +1 @@\n-old\n+changed\n", additions: 1, deletions: 1 },
++    ]
++    // 经过实际App normalizer，不能用手工V1 metadata掩盖Native字段丢失。
++    const result = normalizeSessionMessages("ses_patch", [{ id: "msg_user", type: "user", text: "Apply the requested patch", time: { created: 0 } }, { id: "msg_patch", type: "assistant", agent: "build", model: { id: "test", providerID: "test" }, time: { created: 1, completed: 2 }, content: [{ type: "tool", id: "patch", name: "apply_patch", time: { created: 1, ran: 1, completed: 2 }, state: { status: "completed", input: {}, content: [{ type: "text", text: patch }], ...{ structured: { files } } } }] }])
++    const part = result.parts.get("msg_patch")?.find(part => part.type === "tool")
++    if (!part || part.type !== "tool" || part.state.status !== "completed") throw new Error("Expected completed patch projection")
++    const displayed = patchFiles(part.state.metadata.files)
++    expect(displayed).toHaveLength(3)
++    expect(displayed.map(file => file.type)).toEqual(["delete", "add", "update"])
++    expect(displayed[0]).toMatchObject({ filePath: "src/old.ts", relativePath: "src/old.ts", additions: 0, deletions: 3 })
++    expect(displayed[0]?.view.status).toBe("deleted")
++    // 使用真实diff数据喂给File组件的view，删除内容不是仅保存在原始output里。
++    const deleted = displayed[0]
++    if (!deleted) throw new Error("Expected deleted diff")
++    expect(text(deleted.view, "deletions")).toBe("KEEP_THIS_first\nKEEP_THIS_second\nKEEP_THIS_third\n")
++    expect(text(deleted.view, "additions")).toBe("")
++    expect(displayed[1]?.view.status).toBe("added")
++    expect(displayed[2]?.view.status).toBe("modified")
++  })
+   test("parses patch metadata from the server", () => {
 diff --git a/packages/tui/src/routes/session/index.tsx b/packages/tui/src/routes/session/index.tsx
 --- a/packages/tui/src/routes/session/index.tsx
 +++ b/packages/tui/src/routes/session/index.tsx

@@ -1226,15 +1226,16 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
 +import { Truncate } from "./truncate"
  import { LSP } from "@/lsp/lsp"
  // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
- import * as LSPClient from "@/lsp/client"
-@@ -50,6 +52,9 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
+ import { LSPClient } from "@/lsp/client"
+@@ -50,7 +52,10 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
    instance: InstanceContext,
    afs: FSUtil.Interface,
  ) {
 +  // diff 头统一用 worktree 相对路径（正斜杠）：output 在 win32 有不许含反斜杠的合同测试；
 +  // 相对路径同时是 UI/SummaryCache 的既有展示形态，proposal 与 result 共用同一渲染。
 +  const displayPath = path.relative(instance.worktree, group.filePath).replaceAll("\\", "/")
-   const first = group.hunks[0]
+   const rewrite = group.hunks.length === 2 && group.hunks[0].type === "delete" && group.hunks[1].type === "add"
+   const first = rewrite ? group.hunks[1] : group.hunks[0]
    switch (first.type) {
      case "add": {
 @@ -67,7 +72,7 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
@@ -1312,15 +1313,6 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
                editedFiles.push(edited)
              }
            }
-@@ -442,6 +457,8 @@ export const ApplyPatchTool = Tool.define(
-       const diagMetadata: Record<string, LSPClient.Diagnostic[]> = {}
- 
-       // [local-smark] 逐文件计算增量诊断，只显示本次 patch 新引入的错误
-+      // 基线在 commit 前采集（beforeIssues）：新增错误必须以 patch 前状态为参照，
-+      // 与 after 混采会把既有错误误报为本次引入，反向则漏报真实回归。
-       for (const change of fileChanges) {
-         if (change.type === "delete") continue
-         const target = change.movePath ?? change.filePath
 @@ -478,11 +495,52 @@ export const ApplyPatchTool = Tool.define(
          }
        }
@@ -1374,7 +1366,7 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
 -          files,
 +          diff: resultDiff,
 +          files: resultFiles,
-           // [local-smark] metadata.diagnostics 存新错误数组 + diagnosticSummary 聚合摘要
+           // 未连接不能报告clean；保留差分数据供历史显示，不将空结果当验证成功。
            diagnostics: diagMetadata,
            // summary 缺失时 TUI 不显示 clean，避免与 unavailable output 冲突
 
@@ -1390,15 +1382,15 @@ index 9a927631f661a386eb486b4776bab92a0fb35370..eac1e3522dfeb562e711f99311ee5d5b
 +- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.
 +- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.
  - A failed update reports a closest file candidate only when one location is reliably better than the alternatives; otherwise read the file again.
-diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/tool/edit-apply.ts
---- a/packages/opencode/src/tool/edit-apply.ts
-+++ b/packages/opencode/src/tool/edit-apply.ts
-@@ -1,2 +1,4 @@
- import { normalizeForMatch } from "@opencode-ai/core/util/normalize-for-match"
- export { normalizeForMatch } from "@opencode-ai/core/util/normalize-for-match"
-+import { formatAmbiguityHint, uniqueExtensionHint } from "@opencode-ai/core/patch-match"
-+export { AMBIGUITY_MAX_CANDIDATES, formatAmbiguityHint, uniqueExtensionHint } from "@opencode-ai/core/patch-match"
-@@ -169,6 +171,55 @@ export function applyReplacementsPreservingUnchangedLines(
+diff --git a/packages/core/src/tool/edit-apply.ts b/packages/core/src/tool/edit-apply.ts
+--- a/packages/core/src/tool/edit-apply.ts
++++ b/packages/core/src/tool/edit-apply.ts
+@@ -3,2 +3,4 @@
+ import { normalizeForMatch } from "../util/normalize-for-match"
+ export { normalizeForMatch } from "../util/normalize-for-match"
++import { formatAmbiguityHint, uniqueExtensionHint } from "../patch-match"
++export { AMBIGUITY_MAX_CANDIDATES, formatAmbiguityHint, uniqueExtensionHint } from "../patch-match"
+@@ -156,6 +158,55 @@ export function applyReplacementsPreservingUnchangedLines(
    return result
  }
  
@@ -1454,7 +1446,7 @@ diff --git a/packages/opencode/src/tool/edit-apply.ts b/packages/opencode/src/to
  // progressive locate：先字面 exact，失败才进封闭 normalize；不使用打分/closest 成功。
  export function findMatch(content: string, oldString: string) {
    const exactIndex = content.indexOf(oldString)
-@@ -454,12 +600,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
+@@ -441,12 +492,11 @@ export function applyEdits(content: string, edits: EditReplacement[], path = "fi
        : exactLiteralCount(replacementBase, edit.oldString)
      if (occurrences > 1 && edit.replaceAll !== true) {
        // #521：歧义失败同样携带 editIndex；唯一性证据属于当前 edit，不能借邻近 edit 的定位解释。
@@ -1483,31 +1475,23 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
  import DESCRIPTION from "./edit.txt"
  import { FileSystem } from "@opencode-ai/core/filesystem"
  import { Watcher } from "@opencode-ai/core/filesystem/watcher"
-@@ -18,6 +18,9 @@ import * as Bom from "@/util/bom"
+@@ -17,5 +17,9 @@ import * as Bom from "@/util/bom"
  import { convertToLineEnding, detectLineEnding, normalizeLineEndings } from "@/util/line-ending"
- import { closestWindow } from "@/patch/match"
- // #514：edit 文本替换的唯一语义所有者迁移到 edit-apply（单条与多条 edits 共用同一主路径）
+ import { closestMatch } from "@opencode-ai/core/tool/edit-excerpt"
 +import { canonicalReadPath, visibleReadMeta } from "./read"
-+import { mergeRanges } from "@/util/range"
++import { formatMismatchHistory, type FileTouchHistory } from "@opencode-ai/core/tool/edit-feedback"
++export { formatStalenessNote, type FileTouchHistory } from "@opencode-ai/core/tool/edit-feedback"
 +import type { MessageV2 } from "../session/message-v2"
- import { applyEdits, EditApplyError, replace as applyExactReplace, type EditReplacement } from "./edit-apply"
+ import { EditApply } from "@opencode-ai/core/tool/edit-apply"
  // #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
  import * as Mutation from "./file-mutation-coordinator"
-@@ -92,6 +95,101 @@ export function prepareEditArguments(input: unknown): unknown {
-   return args
+@@ -54,6 +58,73 @@ export function prepareEditArguments(input: unknown): unknown {
+   return EditApply.prepareEditArguments(input)
  }
  
 +// 文件触碰历史（INV-04/05/09 的共享判定源）：edit 与 apply_patch 的失败诊断必须
 +// 消费同一份扫描结果，禁止两个工具各自实现导致判定漂移。只扫描 completed 工具 part；
 +// 时间戳取 state.time.end（completed 时刻），不取 start。
-+export type FileTouchHistory = {
-+  lastReadEnd: number
-+  lastWriteEnd: number
-+  lastWriteTool: string
-+  readRanges: Array<{ start: number; end: number }>
-+  sameNameRead?: string
-+}
-+
 +export function scanFileTouchHistory(messages: MessageV2.WithParts[], filePath: string): FileTouchHistory {
 +  // 与门禁同一身份规则（execute 内 resolveForCompare）：win32 大小写不敏感。
 +  const resolveForCompare = (p: string) => {
@@ -1568,31 +1552,11 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
 +  return history
 +}
 +
-+// 时效事实句（INV-04）：只陈述「最后写入晚于最后读取」的先后事实并指向作用后结果，
-+// 不诱导 re-read（用户决策）。apply_patch 与 edit 共用同一文案。
-+export function formatStalenessNote(history: FileTouchHistory) {
-+  // lastWriteEnd<=0 表示会话内无自写；写入不晚于读取时磁盘内容仍是模型可见真值，
-+  // 两种情形都不附时效句——事实句只在「不可见写入」真实发生时出现。
-+  if (history.lastWriteEnd <= 0 || history.lastWriteEnd <= history.lastReadEnd) return ""
-+  return history.lastReadEnd > 0
-+    ? `\n\nThis file was modified by your own ${history.lastWriteTool} after your last read. Use the result returned by that call (its diff or formatted-changes section) as the current content.`
-+    : `\n\nThis file was last modified by your own ${history.lastWriteTool} in this session and has not been read since.`
-+}
-+
 +function mismatchHistoryNotes(messages: MessageV2.WithParts[], filePath: string) {
-+  const history = scanFileTouchHistory(messages, filePath)
-+  let notes = formatStalenessNote(history)
-+  if (history.readRanges.length > 0) {
-+    const merged = mergeRanges(history.readRanges)
-+    notes += `\n\nLines of this file you have read in this session: ${merged.map((range) => `${range.start}-${range.end}`).join(", ")}.`
-+  }
-+  if (history.sameNameRead) {
-+    notes += `\n\nYou previously read a different file with the same name: ${history.sameNameRead}.`
-+  }
-+  return notes
++  return formatMismatchHistory(scanFileTouchHistory(messages, filePath))
 +}
 +
- function isCreate(edits: EditReplacement[]) {
+ function isCreate(edits: EditApply.EditReplacement[]) {
    return edits.length === 1 && edits[0].oldString === ""
  }
 @@ -289,7 +387,8 @@ export const EditTool = Tool.define(
@@ -1663,9 +1627,9 @@ index 89d945cfefb1f8c6b96c057c51cc06408406fae7..174de35da0ec76dfd45f713fa8143ba9
 diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-diff.ts
 --- a/packages/core/src/tool/file-diff.ts
 +++ b/packages/core/src/tool/file-diff.ts
-@@ -19,6 +19,21 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
- 
- export type RenderedFileDiff = { patch: string; additions: number; deletions: number }
+@@ -26,6 +26,21 @@ export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
+     : patch
+ }
  
 +// 三工具共用连续前缀裁剪：长行放不下立即截止，不能跳过它后再显示短行而制造中间空洞。
 +// UTF-8预算按实际保留前缀计算；omitted是全部未显示行，不只计算超长行。
@@ -1685,7 +1649,7 @@ diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-d
  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
  
  function isBinaryText(text: string) {
-@@ -81,7 +96,34 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
+@@ -88,7 +103,34 @@ function rewriteMarker(filePath: string, oldMid: string[], newMid: string[], old
    }
  }
  
@@ -1732,21 +1696,13 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -233,7 +233,9 @@ function fileSizeOf(stat: { size: unknown }) {
+@@ -141,1 +141,3 @@
+ import { type ReadRangeMeta, canonicalReadPath, escapeXmlText, escapeXmlAttr, formatModified, isReadRangeMeta, findReadStub, findOverlapNote, renderReadOutput, renderReadStub, computeUnreadRanges } from "@opencode-ai/core/tool/read-presentation"
++// 导出既有共享身份规则，失败反馈不能重新定义Windows路径规范化。
++export { canonicalReadPath } from "@opencode-ai/core/tool/read-presentation"
+@@ -155,16 +157,32 @@ function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
  
- // #142：Windows 规范化后小写，保证同路径可见集合
- // #142：路径规范化键
--function canonicalReadPath(filepath: string) {
-+// canonicalPath 协议与可见读取收集是 read metadata 的唯一权威判定；edit 失败诊断
-+// （INV-04/05/09）复用同一判定，禁止调用方另写路径规范化导致两侧漂移。
-+export function canonicalReadPath(filepath: string) {
-   return process.platform === "win32" ? FSUtil.normalizePath(filepath).toLowerCase() : filepath
- }
- 
-@@ -248,17 +250,33 @@ function isReadRangeMeta(input: unknown): input is ReadRangeMeta {
- 
- // #142：从会话历史收集同文件、未 stub 的可见读取
- // #142：扫描 assistant 已完成 read
+ // 可见性仍取自本次会话实际历史，不能以路径缓存代替正文证明。
 +// 「内容仍在模型上下文中可见」的 part 级判定是本模块的单一协议：completed、
 +// 未 compacted、非 stub、metadata.read 合法。collectVisibleReads 与 edit 失败诊断
 +// （INV-04/05）都必须经此判定，复制条件会让两侧对同一历史给出不同答案。
@@ -1978,7 +1934,7 @@ diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode
 +                      fp: "fp",
 +                      start: 1,
 +                      end: 1,
-+                      total: 1,
++                      total: 1, totalExact: true,
 +                      returned: 1,
 +                      stub: false,
 +                    },
@@ -2161,7 +2117,7 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
 +              fp: "fp",
 +              start: readRange.start,
 +              end: readRange.end,
-+              total: readRange.end,
++              total: readRange.end, totalExact: true,
 +              returned: readRange.end - readRange.start + 1,
 +              stub: false,
 +            },
@@ -2398,6 +2354,260 @@ diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/t
        Effect.gen(function* () {
          const test = yield* TestInstance
 
+diff --git a/packages/core/src/tool/edit-feedback.ts b/packages/core/src/tool/edit-feedback.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/tool/edit-feedback.ts
+@@ -0,0 +1,85 @@
++export * as EditFeedback from "./edit-feedback"
++
++import path from "path"
++import { DateTime } from "effect"
++import type { SessionMessage } from "../session/message"
++import { ReadPresentation } from "./read-presentation"
++import { mergeRanges } from "../util/range"
++
++export type FileTouchHistory = {
++  lastReadEnd: number
++  lastWriteEnd: number
++  lastWriteTool: string
++  readRanges: Array<{ start: number; end: number }>
++  sameNameRead?: string
++}
++
++// Native仅适配正式历史形状；两代时效与区间文案继续由下方同一纯格式器持有。
++export function scanFileTouchHistory(messages: readonly SessionMessage.Message[], filePath: string, directory: string): FileTouchHistory {
++  const canonical = (value: string) => ReadPresentation.canonicalReadPath(path.resolve(directory, value))
++  const target = canonical(filePath)
++  const targetName = path.basename(filePath).toLowerCase()
++  const history: FileTouchHistory = { lastReadEnd: -1, lastWriteEnd: -1, lastWriteTool: "", readRanges: [] }
++  for (const message of messages) {
++    if (message.type !== "assistant") continue
++    for (const part of message.content) {
++      if (part.type !== "tool" || part.state.status !== "completed" || part.provider?.executed || part.time.completed === undefined) continue
++      const end = DateTime.toEpochMillis(part.time.completed)
++      if (part.name === "read") {
++        const output = part.state.structured
++        const meta = output.read
++        // 与实际模型投影相同，pruned/stub、媒体或通用裁切结果不能冒充完整可见读取。
++        if (part.time.pruned !== undefined || !ReadPresentation.isReadRangeMeta(meta) || meta.stub || meta.returned === 0 && meta.size > 0) continue
++        if (typeof output.content !== "string" || output.encoding !== "utf8" && output.type !== "text-page") continue
++        if (part.state.outputPaths?.length || part.state.attachments?.length || part.state.content.some(item => item.type !== "text")) continue
++        const body = ReadPresentation.renderNativeRead({ ...output, content: output.content, read: meta })
++        if (part.state.content.length > 0 && !part.state.content.some(item => item.type === "text" && item.text === body)) continue
++        if (meta.canonicalPath === target) {
++          history.readRanges.push({ start: meta.start, end: meta.end })
++          history.lastReadEnd = Math.max(history.lastReadEnd, end)
++        } else if (path.basename(meta.path).toLowerCase() === targetName) history.sameNameRead = meta.path
++        continue
++      }
++      // edit/write沿提交路径识别；完成时钟取max，回放排序不能覆盖更晚事实。
++      if (part.name === "edit" || part.name === "write") {
++        if (typeof part.state.input.path === "string" && canonical(part.state.input.path) === target && end > history.lastWriteEnd) {
++          history.lastWriteEnd = end
++          history.lastWriteTool = part.name
++        }
++        continue
++      }
++      if (part.name !== "apply_patch" || !Array.isArray(part.state.structured.applied)) continue
++      const applied: unknown[] = part.state.structured.applied
++      // 只认真实成功回执的target，不解析请求patchText推断副作用或漏掉Move两端。
++      const touched = applied.some(item =>
++        typeof item === "object" && item !== null && "target" in item && typeof item.target === "string" && canonical(item.target) === target,
++      )
++      if (touched && end > history.lastWriteEnd) {
++        history.lastWriteEnd = end
++        history.lastWriteTool = part.name
++      }
++    }
++  }
++  return history
++}
++
++// 原话只陈述自写与可见读取的先后，不增加re-read要求或改变工具准入。
++export function formatStalenessNote(history: FileTouchHistory) {
++  if (history.lastWriteEnd <= 0 || history.lastWriteEnd <= history.lastReadEnd) return ""
++  return history.lastReadEnd > 0
++    ? `\n\nThis file was modified by your own ${history.lastWriteTool} after your last read. Use the result returned by that call (its diff or formatted-changes section) as the current content.`
++    : `\n\nThis file was last modified by your own ${history.lastWriteTool} in this session and has not been read since.`
++}
++
++// 仅合并实际可见区间；同名异路径保持明确身份，不把近邻文件当成目标已读。
++export function formatMismatchHistory(history: FileTouchHistory) {
++  let notes = formatStalenessNote(history)
++  if (history.readRanges.length > 0) {
++    const merged = mergeRanges(history.readRanges)
++    notes += `\n\nLines of this file you have read in this session: ${merged.map(range => `${range.start}-${range.end}`).join(", ")}.`
++  }
++  if (history.sameNameRead) {
++    notes += `\n\nYou previously read a different file with the same name: ${history.sameNameRead}.`
++  }
++  return notes
++}
+diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
+--- a/packages/core/src/tool/edit.ts
++++ b/packages/core/src/tool/edit.ts
+@@ -24,2 +24,3 @@
+ import { EditApply } from "./edit-apply"
++import { scanFileTouchHistory, formatMismatchHistory } from "./edit-feedback"
+ import { Tool } from "./tool"
+@@ -126,1 +127,1 @@
+-              "- You must use your Read tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.",
++              "- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. Bash output does not count: it may be compressed or transformed, so it cannot serve as an exact editing basis.",
+@@ -132,3 +133,4 @@
+               "- Matching tries exact unique literal first, then a conservative normalized form (trailing line whitespace and common unicode quote/dash/space variants). Uniqueness and replaceAll both count under that same normalized-aware domain (e.g. ASCII hyphen and en-dash siblings count as multiples).",
++              "- ALWAYS transcribe `oldString` from your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct it from an older read alone.",
+               "- Indent/tab differences and escape artifacts still fail; re-read and copy exact text.",
+-              "- The edit will FAIL if oldString is found multiple times without replaceAll. Provide more surrounding context to make it unique or set replaceAll on that edit item.",
++              "- The edit will FAIL if `oldString` is found multiple times without `replaceAll`. Provide more surrounding context (more than 3 lines) to make it unique or set `replaceAll` on that edit item.",
+@@ -182,3 +184,5 @@
+                 const filePath = path.resolve(location.directory, input.path)
+-                const hasTouched = (yield* unableToEdit(sessions.context(context.sessionID))).some(message =>
++                // 复用同一实际可见历史供失败反馈，不新增路径缓存或第二次历史读取。
++                const history = yield* unableToEdit(sessions.context(context.sessionID))
++                const hasTouched = history.some(message =>
+                   message.type === "assistant" && message.content.some(part => {
+@@ -239,4 +243,5 @@
+                     const closest = closestMatch(source.text, convertToLineEnding(probe.oldString, ending))
+                     return new ToolFailure({
+-                      message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text."),
++                      message: message + (closest ? `\n\nClosest match at line ${closest.line}:\n${closest.excerpt}` : "\n\nNo reliable nearby candidate was found. Read the file and retry with exact text.") +
++                        formatMismatchHistory(scanFileTouchHistory(history, target.canonical, location.directory)),
+                     })
+diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
+--- a/packages/core/src/tool/apply-patch.ts
++++ b/packages/core/src/tool/apply-patch.ts
+@@ -17,1 +17,4 @@
+ import { normalizeLineEndings } from "../util/line-ending"
++import { Location } from "../location"
++import { SessionStore } from "../session/store"
++import { scanFileTouchHistory, formatStalenessNote } from "./edit-feedback"
+@@ -78,1 +81,3 @@
+     const format = yield* Format.Service
++    const sessions = yield* SessionStore.Service
++    const location = yield* Location.Service
+@@ -87,3 +92,6 @@
+-            description:
+-              "Apply one patch containing add, update, delete, and move file operations. Create a new file only when the user explicitly requires it. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
++            description: [
++              "Apply one patch containing add, update, delete, and move file operations. Create a new file only when the user explicitly requires it. Add File replaces an existing file; Delete File followed by Add File at the same path rewrites it. Use *** Move to: after Update File to rename while applying changes. Update chunks for one canonical file locate against one original snapshot: complete exact lines share uniqueness checks with PI-normalized lines, then unique literal or reversible PI-normalized substrings preserve surrounding text. Ambiguous or overlapping edits fail; nearby candidates are diagnostic only. All source and destination targets are resolved and approved before contents are read. Distinct file operations apply sequentially; earlier operations remain applied if a later commit fails. Atomic rollback is not supported.",
++              "- A substring update fails when the complete old block occurs zero or multiple times in the eligible range. Add more context (more than 3 lines of surrounding context) instead of relying on whitespace, indentation, Unicode, or fuzzy matching.",
++              "- Base your old lines on your latest read of the file as adjusted by the diffs returned in your own subsequent edit/apply_patch/write results. Never reconstruct them from an older read alone.",
++            ].join("\n"),
+             input: Input,
+@@ -179,2 +187,4 @@
+                 // 授权仍先于读盘；预备失败只排除对应文件，不丢弃其他已验证操作。
++                // 读取本Session同一正式历史，失败文件与Edit共享时效事实格式。
++                const history = yield* sessions.context(context.sessionID)
+                 const errors: string[] = []
+@@ -231,4 +241,4 @@
+                     const index = prepared.findIndex(change => change.target.canonical === target.canonical)
+                     if (index !== -1) prepared.splice(index, 1)
+-                    errors.push(error instanceof ToolFailure ? error.message : fail(hunk.path).message)
++                    errors.push((error instanceof ToolFailure ? error.message : fail(hunk.path).message) + formatStalenessNote(scanFileTouchHistory(history, target.canonical, location.directory)))
+                     return Effect.void
+@@ -305,1 +315,1 @@
+-  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node],
++  deps: [ToolRegistry.node, LocationMutation.node, FileMutation.node, FSUtil.node, PermissionV2.node, Format.node, Location.node, SessionStore.node],
+diff --git a/packages/core/test/tool-apply-patch.test.ts b/packages/core/test/tool-apply-patch.test.ts
+--- a/packages/core/test/tool-apply-patch.test.ts
++++ b/packages/core/test/tool-apply-patch.test.ts
+@@ -14,1 +14,3 @@
+ import { SessionV2 } from "@opencode-ai/core/session"
++import { SessionStore } from "@opencode-ai/core/session/store"
++import type { SessionMessage } from "@opencode-ai/core/session/message"
+@@ -22,1 +24,1 @@
+-import { toolIdentity, executeTool, settleTool, toolDefinitions } from "./lib/tool"
++import { toolIdentity, executeTool, settleTool, toolDefinitions, toolHistory } from "./lib/tool"
+@@ -93,1 +95,1 @@
+-const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>) => {
++const withTool = <A, E, R>(directory: string, body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>, history: SessionMessage.Message[] = []) => {
+@@ -115,2 +117,4 @@
+           [PermissionV2.node, permission],
++          // 与Edit相同，仅隔离调用方提供的可见历史；真实解析/授权/提交/结算保持。
++          [SessionStore.node, Layer.mock(SessionStore.Service, { context: () => Effect.succeed(history) })],
+           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+@@ -406,6 +410,7 @@
+   it.live("applies valid files while reporting a failed later update", () =>
+     Effect.acquireUseRelease(
+       Effect.promise(() => tmpdir()),
+       (tmp) => {
+         reset()
++        const history: SessionMessage.Message[] = []
+         return withTool(tmp.path, (registry) =>
+@@ -426,4 +431,8 @@
+             yield* Effect.promise(() => fs.writeFile(target, persisted))
++            history.push(...toolHistory("retry.txt", "write"))
+             const failed = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: retry.txt\n@@\n-alpha\n+ALPHA\n@@\n-const after = good(1)\n+done\n*** End Patch"))
+-            expect(failed).toMatchObject({ type: "error", value: expect.stringContaining('Closest match at line 2:\nline 2 actual: "const after = good()"') })
++            expect(failed.type).toBe("error")
++            if (failed.type !== "error") throw new Error("Expected failed patch")
++            expect(failed.value).toContain('Closest match at line 2:\nline 2 actual: "const after = good()"')
++            expect(failed.value).toContain("last modified by your own write in this session and has not been read since")
+             // 真实 leaf 的模型输出也必须去重，而非只在共享 helper 单测中修正文案。
+@@ -433,4 +440,5 @@
+             expect(repeated.type).toBe("error")
+             expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(persisted)
+           }),
++          history,
+         )
+diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
+--- a/packages/core/test/tool-edit.test.ts
++++ b/packages/core/test/tool-edit.test.ts
+@@ -16,2 +16,4 @@
+ import { SessionStore } from "@opencode-ai/core/session/store"
++import { SessionMessage } from "@opencode-ai/core/session/message"
++import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
+ import { ToolRegistry } from "@opencode-ai/core/tool/registry"
+@@ -277,3 +279,48 @@
+           expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(example.before)
+         }
++        // 在同一真实leaf验证Native历史适配；只替换已存在的SessionStore历史出口。
++        const page = (filePath: string, start: number, end: number, completed = 2) => {
++          const output = { type: "text-page", content: Array.from({ length: end - start + 1 }, (_, i) => `line ${start + i}`).join("\n"),
++            read: { type: "file" as const, path: filePath, canonicalPath: ReadPresentation.canonicalReadPath(filePath), size: 4096,
++              modified: "", modifiedMs: 1, fp: "fixture", start, end, total: 600, totalExact: true, returned: end - start + 1, stub: false } }
++          return { type: "tool", name: "read", id: `read-${start}-${end}-${completed}`, time: { created: 0, completed },
++            state: { status: "completed", input: { path: filePath }, structured: output,
++              content: [{ type: "text", text: ReadPresentation.renderNativeRead(output) }] } }
++        }
++        const read = page(target, 120, 260)
++        const write = { type: "tool", name: "edit", id: "edited", time: { created: 3, completed: 4 },
++          state: { status: "completed", input: { path: "candidate.txt" }, structured: {}, content: [] } }
++        const messages = (content: unknown[]) => [Schema.decodeUnknownSync(SessionMessage.Assistant)({
++          id: "msg_feedback", type: "assistant", agent: "build", model: { id: "test", providerID: "test" },
++          time: { created: 0, completed: 5 }, content,
++        })]
++        for (const scenario of [
++          { history: messages([read, page(target, 250, 400), page(path.join(tmp.path, "other", "candidate.txt"), 1, 1), write]),
++            shown: ["modified by your own edit after your last read", "Use the result returned by that call", "120-400", "different file with the same name"], absent: [] },
++          // pruned、stub和通用裁切分别失去正文证明；仍保留较晚自写的真实事实。
++          { history: messages([{ ...read, time: { ...read.time, pruned: 3 } }, write]),
++            shown: ["has not been read since"], absent: ["120-260"] },
++          { history: messages([{ ...read, state: { ...read.state, structured: { ...read.state.structured,
++              read: { ...read.state.structured.read, stub: true } } } }, write]),
++            shown: ["has not been read since"], absent: ["120-260"] },
++          { history: messages([{ ...read, state: { ...read.state, content: [{ type: "text", text: "bounded output" }] } }, write]),
++            shown: ["has not been read since"], absent: ["120-260"] },
++          { history: messages([page(target, 120, 260, 5), write]), shown: ["120-260"], absent: ["modified by your own"] },
++          // Move后的正式applied目标仍属于自写，不从提交patch猜测文件列表。
++          { history: messages([read, { ...write, name: "apply_patch", state: { ...write.state, input: { patchText: "not parsed" },
++              structured: { applied: [{ type: "update", resource: "candidate.txt", target }] } } }]),
++            shown: ["modified by your own apply_patch after your last read"], absent: [] },
++        ]) {
++          reset()
++          const before = "line\n".repeat(600)
++          yield* Effect.promise(() => fs.writeFile(target, before))
++          const result = yield* withTool(tmp.path,
++            registry => executeTool(registry, call({ path: "candidate.txt", edits: [{ oldString: "not present anywhere", newString: "replacement" }] })), scenario.history)
++          expect(result.type).toBe("error")
++          if (result.type !== "error") throw new Error("Expected failed edit")
++          for (const shown of scenario.shown) expect(result.value).toContain(shown)
++          for (const absent of scenario.absent) expect(result.value).not.toContain(absent)
++          expect(writes).toEqual([])
++          expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe(before)
++        }
+       }),
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts

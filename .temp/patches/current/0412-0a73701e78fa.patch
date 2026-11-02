@@ -319,7 +319,7 @@ index 0000000000000000000000000000000000000000..df8f941a3239b6071d546ffe28e63fed
 diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src/session/message-v2.ts
 --- a/packages/opencode/src/session/message-v2.ts
 +++ b/packages/opencode/src/session/message-v2.ts
-@@ -1,6 +1,10 @@
+@@ -1,7 +1,11 @@
  import { SessionID, MessageID } from "./schema"
  import { CompactionFileEvidence } from "./file-evidence"
  import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -327,14 +327,15 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 +// [local-smark] 测试与 prompt.ts 通过 MessageV2 命名空间引用 WithParts/Part；
 +// 显式 re-export 让命名空间自导出携带这两个类型（SessionV1 为唯一来源）
 +export type { WithParts, Part, User, Assistant } from "@opencode-ai/core/v1/session"
+ import { SessionMemento } from "@opencode-ai/core/session/compaction-memento"
  import { ProviderV2 } from "@opencode-ai/core/provider"
  import {
    APIError,
 @@ -29,6 +33,6 @@ import { iife } from "@/util/iife"
  import { errorMessage } from "@/util/error"
  import { isMedia } from "@/util/media"
--import { formatCompactionClearedNotice } from "@/util/output-notice"
-+import { formatCompactionClearedNotice, formatExecutionNotice } from "@/util/output-notice"
+-import { formatCompactionClearedNotice, truncateForCompaction } from "@/util/output-notice"
++import { formatCompactionClearedNotice, formatExecutionNotice, truncateForCompaction } from "@/util/output-notice"
  import type { SystemError } from "bun"
  import type { Provider } from "@/provider/provider"
  import { Effect, Schema } from "effect"
@@ -434,10 +435,79 @@ diff --git a/packages/opencode/src/session/processor.ts b/packages/opencode/src/
 diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
 --- a/packages/opencode/src/session/prompt.ts
 +++ b/packages/opencode/src/session/prompt.ts
+@@ -47,1 +47,1 @@
+-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types, Semaphore } from "effect"
++import { Cause, Deferred, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 @@ -66 +66 @@
 -import { formatExecutionNotice } from "@/util/output-notice"
 +import { formatExecutionNotice, formatLongExecutionNotice } from "@/util/output-notice"
-@@ -339,6 +339,8 @@ const layer = Layer.effect(
+@@ -277,2 +277,2 @@
+-    // #173：同 session 并发 cancel 串行，避免双写终态竞态
+-    const cancelLocks = new Map<SessionID, Semaphore.Semaphore>()
++    // 重叠取消共享同一Exit，不能排队后重新读取replacement runner。
++    const cancelFlights = new Map<SessionID, Deferred.Deferred<Exit.Exit<void>>>()
+@@ -289,27 +289,34 @@
+     // #216：复用取消owner递归收尾子会话，保留冻结ID、runner等待与原子结算順序。
+-    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+-      // #173：每 session 一把信号量，合并并发 cancel
+-      let lock = cancelLocks.get(sessionID)
+-      if (!lock) {
+-        // #173：lazy 创建，空闲 session 不占信号量
+-        lock = Semaphore.makeUnsafe(1)
+-        cancelLocks.set(sessionID, lock)
+-      }
+-      // #173：排队后续 cancel，不丢弃第二次请求
+-      yield* lock.withPermits(1)(
+-        Effect.gen(function* () {
+-          yield* Effect.logInfo("cancel", { "session.id": sessionID })
+-          // 冻结 ID 在同会话锁内完成，不能在 idle 发布后重新扫描新运行的消息。
+-          // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
+-          const children = yield* sessions.children(sessionID)
+-          const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
+-            .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
+-            .map((msg) => msg.info.id)
+-          yield* state.cancel(sessionID)
+-          yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+-            discard: true,
+-          })
+-          yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
+-        }),
+-      )
+-    })
++    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")((sessionID: SessionID) =>
++      Effect.uninterruptibleMask((restore) => {
++        const inFlight = cancelFlights.get(sessionID)
++        if (inFlight) return restore(Deferred.await(inFlight).pipe(Effect.flatMap((exit) => exit)))
++        // 同步分配与登记之间不切让；body和join仍可中断，释放由onExit负责。
++        const flight = Deferred.makeUnsafe<Exit.Exit<void>>()
++        cancelFlights.set(sessionID, flight)
++        return restore(
++          Effect.gen(function* () {
++            yield* Effect.logInfo("cancel", { "session.id": sessionID })
++            // 冻结一次旧ID，idle后不能再扫描replacement消息。
++            // #216：等待runner前固定已有子会话列表，父取消后再沿各自owner终态化。
++            const children = yield* sessions.children(sessionID)
++            const pending = (yield* sessions.messages({ sessionID }).pipe(Effect.catch(() => Effect.succeed([]))))
++              .filter((msg) => msg.info.role === "assistant" && !msg.info.time.completed)
++              .map((msg) => msg.info.id)
++            yield* state.cancel(sessionID)
++            yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
++              discard: true,
++            })
++            yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
++          }),
++        ).pipe(
++          Effect.onExit((exit) =>
++            Effect.gen(function* () {
++              // 成功、缺陷或中断都释放flight，并让joiner重放同一结果。
++              cancelFlights.delete(sessionID)
++              yield* Deferred.succeed(flight, exit)
++            }),
++          ),
++        )
++      }),
++    )
+@@ -339,6 +346,8 @@ const layer = Layer.effect(
            if (part.type !== "tool") return Effect.void
            if (part.state.status !== "pending" && part.state.status !== "running") return Effect.void
 +          // 修复只记录本次取消的真实起点，旧记录不追溯伪造耗时。
@@ -502,7 +572,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
  import { ShellID } from "./shell/id"
  import { BashDiagnosticCollector, bashCompressionMetadata, compressVisibleOutput, createTerminalDisplay, normalizePowerShellOutput, renderDiagnosticAppendix } from "@opencode-ai/core/tool/bash-compress"
  // #282：超时/中止/截断改用统一 notice 信封
--import { formatExecutionNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
+-import { formatExecutionNotice, formatExitNotice, formatOutputTruncatedNotice, outputStats } from "@/util/output-notice"
 +import { formatOutputTruncatedNotice, formatShellExecutionNotice, outputStats } from "@/util/output-notice"
  
  import { Truncate } from "./truncate"
@@ -523,21 +593,10 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
        const raw = list.map((item) => item.text).join("")
        // 仅模型可见窗口正常化 CLIXML，完整归档仍保留原始输出。
        const normalized = process.platform === "win32" && Shell.ps(input.shell) ? normalizePowerShellOutput(raw) : raw
-@@ -794,19 +789,15 @@ export const ShellTool = Tool.define(
+@@ -743,8 +738,15 @@ export const ShellTool = Tool.define(
        // 退出 notice 独立描述进程结束，隐藏诊断不能抑制失败退出码。
        // 这里刻意不回放命令文本、环境变量或原始 metadata，保持模型可见信息的最小安全边界。
--      const exitNotice =
--        code === null
--          ? undefined
--          : emptyOutput
--            ? formatExecutionNotice({
--                severity: code === 0 ? "info" : "error",
--                reason: "exit",
--                exit_code: code,
--              })
--            : code !== 0
--              ? formatExecutionNotice({ severity: "error", reason: "exit", exit_code: code })
--              : undefined
+-      const exitNotice = formatExitNotice(code, emptyOutput)
 -      if (exitNotice) meta.push(exitNotice)
 -
 -      if (meta.length > 0) {
@@ -616,45 +675,192 @@ diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/sess
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -91,7 +91,9 @@
+@@ -25 +25 @@
+-import { formatExecutionNotice } from "../util/output-notice"
++import { formatShellExecutionNotice } from "../util/output-notice"
+@@ -96,8 +96,8 @@
  const modelOutput = (output: Output) => {
    const warnings = output.warnings?.length
      ? `\n\nWarnings:\n${output.warnings.map((warning) => `- ${warning}`).join("\n")}`
      : ""
--  if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.`
+   // 终止原因已由唯一finish写入正文，状态投影不再叠加第二条同义提示。
+   if (output.timeout || output.interrupted) return [output.executionNotice, warnings.trimStart()].filter(Boolean).join("\n\n")
 -  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.`
-+  // 原生Bash已有可信durationMs，模型也需看到异常或长成功耗时；短成功正文保持原样。
-+  const elapsed = output.durationMs !== undefined && (output.timeout || output.exit !== 0 || output.durationMs >= 120_000) ? `\nElapsed: ${Math.max(0, Math.floor(output.durationMs))}ms.` : ""
-+  if (output.timeout) return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command timed out before completion.${elapsed}`
-+  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.${elapsed}`
++  return `${warnings.trimStart()}${warnings ? "\n\n" : ""}Command exited with code ${output.exit}.${output.executionNotice ? "\n\n" + output.executionNotice : ""}`
  }
+@@ -353,8 +353,11 @@
+               const normalized = process.platform === "win32" && Shell.ps(shell) ? normalizePowerShellOutput(output) : output
+               const truncated = cut || result?.outputTruncated === true
+               const outcome = interrupted ? { interrupted: true } : result ? { exit: result.exitCode } : { timeout: true }
+-              const executionNotice = result && !interrupted ? undefined : formatExecutionNotice({
+-                severity: "warning", reason: interrupted ? "user_abort" : "timeout", ...(interrupted ? {} : { timeout_ms: timeout }),
++              // 两代共用唯一outcome policy；READY和原文仍由原capture/finish保存。
++              const executionNotice = formatShellExecutionNotice({
++                aborted: interrupted, expired: !result && !interrupted,
++                exitCode: result?.exitCode ?? null, emptyOutput: text.length === 0,
++                timeoutMs: timeout, elapsedMs: durationMs,
+               })
+               const emptyTimeout = !result && !interrupted && !text ? "The process produced no output before timeout. This may indicate:\n- The command is block-buffering output (common for build tools like bun install, bundle install); consider adding --verbose or running with a larger timeout.\n- The process is waiting for interactive input; provide input or use a non-interactive flag.\n- The process is hung; check the command and environment." : undefined
+               const command = input.command.trim().toLowerCase()
+diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registry.ts
+--- a/packages/core/src/tool/registry.ts
++++ b/packages/core/src/tool/registry.ts
+@@ -4 +4 @@
+-import { Cause, Context, Effect, Layer, Scope } from "effect"
++import { Cause, Clock, Context, Effect, Layer, Scope } from "effect"
+@@ -13,3 +13,4 @@
+ import { definition, permission, settle, validateName, type AnyTool, type RegistrationError } from "./tool"
+ import { Tools } from "./tools"
+ import { makeLocationNode } from "../effect/app-node"
++import { formatExecutionNotice, formatLongExecutionNotice } from "../util/output-notice"
+@@ -53 +54 @@
+-      const startedAt = Date.now()
++      const startedAt = yield* Clock.currentTimeMillis
+@@ -80,6 +81,14 @@
+       )
+       if ("result" in pending) return pending
+-      const output = pending.output
++      // 本地/MCP成功在同一限幅前收口；Bash自己装饰，日志计时不能替代模型反馈。
++      const notice = input.call.name === "bash" ? undefined : formatLongExecutionNotice("tool", (yield* Clock.currentTimeMillis) - startedAt)
++      const output = notice
++        ? { ...pending.output, content: [
++            // 空content原本由模型JSON投影承载，追加提示之前保留同一实际结果。
++            ...(pending.output.content.length ? pending.output.content : ToolOutput.fromResultValue({ type: "text", value: pending.output.structured })!.content),
++            { type: "text" as const, text: notice },
++          ] }
++        : pending.output
+       const bounded = yield* resources.bound({ sessionID: input.sessionID, toolCallID: input.call.id, output })
+       const result = ToolOutput.toResultValue(bounded.output)
+       if (result.type === "error")
+@@ -91,9 +96,14 @@
+         Effect.onExit((exit) => Effect.gen(function* () {
+           if (exit._tag !== "Failure" || !Cause.hasInterruptsOnly(exit.cause) || !onInterrupted) return
+           const identity = { sessionID: input.sessionID, toolCallID: input.call.id }
+           const output = yield* resources.interrupted(identity)
+-          if (!output) return
++          // 新调用即使没有partial也交付取消耗时；只写Progress，后续仍Failed并传播原Cause。
++          const interrupted = input.call.name === "bash" && output ? output : {
++            ...output,
++            structured: output?.structured,
++            content: [...(output?.content ?? []), { type: "text" as const, text: formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.max(0, Math.floor((yield* Clock.currentTimeMillis) - startedAt)) }) }],
++          }
+           // 同一 bound 移交原文所有权后才能通知；存储/持久化失败不能改写成成功。
+-          const bounded = yield* resources.bound({ ...identity, output })
++          const bounded = yield* resources.bound({ ...identity, output: interrupted })
+           yield* onInterrupted(bounded)
+         })),
+@@ -102,5 +116,7 @@
+-        Effect.onExit((exit) => Effect.logInfo("tool timing", {
++        Effect.onExit((exit) => Clock.currentTimeMillis.pipe(
++          Effect.flatMap((now) => Effect.logInfo("tool timing", {
+           phase: "tool.end", ...timing,
+           status: exit._tag === "Success" && exit.value.result.type !== "error" ? "completed" : "error",
+-          durationMs: Date.now() - startedAt,
++          durationMs: now - startedAt,
+         })),
++        )),
+diff --git a/packages/core/test/session-runner-tool-registry.test.ts b/packages/core/test/session-runner-tool-registry.test.ts
+--- a/packages/core/test/session-runner-tool-registry.test.ts
++++ b/packages/core/test/session-runner-tool-registry.test.ts
+@@ -1,2 +1,4 @@
+ import { describe, expect } from "bun:test"
+ import { Tool } from "@opencode-ai/core/tool/tool"
++import { ToolOutput } from "@opencode-ai/llm"
++import { adjust } from "effect/testing/TestClock"
+@@ -436,3 +438,21 @@
+       expect(contexts).toEqual([{ sessionID, ...identity, toolCallID: "call-context" }])
++      // 用现成TestClock验证真实结算临界：纯JSON结果不能被长成功Notice替代。
++      for (const elapsed of [119999, 120000]) {
++        yield* service.register({ structured: Tool.make({
++          description: "Structured", input: Schema.Struct({}), output: Schema.Struct({ ok: Schema.Boolean }),
++          execute: () => adjust(elapsed).pipe(Effect.as({ ok: true })),
++        }) })
++        const settled = yield* settleTool(service, {
++          sessionID, ...identity, call: { type: "tool-call", id: `structured-${elapsed}`, name: "structured", input: {} },
++        })
++        expect(settled.output?.structured).toEqual({ ok: true })
++        if (elapsed < 120000) {
++          expect(settled.result).toEqual({ type: "json", value: { ok: true } })
++          continue
++        }
++        expect(settled.output?.content[0]).toEqual({ type: "text", text: '{"ok":true}' })
++        expect(settled.output?.content[1]).toEqual({ type: "text", text: '<opencode_notice type="execution" source="tool" severity="info" reason="completed" elapsed_ms="120000" />' })
++        expect(settled.result).toEqual(ToolOutput.toResultValue(settled.output!))
++      }
+     }),
+   )
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -4578,6 +4578,16 @@
+         },
+       ])
+ 
++      // 实际durable error保留唯一取消提示；无partial的新调用也不能只留下日志。
++      const interrupted = (yield* session.context(sessionID)).findLast(message => message.type === "assistant")
++      if (interrupted?.type !== "assistant") return yield* Effect.die("Expected interrupted assistant")
++      const tool = interrupted.content.find(part => part.type === "tool")
++      if (tool?.type !== "tool" || tool.state.status !== "error") return yield* Effect.die("Expected interrupted tool")
++      const content = tool.state.content?.flatMap(part => part.type === "text" ? [part.text] : []).join("\n") ?? ""
++      expect(content).toContain('reason="user_abort"')
++      expect(content).toMatch(/elapsed_ms="\d+"/)
++      expect(content.match(/type="execution"/g)).toHaveLength(1)
++
+       yield* replaySessionProjection(sessionID)
+ 
+       expect(yield* session.context(sessionID)).toMatchObject([
+@@ -4589,6 +4599,7 @@
+       response = []
+       yield* session.resume(sessionID)
+       expect(requests[0]?.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool"])
++      expect(JSON.stringify(requests[0]?.messages)).toContain("elapsed_ms")
+     }),
+   )
+ 
 diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
 --- a/packages/core/test/tool-bash.test.ts
 +++ b/packages/core/test/tool-bash.test.ts
-@@ -420,7 +420,9 @@ describe("BashTool", () => {
-               const actualStatus = second.text
+@@ -500,6 +500,8 @@ describe("BashTool", () => {
                expect(settled.output?.structured, text).toMatchObject({ exit: 7 })
                expect(text).not.toContain("\uFFFD")
 -              expect(actualStatus).toBe(status)
 +              // 仍逐字检查原授权警告与退出状态，只允许尾部增加本项耗时。
-+              expect(actualStatus.replace(/\nElapsed: \d+ms\.$/, "")).toBe(status)
-+              expect(actualStatus).toMatch(/\nElapsed: \d+ms\.$/)
++              expect(actualStatus.replace(/\n\n<opencode_notice [^\n]*\/>$/, "")).toBe(status)
++              expect(actualStatus).toMatch(/\n\n<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" elapsed_ms="\d+" \/>$/)
                for (const expected of ["桌面 大学文档 毕业设计 压缩感知", "'单引号'", '"双引号"', "中文表格", "中文错误"]) {
                  expect(text).toContain(expected)
                }
-@@ -695,7 +695,7 @@ describe("BashTool", () => {
+@@ -730,6 +732,9 @@ describe("BashTool", () => {
+         return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "false" }, "call-overflow"))).pipe(
+           Effect.andThen((settled) =>
              Effect.sync(() => {
++              const status = settled.output?.content[1]
++              expect(status?.type === "text" ? status.text : "").toMatch(/reason="exit" exit_code="7" elapsed_ms="\d+"/)
++              expect(JSON.stringify(settled.output?.content).match(/opencode_notice/g)).toHaveLength(1)
                expect(settled.output?.content[1]).toMatchObject({
                  type: "text",
--                text: expect.stringContaining("Command timed out"),
-+                text: expect.stringMatching(/Command timed out before completion\.\nElapsed: \d+ms\./),
+                 text: expect.stringContaining("Command exited with code 7"),
+@@ -801,9 +806,9 @@ describe("BashTool", () => {
+               expect(text).toContain('type="execution" source="shell" severity="warning" reason="timeout" timeout_ms="10"')
+               expect(text.match(/reason="timeout"/g)).toHaveLength(1)
+               expect(settled.output?.content[1]).toMatchObject({
+                 type: "text",
+-                text: expect.stringContaining('reason="timeout"'),
++                text: expect.stringMatching(/reason="timeout" timeout_ms="10" elapsed_ms="\d+"/),
                })
                expect(settled.output?.structured).toMatchObject({
                  timeout: true,
+                 truncated: false,
 diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src/util/output-notice.ts
 --- a/packages/opencode/src/util/output-notice.ts
 +++ b/packages/opencode/src/util/output-notice.ts
-@@ -15,15 +15,24 @@ type OutputTruncatedNotice = {
+@@ -1 +1 @@
+-export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, truncateForCompaction } from "@opencode-ai/core/util/output-notice"
++export { outputStats, formatOutputTruncatedNotice, formatExecutionNotice, formatExitNotice, formatCompactionClearedNotice, truncateForCompaction, formatLongExecutionNotice, formatShellExecutionNotice, LONG_EXECUTION_NOTICE_MS } from "@opencode-ai/core/util/output-notice"
+diff --git a/packages/core/src/util/output-notice.ts b/packages/core/src/util/output-notice.ts
+--- a/packages/core/src/util/output-notice.ts
++++ b/packages/core/src/util/output-notice.ts
+@@ -12,15 +12,24 @@ type OutputTruncatedNotice = {
  }
  
  type ExecutionNotice = {
@@ -680,8 +886,8 @@ diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src
 +
  type Notice = Record<string, string | number | undefined>
  
- // 这段文本是模型可见的截断恢复策略，而不是 UI 文案：它必须足够短，
-@@ -57,7 +66,58 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
+ // 这是模型可见的恢复原话：先grep保存文件，再read offset/limit读取局部，避免无必要整读。
+@@ -52,7 +61,58 @@ export function formatOutputTruncatedNotice(input: OutputTruncatedNotice) {
  
  // #282：timeout_ms 直接内联，模型无需再查 metadata 即可判断是否值得重试
  export function formatExecutionNotice(input: ExecutionNotice) {
@@ -740,7 +946,7 @@ diff --git a/packages/opencode/src/util/output-notice.ts b/packages/opencode/src
 +  return undefined
  }
  
- // #282：compaction 已在持久层清理旧输出；给模型一个稳定的占位语义而不是空串
+ // 退出状态与隐藏诊断互相独立，非零退出始终交付，取消仍不冒充进程退出。
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
@@ -913,6 +1119,170 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
            // 查询编码后的持久化 error，而非 callback 内存对象；raw 必须跨 schema 边界保留。
            expect(call.state.metadata?.raw).toBe('{"cmd"')
            expect(call.state.time.end).toBeDefined()
+diff --git a/packages/opencode/src/effect/bridge.ts b/packages/opencode/src/effect/bridge.ts
+--- a/packages/opencode/src/effect/bridge.ts
++++ b/packages/opencode/src/effect/bridge.ts
+@@ -5,7 +5,9 @@ import { InstanceRef, WorkspaceRef } from "./instance-ref"
+ import { attachWith } from "./run-service"
+ 
+ export interface Shape {
+-  readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>) => Promise<A>
++  // RunOptions透传现有runtime；Bash仍由自身处理协作中止及输出收尾。
++  // 非Bash的Effect与finalizer必须从引入项就收到同一AbortSignal。
++  readonly promise: <A, E, R>(effect: Effect.Effect<A, E, R>, options?: Effect.RunOptions) => Promise<A>
+   readonly fork: <A, E, R>(effect: Effect.Effect<A, E, R>) => Fiber.Fiber<A, E>
+   readonly run: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E>
+   readonly bind: <Args extends readonly unknown[], Result>(fn: (...args: Args) => Result) => (...args: Args) => Result
+@@ -61,8 +63,10 @@ export function make(): Effect.Effect<Shape> {
+       attachWith(effect.pipe(Effect.provide(ctx)) as Effect.Effect<A, E, never>, { instance, workspace })
+ 
+     return {
+-      promise: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+-        restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect))),
++      // 沿用原workspace/instance上下文；不另建执行器或取消owner。
++      // runtime负责中断，原Effect finalizer仍完成自己的资源释放。
++      promise: <A, E, R>(effect: Effect.Effect<A, E, R>, options?: Effect.RunOptions) =>
++        restoreWorkspace(workspace, () => Effect.runPromise(wrap(effect), options)),
+       fork: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+         restoreWorkspace(workspace, () => Effect.runFork(wrap(effect))),
+       run: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/session/tools.ts
+--- a/packages/opencode/src/session/tools.ts
++++ b/packages/opencode/src/session/tools.ts
+@@ -199,4 +199,6 @@
+             }
+             return output
+           }),
++          // Bash自己等待kill/drain并保留partial，不能被runtime抢先中断。
++          item.id !== ShellID.ToolID ? { signal: options.abortSignal } : undefined,
+         )
+@@ -284,6 +286,7 @@
+             if (opts.abortSignal?.aborted) {
+               yield* input.processor.completeToolCall(opts.toolCallId, output)
+             }
+             return output
+           }),
++          { signal: opts.abortSignal },
+         )
+@@ -367,6 +370,7 @@
+             if (opts.abortSignal?.aborted) {
+               yield* input.processor.completeToolCall(opts.toolCallId, output)
+             }
+             return output
+           }),
++          { signal: opts.abortSignal },
+         )
+@@ -449,6 +453,7 @@
+             if (opts.abortSignal?.aborted) {
+               yield* input.processor.completeToolCall(opts.toolCallId, output)
+             }
+             return output
+           }),
++          { signal: opts.abortSignal },
+         )
+@@ -574,4 +579,5 @@
+           return output
+         }),
++        { signal: opts.abortSignal },
+       )
+     tools[key] = item
+diff --git a/packages/core/src/session/run-coordinator.ts b/packages/core/src/session/run-coordinator.ts
+--- a/packages/core/src/session/run-coordinator.ts
++++ b/packages/core/src/session/run-coordinator.ts
+@@ -97,3 +97,5 @@
+         if (entry?.owner === undefined) return Effect.void
++        // 重叠中断只等待同一owner，不能清掉清理期间新登记的wake。
++        if (entry.stopping) return Fiber.interrupt(entry.owner)
+         entry.stopping = true
+         entry.pendingWake = false
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -238,1 +238,1 @@
+-function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service> }) {
++function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service>; database?: Layer.Layer<Database.Service>; runState?: Layer.Layer<SessionRunState.Service> }) {
+@@ -245,2 +245,3 @@
+     ...(input?.plugin ? [[Plugin.node, input.plugin] as const] : []),
++    ...(input?.runState ? [[SessionRunState.node, input.runState] as const] : []),
+   ] as const
+@@ -4410,1 +4411,77 @@
+ )
++
++// 在真实外层cancel与RunState间固定窗口，不依赖task忽略中断或2秒计时巧合。
++noLLMServer.instance(
++  "overlapping cancels share single-flight and do not retarget replacement loop",
++  () =>
++    Effect.gen(function* () {
++      const state = yield* SessionRunState.Service
++      const database = yield* Database.Service
++      yield* Effect.forEach([false, true], (failing) => Effect.gen(function* () {
++        const stopped = yield* Deferred.make<void>()
++        const release = yield* Deferred.make<void>()
++        const started = yield* Deferred.make<void>()
++        const nextStarted = yield* Deferred.make<void>()
++        const finish = yield* Deferred.make<void>()
++        const failure = new Error("cancel failure")
++        let cancels = 0
++        let replacementAborted = false
++        const runState = Layer.succeed(SessionRunState.Service, { ...state,
++          cancel: (id) => Effect.gen(function* () {
++            const call = ++cancels
++            yield* state.cancel(id)
++            if (call !== 1) return
++            yield* Deferred.succeed(stopped, undefined)
++            yield* Deferred.await(release)
++            if (failing) return yield* Effect.die(failure)
++          }),
++        })
++        yield* Effect.addFinalizer(() => Effect.all([Deferred.succeed(release, undefined), Deferred.succeed(finish, undefined)], { discard: true }))
++        yield* Effect.gen(function* () {
++          const prompt = yield* SessionPrompt.Service
++          const sessions = yield* Session.Service
++          const chat = yield* sessions.create({ title: "Overlap cancel" })
++          const first = yield* seed(chat.id)
++          const old = yield* MessageV2.get({ sessionID: chat.id, messageID: first.assistant.id })
++          const original = yield* state.ensureRunning(chat.id, Effect.succeed(old), Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never))).pipe(Effect.forkChild)
++          yield* Deferred.await(started)
++          const leader = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++          yield* Deferred.await(stopped)
++          // 新运行和消息均在旧取消快照之后创建，重叠join不能重新扫描它们。
++          const replacement = yield* seed(chat.id)
++          const next = yield* MessageV2.get({ sessionID: chat.id, messageID: replacement.assistant.id })
++          const running = yield* state.ensureRunning(chat.id, Effect.succeed(next), Deferred.succeed(nextStarted, undefined).pipe(
++            Effect.andThen(Deferred.await(finish)), Effect.as(next),
++            Effect.onInterrupt(() => Effect.sync(() => { replacementAborted = true })),
++          )).pipe(Effect.forkChild)
++          yield* Deferred.await(nextStarted)
++          const joiner = yield* prompt.cancel(chat.id).pipe(Effect.forkChild)
++          yield* Effect.yieldNow
++          expect(cancels).toBe(1)
++          yield* Deferred.succeed(release, undefined)
++          const firstExit = yield* Fiber.await(leader)
++          const joinedExit = yield* Fiber.await(joiner)
++          expect(Exit.isFailure(firstExit)).toBe(failing)
++          expect(Exit.isFailure(joinedExit)).toBe(failing)
++          if (Exit.isFailure(firstExit) && Exit.isFailure(joinedExit)) {
++            expect(Cause.squash(firstExit.cause)).toBe(failure)
++            expect(Cause.squash(joinedExit.cause)).toBe(failure)
++          }
++          expect(cancels).toBe(1)
++          expect(replacementAborted).toBe(false)
++          expect(Exit.isFailure(yield* state.assertNotBusy(chat.id).pipe(Effect.exit))).toBe(true)
++          const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: next.info.id })
++          expect(stored.info.role === "assistant" && stored.info.error).toBeUndefined()
++          yield* Deferred.succeed(finish, undefined)
++          expect(Exit.isSuccess(yield* Fiber.await(running))).toBe(true)
++          yield* Fiber.await(original)
++          // 上一flight无论成功或失败都必须释放，后续显式取消仍能独立执行。
++          yield* prompt.cancel(chat.id)
++          expect(cancels).toBe(2)
++        }).pipe(Effect.provide(Layer.fresh(makePrompt({ database: Layer.succeed(Database.Service, database), runState }))))
++      }))
++    }),
++  // 单飞只依赖会话和runner，fixture无需Git初始化或本地配置写入。
++  { git: false },
++  30_000,
++)
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts

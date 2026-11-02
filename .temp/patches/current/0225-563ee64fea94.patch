@@ -74,7 +74,7 @@ diff --git a/packages/core/src/agent.ts b/packages/core/src/agent.ts
 diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.ts
 --- a/packages/core/src/plugin/agent.ts
 +++ b/packages/core/src/plugin/agent.ts
-@@ -133,27 +133,27 @@
+@@ -131,26 +131,26 @@
        // 注册归属现有 transform 的作用域，卸载或重载不留下第二份代理状态。
 -      for (const id of ["Auto", "interactive", "decide"]) {
 +      for (const id of ["auto", "interactive", "decide"]) {
@@ -90,8 +90,7 @@ diff --git a/packages/core/src/plugin/agent.ts b/packages/core/src/plugin/agent.
 +          item.description = id === "auto"
              ? "Build-like agent that routes shell commands through auto permission review."
              : "The default agent. Executes tools based on configured permissions."
-           // 使用 build 的基础系统提示；保留更早注册者提供的提示。
-           item.system ??= BUILD_SYSTEM
+           // 默认族正文由runner逐轮选择；不设置通用system遮蔽实际模型或已有显式配置。
            item.mode = "primary"
            // 配置插件随后追加全局和代理专属规则，保留用户最后覆盖的优先级。
            item.permissions.push(
@@ -133,7 +132,7 @@ diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
          "compaction",
          "decide",
          "explore",
-@@ -137,12 +137,12 @@
+@@ -137,13 +137,13 @@
        // 新增审批代理是唯一例外，既有内置代理仍沿用原来的 bash 策略。
        for (const item of agents) {
 -        if (item.id === "interactive" || item.id === "Auto") continue
@@ -147,6 +146,7 @@ diff --git a/packages/core/test/agent.test.ts b/packages/core/test/agent.test.ts
          if (!item) throw new Error(`expected registered ${id} agent`)
          expect(item).toMatchObject({ id, mode: "primary", hidden: false })
          expect(item.system).toBe((yield* agent.resolve("build"))?.system)
+         expect(item.system).toBeUndefined()
 -        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "Auto" ? "auto" : "ask")
 +        expect(PermissionV2.evaluate("bash", "git status", item.permissions).effect).toBe(id === "auto" ? "auto" : "ask")
 @@ -153,14 +153,14 @@

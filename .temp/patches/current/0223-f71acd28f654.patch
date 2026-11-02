@@ -1,3 +1,58 @@
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -96,4 +96,9 @@
+     vscode_notebook_edit: Tool.withPermission(Tool.make({ ...common, description: VscodeNotebookDescriptions.edit, input: EditInput,
+-      execute: (args, context) => ask("edit", args, context).pipe(Effect.andThen(call("/notebook/edit", args, context, 30_000))) }), "edit"),
++      // 专属权限先表达Notebook策略，再保留通用edit；两层拒绝均在发现/传输之前。
++      execute: (args, context) => ask("vscode_notebook_edit", args, context).pipe(
++        Effect.andThen(ask("edit", args, context)),
++        Effect.andThen(call("/notebook/edit", args, context, 30_000)),
++      ) }), "edit"),
+     vscode_notebook_env: Tool.make({ ...common, description: VscodeNotebookDescriptions.env, input: EnvInput,
+-      execute: (args, context) => call("/notebook/env", args, context, 120_000) }),
++      // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
++      execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -44,1 +44,2 @@
+   const permissions: PermissionV2.AssertInput[] = []
++  let deniedAction: string | undefined
+@@ -175,6 +176,12 @@
+     expect(permissions).toMatchObject([
+       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-4" } },
++      { action: "vscode_notebook_edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
+       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-5" } },
++      { action: "vscode_notebook_edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
+       { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-7" } },
++      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-8" } },
++      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-9" } },
++      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-10" } },
++      { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-11" } },
+       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
+     ])
+@@ -198,1 +205,14 @@
+-    expect(permissions).toHaveLength(4)
++    expect(permissions).toHaveLength(15)
++    // 专属edit、通用edit和env各自拒绝都必须零RPC，不能靠registry广告隐藏替代执行授权。
++    for (const action of ["vscode_notebook_edit", "edit", "vscode_notebook_env"]) {
++      deniedAction = action
++      const beforeRPC = received.length
++      const beforePermissions = permissions.length
++      const name = action === "vscode_notebook_env" ? action : "vscode_notebook_edit"
++      const input = action === "vscode_notebook_env" ? { filePath, operation: "info" } : { filePath, cellId: "#VSC-a", editType: "edit", newCode: "denied" }
++      const result = yield* invoke(name, input)
++      expect(result.result.type).toBe("error")
++      expect(received).toHaveLength(beforeRPC)
++      expect(permissions.slice(beforePermissions).map((item) => item.action)).toEqual(action === "edit" ? ["vscode_notebook_edit", "edit"] : [action])
++    }
++    deniedAction = undefined
+@@ -201,1 +221,3 @@
+-    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }) })],
++    [PermissionV2.node, Layer.mock(PermissionV2.Service, { assert: input => Effect.sync(() => { permissions.push(input); if (input.action === "edit") queued.resolve() }).pipe(
++      Effect.andThen(input.action === deniedAction ? Effect.fail(new PermissionV2.BlockedError({ rules: [] })) : Effect.void),
++    ) })],
 diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/src/plugin/vscode-bridge.ts
 index f0a84c844c..c5d9253352 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts

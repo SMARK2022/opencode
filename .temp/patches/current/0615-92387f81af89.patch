@@ -18,7 +18,7 @@ gate 误判失败（invalid source revision manifest）。
 gitlink==远端 tag commit 的 provenance 一致性，语义不变），test.yml 去掉
 --source-revision-authorized。随删不再被引用的 verifySourceRevisionAuthorization 与其测试。
 
-适配说明：目标的清单有实际build消费者，按source原意在现有构建证据owner改为catalog派生、checkout内读取父仓索引gitlink后删除清单；Nix归档源码不带Git元数据，不伪造commit身份。保留declaredSource和完整安装/native/executable证据；不存在的closure helper/flag不恢复，派生声明不冒充远端授权，consumer CI保持原步骤。
+适配说明：目标的清单有实际build消费者，按source原意在现有CI闭包与构建证据owner改为catalog派生、checkout内读取父仓索引gitlink后删除清单；Nix归档源码不带Git元数据，不伪造commit身份。保留declaredSource和完整安装/native/executable证据；不存在的独立closure脚本/flag不恢复，派生声明不冒充远端授权，consumer CI保持原步骤。
 
 diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 --- a/.github/workflows/test.yml
@@ -36,6 +36,17 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.ts
 --- a/packages/opencode/script/build.ts
 +++ b/packages/opencode/script/build.ts
+@@ -191,4 +191,4 @@
+-  const declared = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()
+-  // index身份是已选源码，声明不能用任意clean目录自证；发布commit另由远端annotated tag证明。
++  // 源码身份取父仓索引，版本及发布tag只取root catalog，不再读取手写清单。
++  // 完整annotated/peeled远端证据仍独立核对，声明不能冒充授权。
+   const gitlink = (await $`git ls-files --stage -- thirdparty/opentui`.cwd(root).quiet().text()).trim().split(/\s+/)[1]
+-  if (declared.schema !== 1 || declared.releaseTag !== tag || !/^[0-9a-f]{40}$/.test(declared.sourceGitlink) || !/^[0-9a-f]{40}$/.test(declared.releaseCommit) || gitlink !== declared.sourceGitlink) throw new Error("invalid OpenTUI source revision authorization")
++  if (!gitlink || !/^[0-9a-f]{40}$/.test(gitlink)) throw new Error("thirdparty/opentui gitlink is missing or invalid")
+@@ -202,1 +202,1 @@
+-  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== declared.releaseCommit) throw new Error(`OpenTUI ${tag} is not annotated at the authorized release commit`)
++  if (!refs.has(ref) || refs.get(`${ref}^{}`) !== gitlink) throw new Error(`OpenTUI ${tag} is not annotated at gitlink ${gitlink}`)
 @@ -221,4 +221,13 @@
 -  // 声明的源码身份与实际包/产物证据分开记录，不以 gitlink 代替安装或远端 tag 授权验证。
 -  const declaredSource = await Bun.file(new URL("./opentui-source-revision.json", import.meta.url)).json()

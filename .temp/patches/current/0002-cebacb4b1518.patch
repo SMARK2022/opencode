@@ -557,11 +557,15 @@ diff --git a/packages/core/src/image/photon.ts b/packages/core/src/image/photon.
 diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 --- a/packages/core/src/tool/read.ts
 +++ b/packages/core/src/tool/read.ts
-@@ -1,6 +1,7 @@
+@@ -1,6 +1,11 @@
  export * as ReadTool from "./read"
  
  import { ToolFailure } from "@opencode-ai/llm"
 +import path from "path"
++import { FSUtil } from "../fs-util"
++import { Location } from "../location"
++import { SessionStore } from "../session/store"
++import { SessionReadInstructions } from "../session/read-instructions"
  import { Effect, Layer, Schema } from "effect"
  import { makeLocationNode } from "../effect/app-node"
  import { FileSystem } from "../filesystem"
@@ -576,28 +580,47 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
  const LocationInput = Schema.Struct({
    path: Schema.String,
    offset: ReadToolFileSystem.PageInput.fields.offset.annotate({
-@@ -43,8 +48,18 @@
+@@ -28,1 +37,5 @@
+-const Output = Schema.Union([FileSystem.Content, ReadToolFileSystem.TextPage, ReadToolFileSystem.ListPage])
++const Output = Schema.Union([
++  Schema.Struct({ ...FileSystem.Content.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
++  Schema.Struct({ ...ReadToolFileSystem.TextPage.fields, instructions: SessionReadInstructions.Files.pipe(Schema.optional) }),
++  ReadToolFileSystem.ListPage,
++])
+@@ -36,1 +49,2 @@
+     const permission = yield* PermissionV2.Service
++    const nearby = yield* SessionReadInstructions.make
+@@ -43,8 +57,24 @@
            input: Input,
            output: Output,
            toModelOutput: ({ input, output }) => {
 -            if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime))
 -              return []
++            const instructions = "instructions" in output ? output.instructions ?? [] : []
++            const reminders = instructions.length ? [{ type: "text" as const, text: `<system-reminder>\n${instructions.map(file => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")}\n</system-reminder>` }] : []
 +            // 仅成功的源码文本触发提醒；目录与原生图片沿用既有投影。
 +            if (!("encoding" in output) || output.encoding !== "base64" || !SUPPORTED_IMAGE_MIMES.has(output.mime)) {
-+              if (!("content" in output) || !HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1)))
++              if (!("content" in output)) return []
++              const risky = HIGH_RISK_EXTENSIONS.has(path.extname(input.path).toLowerCase().slice(1))
++              if (!risky && reminders.length === 0)
 +                return []
 +              // 保留完整结构化结果的模型表示，不能只返回提醒而隐藏正文与 next。
 +              // Schema 已完成编码，此处不增加解析器或改变 utf8/TextPage 的输出契约。
 +              return [
-+                { type: "text", text: CYBER_REMINDER },
-+                { type: "text", text: JSON.stringify(output) },
++                ...(risky ? [{ type: "text" as const, text: CYBER_REMINDER }] : []),
++                { type: "text", text: JSON.stringify({ ...output, instructions: undefined }) },
++                ...reminders,
 +              ]
 +            }
 +            // 原生媒体继续绕过文本化 base64；所有文本仍由 registry 统一限幅。
              return [
                { type: "text", text: "Image read successfully" },
                { type: "file", data: output.content, mime: output.mime, name: input.path },
-@@ -86,7 +101,17 @@
++              ...reminders,
+@@ -86,7 +116,21 @@
++              const instructions = yield* nearby(absolute, context.sessionID)
++              const attach = (value: FileSystem.Content | ReadToolFileSystem.TextPage) => instructions.length ? { ...value, instructions } : value
++              // 附加规则只在成功读取后产生；原生图片与分页仍走原有结果类型及统一限幅。
 -              if ("encoding" in content && content.encoding === "base64" && SUPPORTED_IMAGE_MIMES.has(content.mime)) {
 +              if (
 +                "encoding" in content &&
@@ -614,17 +637,95 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 +                    Effect.catchTag("Image.ResizerUnavailableError", (error) =>
 +                      SUPPORTED_IMAGE_MIMES.has(content.mime) ? Effect.succeed(content) : Effect.fail(error),
 +                    ),
++                    Effect.map(attach),
 +                  )
                }
                if ("encoding" in content && content.encoding === "base64")
                  return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))
-
+@@ -93,1 +137,1 @@
+-              return content
++              return attach(content)
+@@ -116,1 +160,1 @@
+-  deps: [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node],
++  deps: [ToolRegistry.node, ReadToolFileSystem.node, LocationMutation.node, Image.node, PermissionV2.node, FSUtil.node, Location.node, SessionStore.node],
+diff --git a/packages/core/src/instruction-context.ts b/packages/core/src/instruction-context.ts
+--- a/packages/core/src/instruction-context.ts
++++ b/packages/core/src/instruction-context.ts
+@@ -3,1 +3,2 @@
+ import { Array, Effect, Layer, Schema } from "effect"
++import { truthy } from "./flag/flag"
+@@ -14,1 +15,1 @@
+-class File extends Schema.Class<File>("InstructionContext.File")({
++export class File extends Schema.Class<File>("InstructionContext.File")({
+@@ -101,0 +103,5 @@
++
++export function names() {
++  const claude = !truthy("OPENCODE_DISABLE_CLAUDE_CODE") && !truthy("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT")
++  return ["AGENTS.md", ...(claude ? ["CLAUDE.md"] : []), "CONTEXT.md"]
++}
+diff --git a/packages/core/src/session/read-instructions.ts b/packages/core/src/session/read-instructions.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/core/src/session/read-instructions.ts
+@@ -0,0 +1,47 @@
++export * as SessionReadInstructions from "./read-instructions"
++
++import path from "path"
++import { Effect, Option, Schema } from "effect"
++import { FSUtil } from "../fs-util"
++import { InstructionContext } from "../instruction-context"
++import { Location } from "../location"
++import { SessionStore } from "./store"
++import { SessionSchema } from "./schema"
++import { AbsolutePath } from "../schema"
++
++export const Files = Schema.Array(InstructionContext.File)
++
++export const make = Effect.gen(function* () {
++  const fs = yield* FSUtil.Service
++  const location = yield* Location.Service
++  const store = yield* SessionStore.Service
++  return Effect.fn("SessionReadInstructions.resolve")(function* (target: string, sessionID: SessionSchema.ID) {
++    const root = yield* fs.realPath(location.directory)
++    if (!FSUtil.contains(root, target)) return []
++    const excluded = new Set(
++      (yield* store.context(sessionID)).flatMap(message => message.type === "assistant" ? message.content.flatMap(part => {
++        if (part.type !== "tool" || part.name !== "read" || part.time.pruned !== undefined || part.state.status !== "completed") return []
++        const files = Schema.decodeUnknownOption(Files)(part.state.structured.instructions)
++        if (Option.isNone(files)) return []
++        const body = part.state.content.flatMap(content => content.type === "text" ? [content.text] : []).join("\n")
++        // 只有实际保留给模型的完整正文才能证明已加载；pruned、限幅或压缩不能延长去重证明。
++        return files.value.filter(file => body.includes(`Instructions from: ${file.path}\n${file.content}`)).map(file => file.path)
++      }) : []),
++    )
++    const result: InstructionContext.File[] = []
++    // 逐目录取首个规则类型；不扫描子树，Location根及以上由ambient Context Source承担。
++    for (let directory = path.dirname(target); path.relative(root, directory) !== "" && FSUtil.contains(root, directory); directory = path.dirname(directory)) {
++      for (const name of InstructionContext.names()) {
++        const file = AbsolutePath.make(yield* fs.resolve(path.join(directory, name)))
++        if (!(yield* fs.existsSafe(file))) continue
++        if (file !== target && !excluded.has(file)) {
++          const content = yield* fs.readFileStringSafe(file)
++          if (content) result.push(new InstructionContext.File({ path: file, content }))
++        }
++        break
++      }
++    }
++    // 并行未结算的read允许重复携带规则，不提前claim导致另一条失败时规则永久丢失。
++    return result
++  })
++})
 diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read.test.ts
 --- a/packages/core/test/tool-read.test.ts
 +++ b/packages/core/test/tool-read.test.ts
+@@ -3,1 +3,3 @@
+-import { Effect, Exit, Layer, PlatformError } from "effect"
++import { Effect, Exit, Layer, PlatformError, Schema } from "effect"
++import { SessionStore } from "@opencode-ai/core/session/store"
++import { SessionMessage } from "@opencode-ai/core/session/message"
 @@ -132,7 +132,7 @@
 -const readLayer = (imageLayer: Layer.Layer<Image.Service>) =>
-+const readLayer = (imageLayer: Layer.Layer<Image.Service>, readerLayer: Layer.Layer<ReadToolFileSystem.Service> = reader) =>
++const readLayer = (imageLayer: Layer.Layer<Image.Service>, readerLayer: Layer.Layer<ReadToolFileSystem.Service> = reader, replacements: LayerNode.Replacements = []) =>
    AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, ReadTool.node]), [
 -    [ReadToolFileSystem.node, reader],
 +    [ReadToolFileSystem.node, readerLayer],
@@ -632,7 +733,10 @@ diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read
      [Config.node, config],
      [Image.node, imageLayer],
      [LocationMutation.node, mutation],
-@@ -144,6 +144,9 @@
+@@ -142,1 +144,2 @@
+     [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
++    ...replacements,
+@@ -144,6 +147,9 @@
  const it = testEffect(readLayer(imageLayer))
  const itWithoutResizer = testEffect(readLayer(unavailableImage))
 +const itFiles = testEffect(
@@ -642,8 +746,64 @@ diff --git a/packages/core/test/tool-read.test.ts b/packages/core/test/tool-read
  
  describe("ReadTool", () => {
    beforeEach(() => {
-@@ -199,6 +202,39 @@
+@@ -199,6 +205,95 @@
 -  it.effect("asks for external_directory approval before reading an external absolute path", () =>
++  itFiles.live("attaches nearby rules using actual visible results without hiding file contents", () => Effect.gen(function* () {
++    const fs = yield* FSUtil.Service
++    const directory = yield* fs.makeTempDirectoryScoped()
++    const nested = path.join(directory, "nested")
++    const target = path.join(nested, "notes.txt")
++    const rules = path.join(nested, "AGENTS.md")
++    yield* fs.makeDirectory(nested, { recursive: true })
++    yield* fs.writeFileString(path.join(directory, "AGENTS.md"), "Ambient root rule")
++    yield* fs.writeFileString(rules, "Nearby rule body")
++    yield* fs.writeFileString(path.join(nested, "CLAUDE.md"), "Shadowed rule")
++    yield* fs.writeFileString(target, "Actual file body")
++    let visible: SessionMessage.Message[] = []
++    let lookups = 0
++    yield* Effect.gen(function* () {
++      const registry = yield* ToolRegistry.Service
++      const read = (id = sessionID) => settleTool(registry, {
++        sessionID: id, ...toolIdentity,
++        call: { type: "tool-call", id: "nearby-read", name: "read", input: { path: target } },
++      })
++      const first = yield* read()
++      if (!first.output) throw new Error("expected actual read output")
++      expect(first.output.structured).toMatchObject({ content: "Actual file body", instructions: [{ path: rules, content: "Nearby rule body" }] })
++      const text = first.output.content.flatMap(part => part.type === "text" ? [part.text] : []).join("\n")
++      expect(text).toContain("Actual file body")
++      expect(text).toContain(`Instructions from: ${rules}\nNearby rule body`)
++      expect(text).not.toContain("Ambient root rule")
++      expect(text).not.toContain("Shadowed rule")
++      // 使用真实settlement构造持久结果；路径列表本身不能证明正文已经进入模型上下文。
++      const history = (pruned?: number, bounded = false) => Schema.decodeUnknownSync(SessionMessage.Message)({
++        id: "msg_nearby", type: "assistant", agent: "build", model: { id: "test", providerID: "test" }, time: { created: 0 },
++        content: [{ type: "tool", id: "nearby-read", name: "read", time: { created: 0, ...(pruned === undefined ? {} : { pruned }) },
++          state: { status: "completed", input: { path: target }, structured: first.output?.structured,
++            content: bounded ? [{ type: "text", text: "[truncated]" }] : first.output?.content } }],
++      })
++      visible = [history()]
++      expect((yield* read()).output?.structured).not.toHaveProperty("instructions")
++      // 时间为零仍表示pruned；已截断正文、压缩后历史和另一Session均须重新发送规则。
++      visible = [history(0)]
++      expect((yield* read()).output?.structured).toHaveProperty("instructions")
++      visible = [history(undefined, true)]
++      expect((yield* read()).output?.structured).toHaveProperty("instructions")
++      visible = []
++      expect((yield* read()).output?.structured).toHaveProperty("instructions")
++      visible = [history()]
++      expect((yield* read(SessionV2.ID.make("ses_nearby_other"))).output?.structured).toHaveProperty("instructions")
++      const before = lookups
++      allow = false
++      expect((yield* read()).result.type).toBe("error")
++      expect(lookups).toBe(before)
++    }).pipe(Effect.provide(readLayer(imageLayer, LayerNode.compile(ReadToolFileSystem.node), [
++      [Location.node, Layer.succeed(Location.Service, location({ directory: AbsolutePath.make(directory) }))],
++      [SessionStore.node, Layer.mock(SessionStore.Service, { context: id => Effect.sync(() => { lookups++; return id === sessionID ? visible : [] }) })],
++      // 与生产Location构建一致隔离layer memo，不能复用外层fixture已捕获的cwd工具实例。
++    ]).pipe(Layer.fresh)))
++  }))
++
 +  it.effect("projects malware reminders without changing typed text or permission ordering", () =>
      Effect.gen(function* () {
        const registry = yield* ToolRegistry.Service

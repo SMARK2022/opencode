@@ -81,11 +81,11 @@ index 297ba0f914..3b800f492a 100644
          <BlockTool
 +          // #144：Write diff 折叠预览
 +          preview={diffOverflow() && !expanded() ? <text fg={theme.text}>{previewText(diff() ?? "", 10, maxChars())}</text> : undefined}
-           title={"← Write " + pathFormatter.format(stringValue(props.input.filePath)) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
+           title={"← Write " + pathFormatter.format(filepath()) + (diffStats().added > 0 || diffStats().removed > 0 ? ` (+${diffStats().added}/-${diffStats().removed})` : "")}
            part={props.part}
            onClick={diffOverflow() ? () => setExpanded((prev) => !prev) : undefined}
 @@ -2477,6 +2508,8 @@ function Write(props: ToolProps) {
-           title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))}
+           title={"# Wrote " + pathFormatter.format(filepath())}
            part={props.part}
            onClick={writeCanCollapse() ? () => setExpanded((prev) => !prev) : undefined}
 +          // #144：Write 内容折叠预览

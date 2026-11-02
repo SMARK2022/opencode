@@ -611,24 +611,10 @@ diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/
  import { Snapshot } from "@/snapshot"
  import type { MessageV2 } from "./message-v2"
  import { NotFoundError, Storage } from "@/storage/storage"
-+import { MAX_MERGED_PATCH_CHARS, countPatchStats } from "@/tool/file-diff"
++import { boundMergedPatch } from "@/tool/file-diff"
  
  const isDiffs = Schema.is(Schema.Array(Snapshot.FileDiff))
  type Diffs = Snapshot.FileDiff[]
-@@ -84,6 +85,13 @@ function createAccumulator(initial: readonly Snapshot.FileDiff[] = []): DiffAccu
-   }
- }
- 
-+// 摄入界降级标记：超限 patch 替换为事实摘要，计数口径不丢（首见与归并共用同一规则）。
-+function boundMergedPatch(patch: string, additions: number, deletions: number) {
-+  return patch.length > MAX_MERGED_PATCH_CHARS
-+    ? `[aggregated patch elided: ${patch.length} chars, +${additions}/-${deletions}]`
-+    : patch
-+}
-+
- function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
-   if (!item.file) {
-     // 无 file 的历史条目无法安全归并，只能按原顺序追加而不猜测路径。
 @@ -94,15 +102,24 @@ function mergeFileDiff(target: DiffAccumulator, item: Snapshot.FileDiff) {
    if (index === undefined) {
      // 新文件记录首次 index，后续增量在原位置更新以保持 UI 顺序。
@@ -657,39 +643,6 @@ diff --git a/packages/opencode/src/session/summary-cache.ts b/packages/opencode/
      // 计数直接相加，与首次全量 collect 保持同一 totals 口径。
      additions: current.additions + item.additions,
      deletions: current.deletions + item.deletions,
-@@ -174,7 +191,12 @@ export function collectToolDiffs(messages: readonly ToolDiffMessage[], worktree:
-       const diff = stringValue(record.diff)
-       const file = stringValue(record.filepath)
-       if (diff && file) {
--        const stats = countPatchStats(diff)
-+        // 工具显式携带计数时优先（write 自有界标记起附带 additions/deletions）：标记
-+        // 正文无 +/- 行，重扫描会退化为 0/0（plan B-02）；扫描仅服务已入库遗留行。
-+        const adds = record.additions
-+        const dels = record.deletions
-+        const stats =
-+          typeof adds === "number" && typeof dels === "number" ? { additions: adds, deletions: dels } : countPatchStats(diff)
-         merge(file, diff, stats.additions, stats.deletions)
-       }
-     }
-@@ -793,16 +815,8 @@ function toWorktreeRel(base: string, target: string, fromBase: string = base) {
-   return path.relative(base, abs).replaceAll("\\", "/")
- }
- 
--function countPatchStats(patch: string) {
--  let additions = 0
--  let deletions = 0
--  for (const line of patch.split("\n")) {
--    if (line.startsWith("+++") || line.startsWith("---")) continue
--    if (line.startsWith("+")) additions++
--    else if (line.startsWith("-")) deletions++
--  }
--  return { additions, deletions }
--}
-+// countPatchStats 迁移至 @/tool/file-diff 并修复为 hunk 门控（原实现把 hunk 内以
-+// "--"/"++" 开头的内容行误当文件头跳过，对 SQL/Lua 注释类内容漏计；plan B-01）。
- 
- function inferStatus(additions: number, deletions: number): "added" | "deleted" | "modified" {
-   if (deletions === 0 && additions > 0) return "added"
 
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 --- a/packages/opencode/src/tool/apply_patch.ts
@@ -704,7 +657,7 @@ diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/t
 +import { renderFileDiff } from "./file-diff"
  import { LSP } from "@/lsp/lsp"
  // [local-smark] LSPClient.Diagnostic 类型用于增量诊断 baseline Map 的类型标注
- import * as LSPClient from "@/lsp/client"
+ import { LSPClient } from "@/lsp/client"
 @@ -67,10 +66,8 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function*
        // 尾部换行补齐沿用既有 Add File 语义；proposal 不修正用户文本，只保证落盘可 diff。
        const newContent = first.contents.length === 0 || first.contents.endsWith("\n") ? first.contents : `${first.contents}\n`
@@ -834,10 +787,9 @@ diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edi
  
                yield* ctx.ask({
                  permission: "edit",
-@@ -383,28 +375,14 @@ export const EditTool = Tool.define(
-           // 共享出口统一重算 diff：此刻两分支的 contentNew 均已同步 commit/formatter 后的
-           // 最终磁盘内容，output 的 Changed 段与 metadata.diff 因此共用 post-formatter 真值；
-           // 权限请求的预计算 diff 保留在各自 ask 之前，审批预览不受影响（R5）。
+@@ -326,27 +320,13 @@ export const EditTool = Tool.define(
+           // 两分支都已同步 formatter 后的最终内容，回执与 metadata 因此共用同一 diff。
+           // 权限请求仍使用各自 ask 前的预计算，不能拿成功后的真值替代审批预览。
 -          diff = trimDiff(
 -            createTwoFilesPatch(
 -              filePath,
@@ -874,7 +826,7 @@ diff --git a/packages/core/src/tool/file-diff.ts b/packages/core/src/tool/file-d
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/tool/file-diff.ts
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,113 @@
 +import { createHash } from "crypto"
 +import { createTwoFilesPatch } from "diff"
 +
@@ -892,6 +844,13 @@ new file mode 100644
 +export const MAX_MERGED_PATCH_CHARS = 1024 * 1024
 +
 +export type RenderedFileDiff = { patch: string; additions: number; deletions: number }
++
++// 首见与重复归并使用同一表示界，保留显式计数而不从省略标记倒推行数。
++export function boundMergedPatch(patch: string, additions: number, deletions: number) {
++  return patch.length > MAX_MERGED_PATCH_CHARS
++    ? `[aggregated patch elided: ${patch.length} chars, +${additions}/-${deletions}]`
++    : patch
++}
 +
 +const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 +
@@ -986,12 +945,13 @@ diff --git a/packages/opencode/src/tool/file-diff.ts b/packages/opencode/src/too
 new file mode 100644
 --- /dev/null
 +++ b/packages/opencode/src/tool/file-diff.ts
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,11 @@
 +// 保留V1既有导入路径，真实实现归Core所有，原生V2不反向依赖应用包。
 +export {
 +  BINARY_SCAN_CHARS,
 +  MAX_DIFF_MIDDLE_CHARS,
 +  MAX_MERGED_PATCH_CHARS,
++  boundMergedPatch,
 +  countPatchStats,
 +  renderFileDiff,
 +  type RenderedFileDiff,
@@ -1355,35 +1315,40 @@ diff --git a/packages/core/src/tool/edit.ts b/packages/core/src/tool/edit.ts
  import { FileDiff } from "@opencode-ai/schema/file-diff"
 -import { createTwoFilesPatch, diffLines } from "diff"
 +import { renderFileDiff } from "./file-diff"
- import { Effect, Layer, Schema } from "effect"
+ import { Effect, Layer, Schema, SchemaGetter } from "effect"
  import { makeLocationNode } from "../effect/app-node"
  import { FileMutation } from "../file-mutation"
  import { FSUtil } from "../fs-util"
-@@ -196,10 +196,5 @@
--                const counts = diffLines(source.text, replaced).reduce(
+@@ -249,11 +249,3 @@
+                 const diffOld = normalizeLineEndings(source.text)
+                 const diffNew = normalizeLineEndings(replaced)
+-                // 统计和展示共用逻辑文本，CR-only 不得被误计成整行替换。
+-                const counts = diffLines(diffOld, diffNew).reduce(
 -                  (result, item) => ({
 -                    additions: result.additions + (item.added ? (item.count ?? 0) : 0),
 -                    deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
 -                  }),
 -                  { additions: 0, deletions: 0 },
 -                )
-+                // 原生结果同样持久化structured files；复用单一有界生成点，不靠content截断补救。
-+                const rendered = renderFileDiff(target.resource, source.text, replaced)
                  const next = splitBom(replaced)
-                 const result = yield* unableToEdit(
-                   files.writeIfUnchanged({
-@@ -212,10 +206,9 @@
-                   files: [
-                     {
+@@ -268,2 +260,4 @@
+                 const rewrites = EditApply.provenance(editsLF, applied.normalizedMismatchIndices)
++                // 复用锁内最终表示；无formatter写入仍由相同有界owner派生。
++                const rendered = result.rendered ?? renderFileDiff(result.resource, diffOld, diffNew)
+                 const limits = yield* outputStore.limits()
+@@ -276,11 +270,4 @@
                        file: result.resource,
--                      patch: createTwoFilesPatch(result.resource, result.resource, source.text, replaced),
+-                      patch: result.diff ?? createTwoFilesPatch(result.resource, result.resource, diffOld, diffNew),
                        status: "modified" as const,
--                      ...counts,
+-                      ...(result.text === undefined ? counts : diffLines(diffOld, normalizeLineEndings(result.text)).reduce(
+-                        (total, change) => ({
+-                          additions: total.additions + (change.added ? change.count ?? 0 : 0),
+-                          deletions: total.deletions + (change.removed ? change.count ?? 0 : 0),
+-                        }),
+-                        { additions: 0, deletions: 0 },
+-                      )),
 +                      ...rendered,
                      },
-                   ],
-                   replacements,
-                 } satisfies Output
 
 diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/apply-patch.ts
 --- a/packages/core/src/tool/apply-patch.ts
@@ -1392,40 +1357,187 @@ diff --git a/packages/core/src/tool/apply-patch.ts b/packages/core/src/tool/appl
  import { ToolFailure } from "@opencode-ai/llm"
  import { FileDiff } from "@opencode-ai/schema/file-diff"
 -import { createTwoFilesPatch, diffLines } from "diff"
-+import { renderFileDiff } from "./file-diff"
++import { renderFileDiff, type RenderedFileDiff } from "./file-diff"
  import { Effect, Layer, Schema } from "effect"
  import { makeLocationNode } from "../effect/app-node"
  import { FileMutation } from "../file-mutation"
  import { FSUtil } from "../fs-util"
-@@ -245,15 +245,9 @@
- function patchFile(change: Prepared): typeof FileDiff.Info.Type {
--  const counts = diffLines(change.before, change.after).reduce(
+@@ -255,2 +255,2 @@
+                         // Add覆盖也报告持锁前像，而不是将已有正文伪装成空文件。
+-                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }), status: result.existed ? "modified" : "added" })
++                        patchFiles.push({ ...patchFile({ ...change, before: result.previous ?? "", after: result.text ?? change.after.replace(/^\uFEFF+/, "") }, result.rendered), status: result.existed ? "modified" : "added" })
+@@ -277,6 +277,6 @@
+                         patchFiles.push(patchFile({ ...change, type: "delete", after: "" }))
+-                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }), status: result.existed ? "modified" : "added" })
++                        patchFiles.push({ ...patchFile({ ...change, target: moving, before: result.previous ?? "", after: result.text ?? change.after }, result.rendered), status: result.existed ? "modified" : "added" })
+                         return
+                       }
+                       applied.push({ type: change.type, resource: result.resource, target: result.target })
+-                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }))
++                      patchFiles.push(patchFile({ ...change, after: result.text ?? change.after }, result.rendered))
+@@ -307,18 +307,10 @@
+-function patchFile(change: Prepared): typeof FileDiff.Info.Type {
++function patchFile(change: Prepared, rendered?: RenderedFileDiff): typeof FileDiff.Info.Type {
+   const before = normalizeLineEndings(change.before)
+   const after = normalizeLineEndings(change.after)
+-  // 增删统计与展示共用同一逻辑行视图，写入仍使用 prepared 原始内容。
+-  const counts = diffLines(before, after).reduce(
 -    (result, item) => ({
 -      additions: result.additions + (item.added ? (item.count ?? 0) : 0),
 -      deletions: result.deletions + (item.removed ? (item.count ?? 0) : 0),
 -    }),
 -    { additions: 0, deletions: 0 },
 -  )
-+  // add/update/delete在执行前生成元数据；表示降级不改变授权、mutation或部分成功合同。
-+  const rendered = renderFileDiff(change.target.resource, change.before, change.after)
++  // 成功写入复用锁内最终产物；删除与无formatter写入仍用同一有界owner。
    return {
      file: change.target.resource,
--    patch: createTwoFilesPatch(change.target.resource, change.target.resource, change.before, change.after),
+-    patch: createTwoFilesPatch(change.target.resource, change.target.resource, before, after),
      status: change.type === "add" ? "added" : change.type === "delete" ? "deleted" : "modified",
 -    ...counts,
-+    ...rendered,
++    ...(rendered ?? renderFileDiff(change.target.resource, before, after)),
    }
  }
+
+diff --git a/packages/core/src/file-mutation.ts b/packages/core/src/file-mutation.ts
+--- a/packages/core/src/file-mutation.ts
++++ b/packages/core/src/file-mutation.ts
+@@ -3,6 +3,6 @@
+ import { makeLocationNode } from "./effect/app-node"
+ import { Context, Effect, Exit, Layer, Schema } from "effect"
+-import { createTwoFilesPatch } from "diff"
++import { renderFileDiff, type RenderedFileDiff } from "./tool/file-diff"
+ import { dirname } from "path"
+ import { KeyedMutex } from "./effect/keyed-mutex"
+ import { FSUtil } from "./fs-util"
+@@ -62,3 +62,5 @@
+   readonly diff?: string
++  // 只交接同一锁内最终生成的patch和计数，叶子不得再跑全文diff。
++  readonly rendered?: RenderedFileDiff
+   readonly text?: string
+   readonly formattedDiff?: string
+@@ -142,13 +144,15 @@
+       const before = normalizeLineEndings(previous)
+       const after = normalizeLineEndings(text)
+       const submitted = normalizeLineEndings(splitBom(input.content).text)
++      const rendered = renderFileDiff(input.target.resource, before, after)
+       return {
+         ...writeResult(input.target, existed),
+         previous,
+-        diff: createTwoFilesPatch(input.target.resource, input.target.resource, before, after),
++        diff: rendered.patch,
++        rendered,
+         ...(formatted ? { text } : {}),
+         ...(formatted && submitted !== after ? {
+           // 回传请求与最终落盘之间的实际变化，不能用请求片段伪造 formatter 结果。
+-          formattedDiff: createTwoFilesPatch(input.target.resource, input.target.resource, submitted, after),
++          formattedDiff: renderFileDiff(input.target.resource, submitted, after).patch,
+           formattedContent: text,
+         } : {}),
+
+diff --git a/packages/core/src/tool/write.ts b/packages/core/src/tool/write.ts
+--- a/packages/core/src/tool/write.ts
++++ b/packages/core/src/tool/write.ts
+@@ -36,5 +36,8 @@
+   // canonical编码保留覆写diff，供TUI消费；模型成功正文保持原契约。
+   diff: Schema.optionalKey(Schema.String),
++  // rewrite标记不含增删行，显式计数必须穿过真实工具codec供摘要消费。
++  additions: Schema.optionalKey(Schema.Number),
++  deletions: Schema.optionalKey(Schema.Number),
+   formattedDiff: Schema.optionalKey(Schema.String),
+   formattedContent: Schema.optionalKey(Schema.String),
+ })
+@@ -104,1 +107,2 @@
+-                return yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
++                const result = yield* files.writeTextPreservingBom({ target, content: input.content, format: format.file })
++                return { ...result, ...(result.rendered ? { additions: result.rendered.additions, deletions: result.rendered.deletions } : {}) }
+
+diff --git a/packages/core/src/session/tool-diffs.ts b/packages/core/src/session/tool-diffs.ts
+--- a/packages/core/src/session/tool-diffs.ts
++++ b/packages/core/src/session/tool-diffs.ts
+@@ -12,3 +12,4 @@
+ import { RequestUsageAssistantTable } from "./request-usage.sql"
+ import { MessageID } from "../v1/session"
++import { boundMergedPatch, countPatchStats } from "../tool/file-diff"
+ 
+@@ -20,7 +21,10 @@
+     const hit = byFile.get(rel)
+     // 延续source的patch拼接、计数相加和新增/删除优先，不误称为重新计算磁盘净diff。
+-    byFile.set(rel, { file: rel, patch: (hit?.patch ?? "") + patch,
+-      additions: (hit?.additions ?? 0) + additions, deletions: (hit?.deletions ?? 0) + deletions,
++    const adds = (hit?.additions ?? 0) + additions
++    const dels = (hit?.deletions ?? 0) + deletions
++    // 两代首见/重复文件均受同一表示界约束，精确request与seq选集保持原owner。
++    byFile.set(rel, { file: rel, patch: boundMergedPatch((hit?.patch ?? "") + patch, adds, dels),
++      additions: adds, deletions: dels,
+       status: hit?.status === "added" || hit?.status === "deleted" ? hit.status
+         : status === "add" || status === "added" ? "added"
+         : status === "delete" || status === "deleted" ? "deleted"
+@@ -49,6 +53,4 @@
+-    // Write按最终回读patch统计，排除unified文件头；Native的新建状态由真实existed字段判定。
+-    const stats = diff.split("\n").reduce((sum, line) => ({
+-      additions: sum.additions + Number(line.startsWith("+") && !line.startsWith("+++")),
+-      deletions: sum.deletions + Number(line.startsWith("-") && !line.startsWith("---")),
+-    }), { additions: 0, deletions: 0 })
++    // 有界标记优先携带的同源计数；历史行才扫描hunk，不能跳过--/++正文。
++    const stats = typeof meta.additions === "number" && typeof meta.deletions === "number"
++      ? { additions: meta.additions, deletions: meta.deletions } : countPatchStats(diff)
+     merge(file, diff, stats.additions, stats.deletions, typeof meta.existed === "boolean" ? meta.existed ? "modified" : "added" : undefined)
+
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -476,2 +476,14 @@
+     Effect.gen(function* () {
++      // 两代共享摄入界：巨型首见Write也须有界，显式计数不能被省略标记清零。
++      const aggregate = ToolDiffs.collect([
++        { filepath: "/project/large.ts", diff: "x".repeat(1024 * 1024 + 1), additions: 7, deletions: 3 },
++        { files: [{ file: "/project/large.ts", patch: "+tail\n", additions: 2, deletions: 0 }] },
++      ], "/project")
++      expect(aggregate[0]).toMatchObject({ additions: 9, deletions: 3 })
++      expect(aggregate[0]?.patch?.length).toBeLessThan(1024 * 1024)
++      expect(aggregate[0]?.patch).toContain("aggregated patch elided")
++      // hunk内的三连符号是SQL/Lua内容，不再误当文件头跳过。
++      expect(ToolDiffs.collect([{ resource: "comments.sql", diff: "--- before\n+++ after\n@@\n--- old\n+++ new\n" }], "/project")[0])
++        .toMatchObject({ additions: 1, deletions: 1 })
++
+       const db = (yield* Database.Service).db
+@@ -501,2 +501,3 @@
+       yield* complete(assistantMessageID, "write", "write", { target: "/project/app/new.ts", resource: "new.ts", existed: false,
+-        diff: "--- before\n+++ after\n+formatted\n", formattedContent: "formatted\n" })
++        // 旧记录补真实unified hunk；保留+1预期，不能用宽松扫描掩盖错误fixture。
++        diff: "--- before\n+++ after\n@@ -0,0 +1,1 @@\n+formatted\n", formattedContent: "formatted\n" })
+@@ -560,1 +561,1 @@
+-      expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n+formatted\n" })
++      expect(summary?.diffs[2]).toMatchObject({ status: "added", additions: 1, patch: "--- before\n+++ after\n@@ -0,0 +1,1 @@\n+formatted\n" })
+
+diff --git a/packages/core/test/tool-write.test.ts b/packages/core/test/tool-write.test.ts
+--- a/packages/core/test/tool-write.test.ts
++++ b/packages/core/test/tool-write.test.ts
+@@ -126,2 +126,4 @@
+                   existed: false,
+                   diff: expect.stringContaining("+created"),
++                  additions: 1,
++                  deletions: 0,
+
+diff --git a/packages/core/test/file-mutation.test.ts b/packages/core/test/file-mutation.test.ts
+--- a/packages/core/test/file-mutation.test.ts
++++ b/packages/core/test/file-mutation.test.ts
+@@ -110,2 +110,5 @@
+           expect(formatted.text).toBe(`formatted${ending}line${ending}`)
++          // 锁内最终diff和计数同源；物理EOL恢复不能造成全文件虚假增删。
++          expect(formatted.rendered).toMatchObject({ additions: 1, deletions: 1 })
++          expect(formatted.rendered?.patch).toBe(formatted.diff)
+           expect(yield* Effect.promise(() => fs.readFile(target.canonical, "utf8"))).toBe(`\uFEFFformatted${ending}line${ending}`)
+@@ -121,2 +124,4 @@
+           expect(moved.diff).toContain("-destination")
++          expect(moved.rendered).toMatchObject({ additions: 2, deletions: 1 })
++          expect(moved.rendered?.patch).toBe(moved.diff)
+           expect(yield* Effect.promise(() => fs.access(target.canonical).then(() => true, () => false))).toBe(false)
 
 diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit.test.ts
 --- a/packages/core/test/tool-edit.test.ts
 +++ b/packages/core/test/tool-edit.test.ts
-@@ -4,3 +4,3 @@
- import { describe, expect, test } from "bun:test"
--import { Effect, Layer } from "effect"
-+import { Effect, Layer, Schema } from "effect"
- import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
-@@ -160,3 +160,42 @@
+@@ -160,3 +160,43 @@
    )
  
 +  it.live("bounds native structured diffs without changing file mutation", () =>
@@ -1460,6 +1572,7 @@ diff --git a/packages/core/test/tool-edit.test.ts b/packages/core/test/tool-edit
 +            }
 +            expect(writes).toHaveLength(2)
 +          }),
++          [...toolHistory("bounded-0.txt"), ...toolHistory("bounded-1.txt")],
 +        )
 +      },
 +      // 文件与托管输出都使用现成fixture/scope释放，不创建独立应用或daemon。

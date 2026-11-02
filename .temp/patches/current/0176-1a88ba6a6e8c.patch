@@ -222,12 +222,9 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
      console.log(renderDashboard(yield* loadReport(args), { color: colorMode(args.color), limit }))
 --- a/packages/opencode/src/cli/cmd/stats-data.ts
 +++ b/packages/opencode/src/cli/cmd/stats-data.ts
-@@ -1,3 +1,7 @@
+@@ -1,3 +1,5 @@
 +// #180：SQL 会话预过滤 + 工具事件单遍生成
--import { Effect } from "effect"
-+import { Effect, Schema } from "effect"
-+import { SessionMessage } from "@opencode-ai/core/session/message"
-+import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+ import { Effect, Schema } from "effect"
 +import { MessageID } from "@/session/schema"
  import { Session } from "@/session/session"
  // #174：assistant 表优先费用
@@ -711,17 +708,23 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
    const svc = yield* Session.Service
 -  const messages = yield* svc
 +  const legacyMessages = yield* svc
-@@ -406,6 +766,35 @@
+@@ -406,12 +766,35 @@
      .messages({ sessionID: session.id })
      .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed([])))
 -  const visibleMessages = messages.filter((message) => includeTime(cutoff, message.info.time.created))
    const { db } = yield* Database.Service
    const requestUsageRows = yield* db.select().from(RequestUsageTable).where(eq(RequestUsageTable.session_id, session.id)).all().pipe(Effect.orDie)
    const assistantUsageRows = yield* db.select().from(RequestUsageAssistantTable).where(eq(RequestUsageAssistantTable.session_id, session.id)).all().pipe(Effect.orDie)
+-  // 原生消息与 V1 分表投影；同 ID 的迁移副本只计一次，日期仍按消息创建时间。
+-  const legacyIDs = new Set(messages.map(message => String(message.info.id)))
+-  const projected = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, session.id)).all().pipe(Effect.orDie)
+-  const nativeMessages = projected
+-    .filter(row => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created))
+-    .map(row => Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }))
 +  const legacyIDs = new Set(legacyMessages.map((message) => String(message.info.id)))
 +  const projected = yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, session.id)).all().pipe(Effect.orDie)
 +  // 两种历史共享账本，但原生工具只在 session_message；同 ID 的迁移投影不能重复计数。
-+  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user")).map((row) => {
++  const nativeMessages = projected.filter((row) => !legacyIDs.has(row.id) && (row.type === "assistant" || row.type === "user") && includeTime(cutoff, row.time_created)).map((row) => {
 +    const message = Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type })
 +    const assistant = message.type === "assistant" ? message : undefined
 +    const estimate = assistant?.inputEstimate
@@ -808,7 +811,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
          })),
        )
        breakdownEvents.push(...assistantEvents)
-@@ -471,47 +855,119 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
+@@ -471,55 +855,119 @@ const aggregateSession = Effect.fn("Cli.stats.aggregate.session")(function* (ses
          cost: row.cost_micros / MICROS,
          requests: 1,
          assistantCalls: row.assistant_count || 1,
@@ -869,14 +872,22 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
        if (part.type !== "tool" || !part.tool) continue
 -      toolUsage[part.tool] = (toolUsage[part.tool] ?? 0) + 1
 +      const item = getToolUsage(toolUsage, part.tool)
-+      // #176：工具调用次数 +1
++      // Called/Progress/Success 覆盖同一 parts 项，统一扫描只计一次调用。
 +      item.count++
 +      item.inputChars += toolInputChars(part)
 +      item.outputChars += toolOutputChars(part)
      }
    }
  
--  return { session, messageCount: visibleMessages.length, toolUsage, totalEvents, breakdownEvents } satisfies SessionAggregate
+-  // Tool 的 Called/Progress/Success 更新同一投影项，不能把状态更新重复算作工具调用。
+-  for (const message of nativeMessages) {
+-    if (message.type !== "assistant") continue
+-    for (const part of message.content) {
+-      if (part.type !== "tool" || !part.name) continue
+-      toolUsage[part.name] = (toolUsage[part.name] ?? 0) + 1
+-    }
+-  }
+-  return { session, messageCount: visibleMessages.length + nativeMessages.length, toolUsage, totalEvents, breakdownEvents } satisfies SessionAggregate
 +  // #180：批量收集 assistant 种子后单遍生成工具上下文事件
 +  if (requestUsageRows.length > 0) {
 +    const requestRows = requestUsageRows.filter((row) => includeTime(cutoff, row.time_created))
@@ -1183,7 +1194,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +                  }))
 +                : report.models
 +
-+  const rows = limitRows(groups, options.limit).map((group) => {
++  const rows = (by === "tool" ? limitRows(groups, options.limit) : topGroups(groups, options)).map((group) => {
 +    const value = metric === "cost" ? group.cost : group.tokens.total
 +    return { label: group.label || group.id, value }
 +  })
@@ -1208,7 +1219,7 @@ diff --git a/packages/opencode/src/cli/cmd/stats.ts b/packages/opencode/src/cli/
 +    lines.push(...renderGroupDetails(groups, options))
 +    if (by === "source") {
 +      lines.push("Input components by source")
-+      for (const group of limitRows(groups, options.limit)) {
++      for (const group of topGroups(groups, options)) {
 +        lines.push(`  ${group.label || group.id} ${Object.entries(group.components).map(([key, value]) => `${key}=${formatNumber(value)}`).join(" ")}`)
 +      }
 +    }
@@ -1497,6 +1508,19 @@ new file mode 100644
 +    expect(nativeAgent.total).toMatchObject({ tokens: { total: 40 }, cost: 0.5, components: { system: 20, toolCalls: 10, toolResults: 10 } })
 +  }),
 +)
+diff --git a/packages/opencode/test/cli/stats-native.test.ts b/packages/opencode/test/cli/stats-native.test.ts
+--- a/packages/opencode/test/cli/stats-native.test.ts
++++ b/packages/opencode/test/cli/stats-native.test.ts
+@@ -60,1 +60,2 @@
+-    expect(native.toolUsage).toEqual([{ id: "echo", count: 1 }])
++    expect(native.toolUsage.map(tool => ({ id: tool.id, count: tool.count }))).toEqual([{ id: "echo", count: 1 }])
++    expect(native.toolUsage[0]).toMatchObject({ inputChars: 2, outputChars: 4 })
+@@ -86,1 +87,1 @@
+-    expect(mixed.toolUsage).toEqual(expect.arrayContaining([{ id: "echo", count: 1 }, { id: "legacy-tool", count: 1 }]))
++    expect(mixed.toolUsage.map(tool => ({ id: tool.id, count: tool.count }))).toEqual(expect.arrayContaining([{ id: "echo", count: 1 }, { id: "legacy-tool", count: 1 }]))
+@@ -91,1 +92,1 @@
+-    expect(recent.toolUsage).toEqual([{ id: "echo", count: 1 }])
++    expect(recent.toolUsage.map(tool => ({ id: tool.id, count: tool.count }))).toEqual([{ id: "echo", count: 1 }])
 diff --git a/packages/opencode/test/cli/stats-render-width.test.ts b/packages/opencode/test/cli/stats-render-width.test.ts
 new file mode 100644
 --- /dev/null

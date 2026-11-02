@@ -1456,7 +1456,7 @@ diff --git a/packages/core/src/session/goal-progress.ts b/packages/core/src/sess
 new file mode 100644
 --- /dev/null
 +++ b/packages/core/src/session/goal-progress.ts
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,298 @@
 +export * as SessionGoalProgress from "./goal-progress"
 +
 +import path from "path"
@@ -1466,7 +1466,6 @@ new file mode 100644
 +// 两代历史只在入口归一化证据，去重和策略切换仍由这一处拥有。
 +export type Evidence =
 +  | { type: "patch"; files: readonly string[]; hash: string }
-+  | { type: "read"; identity: string }
 +  | { type: "tool"; tool: string; state: { status: string; input: unknown; metadata?: unknown; output?: string } }
 +
 +// #517：Goal progress gate：run-local 证据账本，不持久化、不写入 Goal 状态。
@@ -1583,11 +1582,6 @@ new file mode 100644
 +  // 调用方按各自持久化 lineage 选定 eligible turn，不能把旧 turn 赊给新 turn。
 +  for (const parts of messages) {
 +    for (const part of parts) {
-+      if (part.type === "read") {
-+        // 原生读取以当时交付的范围正文为证，不在事后重读文件伪造版本。
-+        if (recordIfNew(ledger.reads, part.identity)) exploration = true
-+        continue
-+      }
 +      if (part.type === "patch" && part.files.length > 0) {
 +        // patch part 证明工作树发生了实际文件变更；它比普通 tool metadata 更接近
 +        // processor 最终持久化的 diff，因此必须直接成为 advancement。
@@ -1733,7 +1727,7 @@ new file mode 100644
 +}
 +
 +// 原生消息保留自己的结构；这里只投影进度所需字段，不回造 V1 Part 或公共 schema。
-+export function nativeEvidence(messages: readonly SessionMessage.Message[], directory: string): Evidence[][] {
++export function nativeEvidence(messages: readonly SessionMessage.Message[]): Evidence[][] {
 +  return messages.flatMap((message) => {
 +    if (message.type !== "assistant") return []
 +    const parts: Evidence[] = []
@@ -1744,13 +1738,6 @@ new file mode 100644
 +    for (const part of message.content) {
 +      if (part.type !== "tool" || part.state.status !== "completed") continue
 +      const metadata = part.state.structured
-+      if (part.name === "read") {
-+        if (typeof metadata.content !== "string" || !(metadata.type === "text-page" || metadata.encoding === "utf8")) continue
-+        const requested = String(part.state.input.path ?? "")
-+        const canonical = FSUtil.resolve(path.isAbsolute(requested) ? requested : path.join(directory, requested))
-+        parts.push({ type: "read", identity: JSON.stringify([canonical, metadata.offset ?? 1, metadata.content]) })
-+        continue
-+      }
 +      // Bash 首段是稳定输出，后附耗时说明不能制造验证结果变化。
 +      const output = part.state.content.flatMap((content) => content.type === "text" ? [content.text] : [])[0] ?? ""
 +      parts.push({
@@ -1759,7 +1746,8 @@ new file mode 100644
 +        state: {
 +          status: "completed",
 +          input: part.state.input,
-+          metadata: part.name === "bash" ? { ...metadata, hasErrors: Number(metadata.diagnosticErrorLikeLines ?? 0) > 0 } : metadata,
++          // Read 版本凭证与 Bash 错误标记由真实 producer 拥有，不从正文或诊断行数重建。
++          metadata,
 +          output,
 +        },
 +      })
@@ -1830,21 +1818,24 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/core/src/session/history.ts b/packages/core/src/session/history.ts
 --- a/packages/core/src/session/history.ts
 +++ b/packages/core/src/session/history.ts
-@@ -116,2 +116,17 @@
+@@ -186,2 +186,20 @@
  
 +// 进度取当前 eligible turn 的持久投影，不让 compaction 的 provider 窗口裁掉先前工具证据。
 +export const goalTurnMessages = Effect.fn("SessionHistory.goalTurnMessages")(function* (
 +  db: DatabaseService,
 +  sessionID: SessionSchema.ID,
 +) {
-+  const turn = yield* db.select({ seq: SessionMessageTable.seq }).from(SessionMessageTable)
-+    .where(and(eq(SessionMessageTable.session_id, sessionID), or(eq(SessionMessageTable.type, "user"), eq(SessionMessageTable.type, "synthetic"))))
-+    .orderBy(desc(SessionMessageTable.seq)).limit(1).get().pipe(Effect.orDie)
++  const turn = yield* goalTurn(db, sessionID)
 +  if (!turn) return []
++  const boundary = yield* db.select({ seq: SessionMessageTable.seq }).from(SessionMessageTable)
++    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.id, turn.id))).get().pipe(Effect.orDie)
++  if (!boundary) return []
 +  const rows = yield* db.select().from(SessionMessageTable)
-+    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), gt(SessionMessageTable.seq, turn.seq)))
++    .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant"), gt(SessionMessageTable.seq, boundary.seq)))
 +    .orderBy(asc(SessionMessageTable.seq)).all().pipe(Effect.orDie)
-+  return yield* Effect.forEach(rows, decodeMessageRow)
++  // 仅恢复已选 turn 的可见助手；压缩窗口或冷骨架不能抹去实际进度。
++  const restored = yield* ColdStorage.readSessionMessageRows(db, rows.filter(row => !hidden(row.data.metadata?.hidden)))
++  return yield* Effect.forEach(restored, decodeMessageRow)
 +})
 +
  export * as SessionHistory from "./history"
@@ -1874,7 +1865,7 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
                if (Option.isSome(goal) && goal.value.status === "active") {
 +                // 只在既有 eligible completion 边界计一次，provider step 或 compaction 不另计轮。
 +                const signal = SessionGoalProgress.absorbGoalTurnEvidence(
-+                  SessionGoalProgress.nativeEvidence(yield* SessionHistory.goalTurnMessages(db, input.sessionID), location.directory), location.directory, continuation.progressLedger,
++                  SessionGoalProgress.nativeEvidence(yield* SessionHistory.goalTurnMessages(db, input.sessionID)), location.directory, continuation.progressLedger,
 +                )
 +                SessionGoalProgress.updateGoalProgressGate(continuation.progressGate, signal)
 +                continuation.mode = continuation.progressGate.replanRequired ? "replan" : "ordinary"
@@ -1885,13 +1876,13 @@ diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session
 diff --git a/packages/core/src/tool/goal.ts b/packages/core/src/tool/goal.ts
 --- a/packages/core/src/tool/goal.ts
 +++ b/packages/core/src/tool/goal.ts
-@@ -16,1 +16,1 @@
--      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the goal active for further exploration; the second confirms a persistent genuine blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-+      description: "Use operate read before changing any goal status in this goal turn. Read returns objective, status, generation, reason, usage and budget. Use operate complete with a reason only when the full objective is achieved and verified; do not complete merely to stop or because budget is nearly exhausted. Use operate blocked only after two consecutive eligible Goal turns using the same trimmed reason: the first call keeps the Goal active; re-check relevant evidence breadth-first, inspect adjacent producers, consumers, tests or configuration, run a different focused check, and continue if any branch yields a viable path. The next eligible turn may confirm the same persistent blocker. Do not block merely because work is hard, slow, uncertain or incomplete. Use operate active to resume a model-produced terminal goal only in a later real user turn, after reading it again. User-paused and user-produced terminal goals cannot be resumed by the model. You cannot pause, clear or edit the objective or budget. When completing a budgeted goal, report its consumed tokens.",
-@@ -20,1 +20,1 @@
--          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Blocked requires two consecutive eligible Goal turns using the same trimmed reason.",
-+          description: "Use read before any transition. Use complete/blocked with reason, or active to resume in a later user turn. Blocked requires two consecutive eligible Goal turns using the same trimmed reason; the first keeps the Goal active for a breadth-first re-check, and a viable path requires continuing work.",
-@@ -62,3 +62,10 @@
+@@ -23,1 +23,1 @@
+-        "- Use `operate: \"blocked\"` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call `operate: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. The second consecutive call marks the Goal as blocked.",
++        "- Use `operate: \"blocked\"` with a `reason` only when the same blocking condition remains across two consecutive eligible Goal turns using the same trimmed reason, counting the original/user-triggered turn and any automatic Goal continuation. The first call keeps the Goal active: re-check the blocker breadth-first, inspect adjacent producers/consumers/tests/configuration, run a different focused check, and continue immediately if any branch yields a viable path. If the same blocker still prevents meaningful progress, call `operate: \"blocked\"` again in the next eligible Goal turn with the same trimmed reason. Do not block merely because work is hard, uncertain, or incomplete.",
+@@ -35,1 +35,1 @@
+-          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. Use `active` to resume a model-produced terminal goal in a later user turn.",
++          description: "Use `read` to get the current goal before any transition. Use `complete` when the objective is achieved. Use `blocked` only when the same blocker remains after two consecutive eligible Goal turns using the same trimmed reason. The first blocked call keeps the Goal active: re-check relevant evidence breadth-first, continue if any branch yields a viable path, and only confirm the same blocker in the next eligible turn. Do not block merely because work is hard, uncertain, or incomplete. Use `active` to resume a model-produced terminal goal in a later user turn.",
+@@ -77,3 +77,10 @@
              : output.blockedAttempt
 -              ? `Blocked attempt ${output.blockedAttempt.attempt} of ${output.blockedAttempt.required}. Before marking as blocked, re-read relevant files, search with different patterns, split the problem into smaller verifiable steps, and check for overlooked dependencies or constraints. If you still cannot proceed with the available information, call operate blocked again in the next eligible Goal turn with the same trimmed reason to confirm the blocker is persistent.`
 +              ? [
@@ -2474,3 +2465,76 @@ index 469b3def6..9378eea57 100644
        expect(parse(Goal, { operate: "read" })).toEqual({ operate: "read" })
        expect(accepts(Goal, {})).toBe(false)
        expect(accepts(Goal, { mark: "complete", reason: "done" })).toBe(false)
+diff --git a/packages/core/test/session-runner-message.test.ts b/packages/core/test/session-runner-message.test.ts
+--- a/packages/core/test/session-runner-message.test.ts
++++ b/packages/core/test/session-runner-message.test.ts
+@@ -9,4 +9,5 @@ import { toLLMMessages } from "@opencode-ai/core/session/runner/to-llm-message"
+ import { SessionV2 } from "@opencode-ai/core/session"
+ import { DateTime } from "effect"
+ import { ReadPresentation } from "@opencode-ai/core/tool/read-presentation"
++import { SessionGoalProgress } from "@opencode-ai/core/session/goal-progress"
+ 
+@@ -16,3 +17,45 @@ const model = Model.make({ id: "model", provider: "provider", route: OpenAIChat.route })
+ 
++test("classifies Native goal progress from structured producer receipts", () => {
++  const ledger = SessionGoalProgress.createGoalProgressLedger()
++  const gate = { noProgressTurns: 0, replanRequired: false }
++  const signal = (messages: readonly SessionMessage.Message[]) => SessionGoalProgress.absorbGoalTurnEvidence(SessionGoalProgress.nativeEvidence(messages), "/project", ledger)
++  const tool = (value: string, name: string, input: Record<string, unknown>, structured: Record<string, unknown>, output = "stable") => SessionMessage.Assistant.make({
++    id: id(value), type: "assistant", agent: "build",
++    model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
++    content: [SessionMessage.AssistantTool.make({
++      type: "tool", id: value, name, time: { created, completed: created },
++      state: SessionMessage.ToolStateCompleted.make({
++        status: "completed", input, structured, content: [{ type: "text", text: output }],
++      }),
++    })],
++    time: { created, completed: created },
++  })
++  SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
++  SessionGoalProgress.updateGoalProgressGate(gate, { exploration: false, advancement: false })
++  expect(gate).toEqual({ noProgressTurns: 2, replanRequired: true })
++  const read = { canonicalPath: "/project/receipt.txt", size: 3, modifiedMs: 1, fp: "head-v1", start: 1, end: 1, stub: false }
++  const receipt = tool("read", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read })
++  const first = signal([receipt])
++  expect(first).toEqual({ exploration: true, advancement: false })
++  SessionGoalProgress.updateGoalProgressGate(gate, first)
++  expect(gate).toEqual({ noProgressTurns: 0, replanRequired: true })
++  expect(signal([receipt])).toEqual({ exploration: false, advancement: false })
++  expect(signal([tool("changed", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: { ...read, fp: "head-v2" } })])).toEqual({ exploration: true, advancement: false })
++  // 同一正文也须识别版本改变；缺指纹或 stub 都不能制造新的探索。
++  for (const invalid of [{ ...read, fp: undefined }, { ...read, fp: "" }, { ...read, stub: true }]) {
++    expect(signal([tool("invalid", "read", { path: "receipt.txt" }, { content: "one", encoding: "utf8", read: invalid })])).toEqual({ exploration: false, advancement: false })
++  }
++  const command = (hasErrors: boolean) => tool("verify", "bash", { command: "bun test" }, { exit: 0, hasErrors })
++  expect(signal([command(true)])).toEqual({ exploration: true, advancement: false })
++  const changed = signal([command(false)])
++  expect(changed).toEqual({ exploration: false, advancement: true })
++  SessionGoalProgress.updateGoalProgressGate(gate, changed)
++  expect(gate).toEqual({ noProgressTurns: 0, replanRequired: false })
++  const completed = tool("todo", "todowrite", { todos: [{ content: "inspect", priority: "high", status: "completed" }] }, {})
++  expect(signal([completed])).toEqual({ exploration: false, advancement: true })
++  expect(signal([completed])).toEqual({ exploration: false, advancement: false })
++  expect(signal([tool("noop", "write", { path: "receipt.txt" }, { diff: "" })])).toEqual({ exploration: false, advancement: false })
++})
++
+ describe("toLLMMessages", () => {
+   test("deduplicates complete Read versions only within the supplied visible history", () => {
+diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/session-projector.test.ts
+--- a/packages/core/test/session-projector.test.ts
++++ b/packages/core/test/session-projector.test.ts
+@@ -333,5 +333,14 @@ describe("SessionProjector", () => {
+       }
+       // 新提升的输入和助手不能认领旧轮结果；无快照请求仍然保留工具流归因。
++      // 技术提醒不创建 Goal turn，当前 turn 的冷助手也必须按真实选集恢复。
++      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.make("msg_progress_reminder"), timestamp: created, text: "Technical plan reminder" })
++      expect((yield* SessionHistory.goalTurn(db, sessionID))?.id).toBe(first.id)
++      yield* Database.withSync({ db, sync: db.sync }, sync => {
++        expect(ColdStorage.freezeOwner(sync, { type: "session_message", id: assistantMessageID }).type).toBe("frozen")
++      })
++      expect(yield* SessionHistory.goalTurnMessages(db, sessionID)).toEqual([expected])
++      expect((yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).get())?.cold_ref).toBeNull()
++      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+       const later = yield* SessionInput.admit(db, events, { id: SessionMessage.ID.make("msg_diff_later"), sessionID,
+         prompt: Prompt.make({ text: "edit later" }), delivery: "steer" })
+       yield* SessionInput.promoteSteers(db, events, sessionID, later.admittedSeq)

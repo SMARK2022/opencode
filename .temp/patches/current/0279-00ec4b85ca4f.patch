@@ -639,7 +639,7 @@ diff --git a/packages/tui/test/context-usage.test.ts b/packages/tui/test/context
 index 0d8ec26c1..a73e8d71a 100644
 --- a/packages/tui/test/context-usage.test.ts
 +++ b/packages/tui/test/context-usage.test.ts
-@@ -8,10 +8,11 @@ import { createTestKeymap, type TestKeymapEvent, type TestKeymapTarget } from "@opentui/keymap/testing"
+@@ -8,11 +8,12 @@ import { createTestKeymap, type TestKeymapEvent, type TestKeymapTarget } from "@opentui/keymap/testing"
  import { estimate } from "@opencode-ai/core/util/token"
 +import type { InputBreakdown } from "@opencode-ai/schema/session-message"
  import { TuiKeybind } from "../src/config/keybind"
@@ -647,6 +647,7 @@ index 0d8ec26c1..a73e8d71a 100644
  import type { Agent, Message, Part, Provider, Session, TextPart } from "@opencode-ai/sdk/v2"
  import { computeContextData, filterCompactedMessages, resolveToolDescriptions, type ComputeContextDataInput } from "../src/util/context-usage"
  import TOOL_CATALOG from "../src/util/tool-definition-catalog.json"
+ import { TaskPrompt } from "@opencode-ai/core/tool/task-prompt"
 -import { contextUsageDetailLines, contextUsageFooter, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
 +import { contextUsageDetailLines, contextUsageFooter, contextUsageRefreshKey, contextUsageResource, registerContextUsageKeys } from "../src/routes/session/context-usage"
  

@@ -42,7 +42,7 @@ Verify material claims independently. File lists, grep hits, summaries and old v
 
 For this user-requested post-replay review, use the Admission Gate rules in `.temp/patches/AUDIT_CONTRACT_GPT.md`. They govern over conflicting general review instructions. Audit the supplied complete batch against its original/current patches, manifest, upstream implementation, final materialized source and matching cumulative validation evidence. Do not require historical PASS closure, retained intermediate states, source Git regeneration or per-index typechecks.
 
-Normal batches contain five consecutive manifest entries; the current terminal batch is 641-644. A range with resolvable manifest and patch paths is sufficient input. Resolve entries yourself rather than requesting that their contents be pasted into the handoff. Investigate all supplied entries; report actual scope gaps rather than certifying uninspected patches.
+Normal batches contain five consecutive manifest entries; the current terminal batch is 661-662. A range with resolvable manifest and patch paths is sufficient input. Resolve entries yourself rather than requesting that their contents be pasted into the handoff. Investigate all supplied entries; report actual scope gaps rather than certifying uninspected patches.
 
 Read existing source proof and the report's baseline, endpoint, `reusedPrefix`, `baseState` and `appliedThisRun`. Do not compute SHA-256 or other checksums, regenerate source patches, or read every preceding record. Missing evidence remains a finding with a concrete stated impact; continue the behavior investigation. Do not infer historical PASS or use a later patch to conceal a material loss in an earlier item.
 

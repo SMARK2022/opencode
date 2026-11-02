@@ -18,11 +18,86 @@ dialog-session-list.tsx 一致），确保多实例 daemon 模式下路由正确
 解决 CI coverage missing=3。新增回归测试验证 SDK 不含 goal 方法和
 dialog-goal.tsx 使用 fetch 而非 SDK 方法。
 
+diff --git a/packages/client/test/promise.test.ts b/packages/client/test/promise.test.ts
+--- a/packages/client/test/promise.test.ts
++++ b/packages/client/test/promise.test.ts
+@@ -108,6 +108,10 @@
+       if (url.endsWith("/api/session/active")) return Response.json({ data: { ses_test: { type: "running" } } })
+       if (init?.method === "POST" && url.endsWith("/api/session")) return Response.json(session)
+       if (url.endsWith("/api/session/preview")) return Response.json({ ses_test: ["latest user", "earlier user"] })
++      if (url.endsWith("/goal")) return Response.json(init?.method === "DELETE" ? { cleared: false } : {
++        goal: init?.method === "POST" ? { id: "goal_test", sessionID: "ses_test", objective: "test objective", status: "active",
++          tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, time: { created: 1, updated: 1 } } : null,
++      })
+       if (init?.method === "POST") return new Response(null, { status: 204 })
+       return Response.json({ data: [session.data], cursor: { next: "next" } })
+     },
+@@ -138,6 +142,10 @@
+   for await (const event of client.sessions.events({ sessionID: "ses_test", after: 0 })) events.push(event)
+   await client.sessions.interrupt({ sessionID: "ses_test" })
+   const message = await client.sessions.message({ sessionID: "ses_test", messageID: "msg_model" })
++  // Native官方生成方法已消除旧SDK死调用根因，检查真实合同而非锁定SDK缺方法。
++  expect(await client.sessions.goal({ sessionID: "ses_test" })).toEqual({ goal: null })
++  expect((await client.sessions.goalSet({ sessionID: "ses_test", objective: "test objective", tokenBudget: null })).goal).toMatchObject({ objective: "test objective", status: "active" })
++  expect(await client.sessions.goalClear({ sessionID: "ses_test" })).toEqual({ cleared: false })
+   // 生成客户端必须暴露真实批量POST，不得回到逐会话分页。
+   const previews = await client.sessions.preview({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 })
+   expect(previews).toEqual({ ses_test: ["latest user", "earlier user"] })
+@@ -166,8 +174,12 @@
+     ["GET", "http://localhost:3000/api/session/ses_test/event?after=0"],
+     ["POST", "http://localhost:3000/api/session/ses_test/interrupt"],
+     ["GET", "http://localhost:3000/api/session/ses_test/message/msg_model"],
++    ["GET", "http://localhost:3000/api/session/ses_test/goal"],
++    ["POST", "http://localhost:3000/api/session/ses_test/goal"],
++    ["DELETE", "http://localhost:3000/api/session/ses_test/goal"],
+     ["POST", "http://localhost:3000/api/session/preview"],
+   ])
+   expect(requests.at(-1)?.init?.body).toBe(JSON.stringify({ sessionIDs: ["ses_test", "ses_missing"], limit: 2 }))
++  expect(requests.find(request => request.url.endsWith("/goal") && request.init?.method === "POST")?.init?.body).toBe(JSON.stringify({ objective: "test objective", tokenBudget: null }))
+   const body = requests.find((request) => request.url.endsWith("/api/session/ses_test/prompt"))?.init?.body
+   if (typeof body !== "string") throw new Error("Expected JSON request body")
 diff --git a/packages/opencode/test/server/httpapi-exercise/index.ts b/packages/opencode/test/server/httpapi-exercise/index.ts
 index 6d1489f8e..960748276 100644
 --- a/packages/opencode/test/server/httpapi-exercise/index.ts
 +++ b/packages/opencode/test/server/httpapi-exercise/index.ts
-@@ -1677,6 +1677,40 @@ const scenarios: Scenario[] = [
+@@ -981,6 +981,36 @@
+       headers: ctx.headers(),
+     }))
+     .json(200, data(object)),
++  // Native公开路径也进入同一覆盖表；V1场景不能代替不同的method+path。
++  http.protected
++    .get("/api/session/{sessionID}/goal", "v2.session.goal")
++    .seeded(ctx => ctx.session({ title: "Native goal get" }))
++    .at(ctx => ({ path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
++    .json(200, body => {
++      object(body)
++      check(body.goal === null, "new native session should have no goal")
++    }),
++  http.protected
++    .post("/api/session/{sessionID}/goal", "v2.session.goal.set")
++    .mutating()
++    .seeded(ctx => ctx.session({ title: "Native goal set" }))
++    .at(ctx => ({ path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers(),
++      body: { objective: "test objective" } }))
++    .json(200, body => {
++      object(body)
++      object(body.goal)
++      check(body.goal.objective === "test objective", "native goal objective should match")
++      check(body.goal.status === "active", "new native goal should be active")
++    }),
++  http.protected
++    .delete("/api/session/{sessionID}/goal", "v2.session.goal.clear")
++    .mutating()
++    .seeded(ctx => ctx.session({ title: "Native goal clear" }))
++    .at(ctx => ({ path: route("/api/session/{sessionID}/goal", { sessionID: ctx.state.id }), headers: ctx.headers() }))
++    .json(200, body => {
++      object(body)
++      check(body.cleared === false, "clearing absent native goal should return false")
++    }),
+   http.protected
+     .post("/api/session/{sessionID}/agent", "v2.session.switchAgent")
+     .seeded((ctx) => ctx.session({ title: "Switch agent" }))
+@@ -1677,6 +1707,40 @@ const scenarios: Scenario[] = [
        },
        "status",
      ),
@@ -312,7 +387,7 @@ index f3b93ff25..04df7f208 100644
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -1103,15 +1103,15 @@
+@@ -1106,16 +1106,19 @@
                sdk.client.session.status({ workspace: project.workspace.current() })
                  .then((x) => setStore("session_status", reconcile(x.data ?? {}))),
              ])
@@ -330,7 +405,10 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +            // #368：SDK 未生成 session.goal 方法——as any 调用运行时 undefined→TypeError 被吞，
 +            // goal 状态永不在会话打开时加载（/goal 误弹 Set）。改用 sdk.fetch 直调 GET，非致命。
 +            try {
-+              const resp = await sdk.fetch(`${sdk.url}/session/${sessionID}/goal`)
++              const url = new URL(`/session/${sessionID}/goal`, sdk.url)
++              const dir = result.path.directory || sdk.directory
++              if (dir) url.searchParams.set("directory", dir)
++              const resp = await sdk.fetch(url)
 +              if (resp.ok) {
 +                const body = (await resp.json()) as { goal?: SessionGoalInfo }
 +                setStore("session_goal", sessionID, body.goal ?? undefined)
@@ -338,4 +416,5 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +            } catch {
 +              // goal 端点不可用时不阻塞 session sync
 +            }
-             setStore(
+             // 先应用排队片段并标记 touched，再让快照仲裁，避免同一文本被追加两次。
+             flushPartDeltas()

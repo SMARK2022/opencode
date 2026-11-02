@@ -5,15 +5,14 @@ diff --git a/README.md b/README.md
  ```
  
  
--### VS Code Notebook 集成
-+### VS Code 语言服务与 Notebook 集成
+ ### VS Code Notebook 集成
  
 -使用 Notebook 工具前，请先安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。该扩展版本 `1.18.39` 对应 SMARK CLI `1.18.39-smark` 及之后版本，负责在 VS Code/Jupyter Notebook 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
-+需要复用 VS Code 语言服务或使用 Notebook 工具时，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.42-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 会继续使用内置 LSP，但无法使用 VS Code-backed 语言能力或 Notebook 工具。
++使用 Notebook 工具前，请安装 VS Code 扩展 [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge)。仓库内扩展版本为 `1.18.40`，推荐配合 SMARK CLI `1.18.42-smark`；两者独立版本化，Marketplace 可能仍显示旧版 `1.18.39` 直至新构建发布。该扩展在 VS Code 与 OpenCode CLI 之间建立本地鉴权 bridge；未安装或未连接时，CLI 无法可靠读取、编辑或执行 notebook 单元格。
  
  扩展启动后会在 `127.0.0.1:<random port>` 开本地 bridge，并把带心跳的 manifest 写到 `~/.local/state/opencode/ide/<uuid>.json`。OpenCode 会按 workspace 与 notebook 路径自动选择匹配的 VS Code bridge；远程 SSH、WSL 或容器场景下，CLI 需要运行在能访问该 bridge 的同一侧环境。
  
-+扩展不会捆绑 language server，而是复用当前 VS Code 窗口中语言扩展已经注册的 provider。Bridge 支持文件 touch、diagnostics、hover、definition、references、document symbols 和 workspace symbols；bridge 请求失败时回退内置 LSP，diagnostics 的无效结构也会回退。其他成功响应若缺少预期结果字段，当前可能被解释为空结果；合法空结果不会触发回退，也不能代替完整项目 typecheck。Implementation 和调用层级仍由内置 LSP 提供；强诊断刷新可能增加一个保持原焦点的 preview 标签页。
++V1 和 V2 的 LSP 功能固定禁用，统一提示 unavailable；扩展不启用语言诊断、跳转或符号查询，CLI 也不使用内置 LSP 或语言服务回退。Notebook 操作和文件编辑后的 formatter 最终内容及 diff 反馈仍然可用；unavailable 不能视为诊断通过或代替完整项目 typecheck。
 +
  | 工具 | 用途 |
  | --- | --- |
@@ -44,7 +43,7 @@ diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
 +| CI/GitHub Release VSIX name | `dist/opencode-vscode-<version>.vsix` |
  
 -The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code notebook and workspace APIs through authenticated localhost endpoints.
-+The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code language, notebook, and workspace APIs through authenticated localhost endpoints. The CLI and extension are versioned independently.
++The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SMARK OpenCode CLI call VS Code notebook and workspace APIs through authenticated localhost endpoints. The CLI and extension are versioned independently.
  
 @@ -30,7 +32,7 @@ The extension starts a local bridge on `127.0.0.1:<random port>` and lets the SM
  Run all commands from `sdks/vscode`.
@@ -76,8 +75,8 @@ diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
  2. Run `OpenCode: Show Bridge Log` and confirm the bridge is listening on `127.0.0.1`.
  3. Run `Open or Focus OpenCode Terminal` and confirm an `opencode` terminal starts.
 -4. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
-+4. Open a source file supported by an enabled VS Code language extension and request hover or definition at a known symbol.
-+5. Edit a file with a known diagnostic and confirm the post-edit LSP summary reports it; an empty provider result only proves the endpoint was callable.
++4. Confirm LSP remains disabled; the extension does not advertise language-service endpoints or enable a built-in fallback.
++5. Edit a file and check the returned formatter-final diff; LSP feedback remains unavailable.
 +6. Open a notebook and ask OpenCode to call `vscode_notebook_summary`.
 +7. If the notebook has executable cells, call `vscode_notebook_run` on one safe cell.
 +8. If the cell has outputs, call `vscode_notebook_output` and confirm artifacts appear under `.opencode/cache/notebook-outputs/`.
@@ -87,8 +86,7 @@ diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
 @@ -105,8 +116,8 @@
  | Local binding | Bridge listens only on `127.0.0.1`. |
  | Health endpoint | `/health` is unauthenticated. |
--| Tool endpoints | Notebook endpoints and `/manifest` require `Bearer <token>`. |
-+| Tool endpoints | Language, Notebook, and `/manifest` endpoints require `Bearer <token>`. |
+ | Tool endpoints | Notebook endpoints and `/manifest` require `Bearer <token>`. |
  | Cross-origin requests | Requests with an `Origin` header are rejected. |
  | Token logging | Output logs redact the token. |
  | Registry directory | Uses `0o700` on non-Windows systems. |
@@ -138,13 +136,12 @@ diff --git a/docs/VSIX-Packaging.md b/docs/VSIX-Packaging.md
 +The repository root `script/release` currently targets a `publish.yml` workflow that is absent from this checkout. It is not an extension tag helper. Do not substitute either root release script for the local VSIX and manual publishing flow documented above.
  
  ## CLI Integration
-@@ -164,15 +177,17 @@
+@@ -164,15 +177,16 @@
  ```text
  sdks/vscode/src/
  |-- extension.ts           Entry point, lifecycle, terminal commands
  |-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
  |-- bridge-registry.ts     Registry heartbeat and manifest writer
-+|-- lsp.ts                 VS Code language-provider and diagnostics adapter
  |-- util.ts                Shared JSON, URI, and formatting helpers
  `-- notebook/
      |-- commands.ts        Interactive bridge testing command
@@ -164,7 +161,7 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
  # SMARK OpenCode IDE Bridge
  
 -Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token.
-+Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code language, workspace, and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.18.39` until this repository build is published.
++Local VS Code extension for the SMARK OpenCode fork. It connects the OpenCode CLI to VS Code workspace and notebook APIs through a localhost HTTP bridge protected by a per-session Bearer token. The CLI and extension are versioned independently. Marketplace may continue to show `1.18.39` until this repository build is published.
  
  | Field | Value |
  | --- | --- |
@@ -179,7 +176,7 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
  ## What It Adds
  
 -The upstream VS Code extension mainly opens an `opencode` terminal. This SMARK extension keeps that terminal workflow and adds a bridge that lets OpenCode work with VS Code notebooks directly.
-+The upstream VS Code extension mainly opens an `opencode` terminal. This SMARK extension keeps that terminal workflow and adds a bridge that lets OpenCode reuse VS Code language providers and work with notebooks directly.
++The upstream VS Code extension mainly opens an `opencode` terminal. This SMARK extension keeps that terminal workflow and adds an authenticated notebook bridge; LSP integration is disabled in both CLI execution paths.
  
  | Capability | What it does |
  | --- | --- |
@@ -188,7 +185,7 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
  | Notebook execution | Runs one cell or a stable-ID range through VS Code's native notebook execution command. |
  | Output artifacts | Writes images, HTML, JSON, and large text outputs to artifact files and returns compact summaries. |
 -| Kernel operations | Inspects, configures, restarts, and explicitly saves notebooks when requested. |
-+| Language intelligence | Reuses providers registered in the current VS Code window for diagnostics, hover, definitions, references, and symbols. |
++| LSP | Fixed unavailable in both CLI execution paths; notebook and terminal features remain available. |
 +| Kernel operations | Inspects, configures, restarts, or stops kernels and explicitly creates or saves notebooks when requested. |
  
  ## Prerequisites
@@ -196,7 +193,7 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
 @@ -30,4 +31,5 @@
  - Install the SMARK OpenCode CLI from https://github.com/SMARK2022/opencode/releases.
  - Install this extension as `SMARK2022.opencode-ide-bridge`.
-+- For language intelligence, enable a VS Code language extension that registers the required provider for the target language.
++- LSP integration is disabled; enabling a language extension does not enable OpenCode language services.
  - For `.ipynb` work, install the VS Code Jupyter extension `ms-toolsai.jupyter`.
  - For Python notebooks, install the VS Code Python extension `ms-python.python` and configure a kernel.
 @@ -50,3 +51,3 @@
@@ -215,44 +212,23 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
  ```
  
 -Set `OPENCODE_IDE_REGISTRY_DIR` to override this location. The CLI scans the registry, checks live bridge health, scores matching workspaces, and uses the best matching bridge for notebook tools.
-+Set `OPENCODE_IDE_REGISTRY_DIR` to override this location. The CLI scans the registry, checks live bridge health, scores matching workspaces, and uses the best matching bridge for language and notebook operations.
-@@ -109,5 +110,23 @@
++Set `OPENCODE_IDE_REGISTRY_DIR` to override this location. The CLI scans the registry, checks live bridge health, scores matching workspaces, and uses the best matching bridge for notebook tools, not language services.
+@@ -109,5 +110,9 @@
  | `active.textEditor` | Active text editor URI, when present. |
  | `active.notebook` | Active notebook URI, when present. |
 -| `capabilities` | Bridge feature flags, including notebook support. |
-+| `capabilities` | Bridge feature flags, including language (`lsp`) and notebook support. |
++| `capabilities` | Bridge feature flags, including notebook support; this build does not advertise an `lsp` capability. |
 +
 +## Language Intelligence
 +
-+The bridge does not bundle language servers. It calls providers registered by enabled language extensions in the current VS Code window, so availability depends on the target language and provider. OpenCode uses the bridge for these operations:
-+
-+| Operation | VS Code-backed behavior |
-+| --- | --- |
-+| Touch | Reveals a preserve-focus preview when a strong diagnostics refresh needs VS Code to activate the document. |
-+| Diagnostics | Reads diagnostics currently published by VS Code, optionally scoped to one file; the CLI aggregate path requests all published diagnostics. |
-+| Hover | Returns hover contents at a position. |
-+| Definition | Returns definition locations for a symbol. |
-+| References | Returns references for a symbol. |
-+| Document symbols | Returns symbols from one document. |
-+| Workspace symbols | Searches symbols registered for the current workspace. |
-+
-+For supported operations, OpenCode falls back to its built-in LSP when the bridge request fails. Diagnostics also falls back when its response structure is invalid; for other successful responses, a missing result field may currently be interpreted as empty. A valid empty result does not trigger fallback and does not by itself prove that the entire project passes type checking. Implementation lookup and prepare/incoming/outgoing call hierarchy are not bridge endpoints and continue to use the built-in LSP.
-+
-+Opening a document with `vscode.workspace.openTextDocument` does not reveal it. A strong diagnostics refresh may call the touch endpoint, which uses a preview editor with `preserveFocus: true`; this preserves focus but can still add a preview tab.
++LSP integration is disabled in both CLI execution paths. Language diagnostics, hover, definition, references, symbols, implementation, and call hierarchy are unavailable; the bridge exposes no language-service routes and the CLI has no built-in LSP fallback. Notebook operations and formatter-final edit feedback remain available.
  
  ## HTTP Endpoints
-@@ -127,3 +146,10 @@
+@@ -127,3 +132,3 @@
  | `POST` | `/notebook/output` | Bearer | Export outputs as artifacts. |
  | `POST` | `/notebook/cell-output` | Bearer | Alias for `/notebook/output`. |
 -| `POST` | `/notebook/env` | Bearer | Kernel info, configure, restart, and save operations. |
 +| `POST` | `/notebook/env` | Bearer | Kernel info/configure/restart/stop and notebook create/save operations. |
-+| `POST` | `/lsp/touch` | Bearer | Activate a document and wait briefly for diagnostics. |
-+| `POST` | `/lsp/diagnostics` | Bearer | Return diagnostics for one file when scoped, or all currently published diagnostics when omitted. |
-+| `POST` | `/lsp/hover` | Bearer | Return hover results at a position. |
-+| `POST` | `/lsp/definition` | Bearer | Return definition locations at a position. |
-+| `POST` | `/lsp/references` | Bearer | Return reference locations at a position. |
-+| `POST` | `/lsp/document-symbol` | Bearer | Return symbols for a document. |
-+| `POST` | `/lsp/workspace-symbol` | Bearer | Search workspace symbols by query. |
 @@ -138,3 +165,3 @@
  | Token logging | Logs print `<redacted>` instead of the token. |
  | Registry permissions | Registry directories use `0o700` and manifest files use `0o600` on non-Windows systems. |
@@ -261,25 +237,19 @@ diff --git a/sdks/vscode/README.md b/sdks/vscode/README.md
 @@ -159,3 +186,5 @@
  | Run ranges | Range execution is sequential and stops on the first failed or timed-out code cell. |
  | Kernel configure | A selected kernel may not become active until the first code cell executes. `selected` is a valid configure result. |
-+| Language providers | Results depend on providers registered by enabled VS Code language extensions; the bridge does not install a server. |
-+| Empty diagnostics | An empty response is valid but is not a replacement for a complete project typecheck. |
++| Language integration | LSP is fixed unavailable; configuration or bridge discovery cannot enable it. |
++| Diagnostics | An unavailable result is not a clean diagnostic report or a project typecheck. |
  | Save | `vscode_notebook_env` with `operation: "save"` should only be used after explicit user intent. |
-@@ -209,3 +238,4 @@
- |-- bridge.ts              HTTP server, routing, auth, per-filePath mutex
- |-- bridge-registry.ts     Registry heartbeat and manifest writer
-+|-- lsp.ts                 VS Code language-provider and diagnostics adapter
- |-- util.ts                Shared JSON, URI, and formatting helpers
 @@ -215,4 +245,4 @@
      |-- run.ts             Cell execution through VS Code/Jupyter
      |-- output.ts          Artifact-first output export
 -    |-- env.ts             Kernel info/configure/restart/save
 +    |-- env.ts             Kernel info/configure/restart/stop and create/save
      |-- commands.ts        Interactive development test command
-@@ -228,3 +258,5 @@
+@@ -228,3 +236,4 @@
  | `No live VS Code bridge found` | Ensure VS Code is open, this extension is enabled, and the workspace is open in VS Code. Run `Show OpenCode Bridge Log`. |
  | `No live VS Code bridge workspace matches filePath` | Reuse the exact notebook path returned by `vscode_notebook_summary`; check WSL/Remote path boundaries. |
-+| Language result is empty | Confirm the target file belongs to the open workspace and an enabled language extension registers that provider. An empty result can be valid. |
-+| Diagnostics stay unavailable | Open the bridge log, verify `capabilities.lsp`, and confirm the CLI and extension host run on the same side of Remote SSH, WSL, or a container. |
++| LSP diagnostics unavailable | Expected in this build; use formatter-final diffs and explicit project checks rather than language-service bridge setup. |
  | Kernel configure returns `needs-selection` | Select a kernel in the VS Code notebook toolbar, then run configure again. |
 diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
 --- a/sdks/vscode/package.json
@@ -290,17 +260,8 @@ diff --git a/sdks/vscode/package.json b/sdks/vscode/package.json
 -  "description": "Local HTTP bridge extension for OpenCode IDE. Provides notebook operations (summary, source, run, edit, output, env), Jupyter kernel management, and workspace context sharing with the OpenCode CLI daemon.",
 -  "version": "1.18.39",
 -  "//": "#253：协同升号 1.18.38→1.18.39——source 谱系 1.15.3→1.15.3→1.15.4 逐级映射，格式保持三段式",
-+  "description": "SMARK OpenCode IDE bridge for VS Code. Provides VS Code-backed language intelligence, notebook and Jupyter kernel operations, workspace context sharing, and terminal integration over a local authenticated bridge.",
++  "description": "SMARK OpenCode IDE bridge for VS Code. Provides notebook and Jupyter kernel operations, workspace context sharing, and terminal integration over a local authenticated bridge.",
 +  "version": "1.18.40",
 +  "//": "#408：协同升号 1.18.39→1.18.40——source 谱系 1.15.5→1.15.10 映射，格式保持三段式",
    "homepage": "https://github.com/SMARK2022/opencode/tree/dev-smark/sdks/vscode",
    "publisher": "SMARK2022",
-@@ -31,6 +31,8 @@
-     "kernel",
-     "opencode",
-     "bridge",
-+    "lsp",
-+    "language-server",
-     "notebook",
-     "ide"
-   ],

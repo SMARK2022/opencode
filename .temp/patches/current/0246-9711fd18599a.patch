@@ -1,3 +1,104 @@
+diff --git a/packages/session-ui/src/components/grep-summary.ts b/packages/session-ui/src/components/grep-summary.ts
+new file mode 100644
+--- /dev/null
++++ b/packages/session-ui/src/components/grep-summary.ts
+@@ -0,0 +1,19 @@
++import type { UiI18n } from "@opencode-ai/ui/context/i18n"
++
++export function grepSummary(input: Record<string, unknown>, metadata: Record<string, unknown>, i18n: Pick<UiI18n, "t" | "plural">) {
++  // 普通卡片与分组摘要共用同一投影，Native和历史V1结果都不能漏掉不完整状态。
++  const filters = ([false, true] as const).flatMap(exclude => {
++    const value = exclude ? input.exclude : input.include
++    const items = (typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [])
++      .filter(Boolean).map(item => exclude && !item.startsWith("!") ? `!${item}` : item)
++    // include最多两项、exclude一项；其余数量保留，不把整列参数铺满时间线。
++    const shown = items.slice(0, exclude ? 1 : 2)
++    return shown.length ? [`${shown.join(",")}${items.length > shown.length ? ` +${items.length - shown.length}` : ""}`] : []
++  })
++  const count = typeof metadata.matches === "number" ? metadata.matches : Array.isArray(metadata.items) ? metadata.items.length : undefined
++  const result = count === undefined || count === 0 && metadata.timedOut === true ? "" : metadata.truncated === true
++    ? i18n.t("ui.tool.grep.truncated", { count }) : i18n.plural("ui.tool.grep.matches", count)
++  const status = metadata.timedOut !== true ? result : result
++    ? i18n.t("ui.tool.grep.incomplete", { result }) : i18n.t("ui.tool.grep.timedOut")
++  return [typeof input.pattern === "string" ? input.pattern : "", ...filters, status].filter(Boolean)
++}
+diff --git a/packages/session-ui/src/components/message-part.tsx b/packages/session-ui/src/components/message-part.tsx
+--- a/packages/session-ui/src/components/message-part.tsx
++++ b/packages/session-ui/src/components/message-part.tsx
+@@ -67,2 +67,3 @@
+ import { readPartText } from "./message-part-text"
++import { grepSummary } from "./grep-summary"
+ import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
+@@ -855,1 +856,0 @@
+-  const include = typeof input.include === "string" ? input.include : undefined
+@@ -882,8 +882,5 @@
+-      const args: string[] = []
+-      if (pattern) args.push("pattern=" + pattern)
+-      if (include) args.push("include=" + include)
+       return {
+         title: i18n.t("ui.tool.grep"),
+         subtitle: getDirectory(path),
+-        args,
++        args: grepSummary(input, "metadata" in part.state ? part.state.metadata ?? {} : {}, i18n),
+       }
+@@ -1882,4 +1879,1 @@
+     const i18n = useI18n()
+-    const args: string[] = []
+-    if (props.input.pattern) args.push("pattern=" + props.input.pattern)
+-    if (props.input.include) args.push("include=" + props.input.include)
+@@ -1891,5 +1887,5 @@
+           title: i18n.t("ui.tool.grep"),
+           subtitle: getDirectory(props.input.path || "/"),
+-          args,
++          args: grepSummary(props.input, props.metadata, i18n),
+         }}
+       >
+diff --git a/packages/ui/src/context/i18n.tsx b/packages/ui/src/context/i18n.tsx
+--- a/packages/ui/src/context/i18n.tsx
++++ b/packages/ui/src/context/i18n.tsx
+@@ -10,3 +10,4 @@
+   "ui.messagePart.context.search",
+   "ui.messagePart.context.list",
++  "ui.tool.grep.matches",
+ ] as const
+diff --git a/packages/ui/src/i18n/en.ts b/packages/ui/src/i18n/en.ts
+--- a/packages/ui/src/i18n/en.ts
++++ b/packages/ui/src/i18n/en.ts
+@@ -221,3 +221,8 @@
+   "ui.common.showMore": "Show more",
+ 
++  "ui.tool.grep.matches.one": "{{count}} match",
++  "ui.tool.grep.matches.other": "{{count}} matches",
++  "ui.tool.grep.truncated": "{{count}}+ matches",
++  "ui.tool.grep.timedOut": "timed out",
++  "ui.tool.grep.incomplete": "{{result}}, timed out",
+   "ui.permission.deny": "Deny",
+diff --git a/packages/session-ui/src/components/message-part.test.ts b/packages/session-ui/src/components/message-part.test.ts
+--- a/packages/session-ui/src/components/message-part.test.ts
++++ b/packages/session-ui/src/components/message-part.test.ts
+@@ -1,1 +1,4 @@
+ import { describe, expect, test } from "bun:test"
++import { grepSummary } from "./grep-summary"
++import { dict } from "@opencode-ai/ui/i18n/en"
++import type { UiI18n } from "@opencode-ai/ui/context/i18n"
+@@ -6,1 +9,17 @@
++test("shares compact grep filters and incomplete results across both display entrances", () => {
++  const t: UiI18n["t"] = (key, params) => dict[key].replace(/{{(\w+)}}/g, (_, name: string) => String(params?.[name] ?? ""))
++  const i18n = { t, plural: ((_key, count) => t(count === 1 ? "ui.tool.grep.matches.one" : "ui.tool.grep.matches.other", { count })) satisfies UiI18n["plural"] }
++  const input = { pattern: "function", include: ["*.ts", "*.tsx", "*.js"], exclude: ["cache/**", "!bin/**", "vendor/**"], timeout: 1000 }
++  const expected = ["function", "*.ts,*.tsx +1", "!cache/** +2", "64+ matches, timed out"]
++  // canonical items与V1 matches经过同一个实际消费者，不能只测试手工摘要字符串。
++  expect(grepSummary(input, { items: Array(64), truncated: true, timedOut: true }, i18n)).toEqual(expected)
++  expect(grepSummary(input, { matches: 64, truncated: true, timedOut: true }, i18n)).toEqual(expected)
++  expect(grepSummary({ include: "*.ts", exclude: "!cache/**" }, { items: [1] }, i18n)).toEqual(["*.ts", "!cache/**", "1 match"])
++  expect(grepSummary({}, { items: [], timedOut: true }, i18n)).toEqual(["timed out"])
++  expect(grepSummary({}, { matches: 0 }, i18n)).toEqual(["0 matches"])
++  expect(grepSummary(input, {}, i18n).join(" ")).not.toContain("include=")
++  expect(grepSummary(input, {}, i18n).join(" ")).not.toContain("exclude=")
++  expect(grepSummary(input, {}, i18n).join(" ")).not.toContain("1000")
++})
++
+ describe("readPartText", () => {
 diff --git a/packages/opencode/src/cli/cmd/run/tool.ts b/packages/opencode/src/cli/cmd/run/tool.ts
 --- a/packages/opencode/src/cli/cmd/run/tool.ts
 +++ b/packages/opencode/src/cli/cmd/run/tool.ts

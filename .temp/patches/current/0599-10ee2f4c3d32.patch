@@ -14,9 +14,8 @@ Content-Type: text/plain; charset=UTF-8
 diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src/permission/reviewer/prompt.ts
 --- a/packages/core/src/permission/reviewer/prompt.ts
 +++ b/packages/core/src/permission/reviewer/prompt.ts
-@@ -24,3 +24,9 @@
- // #198：默认租户策略从 policy.md 导入——可在 config 中用 policy_path 或 policy 字段覆盖或追加
- export const DEFAULT_TENANT_POLICY = DEFAULT_POLICY
+@@ -27,3 +27,9 @@
+ export const PROTOCOL_RETRY_TEXT = "Protocol retry: your previous reply was rejected because it did not submit the decision. Avoid prose, questions, explanations of inability, and offers to execute the action — none of these produce a decision. Reassess the same evidence and reply with exactly one permission_review_decision call. If you believe tool calls are unavailable, reply with ONLY the JSON object {\"risk_level\",\"user_authorization\",\"outcome\",\"rationale\"} as your entire message."
  
 +// 超时才提示600词软预算；保留意图/风险/策略清单，重建上下文不能引用不可见的上一轮分析。
 +export const TIME_BUDGET_RETRY_USER_ITEM = {
@@ -24,6 +23,7 @@ diff --git a/packages/core/src/permission/reviewer/prompt.ts b/packages/core/src
 +  text: "Time advisory: a previous attempt at this review exceeded its time budget. Think concisely now: keep reasoning within roughly 600 words. State the user's intent and authorization, the action's concrete risk, and the policy rule that matches, then submit the decision. Do not re-derive the transcript, do not re-check alternatives repeatedly, and do not stall in 'wait, but…' loops.",
 +}
 +
+ // #206：输出合约增加 transcript 用途限定——仅用于推断用户意图、范围、授权和本地证据，不作为策略指令
 diff --git a/packages/core/src/config/auto-review.ts b/packages/core/src/config/auto-review.ts
 --- a/packages/core/src/config/auto-review.ts
 +++ b/packages/core/src/config/auto-review.ts
@@ -35,80 +35,76 @@ diff --git a/packages/core/src/config/auto-review.ts b/packages/core/src/config/
 diff --git a/packages/core/src/permission/reviewer.ts b/packages/core/src/permission/reviewer.ts
 --- a/packages/core/src/permission/reviewer.ts
 +++ b/packages/core/src/permission/reviewer.ts
-@@ -79,3 +79,3 @@
-       // 只在reviewer解码边界接受source允许的文本裁决，通用generateObject契约保持严格。
--      const attempt = (index: number, nudged = false): Effect.Effect<PermissionReviewerSchema.Assessment, Failed | LLMError> => Effect.gen(function* () {
-+      const attempt = (index: number, retry?: "protocol" | "timeout"): Effect.Effect<PermissionReviewerSchema.Assessment, Failed | LLMError> => Effect.gen(function* () {
-         const forced = !toolChoiceRejectedProviders.has(selected.model.provider)
-@@ -86,1 +86,1 @@
--          prompt: items.map((item) => item.text).join("\n\n") + (nudged ? "\n\nSubmit a valid decision using the generate_object tool. Avoid prose, questions, explanations of inability, and offers to execute the action. Keep the supplied evidence and requested action unchanged. If tool calls are unavailable, reply with ONLY the JSON decision object." : ""),
-+          prompt: items.map((item) => item.text).join("\n\n") + (retry === "timeout" ? "\n\n" + PermissionReviewerPrompt.TIME_BUDGET_RETRY_USER_ITEM.text : retry === "protocol" ? "\n\nSubmit a valid decision using the generate_object tool. Avoid prose, questions, explanations of inability, and offers to execute the action. Keep the supplied evidence and requested action unchanged. If tool calls are unavailable, reply with ONLY the JSON decision object." : ""),
-@@ -103,8 +103,8 @@
-         // 单次超时位于重试内侧；取消保持interruption，绝不能变成批准或补试。
--        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
-+        Effect.timeoutOrElse({ duration: options.timeout_ms ?? 120_000, orElse: () => Effect.fail(new Failed({ reason: "auto reviewer timed out" })) }),
-         Effect.catchIf((error) => error instanceof Failed || error.reason._tag === "InvalidProviderOutput", (error) => {
-           if (index >= 2) return Effect.fail(error)
--          // 超时保留原提示；协议错误只加一次格式nudge，不重建或扩张授权证据。
--          return attempt(index + 1, nudged || !(error instanceof Failed && error.reason === "auto reviewer timed out"))
-+          // 以最近失败选择单份后缀；混合链不保留旧nudge，也不改变三次预算或授权证据。
-+          return attempt(index + 1, error instanceof Failed && error.reason === "auto reviewer timed out" ? "timeout" : "protocol")
-         }),
-       )
+@@ -176,3 +176,3 @@
+           // 每次拥有完整执行期限；仍先完成原onExit收尾，再向外层交付超时供补试。
+-          Effect.timeoutOrElse({ duration: options.timeout_ms ?? 90_000, orElse: () => Effect.fail(timedOut) }),
++          Effect.timeoutOrElse({ duration: options.timeout_ms ?? 120_000, orElse: () => Effect.fail(timedOut) }),
+           Effect.onExit((exit) => Effect.gen(function* () {
+@@ -220,7 +220,7 @@
+           Effect.catchIf((error) => error === protocolError || error === timedOut, (error) => {
+             if (index >= 2) return Effect.fail(error)
+-            // 协议仅追加同一条原话；超时保留当前提示，必须等上次收尾后才重试。
+-            return attempt(index + 1, error === protocolError ? `${prompt}\n\n${PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT}` : currentPrompt)
++            // 以最近失败重建单份后缀；先完成原收尾，不累积旧提示或扩大授权证据。
++            return attempt(index + 1, `${prompt}\n\n${error === protocolError ? PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT : PermissionReviewerPrompt.TIME_BUDGET_RETRY_USER_ITEM.text}`)
+           }),
+         )
+       const result = yield* attempt(0)
 diff --git a/packages/core/test/permission.test.ts b/packages/core/test/permission.test.ts
 --- a/packages/core/test/permission.test.ts
 +++ b/packages/core/test/permission.test.ts
-@@ -49,3 +49,5 @@
-     reviewRequests.push(request)
-+    // 先固定本次挂起计划再发布开始信号，下一轮计划不能反向影响当前运输。
-+    const hanging = reviewHangs > 0
-     if (reviewStarted) yield* Deferred.succeed(reviewStarted, undefined)
-     // 只在强制选择时产生typed400，不连真实provider；去参请求仍走同一个fake运输边界。
-@@ -58,1 +60,1 @@
--    if (reviewHangs > 0) {
-+    if (hanging) {
-@@ -568,6 +570,11 @@
--    // 真正中断第一次运输后才补试，超时补试保持相同证据且不添加协议nudge。
-+    // 真正中断首次运输；超时补试保留完整证据前缀，只附加一份时间预算。
-     expect(yield* Fiber.join(fiber)).toMatchObject({ effect: "allow" })
-     expect(reviewInterrupted).toBe(1)
+@@ -1083,6 +1083,12 @@
+     expect(interrupted).toBe(1)
      expect(reviewRequests).toHaveLength(2)
 -    expect(reviewRequests[1]?.messages).toEqual(reviewRequests[0]?.messages)
++    // 超时补试保持证据原文，只追加source的一份时间预算，不累积协议提示。
 +    const timeoutInputs = reviewRequests.map((request) => request.messages.flatMap((message) => message.content).filter((part) => part.type === "text").map((part) => part.text).join("\n"))
 +    expect(timeoutInputs[0]).not.toContain("Time advisory")
 +    expect(timeoutInputs[1]).toContain("Time advisory")
 +    expect(timeoutInputs[1]).toContain("600 words")
 +    expect(timeoutInputs[1]?.split("\n\nTime advisory:")[0]).toBe(timeoutInputs[0])
 +    expect(timeoutInputs[1]?.match(/Time advisory:/g)).toHaveLength(1)
-     reviewText = "Based on my analysis:\n" + JSON.stringify({ ...assessment, rationale: 'bounded } transfer with "quoted" evidence' })
-@@ -585,3 +592,27 @@
-     expect(JSON.stringify(reviewRequests[0]?.messages)).not.toContain("Submit a valid decision using the generate_object tool")
-     expect(JSON.stringify(reviewRequests[1]?.messages)).toContain("Submit a valid decision using the generate_object tool")
-+    // 第一轮协议失败、第二轮挂起超时、第三轮成功；用已有运输闸门确定性交错，不靠睡眠。
+     expect(reviewTerminalWriteFailures).toBe(0)
+     expect(reviewTerminals).toEqual(["tool", "assistant"])
+     const child = yield* database.db.select().from(SessionTable).where(eq(SessionTable.parent_id, SessionV2.ID.make("ses_test"))).get().pipe(Effect.orDie)
+@@ -1105,6 +1111,37 @@
+     expect(interrupted).toBe(3)
+     expect(reviewRequests).toHaveLength(3)
+     expect((yield* sessions.context(childID)).filter(message => message.type === "assistant").every(message => message.time.completed !== undefined)).toBe(true)
++    // 完整文本事件表示已完成但未裁决的协议失败；缺text-start会成为运输defect而不应重试。
++    const mixedStarted = yield* Deferred.make<void>()
 +    reviewRequests.length = 0
-+    reviewGate = yield* Deferred.make<void>()
-+    reviewStarted = yield* Deferred.make<void>()
-+    const mixed = yield* service.ask({ ...input, metadata: { ...input.metadata, diff: "mixed" } }).pipe(Effect.forkChild)
-+    yield* Deferred.await(reviewStarted)
-+    reviewHangs = 1
-+    reviewStarted = yield* Deferred.make<void>()
-+    yield* Deferred.succeed(reviewGate, undefined)
-+    reviewGate = undefined
-+    yield* Deferred.await(reviewStarted)
-+    malformed = false
++    reviewScript = [Stream.make(
++      LLMEvent.textStart({ id: "mixed" }), LLMEvent.textDelta({ id: "mixed", text: "No decision" }), LLMEvent.textEnd({ id: "mixed" }),
++      LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }),
++    ), hang(mixedStarted), success]
++    const mixed = yield* service.ask(request("mixed-retry")).pipe(Effect.forkScoped)
++    yield* Deferred.await(mixedStarted)
 +    yield* TestClock.adjust("1 second")
 +    expect(yield* Fiber.join(mixed)).toMatchObject({ effect: "allow" })
-+    expect(reviewInterrupted).toBe(2)
 +    expect(reviewRequests).toHaveLength(3)
-+    expect(JSON.stringify(reviewRequests[0]?.messages)).not.toContain("Time advisory")
-+    expect(JSON.stringify(reviewRequests[1]?.messages)).toContain("Submit a valid decision using the generate_object tool")
-+    expect(JSON.stringify(reviewRequests[1]?.messages)).not.toContain("Time advisory")
-+    // 最近失败是超时，第三轮不能同时携带旧协议提示或多份时间预算。
-+    expect(JSON.stringify(reviewRequests[2]?.messages)).toContain("Time advisory")
-+    expect(JSON.stringify(reviewRequests[2]?.messages)).toContain("600 words")
-+    expect(JSON.stringify(reviewRequests[2]?.messages)).not.toContain("Submit a valid decision using the generate_object tool")
-+    expect(JSON.stringify(reviewRequests[2]?.messages).match(/Time advisory:/g)).toHaveLength(1)
-     // 首个完整对象不符契约时不能继续寻找后面的allow对象。
++    const mixedInputs = reviewRequests.map(item => JSON.stringify(item.messages))
++    expect(mixedInputs[0]).not.toContain("Time advisory")
++    expect(mixedInputs[1]).toContain("Protocol retry:")
++    expect(mixedInputs[1]).not.toContain("Time advisory")
++    expect(mixedInputs[2]).toContain("600 words")
++    expect(mixedInputs[2]).not.toContain("Protocol retry:")
++    expect(mixedInputs[2]?.match(/Time advisory:/g)).toHaveLength(1)
++    // 未配置时真实期限为120秒；显式1000ms的前述回归继续证明配置优先。
++    reviewSettings = new Config.Info({ approvals_reviewer: "auto_review", auto_review: new ConfigAutoReview.Info({ strict: true, fallback: "deny" }) })
++    const defaultStarted = yield* Deferred.make<void>()
++    reviewRequests.length = 0
++    reviewScript = [hang(defaultStarted), success]
++    const defaultTimeout = yield* service.ask(request("default-timeout")).pipe(Effect.forkScoped)
++    yield* Deferred.await(defaultStarted)
++    yield* TestClock.adjust("119999 millis")
++    expect(reviewRequests).toHaveLength(1)
++    yield* TestClock.adjust("1 millis")
++    expect(yield* Fiber.join(defaultTimeout)).toMatchObject({ effect: "allow" })
++    expect(reviewRequests).toHaveLength(2)
+     // 外部取消不是单次超时，不能消费补试次数或留下人工pending。
+     const cancelStarted = yield* Deferred.make<void>()
+     reviewRequests.length = 0
 diff --git a/packages/core/src/v1/config/permission.ts b/packages/core/src/v1/config/permission.ts
 --- a/packages/core/src/v1/config/permission.ts
 +++ b/packages/core/src/v1/config/permission.ts

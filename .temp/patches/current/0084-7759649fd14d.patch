@@ -131,9 +131,9 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
 -    .describe("Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell."),
 +    .describe("Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell."),
    cellId: z.string().describe("Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx."),
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
 @@ -20,5 +20,5 @@
      "Execute notebook code cells in VS Code and return execution status plus artifact paths.",
      "Required fields: filePath and cellId. If endCellId is provided, the bridge runs from cellId through endCellId; otherwise it runs only cellId.",
@@ -141,6 +141,27 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packag
 +    "type is optional. Explicit cell requires endpoints resolving to the same cell; otherwise endCellId selects a range. Use stable #VSC cell IDs from vscode_notebook_summary.",
      "Range execution includes both endpoint cells and does not use numeric cell indexes.",
      "Execution uses VS Code's native notebook.cell.execute path for each code cell, so VS Code/Jupyter handles kernel selection on the real run path; the bridge awaits the cell execution summary or per-cell timeout.",
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -31,6 +31,6 @@
+   filePath,
+-  // endCellId才决定范围，不能在CLI把可选type改成另一套目标选择逻辑。
+-  type: Schema.Literals(["cell", "range"]).annotate({ description: "Optional run kind hint. The bridge runs a range whenever endCellId is provided; otherwise it runs one cell." }).pipe(Schema.optional),
++  // 端点解析和同格别名校验仍归原生owner，CLI声明约束而不复制字符串守卫。
++  type: Schema.Literals(["cell", "range"]).annotate({ description: "Optional run kind. endCellId selects a range when type is omitted or range; explicit cell requires both endpoints to resolve to the same cell." }).pipe(Schema.optional),
+   cellId: cellId.annotate({ description: "Stable start cell ID from vscode_notebook_summary, formatted like #VSC-xxxxxxxx." }),
+   endCellId: cellId.annotate({ description: "Stable ending cell ID, formatted like #VSC-xxxxxxxx. When provided, the bridge runs from cellId through this cell, inclusive." }).pipe(Schema.optional),
+   timeoutMs: PositiveInt.check(Schema.isLessThanOrEqualTo(600_000)).annotate({ description: "Per-cell execution timeout in milliseconds. Defaults to 300000, maximum 600000." }).pipe(Schema.optional),
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -88,4 +88,4 @@
+     const definitions = yield* toolDefinitions(registry)
+     expect(definitions.map(item => item.name).toSorted()).toEqual(["vscode_notebook_edit", "vscode_notebook_env", "vscode_notebook_output", "vscode_notebook_run", "vscode_notebook_source", "vscode_notebook_summary"])
+-    expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("endCellId is the actual range signal")
++    expect(definitions.find(item => item.name === "vscode_notebook_run")?.description).toContain("Explicit cell requires endpoints resolving to the same cell")
+     expect((yield* toolDefinitions(registry, [{ action: "edit", resource: "*", effect: "deny" }])).map(item => item.name)).not.toContain("vscode_notebook_edit")
 diff --git a/sdks/vscode/src/test/notebook-run.test.ts b/sdks/vscode/src/test/notebook-run.test.ts
 new file mode 100644
 --- /dev/null

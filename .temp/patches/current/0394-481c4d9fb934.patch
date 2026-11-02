@@ -203,7 +203,7 @@ diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/sh
 diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 --- a/packages/core/src/tool/bash.ts
 +++ b/packages/core/src/tool/bash.ts
-@@ -267,7 +267,8 @@
+@@ -332,7 +332,8 @@
                  env: Shell.utf8Environment(),
                  stdin: "ignore",
                  detached: process.platform !== "win32",
@@ -212,7 +212,7 @@ diff --git a/packages/core/src/tool/bash.ts b/packages/core/src/tool/bash.ts
 +                forceKillAfter: Duration.millis(500),
                })
                const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
-               // 原文由现有 ToolOutputStore capture 保留，leaf 只产出模型窗口，不发布托管路径或自行做通用截断。
+               let ended = false
 diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
 --- a/packages/opencode/test/session/prompt.test.ts
 +++ b/packages/opencode/test/session/prompt.test.ts

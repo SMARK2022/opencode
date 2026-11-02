@@ -1,28 +1,47 @@
-diff --git a/packages/opencode/src/config/tui.ts b/packages/opencode/src/config/tui.ts
---- a/packages/opencode/src/config/tui.ts
-+++ b/packages/opencode/src/config/tui.ts
-@@ -106,7 +106,8 @@ function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTransc
-     // 相对路径按当前项目目录解析，保持和本地 MCP 配置文件里的路径语义一致。
+diff --git a/packages/tui/src/config/host.ts b/packages/tui/src/config/host.ts
+--- a/packages/tui/src/config/host.ts
++++ b/packages/tui/src/config/host.ts
+@@ -62,4 +62,8 @@ function voiceTranscriberFromMcpConfig(input: unknown, cwd: string): VoiceTranscriber {
+     // 与原本地MCP一致，相对脚本以项目目录解析，不以配置文件目录解析。
      const resolved = path.isAbsolute(mcpServer) ? mcpServer : path.resolve(cwd, mcpServer)
-     return {
--      command: command[0],
+-    return { command: command[0], args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"] }
++    return {
 +      // 直接执行 mcp-server.js 时没有显式解释器；沿用 shebang 依赖的 node 运行同目录 chatgpt.js。
 +      command: path.basename(command[0]).toLowerCase() === "mcp-server.js" ? "node" : command[0],
-       // voice 默认只复用 ChatGPT MCP 同目录的 CLI 入口；不注册 MCP tool，也不要求 chatgpt-browser-agent 在 PATH。
-       args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
-     }
++      args: [path.join(path.dirname(resolved), "chatgpt.js"), "transcribe-file", "--file", "{file}", "--json"],
++    }
+   }
 
+
+diff --git a/packages/tui/test/prompt/prompt-voice-input.test.ts b/packages/tui/test/prompt/prompt-voice-input.test.ts
+--- a/packages/tui/test/prompt/prompt-voice-input.test.ts
++++ b/packages/tui/test/prompt/prompt-voice-input.test.ts
+@@ -107,1 +107,1 @@
+-  test.each(["default", "mcp", "explicit"] as const)("host config reaches the voice controller: %s", async (scenario) => {
++  test.each(["default", "mcp", "direct", "explicit"] as const)("host config reaches the voice controller: %s", async (scenario) => {
+@@ -117,3 +117,4 @@
+         other: { command: ["unrelated", path.join(path.dirname(script), "mcp-server.js")] },
+-        chatgpt: { type: "local", command: [process.execPath, path.join(path.dirname(script), "mcp-server.js")] },
++        // 同一个host入口覆盖显式runtime与直接脚本，两种配置均不启动真实进程。
++        chatgpt: { type: "local", command: scenario === "direct" ? [path.join(path.dirname(script), "mcp-server.js")] : [process.execPath, path.join(path.dirname(script), "mcp-server.js")] },
+       } }))
+@@ -134,5 +135,5 @@
+     expect(config.voice?.transcriber).toEqual(scenario === "explicit"
+       ? { command: "explicit-voice", args: ["{file}"] }
+-      : scenario === "mcp"
+-        ? { command: process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
++      : scenario === "mcp" || scenario === "direct"
++        ? { command: scenario === "direct" ? "node" : process.execPath, args: [script, "transcribe-file", "--file", "{file}", "--json"] }
+         : TuiConfigHost.DefaultVoiceTranscriber)
 
 diff --git a/packages/opencode/test/config/tui.test.ts b/packages/opencode/test/config/tui.test.ts
 --- a/packages/opencode/test/config/tui.test.ts
 +++ b/packages/opencode/test/config/tui.test.ts
-@@ -613,6 +613,41 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
+@@ -613,6 +613,39 @@ it.instance("infers the default voice transcriber from the local ChatGPT MCP com
    ),
  )
  
-+// 这个用例覆盖 shebang 直接执行形态：MCP 配置直接以 mcp-server.js 作为 command[0]，无 node 前缀。
-+// 此时没有显式解释器，必须回退到 shebang 依赖的 node 运行 chatgpt.js，
-+// 否则会 spawn `mcp-server.js chatgpt.js transcribe-file ...` 让 mcp-server 以 MCP 模式启动并污染 stdout。
++// 直接脚本入口必须改用 node 执行转写 CLI，不能误启动会污染 stdout 的 MCP 协议服务。
 +it.instance("infers voice transcriber when MCP command runs mcp-server.js directly via shebang", () =>
 +  withCleanState(
 +    Effect.gen(function* () {

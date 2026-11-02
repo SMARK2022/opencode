@@ -1,21 +1,9 @@
-warning: in the working copy of 'packages/opencode/src/plugin/vscode-bridge-descriptions.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'packages/opencode/src/plugin/vscode-bridge.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'packages/opencode/test/plugin/vscode-bridge.test.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'packages/opencode/test/plugin/vscode-notebook-tool-summary.test.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'sdks/vscode/src/notebook/commands.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'sdks/vscode/src/notebook/edit.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'sdks/vscode/src/notebook/env.ts', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'sdks/vscode/src/notebook/source.ts', LF will be replaced by CRLF the next time Git touches it
-diff --git a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-index 223ed5699e00af1e28fbfdabcc2fb687df51bf31..2609834d35ef2f8ce583e27fa347affdbddffec7 100644
---- a/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-+++ b/packages/opencode/src/plugin/vscode-bridge-descriptions.ts
-@@ -37,9 +37,11 @@ export const VscodeNotebookDescriptions = {
-   ].join("\n"),
- 
+diff --git a/packages/core/src/tool/notebook-descriptions.ts b/packages/core/src/tool/notebook-descriptions.ts
+--- a/packages/core/src/tool/notebook-descriptions.ts
++++ b/packages/core/src/tool/notebook-descriptions.ts
+@@ -38,7 +38,8 @@
    edit: [
-+    // #252：edit 文案明确「字段省略=保源、空串=显式清空」，防止模型调用方序列化歧义
-+    // #252：文案与 bridge 的参数校验成对演进——改其一必须同步另一个
++    // 两代共用省略与空串的明确契约，语言变更不能意外清空源码。
      "Edit VS Code notebook cells with editType=insert, edit, or delete.",
      "For insert, cellId=TOP inserts at the top, cellId=BOTTOM appends, and cellId=#VSC-xxx inserts after that anchor cell. newCode is required.",
 -    "For edit, pass cellId=#VSC-xxx. Use oldCode/newCode for precise string-match replacement, or newCode without oldCode for full-cell replacement. A language-only edit changes the cell kind/language while preserving source.",
@@ -27,14 +15,11 @@ diff --git a/packages/opencode/src/plugin/vscode-bridge.ts b/packages/opencode/s
 index 46c45d0260a4cd6b9afba78d76b6997a40d794a5..537738084a0738db2b451085778275232d99ee6f 100644
 --- a/packages/opencode/src/plugin/vscode-bridge.ts
 +++ b/packages/opencode/src/plugin/vscode-bridge.ts
-@@ -101,10 +101,14 @@ const editArgs = {
+@@ -89,10 +89,11 @@ const editArgs = {
      .union([z.string(), z.array(z.string())])
      .optional()
      .describe("New source for insert or edit. Required for insert, full-cell replacement, and oldCode replacement. Do not wrap in Markdown fences unless the fences are literal content."),
-+  // Language-only edit is represented by an omitted source field, not an empty
-+  // value. The description says this explicitly because model/tool callers can
-+  // otherwise serialize "no source" as "" or [] and accidentally request a real
-+  // full-cell replacement.
++  // 仅语言编辑必须真正省略源码，空字符串和空数组不能冒充缺省字段。
    language: z
      .string()
      .optional()
@@ -43,38 +28,109 @@ index 46c45d0260a4cd6b9afba78d76b6997a40d794a5..537738084a0738db2b45108577827523
  }
  
  async function callRaw(
-@@ -205,6 +209,15 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
-   const diff = fullDiff && fullDiff.length <= NOTEBOOK_DIFF_METADATA_MAX_CHARS ? fullDiff : undefined
-   const cellIndex = numberValue(data.affectedCellIndex) ?? numberValue(data.anchorCellIndex) ?? numberValue(data.deletedCellIndex)
-   const editType = stringValue(data.editType) ?? stringValue(args.editType)
-+  const requestedCellId = stringValue(args.cellId)
-+  // Notebook insert and type-change edits can invalidate the requested handle:
-+  // insert creates a new cell, and type-change replaceCells gives the target a
-+  // new VS Code document URI. Keep `cellId` as the next usable handle while also
-+  // preserving `requestedCellId` when it differs, so existing renderers can show
-+  // the safe continuation point without losing the original anchor/debug value.
-+  const cellId = stringValue(data.insertedCellId) ?? stringValue(data.updatedCellId) ?? requestedCellId
-+  // #252：requested 与新句柄不同时同时输出——渲染器可展示安全续接点而不丢原始锚
-+  // #252：相同则省略 requestedCellId——冗余字段会诱导调用方误判句柄已失效
-   // #233：insert 有 afterSource 时生成有界预览——TUI 用代码渲染器展示插入内容
-   const insertedSourcePreview = editType === "insert" && after !== undefined
-     ? previewNotebookInsertSource(after)
-@@ -213,7 +226,8 @@ function notebookEditView(path: string | undefined, args: Record<string, unknown
-     view: "edit",
-     path,
-     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
--    cellId: stringValue(args.cellId),
-+    cellId,
-+    requestedCellId: requestedCellId && requestedCellId !== cellId ? requestedCellId : undefined,
-     editType,
-     cellCountBefore: numberValue(data.cellCountBefore),
-     cellCountAfter: numberValue(data.cellCountAfter),
-@@ -438,3 +451,5 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
+@@ -195,3 +196,5 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
          await ask(context, "vscode_notebook_env", args)
 +        // save 写回磁盘，专属工具许可之后仍须通过通用 edit 门禁。
 +        if (args.operation === "save") await ask(context, "edit", args)
          return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
        },
+diff --git a/packages/core/src/tool/notebook-view.ts b/packages/core/src/tool/notebook-view.ts
+--- a/packages/core/src/tool/notebook-view.ts
++++ b/packages/core/src/tool/notebook-view.ts
+@@ -77,2 +77,5 @@
+   const editType = stringValue(data.editType) ?? stringValue(args.editType)
++  const requestedCellId = stringValue(args.cellId)
++  // 插入与类型替换会分配新句柄；续用结果身份，同时保留不同的请求锚点。
++  const cellId = stringValue(data.insertedCellId) ?? stringValue(data.updatedCellId) ?? requestedCellId
+   // #233：insert 有 afterSource 时生成有界预览——TUI 用代码渲染器展示插入内容
+@@ -85,3 +88,4 @@
+     cellLabel: cellIndex === undefined ? undefined : `c${cellIndex + 1}`,
+-    cellId: stringValue(args.cellId),
++    cellId,
++    requestedCellId: requestedCellId && requestedCellId !== cellId ? requestedCellId : undefined,
+     editType,
+diff --git a/packages/core/src/tool/notebook.ts b/packages/core/src/tool/notebook.ts
+--- a/packages/core/src/tool/notebook.ts
++++ b/packages/core/src/tool/notebook.ts
+@@ -48,1 +48,1 @@
+-  language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source." }).pipe(Schema.optional),
++  language: Schema.String.annotate({ description: "Cell language. Use 'markdown' for Markdown cells; use 'python' or another language for code cells. On edit, language alone changes cell kind/language while preserving source; omit oldCode and newCode entirely for this mode." }).pipe(Schema.optional),
+@@ -109,2 +109,5 @@
+       // info也遵循同一工具级策略，不增加会绕开配置的operation级权限面。
+-      execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
++      execute: (args, context) => ask("vscode_notebook_env", args, context).pipe(
++        // save写回磁盘，专属审批通过后仍须服从通用edit，拒绝时不发现或调用桥。
++        Effect.andThen(args.operation === "save" ? ask("edit", args, context) : Effect.void),
++        Effect.andThen(call("/notebook/env", args, context, 120_000))) }),
+diff --git a/packages/session-ui/src/components/notebook-tool.ts b/packages/session-ui/src/components/notebook-tool.ts
+--- a/packages/session-ui/src/components/notebook-tool.ts
++++ b/packages/session-ui/src/components/notebook-tool.ts
+@@ -20,2 +20,4 @@
+   ["target", "ui.notebook.target"],
++  ["cellId", "ui.notebook.cellId"],
++  ["requestedCellId", "ui.notebook.requestedCellId"],
+   ["cellCountBefore", "ui.notebook.beforeCells"],
+diff --git a/packages/session-ui/src/components/notebook-tool-view.tsx b/packages/session-ui/src/components/notebook-tool-view.tsx
+--- a/packages/session-ui/src/components/notebook-tool-view.tsx
++++ b/packages/session-ui/src/components/notebook-tool-view.tsx
+@@ -27,1 +27,2 @@
+-      <span>{title()} {path()} {notebookValue(view()?.cellLabel ?? props.input.cellId)} {notebookValue(view()?.editType ?? props.input.operation)}</span>
++      {/* 格序号和可续用句柄同时显示，不能让cN遮住类型替换后的新身份。 */}
++      <span>{title()} {path()} {notebookValue(view()?.cellLabel)} {notebookValue(view()?.cellId ?? props.input.cellId)} {notebookValue(view()?.editType ?? props.input.operation)}</span>
+diff --git a/packages/ui/src/i18n/en.ts b/packages/ui/src/i18n/en.ts
+--- a/packages/ui/src/i18n/en.ts
++++ b/packages/ui/src/i18n/en.ts
+@@ -242,1 +242,3 @@
++  "ui.notebook.cellId": "Cell ID",
++  "ui.notebook.requestedCellId": "Requested cell ID",
+   "ui.notebook.summary": "Notebook summary",
+diff --git a/packages/tui/src/routes/session/notebook-tool.tsx b/packages/tui/src/routes/session/notebook-tool.tsx
+--- a/packages/tui/src/routes/session/notebook-tool.tsx
++++ b/packages/tui/src/routes/session/notebook-tool.tsx
+@@ -115,2 +115,4 @@
+-      stringValue(metadata.cellLabel) ?? stringValue(metadata.cellId),
++      stringValue(metadata.cellLabel),
++      // 旧锚点仅用于追踪，箭头右侧为SDK实际返回的新句柄。
++      [stringValue(metadata.requestedCellId), stringValue(metadata.cellId)].filter(Boolean).join(" -> "),
+         stats.added > 0 || stats.removed > 0 ? `+${stats.added} -${stats.removed}` : undefined,
+diff --git a/packages/core/test/tool-notebook.test.ts b/packages/core/test/tool-notebook.test.ts
+--- a/packages/core/test/tool-notebook.test.ts
++++ b/packages/core/test/tool-notebook.test.ts
+@@ -194,2 +194,3 @@
+       { action: "vscode_notebook_env", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-11" } },
++      { action: "edit", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-11" } },
+       { action: "vscode_notebook_run", resources: [filePath], source: { type: "tool", messageID: toolIdentity.assistantMessageID, callID: "call-12" } },
+@@ -214,1 +215,1 @@
+-    expect(permissions).toHaveLength(15)
++    expect(permissions).toHaveLength(16)
+@@ -227,2 +228,9 @@
++    deniedAction = "edit"
++    const beforeSaveRPC = received.length
++    const beforeSavePermissions = permissions.length
++    // save与格编辑一样受通用门禁约束，拒绝后不能进入发现或RPC。
++    expect((yield* invoke("vscode_notebook_env", { filePath, operation: "save" })).result.type).toBe("error")
++    expect(received).toHaveLength(beforeSaveRPC)
++    expect(permissions.slice(beforeSavePermissions).map(item => item.action)).toEqual(["vscode_notebook_env", "edit"])
+     deniedAction = undefined
+     // 大格源码仍在完整原生data；仅展示差分受原有16Ki字符预算约束。
+@@ -243,5 +251,6 @@
+-      responses["/notebook/edit"] = { ran: false, summary: "insert", data: { beforeSource: "", afterSource: source, affectedCellIndex: 0, editType: "insert", language: "python" } }
++      responses["/notebook/edit"] = { ran: false, summary: "insert", data: { beforeSource: "", afterSource: source, affectedCellIndex: 0, editType: "insert", language: "python", insertedCellId: "#VSC-inserted" } }
+       const result = yield* invoke("vscode_notebook_edit", { filePath, cellId: "BOTTOM", editType: "insert", newCode: "RAW_INPUT_NOT_RENDERED" })
+       const view = notebookMetadata(result.output?.structured).vscodeNotebook
++      expect(view).toMatchObject({ cellId: "#VSC-inserted", requestedCellId: "BOTTOM" })
+       expect(view).toMatchObject({ view: "edit", editType: "insert", language: "python", added, removed: 0, insertedSourcePreviewTruncated: truncated })
+       expect(typeof view.insertedSourcePreview).toBe("string")
+@@ -254,2 +263,9 @@
+     }
++    responses["/notebook/edit"] = { ran: false, summary: "language-only", data: { beforeSource: "same", afterSource: "same", editType: "edit", updatedCellId: "#VSC-updated", language: "markdown" } }
++    const changed = yield* invoke("vscode_notebook_edit", { filePath, cellId: "#VSC-old", editType: "edit", language: "markdown" })
++    expect(notebookMetadata(changed.output?.structured).vscodeNotebook).toMatchObject({ cellId: "#VSC-updated", requestedCellId: "#VSC-old" })
++    // 真正字段省略一直传到桥，不能由CLI序列化成清空内容。
++    expect(received.at(-1)?.body).not.toHaveProperty("oldCode")
++    expect(received.at(-1)?.body).not.toHaveProperty("newCode")
++    expect(changed.result.type).toBe("text")
+   }).pipe(Effect.provide(AppNodeBuilder.build(LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, NotebookTools.node]), [
 diff --git a/packages/opencode/test/plugin/vscode-bridge.test.ts b/packages/opencode/test/plugin/vscode-bridge.test.ts
 index 4a03ed9ea48300fefc8f3fce8290c5c4c4728153..f86f2520b4d246c1f1751442804c991eced34c66 100644
 --- a/packages/opencode/test/plugin/vscode-bridge.test.ts

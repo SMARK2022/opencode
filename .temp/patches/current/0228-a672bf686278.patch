@@ -11,187 +11,105 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 
-diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
---- a/packages/opencode/src/session/session.ts
-+++ b/packages/opencode/src/session/session.ts
-@@ -968,18 +968,60 @@
- 
- // #143：directory 列命名空间（path 为空的历史行）
- function relatedDirectoryConditions(directory: string) {
+diff --git a/packages/core/src/session/listing.ts b/packages/core/src/session/listing.ts
+--- a/packages/core/src/session/listing.ts
++++ b/packages/core/src/session/listing.ts
+@@ -19,10 +19,22 @@
+ function relatedDirectory(directory: string) {
 -  const column = sql<string>`replace(${SessionTable.directory}, ${"\\"}, "/")`
 -  const normalized = path.resolve(directory).replaceAll("\\", "/").replace(/\/+$/, "")
 -  const comparable = process.platform === "win32" ? sql<string>`lower(${column})` : column
 -  const value = process.platform === "win32" ? normalized.toLowerCase() : normalized
-+  // #228：目录相关条件集合——祖先链+子目录通配，与 path 过滤互补
-+  const comparable = comparableDirectoryColumn()
-+  // #228：SQL 侧表达式只构造一次——避免每行重复拼 SQL
-+  const value = comparableDirectoryValue(directory)
-   return [
-     ...SessionPath.ancestors(value).map((ancestor) => eq(comparable, ancestor)),
-+  // #228：祖先链逐级匹配——跨 project 父会话经 global OR 臂命中
-     like(comparable, value ? `${value}/%` : "%"),
-+  // #228：子目录通配覆盖深度嵌套——空值退化为全匹配
-   ]
++  const comparable = directoryColumn()
++  const value = directoryValue(directory)
+   return or(...SessionPath.ancestors(value).map(ancestor => eq(comparable, ancestor)), like(comparable, value ? `${value}/%` : "%"))
  }
-+// Session switching is path-scoped, not raw-directory scoped: the TUI asks with
-+// both `directory` (absolute cwd) and `path` (cwd relative to the project
-+// worktree). `Global.Path.home` is the canonical absolute path for `~`; on
-+// Windows historical rows and requests can differ by slash direction, trailing
-+// slash, or drive-letter casing, so home comparisons must normalize those
-+// spellings without changing the broader directory/path API contract.
-+function comparableDirectoryColumn() {
-+// #228：目录列归一化——反斜杠转正斜杠、去尾部斜杠，win32 再统一小写；与存库行的拼写差异解耦
-+  const column = sql<string>`rtrim(replace(${SessionTable.directory}, ${"\\"}, "/"), "/")`
-+// #228：SQL 侧 rtrim+replace 一次性完成归一化——避免在 JS 层逐行转换大表
-+  if (process.platform === "win32") return sql<string>`lower(${column})`
-+// #228：Windows 盘符大小写不敏感——SQL lower 与 JS toLowerCase 必须两侧一致
-+  return column
-+}
-+
-+function comparableDirectoryValue(directory: string) {
-+// #228：JS 侧与 SQL 侧同构的归一化——home 比较与列匹配使用同一规则
-+  const resolved = process.platform === "win32" ? directory : path.resolve(directory)
-+// #228：win32 不 resolve（避免盘符/UNC 语义差异）；POSIX resolve 规范化 . 与 ..
-+  const normalized = resolved.replaceAll("\\", "/").replace(/\/+$/, "")
-+// #228：反斜杠统一为斜杠并去掉尾部斜杠——C:\Users\Alice/ 与 C:/Users/Alice 等价
-+  if (process.platform === "win32") return normalized.toLowerCase()
-+  return normalized
-+}
-+
-+function homeDirectoryCondition() {
-+// #228：home 条件只精确匹配 ~ 本身——不匹配 ~/child 会话，避免跨目录误归
-+  // Match exactly the home directory after applying the same compatibility
-+  // normalization to stored rows and `Global.Path.home`; this deliberately does
-+  // not match `~/child` sessions when another directory asks to include `~`.
-+  return eq(comparableDirectoryColumn(), comparableDirectoryValue(Global.Path.home))
-+}
-+
-+function isHomeDirectory(directory: string | undefined) {
-+// #228：请求目录与 Global.Path.home 归一化后相等即视为 home 切换请求
-+  if (!directory) return false
-+  return comparableDirectoryValue(directory) === comparableDirectoryValue(Global.Path.home)
-+}
-+
  
- // #143：directory 与 path 是否同一 worktree 相对路径
- function directoryMatchesPath(input: { directory?: string; path: string; worktree: string }) {
-+  // #228：directory 与 path 是否同一 worktree 相对路径——决定能否用 directory 兜底
-   if (!input.directory) return false
-   const left = SessionPath.relative(input.worktree, input.directory)
-   const right = input.path.replaceAll("\\", "/")
-@@ -1001,49 +1043,60 @@
-     conditions.push(eq(SessionTable.workspace_id, input.workspaceID))
-   }
++function directoryColumn() {
++  // 存量目录与请求值采用同构归一化，不能只修请求端的斜杠和盘符大小写。
++  const column = sql<string>`rtrim(replace(${SessionTable.directory}, ${"\\"}, "/"), "/")`
++  return process.platform === "win32" ? sql<string>`lower(${column})` : column
++}
++
++function directoryValue(directory: string) {
++  const resolved = process.platform === "win32" ? directory : path.resolve(directory)
++  const normalized = resolved.replaceAll("\\", "/").replace(/\/+$/, "")
++  return process.platform === "win32" ? normalized.toLowerCase() : normalized
++}
++
+ // 两代共用相关命名空间的唯一 SQL；调用者决定是否请求此语义，精确目录查询不隐式扩大。
+-export function related(input: { projectID: ProjectV2.ID; worktree: string; path: string; directory?: string }) {
++export function related(input: { projectID: ProjectV2.ID; worktree: string; path: string; directory?: string; home?: string }) {
++  // home只移除路径边界；workspace、搜索、游标和数量限制仍由原查询保留。
++  if (input.home !== undefined && input.directory && directoryValue(input.directory) === directoryValue(input.home)) return undefined
+@@ -42,3 +54,4 @@
+     ...(sameLocation && input.directory ? [relatedDirectory(input.directory)] : []),
++    ...(input.home !== undefined && input.directory !== undefined ? [eq(directoryColumn(), directoryValue(input.home))] : []),
+   ].filter((branch): branch is SQL => branch !== undefined)
+   // 第一分支始终含 project_id；join 仅去掉 Drizzle 的可选条件类型，不引入第二次取数。
+diff --git a/packages/opencode/src/session/session.ts b/packages/opencode/src/session/session.ts
+--- a/packages/opencode/src/session/session.ts
++++ b/packages/opencode/src/session/session.ts
+@@ -915,4 +915,5 @@
    if (input.path !== undefined) {
--    // #143：path 只要定义（含 worktree 根 ""）就必须走 related/global OR，禁止回退 project_id
--
--    const isGlobal = String(input.projectID) === "global"
--    // #143：主项目 path 过滤（祖先+子孙）
--    const projectPath = or(
--      ...relatedPathConditions({
-+    const includeHomeSwitchScope = input.scope !== "project" && input.directory !== undefined
-+// #228：project 作用域不做 home 切换——只有全局/跨 project 视图才展开 home 会话
-+    if (includeHomeSwitchScope && isHomeDirectory(input.directory)) {
-+      // #228：home 作为全局切换枢纽——不添加任何 project/path 谓词，
-+      // #228：使 search/start/limit 跨所有 session 应用；workspace/start/search/roots/limit 谓词保持生效
-+    } else {
-+      // #143：path 只要定义（含 worktree 根 ""）就必须走 related/global OR，禁止回退 project_id
-+
-+      const isGlobal = String(input.projectID) === "global"
-+  // #228：global 项目自身的 path 条件与并入臂分开构造——避免自引用
-+      // #143：主项目 path 过滤（祖先+子孙）
-+      const projectPath = or(
-+        ...relatedPathConditions({
-+          path: input.path,
-+          directory: input.directory,
-+          global: isGlobal,
-+          root: true,
-+        }),
-+      )!
-+      const useDirectoryFallback = directoryMatchesPath({
-+        directory: input.directory,
-+  // #228：path 未定义的历史行回退 directory——directoryMatchesPath 判定 worktree 一致性
-         path: input.path,
--        directory: input.directory,
--        global: isGlobal,
--        root: true,
--      }),
--    )!
--    const useDirectoryFallback = directoryMatchesPath({
--      directory: input.directory,
--      path: input.path,
--      worktree: input.worktree,
--    })
--    // #143：全局 path（从 / 相对的 directory）供跨 project 父会话
--    const globalPath =
--      useDirectoryFallback && input.directory
--        ? or(
--            ...relatedPathConditions({
--              path: SessionPath.relative("/", input.directory),
--              directory: input.directory,
--              global: true,
--            }),
--          )
-+        worktree: input.worktree,
-+      })
-+      // #143：全局 path（从 / 相对的 directory）供跨 project 父会话
-+      const globalPath =
-+        useDirectoryFallback && input.directory
-+          ? or(
-+              ...relatedPathConditions({
-+                path: SessionPath.relative("/", input.directory),
-+                directory: input.directory,
-+                global: true,
-+              }),
-+            )
-+          : undefined
-+      const nullPath = input.directory
-+  // #228：历史行 path 为 NULL——directory 精确匹配作为兜底臂
-+        ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
-         : undefined
--    const nullPath = input.directory
--      ? and(isNull(SessionTable.path), eq(SessionTable.directory, input.directory))
--      : undefined
--    conditions.push(
--      or(
--        and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
--        // #143：非全局项目时并入 global 项目同源 path
--        // #143：global 项目父会话必须可被 git 子目录 list OR 命中
--        ...(globalPath && !isGlobal
--          ? [and(eq(SessionTable.project_id, "global" as ProjectV2.ID), nullPath ? or(globalPath, nullPath)! : globalPath)]
--          : []),
--        ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
--      )!,
--    )
--  
-+      conditions.push(
-+        or(
-+          and(eq(SessionTable.project_id, input.projectID), nullPath ? or(projectPath, nullPath)! : projectPath),
-+          // #143：非全局项目时并入 global 项目同源 path
-+          // #143：global 项目父会话必须可被 git 子目录 list OR 命中
-+          ...(globalPath && !isGlobal
-+            ? [and(eq(SessionTable.project_id, "global" as ProjectV2.ID), nullPath ? or(globalPath, nullPath)! : globalPath)]
-+            : []),
-+          ...(useDirectoryFallback ? [or(...relatedDirectoryConditions(input.directory!))] : []),
-+          ...(includeHomeSwitchScope ? [homeDirectoryCondition()] : []),
-+        )!,
-+      )
-+
-+    }
+     // 已定义的空根也使用共享相关查询，不能被真值判断吞掉。
+-    conditions.push(SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory }))
++    const condition = SessionListing.related({ projectID: input.projectID, worktree: input.worktree, path: input.path, directory: input.directory, home: input.scope !== "project" ? Global.Path.home : undefined })
++    if (condition) conditions.push(condition)
    } else {
-     conditions.push(eq(SessionTable.project_id, input.projectID))
-     if (input.scope !== "project") {
-@@ -1017,8 +1070,9 @@
-   return db
-     // 项目列表仍复用原筛选，公开请求字段只随已有 Session 行读取。
-     .select(selection)
+@@ -939,3 +940,3 @@
      .from(SessionTable)
 -    .where(and(...conditions))
-+    // #228：home 切换查询故意无 project/path 谓词——undefined 表示无 WHERE，只保留 start/search/roots 过滤
 +    .where(conditions.length > 0 ? and(...conditions) : undefined)
      .orderBy(desc(SessionTable.time_updated))
-     .limit(limit)
-     .all()
+diff --git a/packages/core/src/session.ts b/packages/core/src/session.ts
+--- a/packages/core/src/session.ts
++++ b/packages/core/src/session.ts
+@@ -42,1 +42,2 @@
+ import { SessionListing } from "./session/listing"
++import { Global } from "./global"
+@@ -292,3 +293,4 @@
+             // 已公开的 subpath 进入真实查询；空根与普通 project 仍是不同的筛选意图。
+-            conditions.push(SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath) }))
++            const condition = SessionListing.related({ projectID: input.project, worktree: project.worktree, path: input.subpath, directory: path.resolve(project.worktree, input.subpath), home: Global.Path.home })
++            if (condition) conditions.push(condition)
+           }
+diff --git a/packages/core/test/session-create.test.ts b/packages/core/test/session-create.test.ts
+--- a/packages/core/test/session-create.test.ts
++++ b/packages/core/test/session-create.test.ts
+@@ -78,3 +78,4 @@
+       { title: "unrelated", project_id: otherID, directory: foreign, path: "unrelated" },
++      { title: "unrelated-child", project_id: otherID, directory: path.join(foreign, "child"), path: "child" },
+       { title: "other-workspace", project_id: projectID, directory: child, path: "packages/a" },
+     ]
+@@ -101,3 +102,27 @@
+     expect((yield* session.list({ ...query, limit: 2, anchor: { id: back.id, time: DateTime.toEpochMillis(back.time.created), direction: "previous" } })).map(item => item.id)).toEqual(first.map(item => item.id))
++
++    // 同一真实查询覆盖home全局视图，环境只在当前测试作用域内切换并恢复。
++    const previousHome = process.env.OPENCODE_TEST_HOME
++    yield* Effect.addFinalizer(() => Effect.sync(() => {
++      if (previousHome === undefined) delete process.env.OPENCODE_TEST_HOME
++      if (previousHome !== undefined) process.env.OPENCODE_TEST_HOME = previousHome
++    }))
++    process.env.OPENCODE_TEST_HOME = child
++    const home = yield* session.list(query)
++    expect(home.map(item => item.title)).toEqual(["root", "parent", "current", "deeper", "sibling", "global-parent", "legacy", "cross-owner-parent", "global-alias", "unrelated", "unrelated-child"])
++    expect((yield* session.list({ ...query, search: "unrelated", limit: 1 })).map(item => item.title)).toEqual(["unrelated"])
++    expect((yield* session.list({ directory: AbsolutePath.make(child), workspaceID, order: "asc" })).map(item => item.title)).toEqual(["current", "legacy"])
++    // 非home查询只并入home本身，不能把其子目录或其他兄弟目录一并展开。
++    process.env.OPENCODE_TEST_HOME = foreign
++    const outside = (yield* session.list(query)).map(item => item.title)
++    expect(outside).toContain("unrelated")
++    expect(outside).not.toContain("unrelated-child")
++    expect(outside).not.toContain("sibling")
++    expect((yield* session.list({ project: projectID, workspaceID })).map(item => item.title)).not.toContain("unrelated")
++    if (process.platform === "win32") {
++      // 历史Windows拼写与派生绝对cwd应命中同一home，不能再受盘符或尾斜杠分裂影响。
++      process.env.OPENCODE_TEST_HOME = child.replaceAll("\\", "/").toUpperCase() + "/"
++      expect((yield* session.list(query)).map(item => item.title)).toContain("unrelated")
++    }
+   }))
+ 
 diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/opencode/test/server/session-list.test.ts
 --- a/packages/opencode/test/server/session-list.test.ts
 +++ b/packages/opencode/test/server/session-list.test.ts

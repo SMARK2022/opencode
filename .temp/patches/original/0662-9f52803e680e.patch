@@ -1,0 +1,113 @@
+From 9f52803e680e9bba24c5c5dfe6ce98abfb6d7f57 Mon Sep 17 00:00:00 2001
+From: SMARK <3222301373@qq.com>
+Date: Fri, 16 Oct 2026 15:29:50 +0800
+Subject: [PATCH] =?UTF-8?q?fix(session):=20=E5=A4=8D=E7=94=A8=E7=8E=B0?=
+ =?UTF-8?q?=E6=9C=89=E9=87=8D=E8=AF=95=E5=A4=84=E7=90=86=20Cloudflare=20?=
+ =?UTF-8?q?=E6=8B=A6=E6=88=AA=E4=B8=8E=E9=99=90=E6=B5=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+将可识别的 Cloudflare HTML 403 和 HTTP 429 纳入 SessionRetry，即使 SDK 标记为不可重试也沿用原有无限重试、退避和 Retry-After 处理；不限定 Provider，不新增重试计数或次数上限。
+
+保留普通鉴权、权限及内容策略错误的既有判定，增加跨 Provider 拦截与 429 回归测试，避免间歇性网关拦截直接终止会话。
+
+diff --git a/packages/opencode/src/session/retry.ts b/packages/opencode/src/session/retry.ts
+index 91dab73ee391977d3015bf21cd16ac2bb41c0422..1b0e098b74ebae821b6ef3e276d4f787075430ac 100644
+--- a/packages/opencode/src/session/retry.ts
++++ b/packages/opencode/src/session/retry.ts
+@@ -73,9 +73,23 @@ export function retryable(error: Err, provider: string) {
+   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
+   if (MessageV2.APIError.isInstance(error)) {
+     const status = error.data.statusCode
+-    // 5xx errors are transient server failures and should always be retried,
+-    // even when the provider SDK doesn't explicitly mark them as retryable.
+-    if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
++    const headers = error.data.responseHeaders
++    const body = error.data.responseBody ?? ""
++    const cloudflare =
++      status === 403 &&
++      headers?.server?.trim().toLowerCase() === "cloudflare" &&
++      !!headers["cf-ray"]?.trim() &&
++      /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(body) &&
++      (headers["cf-mitigated"]?.trim().toLowerCase() === "challenge" ||
++        (body.includes("window._cf_chl_opt") && body.includes("/cdn-cgi/challenge-platform/")) ||
++        (/\bid\s*=\s*["']cf-error-details["']/i.test(body) && body.includes("/cdn-cgi/styles/cf.errors.css")) ||
++        (body.includes("Unable to load site") &&
++          body.includes("Please try again later") &&
++          body.includes("https://status.openai.com/")))
++
++    // Use the existing retry policy even when the SDK marks these failures non-retryable.
++    if (!error.data.isRetryable && status !== 429 && !cloudflare && !(status !== undefined && status >= 500))
++      return undefined
+     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
+       return {
+         message: GO_UPSELL_MESSAGE,
+diff --git a/packages/opencode/test/session/retry.test.ts b/packages/opencode/test/session/retry.test.ts
+index 2aa6e64c4fbf141235577bcdec7281661b7835b5..2b7607069e24f8bb191fc8ab0d237c247ed41c0e 100644
+--- a/packages/opencode/test/session/retry.test.ts
++++ b/packages/opencode/test/session/retry.test.ts
+@@ -15,6 +15,9 @@ import { testEffect } from "../lib/effect"
+ const providerID = ProviderID.make("test")
+ const retryProvider = "test"
+ const it = testEffect(Layer.mergeAll(SessionStatus.defaultLayer, CrossSpawnSpawner.defaultLayer))
++const cloudflareHeaders = { server: "cloudflare", "cf-ray": "test-HKG" }
++const cloudflareBody =
++  '<html>Unable to load site. Please try again later. <a href="https://status.openai.com/">Status</a></html>'
+ 
+ function apiError(headers?: Record<string, string>): MessageV2.APIError {
+   return Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+@@ -184,6 +187,39 @@ describe("session.retry.retryable", () => {
+     expect(SessionRetry.retryable(error, retryProvider)).toBeUndefined()
+   })
+ 
++  test.each(["openai", "anthropic", "smark-codex", "custom-provider"])(
++    "retries Cloudflare HTML blocks for %s even when the SDK marks them non-retryable",
++    (provider) => {
++      const error = MessageV2.fromError(
++        new APICallError({
++          message: "Forbidden",
++          url: "https://example.com/v1/responses",
++          requestBodyValues: {},
++          statusCode: 403,
++          responseHeaders: cloudflareHeaders,
++          responseBody: cloudflareBody,
++          isRetryable: false,
++        }),
++        { providerID: ProviderID.make(provider) },
++      )
++      if (!MessageV2.APIError.isInstance(error)) throw new Error("expected APIError")
++      expect(error.data.isRetryable).toBe(false)
++      expect(SessionRetry.retryable(error, provider)).toEqual({ message: error.data.message })
++    },
++  )
++
++  test("retries 429 errors even when isRetryable is false", () => {
++    const error = new MessageV2.APIError({
++      message: "Too many requests",
++      isRetryable: false,
++      statusCode: 429,
++      responseHeaders: { "retry-after": "7" },
++    }).toObject()
++
++    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Too many requests" })
++    expect(SessionRetry.delay(1, error)).toBe(7000)
++  })
++
+   test("retries 500 errors even when isRetryable is false", () => {
+     const error = Schema.decodeUnknownSync(MessageV2.APIError.Schema)(
+       new MessageV2.APIError({
+@@ -554,10 +590,9 @@ describe("session.message-v2.fromError", () => {
+   })
+ 
+   test("converts SSE read timeouts to retryable APIError", () => {
+-    const result = MessageV2.fromError(
+-      Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }),
+-      { providerID },
+-    )
++    const result = MessageV2.fromError(Object.assign(new Error("SSE read timed out"), { code: "SSE_READ_TIMEOUT" }), {
++      providerID,
++    })
+ 
+     expect(MessageV2.APIError.isInstance(result)).toBe(true)
+     if (!MessageV2.APIError.isInstance(result)) throw new Error("expected APIError")

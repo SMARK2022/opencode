@@ -910,7 +910,7 @@ diff --git a/packages/opencode/script/build.ts b/packages/opencode/script/build.
 -    plugins: [plugin],
 +    plugins: [plugin, sharpPlugin],
 @@ -254,1 +256,2 @@
-       "opencode-pvrecorder.gen.ts": createPvRecorderNativeFileMap(item),
+       "opencode-pvrecorder.gen.ts": PromptVoiceAssets.createPvRecorderNativeFileMap(item, dir),
 +      "opencode-sharp.gen.ts": sharpFiles.source,
 @@ -262,1 +265,2 @@
        "opencode-pvrecorder.gen.ts",
@@ -1090,7 +1090,7 @@ diff --git a/packages/opencode/test/session/processor-effect.test.ts b/packages/
 +// 与生产 session/tools.ts 注册适配器同形；否则会被 processor 的 Schema 过滤丢弃，
 +// 使 omitted 分支不可达（回归测试空转）。
 +const makeImageRead = (sessionID: SessionID, messageID: MessageID) =>
-+  aiTool({
++  tool({
 +    description: "image read",
 +    inputSchema: z.object({ path: z.string() }),
 +    execute: async (): Promise<{ output: string; attachments: Array<Record<string, string>> }> => ({
@@ -1412,7 +1412,7 @@ new file mode 100644
 diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 --- a/packages/core/src/tool/read.ts
 +++ b/packages/core/src/tool/read.ts
-@@ -110,11 +110,6 @@
+@@ -128,12 +128,7 @@
                  return yield* image
                    // 1,600 的源估算只约束 Read 图片，不能扩散到用户上传。
                    .normalize(resource, { ...content, encoding: "base64" }, 1600 * 750)
@@ -1420,7 +1420,9 @@ diff --git a/packages/core/src/tool/read.ts b/packages/core/src/tool/read.ts
 -                    Effect.catchTag("Image.ResizerUnavailableError", (error) =>
 -                      SUPPORTED_IMAGE_MIMES.has(content.mime) ? Effect.succeed(content) : Effect.fail(error),
 -                    ),
+-                    Effect.map(attach),
 -                  )
++                  .pipe(Effect.map(attach))
                }
                if ("encoding" in content && content.encoding === "base64")
                  return yield* Effect.fail(new ReadToolFileSystem.BinaryFileError({ resource }))

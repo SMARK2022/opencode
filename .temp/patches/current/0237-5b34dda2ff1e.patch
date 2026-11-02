@@ -159,8 +159,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
 +        logPartDeltaApplication(event, "delta.drop", "missing-part")
 +        return
 +      }
-       // #186：合并后的单次 apply 仍要 touch，保持活跃 part 跟踪
-       // #186：touch 必须在 setStore 前，供 sticky/scroll 活跃集使用
+       // 合并后的实际写入仍须标记 hydration 冲突，避免旧 HTTP 快照覆盖实时内容。
+       // 此标记不创建 orphan，也不改变 pending raw 的嵌套状态契约。
 @@ -228,5 +247,6 @@
          }),
        )
@@ -562,3 +562,167 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 +    expect(timing).not.toContain(file)
    }),
  )
+diff --git a/packages/core/src/session/runner/llm.ts b/packages/core/src/session/runner/llm.ts
+--- a/packages/core/src/session/runner/llm.ts
++++ b/packages/core/src/session/runner/llm.ts
+@@ -304,3 +304,14 @@
+       const startSnapshot = yield* snapshots.capture()
++      const startedAt = Date.now()
++      let firstStreamEvent = true
++      // 只记录本轮身份和里程碑，不把实际请求、工具参数或提供者元数据带进日志。
++      yield* Effect.logInfo("stream timing", {
++        phase: "processor.start", sessionID: session.id, providerID: model.provider, modelID: model.id, agent: agent.id,
++      })
++      // turn scope 在流、工具和用量结算后关闭，失败与中断也记录结束且保持原Cause。
++      yield* Effect.addFinalizer((exit) => Effect.logInfo("stream timing", {
++        phase: "processor.end", sessionID: session.id, result: exit._tag,
++        durationMs: Date.now() - startedAt,
++      }))
+       // ContextEpoch 仍决定 baseline 和历史选择，估算不另建历史或改变请求。
+       const samples = Token.inputHistory(context, model)
+@@ -345,4 +356,11 @@
+         Stream.runForEach((event) =>
+           Effect.gen(function* () {
++            // 首事件只取类型，保留唯一stream与既有顺序消费，不逐token写诊断。
++            if (firstStreamEvent) {
++              firstStreamEvent = false
++              yield* Effect.logInfo("stream timing", {
++                phase: "ai.first_event", sessionID: session.id, event: event.type, elapsedMs: Date.now() - startedAt,
++              })
++            }
+             if (overflowFailure || publisher.hasProviderError()) return
+             if (LLMEvent.is.providerError(event)) {
+diff --git a/packages/core/src/session/runner/publish-llm-event.ts b/packages/core/src/session/runner/publish-llm-event.ts
+--- a/packages/core/src/session/runner/publish-llm-event.ts
++++ b/packages/core/src/session/runner/publish-llm-event.ts
+@@ -69,6 +69,13 @@
+   const timestamp = DateTime.now
++  const startedAt = Date.now()
+   let assistantMessageID: SessionMessage.ID | undefined
+   let assistantActive = false
+   let assistantFailed = false
+   let providerFailed = false
+   let stepSettlement: { readonly finish: string; readonly tokens: ReturnType<typeof tokens> } | undefined
++  // 复用真实publisher身份；日志仅传长度和阶段，绝不携带片段正文。
++  const streamTiming = (phase: string, extra: Record<string, unknown>) =>
++    Effect.logInfo("stream timing", {
++      phase, sessionID: input.sessionID, messageID: assistantMessageID,
++      elapsedMs: Date.now() - startedAt, ...extra,
++    })
+@@ -107,5 +114,9 @@
+         const current = chunks.get(id)
+         if (!current) return Effect.die(`${name} delta before start: ${id}`)
++        // 既有片段数组即首delta证据，不另建去重缓存，也不改变缺start的错误语义。
++        const first = current.length === 0
+         current.push(value)
+-        return Effect.void
++        return first
++          ? streamTiming("part.first_delta", { partType: name === "tool input" ? "tool" : name, partID: id, field: name === "tool input" ? "raw" : "text", deltaChars: value.length })
++          : Effect.void
+       })
+@@ -182,8 +193,9 @@
+     yield* events.publish(SessionEvent.Tool.Input.Started, {
+       sessionID: input.sessionID,
+       timestamp: yield* timestamp,
+       assistantMessageID,
+       callID: event.id,
+       name: event.name,
+     })
++    yield* streamTiming("part.start", { partType: "tool", partID: event.id, callID: event.id })
+   })
+@@ -267,8 +279,9 @@
+         yield* text.start(event.id)
+         yield* events.publish(SessionEvent.Text.Started, {
+           sessionID: input.sessionID,
+           assistantMessageID: yield* startAssistant(),
+           timestamp: yield* timestamp,
+           textID: event.id,
+         })
++        yield* streamTiming("part.start", { partType: "text", partID: event.id })
+         return
+@@ -289,9 +302,10 @@
+         yield* reasoning.start(event.id)
+         yield* events.publish(SessionEvent.Reasoning.Started, {
+           sessionID: input.sessionID,
+           assistantMessageID: yield* startAssistant(),
+           timestamp: yield* timestamp,
+           reasoningID: event.id,
+           providerMetadata: event.providerMetadata,
+         })
++        yield* streamTiming("part.start", { partType: "reasoning", partID: event.id })
+         return
+diff --git a/packages/core/src/tool/registry.ts b/packages/core/src/tool/registry.ts
+--- a/packages/core/src/tool/registry.ts
++++ b/packages/core/src/tool/registry.ts
+@@ -52,3 +52,7 @@
+     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object, onInterrupted?: (output: ToolOutputStore.BoundResult) => Effect.Effect<void>) {
++      const startedAt = Date.now()
++      // canonical结算统一计时，叶子仍拥有授权与执行；不记录输入、输出和metadata。
++      const timing = { source: "native", tool: input.call.name, sessionID: input.sessionID, messageID: input.assistantMessageID, callID: input.call.id }
++      yield* Effect.logInfo("tool timing", { phase: "tool.start", ...timing })
+       // 把暂存原文的清理绑定整个 settlement，而不是仅绑定成功返回路径。
+       return yield* Effect.gen(function* () {
+@@ -94,4 +98,10 @@
+           yield* onInterrupted(bounded)
+         })),
+         Effect.ensuring(resources.discard({ sessionID: input.sessionID, toolCallID: input.call.id })),
++        // 模型可见的error结果也记失败，真实失败/中断仍原样传播，不做catch-and-success。
++        Effect.onExit((exit) => Effect.logInfo("tool timing", {
++          phase: "tool.end", ...timing,
++          status: exit._tag === "Success" && exit.value.result.type !== "error" ? "completed" : "error",
++          durationMs: Date.now() - startedAt,
++        })),
+       )
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -67,1 +67,1 @@
+-import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Stream } from "effect"
++import { Cause, ConfigProvider, DateTime, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, References, Schema, Stream } from "effect"
+@@ -674,2 +674,46 @@
+ describe("SessionRunnerLLM", () => {
++  it.effect("records Native stream and tool milestones without logging payloads", () =>
++    Effect.gen(function* () {
++      yield* setup
++      // 复用真实runner与内存投影；局部Logger不依赖协调器先前创建的fork context。
++      yield* Effect.addFinalizer(() => Effect.sync(() => { requests.length = 0 }))
++      const session = yield* SessionV2.Service
++      const runner = yield* SessionRunner.Service
++      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Run timing check" }), resume: false })
++      const secret = "payload-not-for-timing"
++      responses = [
++        [
++          LLMEvent.stepStart({ index: 0 }),
++          LLMEvent.reasoningStart({ id: "timing-reasoning" }),
++          LLMEvent.reasoningDelta({ id: "timing-reasoning", text: secret }),
++          LLMEvent.reasoningEnd({ id: "timing-reasoning" }),
++          LLMEvent.toolInputStart({ id: "timing-call", name: "echo" }),
++          LLMEvent.toolInputDelta({ id: "timing-call", name: "echo", text: JSON.stringify({ text: secret }) }),
++          LLMEvent.toolInputEnd({ id: "timing-call", name: "echo" }),
++          LLMEvent.toolCall({ id: "timing-call", name: "echo", input: { text: secret } }),
++          LLMEvent.textStart({ id: "timing-text" }),
++          LLMEvent.textDelta({ id: "timing-text", text: secret }),
++          LLMEvent.textDelta({ id: "timing-text", text: " tail" }),
++          LLMEvent.textEnd({ id: "timing-text" }),
++          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
++          LLMEvent.finish({ reason: "tool-calls" }),
++        ],
++        [],
++      ]
++      const logs: string[] = []
++      // 局部真实Effect Logger验证实际埋点，不添加生产捕获数组或另写模拟执行器。
++      yield* runner.run({ sessionID, force: true }).pipe(
++        Effect.provide(Logger.layer([Logger.make((entry) => { logs.push(JSON.stringify(entry.message)) })])),
++        Effect.provideService(References.MinimumLogLevel, "Info"),
++      )
++      const timing = logs.filter((line) => line.includes(" timing")).join("\n")
++      for (const phase of ["processor.start", "ai.first_event", "part.start", "part.first_delta", "processor.end", "tool.start", "tool.end"]) {
++        expect(timing).toContain(`"phase":"${phase}"`)
++      }
++      expect(logs.filter((line) => line.includes('"phase":"part.first_delta"'))).toHaveLength(3)
++      expect(timing).not.toContain(secret)
++      expect(executions).toContain(secret)
++    }),
++  )
++
+   it.effect("bounds active provider streams by total timeout and respects explicit timeout or false", () =>
