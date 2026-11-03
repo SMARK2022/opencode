@@ -10,6 +10,7 @@ export type Event =
   | EventIntegrationConnectionUpdated
   | EventCatalogUpdated
   | EventSessionCreated
+  | EventSessionForked
   | EventSessionUpdated
   | EventSessionDeleted
   | EventMessageUpdated
@@ -30,6 +31,7 @@ export type Event =
   | EventSessionNextShellStarted
   | EventSessionNextShellEnded
   | EventSessionNextStepStarted
+  | EventSessionNextStepSnapshotUpdated
   | EventSessionNextStepEnded
   | EventSessionNextStepFailed
   | EventSessionNextTextStarted
@@ -869,6 +871,22 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.forked"
+        properties: {
+          sourceSessionID: string
+          targetSessionID: string
+          messageMap: Array<{
+            sourceID: string
+            targetID: string
+          }>
+          partMap: Array<{
+            sourceID: string
+            targetID: string
+          }>
+        }
+      }
+    | {
+        id: string
         type: "session.updated"
         properties: {
           sessionID: string
@@ -889,6 +907,7 @@ export type GlobalEvent = {
         properties: {
           sessionID: string
           info: Message
+          summaryOnly?: boolean
         }
       }
     | {
@@ -1067,6 +1086,16 @@ export type GlobalEvent = {
           model: ModelRef
           inputEstimate?: SessionMessageInputEstimate
           snapshot?: string
+        }
+      }
+    | {
+        id: string
+        type: "session.next.step.snapshot.updated"
+        properties: {
+          timestamp: number
+          sessionID: string
+          assistantMessageID: string
+          snapshot: SessionMessageSnapshot
         }
       }
     | {
@@ -1630,7 +1659,7 @@ export type GlobalEvent = {
           permission: string
           patterns: Array<string>
           precheck: {
-            level: "safe" | "general" | "cautious" | "dangerous"
+            level: "safe" | "general" | "cautious" | "dangerous" | "forbidden"
             reason: string
           }
         }
@@ -1865,6 +1894,7 @@ export type GlobalEvent = {
       }
     | EventServerInstanceDisposed
     | SyncEventSessionCreated
+    | SyncEventSessionForked
     | SyncEventSessionUpdated
     | SyncEventSessionDeleted
     | SyncEventMessageUpdated
@@ -1885,6 +1915,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextShellStarted
     | SyncEventSessionNextShellEnded
     | SyncEventSessionNextStepStarted
+    | SyncEventSessionNextStepSnapshotUpdated
     | SyncEventSessionNextStepEnded
     | SyncEventSessionNextStepFailed
     | SyncEventSessionNextTextStarted
@@ -1935,12 +1966,13 @@ export type ApprovalsReviewer = "user" | "auto_review"
 export type AutoReviewConfig = {
   model?: string
   /**
-   * Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Defaults to 90000.
+   * Reviewer execution timeout per attempt in milliseconds. At most three attempts (one initial attempt plus two retries). Timeout retries append a time-budget advisory to the prompt. Defaults to 120000.
    */
   timeout_ms?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
   policy_path?: string
   policy?: string
   fallback?: "deny" | "user"
+  effort?: string
   strict?: boolean
   /**
    * Circuit breaker consecutive denial threshold.
@@ -2965,6 +2997,10 @@ export type GoalApiError = {
   }
 }
 
+export type VoiceError = {
+  message: string
+}
+
 export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
@@ -3115,6 +3151,7 @@ export type SessionDurableEvent =
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
+  | SessionNextStepSnapshotUpdated
   | SessionNextStepEnded
   | SessionNextStepFailed
   | SessionNextTextStarted
@@ -3244,6 +3281,7 @@ export type V2Event =
   | IntegrationConnectionUpdated
   | CatalogUpdated
   | SessionCreated
+  | SessionForked
   | SessionUpdated
   | SessionDeleted
   | MessageUpdated
@@ -3264,6 +3302,7 @@ export type V2Event =
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
+  | SessionNextStepSnapshotUpdated
   | SessionNextStepEnded
   | SessionNextStepFailed
   | SessionNextTextStarted
@@ -3543,6 +3582,13 @@ export type SessionMessageHidden = {
   reason: "permission-reviewer-protocol-retry"
 }
 
+export type SessionMessageSnapshot = {
+  start?: string
+  end?: string
+  files?: Array<string>
+  worktree?: "declared" | "ambient"
+}
+
 export type LlmProviderMetadata = {
   [key: string]: {
     [key: string]: unknown
@@ -3680,6 +3726,29 @@ export type SyncEventSessionCreated = {
   }
 }
 
+export type SyncEventSessionForked = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.forked.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      sourceSessionID: string
+      targetSessionID: string
+      messageMap: Array<{
+        sourceID: string
+        targetID: string
+      }>
+      partMap: Array<{
+        sourceID: string
+        targetID: string
+      }>
+    }
+  }
+}
+
 export type SyncEventSessionUpdated = {
   type: "sync"
   id: string
@@ -3721,6 +3790,7 @@ export type SyncEventMessageUpdated = {
     data: {
       sessionID: string
       info: Message
+      summaryOnly?: boolean
     }
   }
 }
@@ -4018,6 +4088,23 @@ export type SyncEventSessionNextStepStarted = {
       model: ModelRef
       inputEstimate?: SessionMessageInputEstimate
       snapshot?: string
+    }
+  }
+}
+
+export type SyncEventSessionNextStepSnapshotUpdated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.step.snapshot.updated.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      assistantMessageID: string
+      snapshot: SessionMessageSnapshot
     }
   }
 }
@@ -4731,11 +4818,7 @@ export type SessionMessageAssistant = {
   model: ModelRef
   inputEstimate?: SessionMessageInputEstimate
   content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
-  snapshot?: {
-    start?: string
-    end?: string
-    files?: Array<string>
-  }
+  snapshot?: SessionMessageSnapshot
   finish?: string
   cost?: number
   tokens?: {
@@ -5069,6 +5152,26 @@ export type SessionNextStepStarted = {
     model: ModelRef
     inputEstimate?: SessionMessageInputEstimate
     snapshot?: string
+  }
+}
+
+export type SessionNextStepSnapshotUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.step.snapshot.updated"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    snapshot: SessionMessageSnapshot
   }
 }
 
@@ -5875,6 +5978,32 @@ export type SessionCreated = {
   }
 }
 
+export type SessionForked = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.forked"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    sourceSessionID: string
+    targetSessionID: string
+    messageMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
+    partMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
+  }
+}
+
 export type SessionUpdated = {
   id: string
   metadata?: {
@@ -5926,6 +6055,7 @@ export type MessageUpdated = {
   data: {
     sessionID: string
     info: Message
+    summaryOnly?: boolean
   }
 }
 
@@ -6580,7 +6710,7 @@ export type PermissionReviewStarted = {
     permission: string
     patterns: Array<string>
     precheck: {
-      level: "safe" | "general" | "cautious" | "dangerous"
+      level: "safe" | "general" | "cautious" | "dangerous" | "forbidden"
       reason: string
     }
   }
@@ -6988,7 +7118,7 @@ export type ServerConnected = {
   }
   location?: LocationRef
   data: {
-    reason?: string
+    [key: string]: unknown
   }
 }
 
@@ -7005,7 +7135,7 @@ export type GlobalDisposed = {
   }
   location?: LocationRef
   data: {
-    [key: string]: unknown
+    reason?: string
   }
 }
 
@@ -7096,6 +7226,23 @@ export type EventSessionCreated = {
   }
 }
 
+export type EventSessionForked = {
+  id: string
+  type: "session.forked"
+  properties: {
+    sourceSessionID: string
+    targetSessionID: string
+    messageMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
+    partMap: Array<{
+      sourceID: string
+      targetID: string
+    }>
+  }
+}
+
 export type EventSessionUpdated = {
   id: string
   type: "session.updated"
@@ -7120,6 +7267,7 @@ export type EventMessageUpdated = {
   properties: {
     sessionID: string
     info: Message
+    summaryOnly?: boolean
   }
 }
 
@@ -7315,6 +7463,17 @@ export type EventSessionNextStepStarted = {
     model: ModelRef
     inputEstimate?: SessionMessageInputEstimate
     snapshot?: string
+  }
+}
+
+export type EventSessionNextStepSnapshotUpdated = {
+  id: string
+  type: "session.next.step.snapshot.updated"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    snapshot: SessionMessageSnapshot
   }
 }
 
@@ -7928,7 +8087,7 @@ export type EventPermissionReviewStarted = {
     permission: string
     patterns: Array<string>
     precheck: {
-      level: "safe" | "general" | "cautious" | "dangerous"
+      level: "safe" | "general" | "cautious" | "dangerous" | "forbidden"
       reason: string
     }
   }
@@ -10531,6 +10690,7 @@ export type SessionListData = {
     roots?: boolean | "true" | "false"
     start?: number
     search?: string
+    searchMode?: "title" | "all"
     limit?: number
   }
   url: "/session"
@@ -11912,6 +12072,53 @@ export type SessionPreviewResponses = {
 
 export type SessionPreviewResponse = SessionPreviewResponses[keyof SessionPreviewResponses]
 
+export type SessionSearchScanData = {
+  body?: {
+    search: string
+    cursor?: {
+      time_updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      id: string
+    }
+    batch?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    scope?: "project"
+    path?: string
+    roots?: boolean
+    start?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    directory?: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/search/scan"
+}
+
+export type SessionSearchScanErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+}
+
+export type SessionSearchScanError = SessionSearchScanErrors[keyof SessionSearchScanErrors]
+
+export type SessionSearchScanResponses = {
+  /**
+   * Progressive session search scan page
+   */
+  200: {
+    sessions: Array<Session>
+    nextCursor: {
+      time_updated: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      id: string
+    }
+    done: boolean
+  }
+}
+
+export type SessionSearchScanResponse = SessionSearchScanResponses[keyof SessionSearchScanResponses]
+
 export type SyncStartData = {
   body?: never
   path?: never
@@ -12050,6 +12257,40 @@ export type SyncHistoryListResponses = {
 }
 
 export type SyncHistoryListResponse = SyncHistoryListResponses[keyof SyncHistoryListResponses]
+
+export type TuiVoiceTranscribeData = {
+  body?: Blob | File
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/tui/voice/transcribe"
+}
+
+export type TuiVoiceTranscribeErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * VoiceError
+   */
+  502: VoiceError
+}
+
+export type TuiVoiceTranscribeError = TuiVoiceTranscribeErrors[keyof TuiVoiceTranscribeErrors]
+
+export type TuiVoiceTranscribeResponses = {
+  /**
+   * Transcribed text for the uploaded WAV
+   */
+  200: {
+    text: string
+  }
+}
+
+export type TuiVoiceTranscribeResponse = TuiVoiceTranscribeResponses[keyof TuiVoiceTranscribeResponses]
 
 export type TuiAppendPromptData = {
   body?: {
@@ -15227,6 +15468,43 @@ export type V2ProjectCopyRefreshResponses = {
 }
 
 export type V2ProjectCopyRefreshResponse = V2ProjectCopyRefreshResponses[keyof V2ProjectCopyRefreshResponses]
+
+export type V2TuiVoiceTranscribeData = {
+  body: Blob | File
+  path?: never
+  query?: {
+    directory?: string
+  }
+  url: "/api/tui/voice/transcribe"
+}
+
+export type V2TuiVoiceTranscribeErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+  /**
+   * VoiceError
+   */
+  502: VoiceError
+}
+
+export type V2TuiVoiceTranscribeError = V2TuiVoiceTranscribeErrors[keyof V2TuiVoiceTranscribeErrors]
+
+export type V2TuiVoiceTranscribeResponses = {
+  /**
+   * Success
+   */
+  200: {
+    text: string
+  }
+}
+
+export type V2TuiVoiceTranscribeResponse = V2TuiVoiceTranscribeResponses[keyof V2TuiVoiceTranscribeResponses]
 
 export type PtyConnectData = {
   body?: never

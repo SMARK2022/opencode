@@ -3,7 +3,7 @@ name: Build OpenCode CLI
 # 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
 run-name: ${{ github.event.head_commit.message || github.workflow }}
 
-# #156：push dev-smark 与手动 workflow_dispatch
+# 1.x产品分支的push与手动触发共用完整构建和发布链。
 on:
   # #156：手动触发不依赖 push，可单独发布紧急修复版
   workflow_dispatch:
@@ -19,7 +19,7 @@ on:
         type: string
   push:
     branches:
-      - dev-smark
+      - dev1-smark
     paths:
       - ".github/workflows/build-opencode.yml"
       # #156：保留 tip setup-bun 路径触发，工具链变更必重建
@@ -93,7 +93,7 @@ jobs:
   build-macos:
     # #156：needs 显式声明：version 失败时 build 不以空版本号产出错误资产
     needs: version
-    # #156：单 job 双 target：共享 bun 缓存，比 matrix 拆分省一半 setup 时间
+    # 单job双target共享缓存；与主分支一致，跟随macOS托管镜像。
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -376,7 +376,7 @@ jobs:
             release-assets/opencode-windows-x64.exe
   # #489：四个 smoke job 覆盖全部 release archive 的真实 PTY/ConPTY 加载，
   smoke-macos:
-    # smoke必须下载刚刚打包的archive，而不是直接运行build目录，才能覆盖release层解压和权限行为。
+    # smoke消费实际archive并使用macOS Arm64原生宿主，覆盖解压、权限和两种发布架构。
     needs:
       - version
       - build-macos

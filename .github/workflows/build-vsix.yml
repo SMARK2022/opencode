@@ -10,7 +10,7 @@ on:
         type: string
   push:
     branches:
-      - dev-smark
+      - dev1-smark
     paths:
       - "sdks/vscode/**"
       - ".github/workflows/build-vsix.yml"

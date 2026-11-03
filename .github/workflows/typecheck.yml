@@ -4,9 +4,9 @@ run-name: ${{ github.event.head_commit.message || github.workflow }}
 
 on:
   push:
-    branches: [dev-smark]
+    branches: [dev1-smark]
   pull_request:
-    branches: [dev-smark]
+    branches: [dev1-smark]
   workflow_dispatch:
 
 jobs:
@@ -23,7 +23,8 @@ jobs:
 
       - name: Run typecheck
         # 输出直接暴露当前 package；不把类型检查缓存或分片当作安装优化。
-        run: bun typecheck --log-order=stream
+        # 冷检查多个大型workspace会触发runner资源终止；只限制并发，不裁剪检查范围。
+        run: bun typecheck --log-order=stream --concurrency=2
 
   # Replaces the generate bot: pull requests must commit the regenerated SDK, OpenAPI document and formatting.
   generated:

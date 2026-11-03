@@ -1,19 +1,19 @@
 name: test
 # 显式设置 run-name 为 commit 消息；GitHub Actions 默认 display_title 不再自动回退到 commit 消息
 run-name: ${{ github.event.head_commit.message || github.workflow }}
-# #263：触发面收敛到 dev-smark——fork 分支的自有 CI，不随上游 dev 分支空转
+# 1.x产品分支独立触发完整CI，迁移归档分支保留原用途。
 
 on:
   push:
     branches:
-      - dev-smark
+      - dev1-smark
   pull_request:
     branches:
-      - dev-smark
+      - dev1-smark
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.ref == 'refs/heads/dev-smark' && format('{0}-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
+  group: ${{ github.ref == 'refs/heads/dev1-smark' && format('{0}-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.event.pull_request.number || github.ref) }}
   cancel-in-progress: true
 # #263：同分支 run 串行、PR 按 PR 号互斥并取消旧 run——避免并发写共享缓存与抢占 runner
 
@@ -77,7 +77,8 @@ jobs:
             label: packages/core
             os_label: Windows
             runner: windows-latest
-            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
+            # 原生进程与包缓存集成共用宿主预算，不改变生产命令或搜索的执行期限。
+            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
             junit: packages/core/.artifacts/unit/junit.xml
           - id: http-recorder-linux
             label: packages/http-recorder
@@ -91,7 +92,7 @@ jobs:
             runner: windows-latest
             command: GITHUB_ACTIONS=false bun run --cwd packages/http-recorder test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
             junit: packages/http-recorder/.artifacts/unit/junit.xml
-          # macOS 覆盖 opencode/core 的平台分支；http-recorder 保留既有双平台矩阵。
+          # macOS与主分支使用同一latest Arm64宿主，不额外固定系统代系。
           # 与现有必过项使用相同 test/JUnit 契约，filewatcher 标志仍按 runner 判断。
           - id: opencode-macos
             label: packages/opencode
@@ -103,7 +104,7 @@ jobs:
             label: packages/core
             os_label: macOS
             runner: macos-latest
-            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
+            command: GITHUB_ACTIONS=false bun run --cwd packages/core test --timeout 30000 --reporter=junit --reporter-outfile=.artifacts/unit/junit.xml
             junit: packages/core/.artifacts/unit/junit.xml
           # 迁出的原生消费测试由TUI包自己的进程和preload承载，不漏出原全覆盖合同。
           - id: tui-linux
@@ -146,6 +147,17 @@ jobs:
           # root 保留执行工具与 hooks；SDK 的 ^build 反向读取 CLI，安装图须覆盖其运行依赖。
           install-flags: --filter './' --filter './${{ matrix.label }}' --filter './packages/opencode'
           cache-scope: test-${{ matrix.label }}-opencode-root-v1
+
+      - name: Prepare Windows search dependency
+        if: matrix.id == 'core-windows' || matrix.id == 'opencode-windows-runtime'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          # 依赖安装不占Glob首例的30秒搜索预算，测试仍运行真实系统rg。
+          choco install ripgrep --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "ripgrep installation failed" }
+          rg --version
+          if ($LASTEXITCODE -ne 0) { throw "ripgrep is not available on PATH" }
 
       - name: Configure git identity
         run: |
