@@ -1,13 +1,24 @@
 diff --git a/packages/core/src/util/effect-flock.ts b/packages/core/src/util/effect-flock.ts
 --- a/packages/core/src/util/effect-flock.ts
 +++ b/packages/core/src/util/effect-flock.ts
-@@ -246,4 +246,10 @@
+@@ -95,1 +95,7 @@
+-  const isPathGone = (e: PlatformError) => e.reason._tag === "NotFound" || e.reason._tag === "Unknown"
++  const nodeCode = (error: PlatformError) => {
++    const cause = error.reason.cause
++    return typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string" ? cause.code : undefined
++  }
++
++  const isPathGone = (error: PlatformError) =>
++    error.reason._tag === "NotFound" || ["ENOENT", "ENOTDIR"].some(code => code === nodeCode(error))
+@@ -246,4 +252,12 @@
            if (parsed.token !== handle.token) return yield* Effect.die(new ReleaseError({ detail: "token mismatch" }))
  
 -          yield* forceRemove(handle.lockDir)
 +          const releasePath = `${handle.lockDir}.release-${handle.token}`
 +          // 安装与MCP凭据同样使用此锁；先移走旧owner，再清理，不能删除后继owner重新建立的活动路径。
 +          yield* fs.rename(handle.lockDir, releasePath).pipe(
++            // Windows共享句柄可短暂拒绝rename；有界等待仍失败时保留原错误，不能当成路径消失。
++            Effect.retry({ while: error => process.platform === "win32" && ["EPERM", "EACCES", "EBUSY"].some(code => code === nodeCode(error)), times: 20, schedule: Schedule.spaced(50) }),
 +            Effect.catchIf(isPathGone, (cause) => Effect.die(new ReleaseError({ detail: "directory missing", cause }))),
 +            Effect.orDie,
 +          )
@@ -16,21 +27,27 @@ diff --git a/packages/core/src/util/effect-flock.ts b/packages/core/src/util/eff
 diff --git a/packages/core/test/util/effect-flock.test.ts b/packages/core/test/util/effect-flock.test.ts
 --- a/packages/core/test/util/effect-flock.test.ts
 +++ b/packages/core/test/util/effect-flock.test.ts
-@@ -6,1 +6,1 @@
+@@ -6,1 +6,2 @@
 -import { Cause, Effect, Exit } from "effect"
 +import { Cause, Effect, Exit, Layer } from "effect"
-@@ -10,3 +10,4 @@
++import { systemError } from "effect/PlatformError"
+@@ -10,3 +11,4 @@
  import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
  import { Global } from "@opencode-ai/core/global"
  import { Hash } from "@opencode-ai/core/util/hash"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -132,3 +133,26 @@
+@@ -132,3 +134,32 @@
        expect(yield* Effect.promise(() => exists(lockDir))).toBe(false)
 -      yield* Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))
 +      const released: string[] = []
++      let attempts = 0
 +      const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
 +        const actual = yield* FSUtil.Service
 +        return FSUtil.Service.of({ ...actual, rename: (from, to) => Effect.gen(function* () {
++          if (from === lockDir && process.platform === "win32" && ++attempts === 1) {
++            // 复刻线上Unknown/EPERM，不让第一次共享冲突跳过真实交接和后继owner断言。
++            return yield* systemError({ _tag: "Unknown", module: "FileSystem", method: "rename", cause: Object.assign(new Error("sharing violation"), { code: "EPERM" }) })
++          }
 +          yield* actual.rename(from, to)
 +          if (from !== lockDir) return
 +          released.push(to)
@@ -46,12 +63,45 @@ diff --git a/packages/core/test/util/effect-flock.test.ts b/packages/core/test/u
 +          yield* guarded.acquire("eflock:acquire", dir)
 +        }).pipe(Effect.provide(Layer.fresh(AppNodeBuilder.build(EffectFlock.node, [[Global.node, testGlobal], [FSUtil.node, filesystem]])))))
 +        expect(released).toHaveLength(1)
++        expect(attempts).toBe(process.platform === "win32" ? 2 : 0)
 +        expect(released[0]).toStartWith(`${lockDir}.release-`)
 +        // scope释放只能清掉改名后的旧目录，下一owner的元数据和活动目录须完整保留。
 +        expect((yield* Effect.promise(() => readJson<{ token: string }>(path.join(lockDir, "meta.json")))).token).toBe("next-owner")
 +        expect(yield* Effect.promise(() => fs.readdir(dir))).toEqual([path.basename(lockDir)])
 +      }).pipe(Effect.ensuring(Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))))
      }),
+@@ -137,2 +168,31 @@
++  for (const errorCode of ["EIO", "EPERM"]) {
++    it.live(`preserves persistent ${errorCode} release failures`, Effect.gen(function* () {
++      const tmp = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "eflock-error-")))
++      const dir = path.join(tmp, "locks")
++      let attempts = 0
++      const filesystem = Layer.effect(FSUtil.Service, Effect.gen(function* () {
++        const actual = yield* FSUtil.Service
++        return FSUtil.Service.of({ ...actual, rename: () => Effect.suspend(() => {
++          attempts++
++          return Effect.fail(systemError({ _tag: "Unknown", module: "FileSystem", method: "rename", cause: Object.assign(new Error(`${errorCode} release failure`), { code: errorCode }) }))
++        }) })
++      })).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
++      // 只替换外部FS失败边界，获取、token校验和释放仍执行真实锁实现。
++      const result = yield* Effect.scoped(Effect.gen(function* () {
++        const flock = yield* EffectFlock.Service
++        yield* flock.acquire("eflock:release-error", dir)
++      }).pipe(Effect.provide(Layer.fresh(AppNodeBuilder.build(EffectFlock.node, [[Global.node, testGlobal], [FSUtil.node, filesystem]]))))).pipe(Effect.exit)
++      yield* Effect.gen(function* () {
++        expect(Exit.isFailure(result)).toBe(true)
++        const failure = Exit.isFailure(result) ? Cause.pretty(result.cause) : ""
++        expect(failure).toContain(errorCode)
++        expect(failure).not.toContain("directory missing")
++        // 无关I/O错误不重试；持久共享拒绝也必须有界失败并保留活动owner。
++        expect(attempts).toBe(process.platform === "win32" && errorCode === "EPERM" ? 21 : 1)
++        expect(yield* Effect.promise(() => exists(lock(dir, "eflock:release-error")))).toBe(true)
++      }).pipe(Effect.ensuring(Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))))
++    }))
++  }
++
+   it.live(
+     "withLock data-first",
 diff --git a/packages/core/src/util/flock.ts b/packages/core/src/util/flock.ts
 --- a/packages/core/src/util/flock.ts
 +++ b/packages/core/src/util/flock.ts
@@ -64,7 +114,7 @@ diff --git a/packages/core/src/util/flock.ts b/packages/core/src/util/flock.ts
  import { Hash } from "./hash"
  import { Effect } from "effect"
  
-@@ -261,7 +261,17 @@ export namespace Flock {
+@@ -261,7 +261,24 @@ export namespace Flock {
          throw new Error("Refusing to release: lock token mismatch (not the owner).")
        }
  
@@ -72,19 +122,65 @@ diff --git a/packages/core/src/util/flock.ts b/packages/core/src/util/flock.ts
 +      const releasePath = `${lockDir}.release-${token}`
 +      // 先原子改名再异步删除，避免 Windows 并发下 rm(lockDir) 删除到
 +      // 另一个等待者刚刚 mkdir 成功的新锁目录，从而破坏互斥保证。
-+      await rename(lockDir, releasePath).catch((err) => {
-+        const errCode = code(err)
-+        if (errCode === "ENOENT" || errCode === "ENOTDIR") {
-+          throw new Error("Refusing to release: lock is compromised (directory missing).")
++      for (let attempt = 0; ; attempt++) {
++        try {
++          await rename(lockDir, releasePath)
++          break
++        } catch (err) {
++          const errCode = code(err)
++          if (errCode === "ENOENT" || errCode === "ENOTDIR") {
++            throw new Error("Refusing to release: lock is compromised (directory missing).")
++          }
++          // 只等待Windows瞬时共享冲突；永久拒绝不能被伪装成成功释放。
++          if (process.platform !== "win32" || attempt === 20 || !["EPERM", "EACCES", "EBUSY"].some(value => value === errCode)) throw err
++          await sleep(50)
 +        }
-+        throw err
-+      })
++      }
 +      await rm(releasePath, { recursive: true, force: true })
      }
  
      return {
 
 
+diff --git a/packages/core/test/util/flock.test.ts b/packages/core/test/util/flock.test.ts
+--- a/packages/core/test/util/flock.test.ts
++++ b/packages/core/test/util/flock.test.ts
+@@ -116,2 +116,35 @@
+ describe("util.flock", () => {
++  test("retries a Windows sharing violation during owned release", async () => {
++    await using tmp = await tmpdir()
++    const dir = path.join(tmp.path, "locks")
++    const key = "flock:sharing"
++    const lease = await Flock.acquire(key, { dir })
++    if (process.platform !== "win32") {
++      await lease.release()
++      expect(await exists(lock(dir, key))).toBe(false)
++      return
++    }
++    const ready = path.join(tmp.path, "held")
++    const proceed = path.join(tmp.path, "release")
++    const meta = path.join(lock(dir, key), "meta.json")
++    // 不共享删除的真实句柄确定性阻塞rename；显式标记控制释放，不猜测子进程启动速度。
++    const script = `$handle = [IO.File]::Open('${meta.replaceAll("'", "''")}', 'Open', 'Read', 'Read'); try { [IO.File]::WriteAllText('${ready.replaceAll("'", "''")}', 'held'); while (-not [IO.File]::Exists('${proceed.replaceAll("'", "''")}')) { Start-Sleep -Milliseconds 10 } } finally { $handle.Dispose() }`
++    const proc = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
++    let released = false
++    try {
++      await wait(ready, 5_000)
++      const releasing = lease.release()
++      // 句柄仍被明确持有时，原实现立即抛EPERM；新实现应保持等待而非删掉活动目录。
++      expect(await Promise.race([releasing.then(() => "released"), sleep(100).then(() => "waiting")])).toBe("waiting")
++      await fs.writeFile(proceed, "")
++      await releasing
++      released = true
++      expect(await exists(lock(dir, key))).toBe(false)
++      expect(await fs.readdir(dir)).toEqual([])
++    } finally {
++      await stopWorker(proc)
++      if (!released) await lease.release()
++    }
++  }, 10_000)
++
+   test("enforces mutual exclusion under process contention", async () => {
 diff --git a/packages/desktop/src/main/shell-env.ts b/packages/desktop/src/main/shell-env.ts
 --- a/packages/desktop/src/main/shell-env.ts
 +++ b/packages/desktop/src/main/shell-env.ts
