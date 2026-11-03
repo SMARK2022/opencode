@@ -1368,4 +1368,4 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
            if (size === 16) expect(text).toContain("READY")
            expect(Buffer.byteLength(text)).toBeLessThanOrEqual(ToolOutputStore.MAX_BYTES)
 -          const retained = /captured raw output saved to (.+?) \.\.\./.exec(text)?.[1]
-+          const retained = /(?:captured raw output saved to |path=")(.+?)(?: \.\.\.|" \/>)/.exec(text)?.[1]
++          const retained = /(?:captured raw output saved to |path=")([^"\r\n]+?)(?: \.\.\.|"|$)/m.exec(text)?.[1] // 文本尾与XML属性都保留完整路径，不将标签尾部并入文件名。

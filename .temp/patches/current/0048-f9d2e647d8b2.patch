@@ -424,8 +424,8 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
              const initialized = yield* SystemContext.initialize(yield* contexts.load())
              expect(initialized.baseline).toContain(`Shell: ${runs[0]?.shell}`)
              expect(initialized.baseline).toContain("captured output is decoded as UTF-8")
-+            // 在真实 BashTool 节点的完整 baseline 上检查独立政策文本，不能只测 Shell.guidance 自身。
-+            expect(initialized.baseline).toContain([
++            // 完整政策只统一checkout换行，授权条件仍在真实BashTool的baseline上逐句核对。
++            expect(initialized.baseline.replaceAll("\r\n", "\n")).toContain([
 +              // HEAD 作者与未推送状态是两个独立条件；完整 oracle 不能只留下“需显式请求”的摘要。
 +              "# Git repository state changes", "",
 +              "<!-- 授权对应操作类型并持续到撤回；后续调试消息不会自动授予写权限，也不会自动撤销既有授权。 -->",

@@ -1082,7 +1082,7 @@ index 0c1575d42..d6a6e3a1e 100644
  // stop 的命令注册和参数解析必须通过真实 CLI 入口保留回归覆盖。
  const INDEX_TS = fileURLToPath(new URL("../../../src/index.ts", import.meta.url))
  const credentials = { username: "daemon-test", password: "daemon-test-password" }
-@@ -742,6 +751,191 @@ test(
+@@ -742,6 +751,192 @@ test(
      10_000,
    )
  
@@ -1230,7 +1230,8 @@ index 0c1575d42..d6a6e3a1e 100644
 +      const tuiUrl = fileURLToPath(new URL("../../../src/cli/cmd/tui.ts", import.meta.url))
 +      const parentCode = `
 +        const { discoverOrSpawnDaemon } = await import(${JSON.stringify(tuiUrl)})
-+        const { url } = await discoverOrSpawnDaemon({} as never)
++        // 直接调用发现入口时显式提供yargs的本地默认值，避免undefined被误作外部监听请求。
++        const { url } = await discoverOrSpawnDaemon({ port: 0, hostname: "127.0.0.1", mdns: false, "mdns-domain": "opencode.local", cors: [] })
 +        const ctrl = new AbortController()
 +        const response = await fetch(url + "/global/event", { headers: ${JSON.stringify(ServerLock.headers(credentials))}, signal: ctrl.signal })
 +        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
@@ -1252,9 +1253,9 @@ index 0c1575d42..d6a6e3a1e 100644
 +        stdout: "pipe",
 +        stderr: "pipe",
 +      })
-+      const firstLine = await new Response(launcher.stdout).text()
++      const [exitCode, firstLine, error] = await Promise.all([launcher.exited, new Response(launcher.stdout).text(), new Response(launcher.stderr).text()])
++      expect(exitCode, error).toBe(0)
 +      const lock = JSON.parse(firstLine.trim()) as ServerLock.ServerLock
-+      expect(await launcher.exited).toBe(0)
 +      try {
 +        // #495：Project 中的同名程序不能参与 wrapper 解析；launcher 退出也不能成为 daemon 生命周期事件。
 +        // 同一 PID/lock 必须继续服务，第二个 TUI 才能复用 owner 而不是发布替代 daemon。
@@ -1283,6 +1284,10 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +import { DaemonProcess, TuiThreadCommand, resolveThreadDirectory, discoverOrSpawnDaemon,
    DAEMON_START_TIMEOUT_MS, SERVER_ELECTION_TIMEOUT_MS, SERVER_ELECTION_STALE_MS, SERVER_POLL_INTERVAL_MS, status, printDaemonExitHint } from "../../../src/cli/cmd/tui"
  import type { DiscoverDaemonDeps } from "../../../src/cli/cmd/tui"
+@@ -58,1 +58,2 @@
+-    expect(worker).toContain("ephemeral: true, eventClients, sharedServices")
++    // exact-zero listener仍须共享全部依赖，formatter换行不改变接线合同。
++    expect(worker).toMatch(/ephemeral: true,\s*eventClients,\s*sharedServices/)
 @@ -168,3 +168,57 @@ describe("tui thread", () => {
      // 显式给出本地默认值，保证用例只测试 owner 状态，不误进入 external listener 分支。
      const localNet = { port: 0, hostname: "127.0.0.1", mdns: false, cors: [] as string[] }
@@ -1307,14 +1312,14 @@ diff --git a/packages/opencode/test/cli/tui/thread.test.ts b/packages/opencode/t
 +      expect(result).toEqual({ url: "http://127.0.0.1:9999", fwdPid: FAKE_DAEMON_PID, lockPath: "/tmp/async-daemon.json" })
 +      expect(unrefs).toBe(1)
 +      if (process.platform === "win32") {
-+        // 只替换 native spawn 边界；真实 adapter 读取分块 PID 并持续 drain，整个测试不创建进程。
++        // 只替换native spawn并给足双输出管道；真实adapter读取分块PID和持续drain，不创建进程。
 +        const encoder = new TextEncoder()
 +        const stdout = new ReadableStream<Uint8Array>({ start(controller) {
 +          controller.enqueue(encoder.encode("99"))
 +          controller.enqueue(encoder.encode("999\r\nworker output"))
 +          controller.close()
 +        } })
-+        const wrapper = { pid: 12345, exited: Promise.resolve(0), stdout, unref() { unrefs++ }, kill() {} }
++        const wrapper = { pid: 12345, exited: Promise.resolve(0), stdout, stderr: new ReadableStream<Uint8Array>({ start(controller) { controller.close() } }), unref() { unrefs++ }, kill() {} }
 +        const spawn = spyOn(Bun, "spawn").mockReturnValue(wrapper as never)
 +        try {
 +          const target = "C:\\fake worker\\target.ts"

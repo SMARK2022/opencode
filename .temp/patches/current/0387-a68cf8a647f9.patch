@@ -141,7 +141,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
      const original = yield* goals.set(sessionID, { objective: "  original  ", tokenBudget: 50000 })
 @@ -758,9 +764,31 @@
      expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
-     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description).toBe(GOAL_DESCRIPTION.trimEnd())
+     expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description.replaceAll("\r\n", "\n")).toBe(GOAL_DESCRIPTION.replaceAll("\r\n", "\n").trimEnd())
      const paused = yield* goals.get(sessionID)
      expect(Option.getOrThrow(paused).status).toBe("paused")
      expect(Option.getOrThrow(paused).tokensUsed).toBe(12)

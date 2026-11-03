@@ -1274,7 +1274,7 @@ new file mode 100644
 +  const { createSharpNativeFileMap, sharpPlugin } = await import("../../script/sharp-native")
 +  const native = await createSharpNativeFileMap({ os: process.platform, arch: process.arch === "arm64" ? "arm64" : "x64" })
 +  expect(native.supported).toBe(true)
-+  const unsupported = await createSharpNativeFileMap({ os: "win32", arch: "arm64" })
++  const unsupported = await createSharpNativeFileMap({ os: "freebsd", arch: "x64" }) // Windows ARM64已有正式包，负例使用仍未发布的平台。
 +  expect(unsupported.supported).toBe(false)
 +  expect(unsupported.source).toContain('"addon":null')
 +  // 只验证正式plugin与资源表能生成bundle；不compile、不运行产物或OpenCode helper。

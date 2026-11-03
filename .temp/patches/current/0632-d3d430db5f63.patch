@@ -191,7 +191,7 @@ diff --git a/packages/opencode/test/cli/db-maintenance.test.ts b/packages/openco
 --- a/packages/opencode/test/cli/db-maintenance.test.ts
 +++ b/packages/opencode/test/cli/db-maintenance.test.ts
 @@ -169,8 +169,13 @@ async function runCliUntilStderr(root: string, args: string[], marker: string) {
- function answerPrompt(proc: IPty, prompt: string, answer: "y" | "n") {
+ function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
    let answered = false
    // 只应答首个匹配 prompt；后续 reclaim 等待由各自用例单独控制，避免双写 stdin。
 +  let output = ""
@@ -429,7 +429,10 @@ diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/t
 diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
 --- a/packages/core/src/cross-spawn-spawner.ts
 +++ b/packages/core/src/cross-spawn-spawner.ts
-@@ -343,6 +343,27 @@ export const make = Effect.gen(function* () {
+@@ -342,7 +342,30 @@ export const make = Effect.gen(function* () {
+       if (proc.kill(signal)) return Effect.void
++      // 已观察到退出时重复取消幂等完成；存活进程发送失败仍保留原错误链。
++      if (proc.exitCode !== null || proc.signalCode !== null) return Effect.void
        return Effect.fail(toPlatformError("kill", new Error("Failed to kill child process"), command))
      })
  
@@ -497,7 +500,7 @@ diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-
 diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/core/test/effect/cross-spawn-spawner.test.ts
 --- a/packages/core/test/effect/cross-spawn-spawner.test.ts
 +++ b/packages/core/test/effect/cross-spawn-spawner.test.ts
-@@ -333,6 +333,45 @@ describe("cross-spawn spawner", () => {
+@@ -333,6 +333,44 @@ describe("cross-spawn spawner", () => {
        }),
      )
  
@@ -527,12 +530,11 @@ diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/co
 +              return handle
 +            }),
 +          )
-+          // EOF 证明忽略 TERM 的后代不再持有管道，不依赖孤儿 zombie 的 PID 回收时机。
-+          yield* decodeByteStream(handle.stderr).pipe(
-+            Effect.timeoutOrElse({
-+              duration: "5 seconds",
-+              orElse: () => Effect.fail(new Error(`${mode} left descendant pipes open`)),
-+            }),
++          // scope结束后输出句柄已释放，直接检查同一独占session中的实际进程。
++          const probe = yield* ChildProcess.make("ps", ["-o", "stat=", "-g", String(handle.pid)])
++          yield* decodeByteStream(probe.stdout).pipe(
++            // 僵尸已无执行与管道能力，不把宿主init的回收时机当作泄漏。
++            Effect.tap((states) => Effect.sync(() => expect(states.split(/\s+/).filter((state) => state && !state.startsWith("Z"))).toEqual([]))),
 +            Effect.ensuring(handle.kill({ killSignal: "SIGKILL" }).pipe(Effect.ignore)),
 +          )
 +        }
@@ -543,6 +545,14 @@ diff --git a/packages/core/test/effect/cross-spawn-spawner.test.ts b/packages/co
      fx.effect(
        "isRunning reflects process state",
        Effect.gen(function* () {
+@@ -402,5 +440,7 @@ describe("cross-spawn spawner", () => {
+         const handle = yield* js('process.stdout.write("done")')
+         yield* handle.exitCode
++        // 完成后的重复取消不能把快速退出的写手误报为失败。
++        yield* handle.kill()
+         const running = yield* handle.isRunning
+         expect(running).toBe(false)
+       }),
 
 diff --git a/turbo.json b/turbo.json
 --- a/turbo.json

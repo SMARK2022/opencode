@@ -5111,64 +5111,73 @@ diff --git a/packages/core/src/session/search.ts b/packages/core/src/session/sea
 diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
 --- a/packages/core/src/database/schema.gen.ts
 +++ b/packages/core/src/database/schema.gen.ts
-@@ -205,6 +205,7 @@ export default {
+@@ -205,7 +205,8 @@ export default {
            \`time_updated\` integer NOT NULL,
            \`data\` text NOT NULL,
-           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+           \`cold_ref\` text,
 +          \`cold_key\` blob,
-           CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+           CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
+           CONSTRAINT \`fk_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
          );
        `)
-@@ -217,6 +218,8 @@ export default {
+@@ -217,7 +218,9 @@ export default {
            \`time_updated\` integer NOT NULL,
            \`data\` text NOT NULL,
-           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+           \`cold_ref\` text,
 +          \`cold_key\` blob,
 +          \`cold_stats\` text,
-           CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE
+           CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE,
+           CONSTRAINT \`fk_part_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
          );
        `)
-@@ -253,6 +256,8 @@ export default {
+@@ -253,7 +256,9 @@ export default {
            \`time_updated\` integer NOT NULL,
            \`data\` text NOT NULL,
-           \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
+           \`cold_ref\` text,
 +          \`cold_key\` blob,
 +          \`cold_stats\` text,
-           CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
+           CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
+           CONSTRAINT \`fk_session_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
          );
        `)
 @@ -269,6 +274,11 @@ export default {
            \`summary_deletions\` integer,
            \`summary_files\` integer,
            \`summary_diffs\` text,
-+          \`summary_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
++          \`summary_ref\` text,
 +          \`summary_cursor\` text,
-+          \`summary_initialized\` integer DEFAULT 0 NOT NULL,
-+          \`summary_init_dirty\` integer DEFAULT 0 NOT NULL,
++          \`summary_initialized\` integer DEFAULT false NOT NULL,
++          \`summary_init_dirty\` integer DEFAULT false NOT NULL,
 +          \`summary_seed\` text,
            \`metadata\` text,
            \`cost\` real DEFAULT 0 NOT NULL,
            \`tokens_input\` integer DEFAULT 0 NOT NULL,
-@@ -381,7 +389,9 @@ export default {
+@@ -298,7 +308,8 @@ export default {
+           \`time_updated\` integer NOT NULL,
+           \`time_compacting\` integer,
+           \`time_archived\` integer,
+-          CONSTRAINT \`fk_session_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE
++          CONSTRAINT \`fk_session_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE,
++          CONSTRAINT \`fk_session_summary_ref_cold_storage_hash_fk\` FOREIGN KEY (\`summary_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
+         );
        `)
-       yield* tx.run(`CREATE INDEX \`cold_storage_ref_count_idx\` ON \`cold_storage\` (\`ref_count\`);`)
-       yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
-+      // #0500：summary payload cache 的 RESTRICT 引用索引——expand/cleanup 反算共用。
+       yield* tx.run(`
+@@ -378,3 +389,4 @@ export default {
+       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
+       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
 +      yield* tx.run(`CREATE INDEX \`session_summary_ref_idx\` ON \`session\` (\`summary_ref\`);`)
-       yield* tx.run(`CREATE INDEX \`part_cold_ref_idx\` ON \`part\` (\`cold_ref\`);`)
-       yield* tx.run(`CREATE INDEX \`session_message_cold_ref_idx\` ON \`session_message\` (\`cold_ref\`);`)
-     })
-   },
+       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
 
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -50,5 +50,7 @@
-     // #493：cold_storage 表 + message/part.cold_ref 引用列
-     import("./migration/20260717035626_cold_storage"),
-     import("./migration/20260717035627_native_cold_storage"),
+@@ -48,6 +48,8 @@
+     import("./migration/20260726100000_session_goal"),
+     import("./migration/20260812100000_goal_continue_on_error"),
+     import("./migration/20260901100000_session_goal_integrity"),
 +    import("./migration/20260930100000_cold_storage_pack_v2"),
 +    import("./migration/20260930100001_native_cold_storage_pack_v2"),
+     import("./migration/20261009114905_session_request_usage"),
    ])
  ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
 diff --git a/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts b/packages/core/src/database/migration/20260930100000_cold_storage_pack_v2.ts
@@ -6431,7 +6440,7 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
 +    const storage = yield* Storage.Service
 +    const database = yield* Database.Service
  
-@@ -97,48 +49,59 @@ const layer = Layer.effect(
+@@ -97,48 +49,65 @@ const layer = Layer.effect(
      const summarize = Effect.fn("SessionSummary.summarize")(function* (input: {
        sessionID: SessionID
        messageID: MessageID
@@ -6499,9 +6508,15 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
 -        return native.message.summary?.diffs.map((item) => ({ ...item })) ?? []
 -      }
 +      if (input.messageID) {
-+        // Native保留精确per-user摘要；身份与Session同时限定，不能退化为旧消息表聚合。
++        // 混合历史按 Message 身份选择持久 owner，精确回合不能退回整个会话的汇总。
 +        const native = yield* nativeMessages.message(SessionMessage.ID.make(input.messageID), input.sessionID)
-+        if (native?.message.type === "user") return native.message.summary?.diffs.map(item => ({ ...item })) ?? []
++        if (native) return native.message.type === "user" ? native.message.summary?.diffs.map(item => ({ ...item })) ?? [] : []
++        const legacy = yield* MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID }).pipe(
++          Effect.provideService(Database.Service, database),
++          // 查询不存在或隐藏的回合返回空集合；数据库和冷包故障仍沿原错误路径传播。
++          Effect.catchTag("NotFoundError", () => Effect.succeed(undefined)),
++        )
++        return legacy?.info.role === "user" ? SummaryCache.normalizeDiffPaths(legacy.info.summary?.diffs ?? []) : []
 +      }
 -      const message = (yield* sessions.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
 -        (item) => item.info.id === input.messageID,
@@ -6523,7 +6538,7 @@ diff --git a/packages/opencode/src/session/summary.ts b/packages/opencode/src/se
      })
  
      return Service.of({ summarize, diff, computeDiff })
-@@ -158,6 +119,6 @@ export const node = LayerNode.make({
+@@ -158,6 +125,6 @@ export const node = LayerNode.make({
    layer: layer,
    // 两代摘要读取仍使用各自持久消息表，不再为Modified Files构造整树快照。
 -  deps: [Session.node, EventV2Bridge.node, Config.node, SessionStore.node],
@@ -8541,4 +8556,206 @@ diff --git a/packages/opencode/test/server/session-list.test.ts b/packages/openc
          // #265：命中/排除交错断言——防止白名单被放宽成全字段搜索后负向项静默通过
          expect(yield* searchIDs("v1-output-hidden-needle")).not.toContain(session.id)
          expect(yield* searchIDs("v1-metadata-hidden-needle")).not.toContain(session.id)
+
+diff --git a/packages/core/schema.json b/packages/core/schema.json
+--- a/packages/core/schema.json
++++ b/packages/core/schema.json
+@@ -1512,6 +1512,16 @@
+       "name": "cold_ref",
+       "entityType": "columns",
+       "table": "message"
+     },
++    {
++      "type": "blob",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_key",
++      "entityType": "columns",
++      "table": "message"
++    },
+     {
+       "type": "text",
+@@ -1582,6 +1592,26 @@
+       "name": "cold_ref",
+       "entityType": "columns",
+       "table": "part"
+     },
++    {
++      "type": "blob",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_key",
++      "entityType": "columns",
++      "table": "part"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_stats",
++      "entityType": "columns",
++      "table": "part"
++    },
+     {
+       "type": "text",
+@@ -1772,6 +1802,26 @@
+       "name": "cold_ref",
+       "entityType": "columns",
+       "table": "session_message"
+     },
++    {
++      "type": "blob",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_key",
++      "entityType": "columns",
++      "table": "session_message"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_stats",
++      "entityType": "columns",
++      "table": "session_message"
++    },
+     {
+       "type": "text",
+@@ -1916,6 +1966,56 @@
+       "name": "summary_diffs",
+       "entityType": "columns",
+       "table": "session"
+     },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_ref",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_cursor",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "false",
++      "generated": null,
++      "name": "summary_initialized",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "false",
++      "generated": null,
++      "name": "summary_init_dirty",
++      "entityType": "columns",
++      "table": "session"
++    },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "summary_seed",
++      "entityType": "columns",
++      "table": "session"
++    },
+     {
+       "type": "text",
+@@ -2381,6 +2481,17 @@
+       "name": "fk_session_project_id_project_id_fk",
+       "entityType": "fks",
+       "table": "session"
+     },
++    {
++      "columns": ["summary_ref"],
++      "tableTo": "cold_storage",
++      "columnsTo": ["hash"],
++      "onUpdate": "NO ACTION",
++      "onDelete": "RESTRICT",
++      "nameExplicit": false,
++      "name": "fk_session_summary_ref_cold_storage_hash_fk",
++      "entityType": "fks",
++      "table": "session"
++    },
+     {
+       "columns": [
+@@ -3050,6 +3161,20 @@
+       "name": "session_parent_idx",
+       "entityType": "indexes",
+       "table": "session"
+     },
++    {
++      "columns": [
++        {
++          "value": "summary_ref",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_summary_ref_idx",
++      "entityType": "indexes",
++      "table": "session"
++    },
+     {
+       "columns": [
+
+diff --git a/packages/opencode/test/server/session-diff-missing-patch.test.ts b/packages/opencode/test/server/session-diff-missing-patch.test.ts
+--- a/packages/opencode/test/server/session-diff-missing-patch.test.ts
++++ b/packages/opencode/test/server/session-diff-missing-patch.test.ts
+@@ -7,5 +7,5 @@
+- * session never loaded. Legacy session-level diffs are no longer surfaced,
+- * but the endpoint remains compatible and must still return successfully.
++ * session never loaded. SMARK 保留旧缓存作为冷摘要的迁移种子，
++ * 缺少 patch 的有效文件统计仍应返回。
+  *
+  * This test inserts a session row with a missing-patch diff entry and
+- * asserts that GET /session/<id>/diff returns 200 with empty data.
++ * 验证 GET /session/<id>/diff 返回 200 并保留原文件统计。
+@@ -41,7 +41,7 @@
+ 
+ describe("session diff with missing patch (#26574)", () => {
+   it.instance(
+-    "GET /session/<id>/diff ignores legacy session-level diff storage",
++    "GET /session/<id>/diff accepts legacy diff seeds without patch text",
+     () =>
+       Effect.gen(function* () {
+         const test = yield* TestInstance
+@@ -60,7 +60,7 @@
+         )
+ 
+         expect(response.status).toBe(200)
+-        expect(yield* response.json).toEqual([])
++        expect(yield* response.json).toEqual([{ file: "legacy.txt", additions: 1, deletions: 0 }])
+       }),
+     { git: true, config: { formatter: false, lsp: false } },
+   )
 

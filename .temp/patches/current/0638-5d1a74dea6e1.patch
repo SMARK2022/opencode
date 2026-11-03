@@ -2294,17 +2294,19 @@ index 534caa9..1064e66 100644
  import { OpenApi } from "effect/unstable/httpapi"
  import { TestLLMServer } from "../../lib/llm-server"
  import path from "path"
-@@ -1743,6 +1745,63 @@ const scenarios: Scenario[] = [
+@@ -1743,6 +1745,66 @@ const scenarios: Scenario[] = [
        check(result.done === true, "search scan should finish in one batch for the seeded corpus")
        check(result.nextCursor === null, "search scan should end with a null nextCursor")
      }),
-+  http.protected
-+    .post("/tui/voice/transcribe", "tui.voiceTranscribe")
++  // 两个实际入口共用合法音频和认证合同，不能只登记兼容路由。
++  ...["/tui/voice/transcribe", "/api/tui/voice/transcribe"].map((endpoint) =>
++    http.protected
++    .post(endpoint, endpoint.startsWith("/api/") ? "v2.tui.voiceTranscribe" : "tui.voiceTranscribe")
 +    .inProject({ git: false })
 +    // 普通 Builder 只编码 JSON；空体探针负责路由登记，二进制验收在下方走真实 HTTP 栈。
 +    // protected 保留统一 auth 模式的 401 检查；effect 模式还精确验证二进制请求的认证结果。
-+    .probe({ path: "/tui/voice/transcribe", headers: { "content-type": "audio/wav" } })
-+    .at((ctx) => ({ path: "/tui/voice/transcribe", headers: ctx.headers({ "content-type": "audio/wav" }) }))
++    .probe({ path: endpoint, headers: { "content-type": "audio/wav" } })
++    .at((ctx) => ({ path: endpoint, headers: ctx.headers({ "content-type": "audio/wav" }) }))
 +    .jsonEffect(502, (body, ctx) =>
 +      Effect.gen(function* () {
 +        object(body)
@@ -2337,7 +2339,7 @@ index 534caa9..1064e66 100644
 +        wav.writeUInt32LE(2, 40)
 +        // 两次请求共享音频和目录，只改变认证；不能把解码错误或任意非 401 当成成功。
 +        for (const authenticated of [false, true]) {
-+          const response = yield* Effect.promise(() => app.handler(new Request("http://localhost/tui/voice/transcribe", {
++          const response = yield* Effect.promise(() => app.handler(new Request(`http://localhost${endpoint}`, {
 +            method: "POST",
 +            headers: ctx.headers({
 +              "content-type": "audio/wav",
@@ -2355,6 +2357,7 @@ index 534caa9..1064e66 100644
 +        }
 +      }).pipe(Effect.scoped),
 +    ),
++  ),
    http.protected
      .post("/tui/append-prompt", "tui.appendPrompt")
      .at((ctx) => ({ path: "/tui/append-prompt", headers: ctx.headers(), body: { text: "hello" } }))

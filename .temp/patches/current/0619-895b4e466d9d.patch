@@ -817,9 +817,32 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -52,1 +52,2 @@
-     import("./migration/20260930100000_cold_storage_pack_v2"),
+@@ -50,2 +50,3 @@
+     import("./migration/20260901100000_session_goal_integrity"),
 +    import("./migration/20260911173121_session_context_epoch"),
+     import("./migration/20260930100000_cold_storage_pack_v2"),
+diff --git a/packages/core/schema.json b/packages/core/schema.json
+--- a/packages/core/schema.json
++++ b/packages/core/schema.json
+@@ -2021,8 +2021,18 @@
+       "generated": null,
+       "name": "metadata",
+       "entityType": "columns",
+       "table": "session"
+     },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "context_epoch",
++      "entityType": "columns",
++      "table": "session"
++    },
+     {
+       "type": "real",
+       "notNull": true,
 diff --git a/packages/core/src/database/migration/20260911173121_session_context_epoch.ts b/packages/core/src/database/migration/20260911173121_session_context_epoch.ts
 new file mode 100644
 --- /dev/null

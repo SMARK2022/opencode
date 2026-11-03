@@ -2839,15 +2839,16 @@ index 20a6ec15376bafcf19b0df6bc6cecdc410f016a7..53d725208132cb131ebaadfa4bf5b1bd
  try {
  $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
  $startup.ShowWindow = 0
-@@ -149,19 +260,23 @@
+@@ -149,19 +260,24 @@
  if ($env:OPENCODE_PRINT_LOGS -eq '1') {
 -  $stdoutReady.GetAwaiter().GetResult(); $stderrReady.GetAwaiter().GetResult()
-+  $stdoutReady.GetAwaiter().GetResult()
++  # PowerShell会把VoidTaskResult写入stdout，握手等待只消费完成信号。
++  [void]$stdoutReady.GetAwaiter().GetResult()
    # 独立 stderr 通道不经过 PID/stdout parser，依赖错误不能污染握手或变成普通输出。
    $stdoutTask = $stdout.CopyToAsync([Console]::OpenStandardOutput())
 -  $stderrTask = $stderr.CopyToAsync([Console]::OpenStandardError())
  }
-+$stderrReady.GetAwaiter().GetResult()
++[void]$stderrReady.GetAwaiter().GetResult()
 +$stderrTask = $stderr.CopyToAsync([Console]::OpenStandardError())
  # completion 由 relay 在 Process.ExitCode 与两流 EOF 已确定后发布，不再固定返回成功。
  while (-not (Test-Path -LiteralPath ($env:OPENCODE_DAEMON_PID_FILE + '.exit'))) {
@@ -3978,3 +3979,31 @@ index 552a5e0047c8820ea24779b77061c2c9cc5e670e..6933d70b8c34c1dfdc1b88acffe0c160
    it.live(
      "preserves output when aborted",
      () =>
+
+diff --git a/packages/opencode/test/cli/acp/lifecycle.test.ts b/packages/opencode/test/cli/acp/lifecycle.test.ts
+--- a/packages/opencode/test/cli/acp/lifecycle.test.ts
++++ b/packages/opencode/test/cli/acp/lifecycle.test.ts
+@@ -13,3 +13,17 @@
+ describe("opencode acp lifecycle subprocess", () => {
++  // 启动前EOF仍须正常退出，但不能把完整CLI冷启动计入就绪后的五秒收尾期限。
++  cliIt.live(
++    "stdin EOF during startup exits cleanly",
++    ({ opencode }) =>
++      Effect.gen(function* () {
++        const acp = yield* opencode.acp()
++        acp.close()
++        // 保留原来的立即关闭场景，期限与CLI现有三十秒启动窗口一致。
++        const code = yield* Effect.promise(() => acp.exited).pipe(Effect.timeout(Duration.seconds(30)))
++        expect(code).toBe(0)
++      }),
++    60_000,
++  )
++
+   cliIt.live(
+     "stdin EOF exits cleanly",
+@@ -18,2 +32,5 @@
+         const acp = yield* opencode.acp()
++        // 使用真实initialize响应作为就绪屏障，之后仍严格验证原五秒退出合同。
++        yield* acp.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } })
++        expect(yield* acp.receive.pipe(Effect.timeout(Duration.seconds(30)))).toMatchObject({ id: 1, result: { protocolVersion: 1 } })
+         acp.close()

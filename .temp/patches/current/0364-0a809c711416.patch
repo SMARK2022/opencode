@@ -2782,7 +2782,7 @@ diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/sess
 +    expect(userTexts(requests[1]!)).toEqual(["Start working", "Queued input"])
 +    expect(userTexts(requests[2]!).at(-1)).toContain("<session-goal-continuation>")
 +    expect(requests[0]!.tools.map(tool => tool.name)).toContain("goal")
-+    expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description).toBe(GOAL_DESCRIPTION.trimEnd())
++    expect(requests[0]!.tools.find(tool => tool.name === "goal")?.description.replaceAll("\r\n", "\n")).toBe(GOAL_DESCRIPTION.replaceAll("\r\n", "\n").trimEnd())
 +    const active = yield* goals.get(sessionID)
 +    expect(Option.getOrThrow(active).status).toBe("active")
 +    expect(Option.getOrThrow(active).tokensUsed).toBe(12)

@@ -770,7 +770,7 @@ diff --git a/packages/core/test/plugin/provider-openai-compatible.test.ts b/pack
  import { Effect } from "effect"
  import { ModelV2 } from "@opencode-ai/core/model"
  import { PluginV2 } from "@opencode-ai/core/plugin"
-@@ -62,28 +63,39 @@ describe("OpenAICompatiblePlugin", () => {
+@@ -62,28 +63,45 @@ describe("OpenAICompatiblePlugin", () => {
      }),
    )
  
@@ -779,7 +779,8 @@ diff --git a/packages/core/test/plugin/provider-openai-compatible.test.ts b/pack
        const plugin = yield* PluginV2.Service
        const aisdk = yield* AISDK.Service
        const observed: string[] = []
-+      const signal = new AbortController().signal
++      const controller = new AbortController()
++      const signal = controller.signal
 +      const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(new Response("ok"))
 +      yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
        yield* addPlugin()
@@ -811,7 +812,12 @@ diff --git a/packages/core/test/plugin/provider-openai-compatible.test.ts b/pack
        expect(observed).toEqual(["custom-provider.chat"])
 +      expect(fetchSpy).toHaveBeenCalledTimes(1)
 +      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
-+      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
++      // SSE期限会组合信号，原取消原因必须仍穿透，不能要求对象引用同一。
++      const forwarded = fetchSpy.mock.calls[0]?.[1]?.signal
++      expect(forwarded?.aborted).toBe(false)
++      controller.abort("caller cancelled")
++      expect(forwarded?.aborted).toBe(true)
++      expect(forwarded?.reason).toBe("caller cancelled")
      }),
    )
  

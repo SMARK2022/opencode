@@ -585,17 +585,6 @@ index 670f9b6bf2f83f9ad597a99d1b7cf5fa16e9f761..6c7f317aa698ed8288a74438f630ec0c
          model.id.toLowerCase().startsWith("gpt") && msg.info.modelID.toLowerCase().startsWith("gpt")
        // 两端都检查，避免非 GPT 模型的签名因目标为 GPT 而被放行。
        // 此处保留语义信息；最终 wire 字段由目标协议适配器编码。
-diff --git a/packages/core/src/system-context/prompts.ts b/packages/core/src/system-context/prompts.ts
---- a/packages/core/src/system-context/prompts.ts
-+++ b/packages/core/src/system-context/prompts.ts
-@@ -27,5 +27,5 @@
-   if (id.includes("gpt")) {
--    // 与上游保持路由优先级：GPT-6（含 Codex 名称）使用本地 Astra 模板。
--    if (id.includes("gpt-6")) return PROMPT_ASTRA
-+    // Astra专用指令按实际API家族选择，两代同时避免Sol/Luna等同代模型误用。
-+    if (id.includes("astra")) return PROMPT_ASTRA
-     if (id.includes("codex")) return PROMPT_CODEX
-     return PROMPT_GPT
 diff --git a/packages/opencode/test/plugin/codex.test.ts b/packages/opencode/test/plugin/codex.test.ts
 index 9d763deeb241637991ce2cc8dfc7f535f085defc..c000edf649499941eb8574affea3328f73f948b2 100644
 --- a/packages/opencode/test/plugin/codex.test.ts
@@ -941,18 +930,18 @@ index 07c4ae79ee39ce58bec5991a78eed99cd9a23838..14d08c431f9901d1b3df355f2505bad0
    })
  
 -  // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6 的优先级高于 Codex。
-+  // 使用实际 API id 验证分流；展示别名不能决定模板，Astra 家族优先于 Codex 后缀。
++  // 使用实际 API id 验证分流；展示别名不能决定模板，GPT-6沿用上游Astra优先级。
    test.each([
      ["gpt-6-astra", PROMPT_ASTRA],
 -    ["gpt-6", PROMPT_ASTRA],
 -    ["gpt-6-codex", PROMPT_ASTRA],
-+    ["gpt-5-astra", PROMPT_ASTRA],
++    ["gpt-5-astra", PROMPT_GPT],
 +    ["gpt-6-astra-codex", PROMPT_ASTRA],
-+    // 同代模型不共享专用模板；收窄后仍遵守既有 Codex 与通用 GPT 路由。
-+    ["gpt-6", PROMPT_GPT],
-+    ["gpt-6-sol", PROMPT_GPT],
-+    ["gpt-6-luna", PROMPT_GPT],
-+    ["gpt-6-codex", PROMPT_CODEX],
++    // GPT-6后缀不收窄家族，旧GPT与普通Codex仍保留各自模板。
++    ["gpt-6", PROMPT_ASTRA],
++    ["gpt-6-sol", PROMPT_ASTRA],
++    ["gpt-6-luna", PROMPT_ASTRA],
++    ["gpt-6-codex", PROMPT_ASTRA],
      ["gpt-5.6-luna", PROMPT_GPT],
      ["gpt-5.4-codex", PROMPT_CODEX],
      ["gpt-4.1", PROMPT_BEAST],
@@ -1084,6 +1073,18 @@ diff --git a/packages/core/test/session-runner-model.test.ts b/packages/core/tes
 +        }))) })
 +        yield* LLMClient.prepare(LLM.request({ model: route.model({ id: selected.id }), prompt: "Hello" }))
 +      }
+diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
+--- a/packages/core/test/session-runner.test.ts
++++ b/packages/core/test/session-runner.test.ts
+@@ -2129,4 +2129,7 @@
+         ["gpt-6-astra", "openai", PROMPT_ASTRA],
+         ["gpt-6", "openai", PROMPT_ASTRA],
+         ["gpt-6-codex", "openai", PROMPT_ASTRA],
++        // Native真实请求同样遵从上游GPT-6优先级，不按Sol/Luna后缀降级模板。
++        ["gpt-6-sol", "openai", PROMPT_ASTRA],
++        ["gpt-6-luna", "openai", PROMPT_ASTRA],
+         ["gpt-5.6-luna", "openai", PROMPT_GPT],
+
 diff --git a/packages/llm/test/provider/openai-responses.test.ts b/packages/llm/test/provider/openai-responses.test.ts
 --- a/packages/llm/test/provider/openai-responses.test.ts
 +++ b/packages/llm/test/provider/openai-responses.test.ts

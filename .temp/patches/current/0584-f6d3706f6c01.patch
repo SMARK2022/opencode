@@ -2512,6 +2512,21 @@ diff --git a/packages/opencode/test/storage/cold.test.ts b/packages/opencode/tes
    // fork 用例在 source 冷态时调用公开 Session.fork，确保路径不能先 hydrate 再复制完整热内容。
    // child Message/Part ID 必须独立，避免父子更新或删除命中同一 primary key。
    // child 与 source cold_ref 完全相同，证明 payload 按内容地址共享而非重新压缩副本。
+@@ -989,11 +1261,12 @@ describe.serial("ColdStorage", () => {
+       yield* sessions.remove(bounded.id)
+       expect(coldOwnerCount(sync, [source.id])).toBe(1)
+-      expect(MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: MessageID.make("msg_missing") }).messages).toHaveLength(6)
++      // 本项要求显式边界属于当前 Session；缺失或跨 Session 不得放大为完整克隆。
++      expect(MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: MessageID.make("msg_missing") })).toEqual({ messages: [], parts: [], missing: true })
+       const external = yield* sessions.create({ title: "external fork anchor" })
+       const externalID = MessageID.make("msg_40_external")
+       yield* sessions.updateMessage({ id: externalID, sessionID: external.id, role: "user", time: { created: 15 },
+         agent: "build", model: { providerID: ProviderV2.ID.make("test-provider"), modelID: ModelV2.ID.make("test-model") } })
+-      expect(MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: externalID }).messages).toHaveLength(6)
++      expect(MessageV2.rawForkRows(sync, { sessionID: source.id, messageID: externalID })).toEqual({ messages: [], parts: [], missing: true })
+       yield* sessions.remove(external.id)
+ 
+       const child = yield* sessions.fork({ sessionID: source.id })
 
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 --- a/packages/opencode/test/session/message-v2.test.ts

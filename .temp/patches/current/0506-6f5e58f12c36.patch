@@ -609,9 +609,9 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +
 +describe("SubagentFooter usage flow template", () => {
 +  test("joins input/output arrows with a plain space, not a middot", () => {
-+    // ↑ 后数字与 ↓ 之间必须是空格内聚（与主面板 live flow 和 formatUsageStats 的 flow.join(" ") 同构）
-+    expect(source).toContain(`<span style={{ fg: usageFlow().input ? theme.text : theme.textMuted }}>↑</span> {Locale.number(item().input)}{" "}`)
-+    expect(source).toContain(`<span style={{ fg: usageFlow().output ? theme.text : theme.textMuted }}>↓</span> {Locale.number(item().output)}`)
++    // 同行空格与显式空格节点等价，单独换行不保证JSX渲染间隔。
++    expect(source).toMatch(/<span style=\{\{ fg: usageFlow\(\)\.input \? theme.text : theme.textMuted \}\}>↑<\/span>(?:[ \t]+|\{" "\}\s*)\{Locale\.number\(item\(\)\.input\)\}\{" "\}/)
++    expect(source).toMatch(/<span style=\{\{ fg: usageFlow\(\)\.output \? theme.text : theme.textMuted \}\}>↓<\/span>(?:[ \t]+|\{" "\}\s*)\{Locale\.number\(item\(\)\.output\)\}/)
 +    // 箭头行内不得回退到中点分隔（B-01 曾把 ` ·{" "}` 保留在 ↑/↓ 之间，与主面板形态分裂）
 +    const usageRow = source.split("\n").find((line) => line.includes("usageFlow().input"))
 +    expect(usageRow).toBeDefined()

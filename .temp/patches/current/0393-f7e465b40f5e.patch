@@ -363,13 +363,13 @@ diff --git a/packages/core/test/git.test.ts b/packages/core/test/git.test.ts
        ])
  
 -      const files = new Map([[RelativePath.make("scope/tracked.txt"), before]])
-+      // 同树两个已存在文件使用批量恢复，范围外文件和新增文件仍保持当前值。
++      // 同树两文件批量恢复，范围外及新增文件保持当前值；预览沿用上游 Map 顺序，不增加排序契约。
 +      const files = new Map([[RelativePath.make("scope/tracked.txt"), before], [RelativePath.make("scope/second.txt"), before]])
        const preview = yield* git.tree.preview({ repository, current: after, files, context: 1 })
 -      expect(preview).toHaveLength(1)
 -      expect(preview[0]?.path).toBe(RelativePath.make("scope/tracked.txt"))
 +      expect(preview).toHaveLength(2)
-+      expect(preview.map(file => file.path)).toEqual([RelativePath.make("scope/second.txt"), RelativePath.make("scope/tracked.txt")])
++      expect(preview.map(file => file.path)).toEqual([RelativePath.make("scope/tracked.txt"), RelativePath.make("scope/second.txt")])
        yield* git.tree.restore({ repository, files })
        expect(yield* read(path.join(root.path, "scope", "tracked.txt"))).toBe("one\n")
 +      expect(yield* read(path.join(root.path, "scope", "second.txt"))).toBe("second one\n")

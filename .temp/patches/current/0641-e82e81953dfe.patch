@@ -1664,6 +1664,25 @@ diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash
                    for (const action of ["external_directory", "bash"]) {
                      reset()
                      denyAction = action
+@@ -563,3 +568,3 @@ describe("BashTool", () => {
+-              // 仍逐字检查原授权警告与退出状态，只允许尾部增加本项耗时。
++              // 原警告和退出状态逐字保留，附加notice同时记录真实shell身份与耗时。
+               expect(actualStatus.replace(/\n\n<opencode_notice [^\n]*\/>$/, "")).toBe(status)
+-              expect(actualStatus).toMatch(/\n\n<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" elapsed_ms="\d+" \/>$/)
++              expect(actualStatus).toMatch(/\n\n<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7" elapsed_ms="\d+" shell="(?:pwsh|powershell)" \/>$/)
+@@ -641,9 +646,11 @@ describe("BashTool", () => {
+                 expect(assertions.at(-1)).toMatchObject({ action: "bash", resources: [clixmlCommand], save: [clixmlCommand] })
+               }), LayerNode.compile(AppProcess.node), shell, mode === "config" ? false : undefined, undefined, "auto")
+             }
+           }
+         }),
+         (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+       ),
++      // 两版PowerShell共22次原生启动，总预算独立于单次命令期限。
++      60_000,
+     )
+   }
+
 diff --git a/packages/opencode/src/tool/shell/prompt.ts b/packages/opencode/src/tool/shell/prompt.ts
 index 5cf84f5..a4e252b 100644
 --- a/packages/opencode/src/tool/shell/prompt.ts

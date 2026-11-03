@@ -210,9 +210,9 @@ diff --git a/packages/tui/test/routes/session/auto-review-deep-link.test.ts b/pa
 +    // 路径 A（sync 完成补滚）传 true：补滚不得覆盖同会话用户已滚离位置。
 +    expect(source).toContain("if (route.sessionID === sessionID) scheduleSessionOpenScroll(true)")
 +    // 路径 B defer 跳过 mount 发射（mount 不是导航，贴底由 stickyStart+守卫后路径 A 承担）；
-+    // 箭头包装防止 solid 把 deps 对象注入成首参使 respectUserScroll 意外为真。
-+    expect(source).toContain(
-+      "createEffect(on(() => ({ sessionID: route.sessionID, reviewID: route.reviewID }), () => scheduleSessionOpenScroll(), { defer: true }))",
++    // 箭头包装避免deps被当首参；仅忽略排版和尾逗号，不放宽依赖及defer合同。
++    expect(source.replace(/\s+/g, "").replace(/,(?=[})])/g, "")).toContain(
++      "createEffect(on(()=>({sessionID:route.sessionID,reviewID:route.reviewID}),()=>scheduleSessionOpenScroll(),{defer:true}))",
 +    )
    })
  

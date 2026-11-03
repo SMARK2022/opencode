@@ -98,9 +98,9 @@ index 6d1489f8e..960748276 100644
      .post("/api/session/{sessionID}/agent", "v2.session.switchAgent")
      .seeded((ctx) => ctx.session({ title: "Switch agent" }))
 @@ -1677,6 +1707,40 @@ const scenarios: Scenario[] = [
-       },
-       "status",
-     ),
+         check(body.data.message === "Request usage not found: msg_httpapi_missing", "missing request should remain a resource error")
+       }),
+   ),
 +  // [local-smark] goal 端点 scenario：GET/POST/DELETE /session/:id/goal
 +  // 覆盖 0364 引入的 goal 生命周期端点，解决 CI coverage missing=3
 +  http.protected

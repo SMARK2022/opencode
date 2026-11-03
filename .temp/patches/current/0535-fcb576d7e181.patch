@@ -1364,12 +1364,13 @@ index fc0fdf7e7..a4954ca6e 100644
  
  
  class MaintenanceUnavailableError extends Error {}
-@@ -53,6 +60,7 @@ async function liveDaemon() {
+@@ -53,7 +60,8 @@ async function liveDaemon() {
 -  const lock = await ServerLock.read()
 +  const lockPath = ServerLock.placement()
 +  const lock = await ServerLock.read(lockPath)
    if (!lock) return
-   if (path.resolve(lock.dbPath) !== path.resolve(Database.path())) return
+   // 按宿主路径语义比较同一数据库，Windows大小写差异不能把活跃owner误判为offline。
+   if (path.relative(lock.dbPath, Database.path()) !== "") return
    if (!ServerLock.alive(lock.pid)) {
 -    await ServerLock.clearIfOwner(lock.token)
 +    await ServerLock.clearIfOwner(lock.token, lockPath)
@@ -2057,7 +2058,7 @@ index 0000000000000000000000000000000000000000..11111111111111111111111111111111
 +import path from "path"
 +import { fileURLToPath } from "url"
 +import stripAnsi from "strip-ansi"
-+import { spawn as spawnPty, type IPty } from "@lydell/node-pty"
++import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun" // Bun 宿主沿 source 的 #pty 使用原生后端。
 +import { Database as SQLite } from "bun:sqlite"
 +import { Flock } from "@opencode-ai/core/util/flock"
 +import { tmpdir } from "../fixture/fixture"
@@ -2089,7 +2090,7 @@ index 0000000000000000000000000000000000000000..11111111111111111111111111111111
 +// PTY helper 保留真实 stdin/stderr 关系，prompt、ANSI 和光标行为都由产品入口产生。
 +function runPty(args: string[], env: Record<string, string | undefined>) {
 +  // env 过滤 undefined：PTY 构造器要求值类型完整，不依赖平台对 undefined 的容错。
-+  const proc = spawnPty(process.execPath, [INDEX_TS, ...args], {
++  const proc = spawn(process.execPath, [INDEX_TS, ...args], {
 +    ...PTY_OPTIONS,
 +    cwd: path.dirname(INDEX_TS),
 +    env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
@@ -2128,7 +2129,7 @@ index 0000000000000000000000000000000000000000..11111111111111111111111111111111
 +  })()
 +  db.close()
 +}
-+async function waitForExit(proc: IPty, exited: Promise<number>) {
++async function waitForExit(proc: Proc, exited: Promise<number>) {
 +  // PTY 是真实 CLI seam；外层期限只防测试挂死，不参与产品进度或完成判定。
 +  const result = await Promise.race([exited, Bun.sleep(20_000).then(() => "timeout" as const)])
 +  if (result !== "timeout") return result
@@ -2150,7 +2151,7 @@ index 0000000000000000000000000000000000000000..11111111111111111111111111111111
 +  ])
 +  return { exitCode, stdout, stderr }
 +}
-+function answerPrompt(proc: IPty, prompt: string, answer: "y" | "n") {
++function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
 +  let answered = false
 +  // 只应答首个匹配 prompt；后续 reclaim 等待由各自用例单独控制，避免双写 stdin。
 +  proc.onData((data) => {
@@ -2306,9 +2307,9 @@ index fa25bc63b..35a903a63 100644
  // #493：maintenance task record 类型来自 core ColdStorage——三用例覆盖 lease 抢占/reclaim、control 协议与 startup recovery。
  import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-storage"
  import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
-+// #535：交互 DB 命令走真实 PTY；control 断言用同 token 的公开 endpoint。
++// #535：Bun 宿主复用 Core 的实际 PTY 后端；control 断言用同 token 的公开 endpoint。
 +import stripAnsi from "strip-ansi"
-+import { spawn as spawnPty } from "@lydell/node-pty"
++import { spawn } from "@opencode-ai/core/pty/pty.bun"
 +import { Flock } from "@opencode-ai/core/util/flock"
  
  const WORKER_TS = fileURLToPath(new URL("../../../src/cli/tui/worker.ts", import.meta.url))
@@ -2345,7 +2346,7 @@ index fa25bc63b..35a903a63 100644
 +  beforeAnswer: () => Promise<unknown> = async () => {},
 +  observe: (chunk: string) => void = () => {},
 +) {
-+  const proc = spawnPty(process.execPath, [INDEX_TS, "db", ...args], {
++  const proc = spawn(process.execPath, [INDEX_TS, "db", ...args], {
 +    name: "xterm-256color",
 +    cols: 100,
 +    rows: 30,

@@ -2038,6 +2038,15 @@ diff --git a/packages/opencode/src/session/tools.ts b/packages/opencode/src/sess
              "tool.execute.before",
              { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
 
+diff --git a/packages/opencode/test/session/tools.test.ts b/packages/opencode/test/session/tools.test.ts
+--- a/packages/opencode/test/session/tools.test.ts
++++ b/packages/opencode/test/session/tools.test.ts
+@@ -172,2 +172,3 @@
+-    expect(updates).toEqual([100, 100])
++    // durable执行屏障和两次metadata更新都必须保留最初开始时间。
++    expect(updates).toEqual([100, 100, 100])
+     expect(state.state.status).toBe("running")
+
 diff --git a/packages/opencode/src/tool/tool.ts b/packages/opencode/src/tool/tool.ts
 --- a/packages/opencode/src/tool/tool.ts
 +++ b/packages/opencode/src/tool/tool.ts
@@ -3390,6 +3399,41 @@ diff --git a/packages/schema/src/session-message.ts b/packages/schema/src/sessio
 -    files: Schema.Array(RelativePath).pipe(optional),
 -  }).pipe(optional),
 +  snapshot: Snapshot.pipe(optional),
+
+diff --git a/packages/schema/test/event-manifest.test.ts b/packages/schema/test/event-manifest.test.ts
+--- a/packages/schema/test/event-manifest.test.ts
++++ b/packages/schema/test/event-manifest.test.ts
+@@ -12,2 +12,3 @@
+-    expect(EventManifest.ServerDefinitions.length).toBe(69)
+-    expect(EventManifest.Definitions.length).toBe(101)
++    // 本项新增可公开的Native快照事件，兼容集合也增加同一个定义。
++    expect(EventManifest.ServerDefinitions.length).toBe(70)
++    expect(EventManifest.Definitions.length).toBe(102)
+@@ -28,2 +29,2 @@
+-    expect(EventManifest.Latest.size).toBe(101)
+-    expect(EventManifest.Durable.size).toBe(41)
++    expect(EventManifest.Latest.size).toBe(102)
++    expect(EventManifest.Durable.size).toBe(42)
+@@ -53,2 +54,2 @@
+-    expect(EventManifest.Definitions.slice(49, 53)).toEqual([
++    expect(EventManifest.Definitions.slice(50, 54)).toEqual([
+       SessionV1.Event.PartDelta,
+@@ -59,3 +60,5 @@
+     expect(EventManifest.Durable.has("session.next.step.ended.1")).toBe(false)
+     expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
+     expect(EventManifest.Durable.get("session.next.messages.hidden.1")).toBe(SessionEvent.MessagesHidden)
++    // 快照更新必须沿同一持久定义重放，而不是仅增加一个计数。
++    expect(EventManifest.Durable.get("session.next.step.snapshot.updated.1")).toBe(SessionEvent.Step.SnapshotUpdated)
+
+diff --git a/packages/opencode/test/event-manifest.test.ts b/packages/opencode/test/event-manifest.test.ts
+--- a/packages/opencode/test/event-manifest.test.ts
++++ b/packages/opencode/test/event-manifest.test.ts
+@@ -12,3 +12,3 @@
+-    // PartProgress 注册为 V1-only 纯广播事件后 manifest 集合 +1。
+-    expect(EventManifest.Latest.size).toBe(100)
++    // Forked与Native快照事件都已注册，每种wire类型仍只保留一个定义。
++    expect(EventManifest.Latest.size).toBe(102)
+     expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
 
 diff --git a/packages/schema/src/session-event.ts b/packages/schema/src/session-event.ts
 --- a/packages/schema/src/session-event.ts

@@ -301,7 +301,7 @@ diff --git a/packages/core/test/config/provider.test.ts b/packages/core/test/con
 +              expect(evidence).toContain(value)
 +              expect(body.instructions).not.toContain(value)
 +            }
-+            expect(evidence.includes(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT)).toBe(index === 1)
++            expect(evidence.includes(JSON.stringify(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT).slice(1, -1))).toBe(index === 1) // JSON证据中的换行与引号必须按同一编码比较完整原话。
 +            expect(body.instructions).not.toContain(PermissionReviewerPrompt.PROTOCOL_RETRY_TEXT)
 +            expect(body.custom_extension).toEqual({ kept: true })
 +            expect(urls[index]).toBe(!scenario.promote ? "https://api.openai.com/v1/responses" : selected === "review-late" ? "https://custom-codex.fixture.invalid/responses?tenant=fixture" : "https://chatgpt.com/backend-api/codex/responses")

@@ -889,14 +889,12 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
        // #186：orphan delta（part 尚未入 store）直接丢弃，与 hydration 竞态测试一致
        const parts = store.part[event.properties.messageID]
        if (!parts) {
-@@ -534,6 +622,11 @@ export const {
+@@ -534,6 +622,9 @@ export const {
      }
  
      function enqueuePartDelta(event: EventMessagePartDelta) {
 +      if (partGone(event.properties.sessionID, event.properties.messageID, event.properties.partID)) return
 +      // 到达时刻登记 sync 变更；flush 延迟 16ms，不能等 apply 才记录，否则 prune 先于登记。
-+      // message/part 双登记与事件路径同口径：delta 隐含其 Message 在请求期间发生了变化。
-+      touchMessage(event.properties.sessionID, event.properties.messageID)
 +      touchPart(event.properties.sessionID, event.properties.partID)
        // #186：只入队不立刻写 store，把高频 token 片段留给 coalesce
        pendingPartDeltas.push(event)
@@ -1043,7 +1041,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              const parts = store.part[part.messageID]
              if (!parts) break
              const foundAt = search(parts, part.id, (p) => p.id)
-@@ -977,10 +1041,12 @@ export const {
+@@ -977,10 +1041,10 @@ export const {
                  draft.splice(foundAt.index, 1)
                }),
              )
@@ -1052,9 +1050,7 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
              break
            }
 +          if (partGone(part.sessionID, part.messageID, part.id)) break
-+          // part 事件同时登记其父 Message：sync 合并按 message 级偏好 live 投影，
-+          // 只登 part 会让请求期间新 Message 的整体被 HTTP 页覆盖。
-+          touchMessage(event.properties.part.sessionID, event.properties.part.messageID)
++          // Message 元数据只由 message.updated 仲裁，Part-first 也不能挡住其首次 hydration。
            touchPart(event.properties.part.sessionID, event.properties.part.id)
            const parts = store.part[event.properties.part.messageID]
            if (!parts) {
@@ -1211,7 +1207,8 @@ diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.t
                    const parts = message.parts.flatMap((part) => {
 +                    if (partGone(part.sessionID, part.messageID, part.id)) return []
                      const current = currentParts.find((item) => item.id === part.id)
-                     if (tracker.parts.has(part.id)) return current ? [current] : []
+-                    if (tracker.parts.has(part.id)) return current ? [current] : []
++                    if (tracker.parts.has(part.id) && current) return [current]
                      // 通用单调合并守卫：pending 短快照不回退本地已累积的长文本（text/reasoning/tool raw）
                      return [mergeLivePart(current, part)]
                    })

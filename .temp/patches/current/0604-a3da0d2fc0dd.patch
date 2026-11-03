@@ -1406,3 +1406,45 @@ diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/
          expect(result.output).toContain(
            '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="9"',
          )
+@@ -2955,10 +2984,12 @@
+-        // 真实 V1 caller 的短输出没有其它压缩命中，也必须脱敏并保留未修改 raw。
++        // 真实调用跨过本项200B边界后验证脱敏，不以扩大短正文职责来迎合旧夹具。
+         const secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+-        const redacted = yield* run({ command: `echo ${secret}` })
+-        expect(redacted.output).toContain("<REDACTED_API-KEY>")
++        const payload = `${secret}\n${Array.from({ length: 40 }, (_, index) => `context-${index}`).join(" ")}`
++        const secretCommand = `${bin} -e ${evalarg(`process.stdout.write(${JSON.stringify(payload)})`)}`
++        const redacted = yield* run({ command: PS.has(sh()) ? `& ${secretCommand}` : secretCommand })
++        expect(redacted.output).toContain("sk-abcd…[redacted api-key]")
+         expect(redacted.output).not.toContain(secret)
+-        expect(redacted.metadata).toMatchObject({ compressed: false, compressionSecretsRedacted: 1 })
++        expect(redacted.metadata).toMatchObject({ compressed: true, compressionSecretsRedacted: 1 })
+         const rawPath = redacted.metadata.outputPath
+         if (typeof rawPath !== "string") throw new Error("expected redacted raw output")
+         expect(redacted.output).toContain(rawPath)
+         expect(yield* fs.readFileString(rawPath)).toContain(secret)
+@@ -2965,11 +2996,12 @@
+-        // 短CLIXML净增长时不标记压缩，但实际V1调用仍须返回解码正文和可读raw。
++        // PowerShell先解码再计压缩字节；其他shell由压缩器解码，两者都保留原始归档。
+         const clixml = '<Objs><S S="Output">ordinary</S></Objs>'
+         const program = `process.stdout.write(String.fromCharCode(${Array.from(clixml, (char) => char.charCodeAt(0)).join(",")}))`
+         const command = `${bin} -e ${evalarg(program)}`
+         const decoded = yield* run({ command: PS.has(sh()) ? `& ${command}` : command })
+-        expect(decoded.output).toContain("<high-entropy powershell-clixml>ordinary</high-entropy>")
+-        expect(decoded.metadata).toMatchObject({ compressed: false, compressionOriginalBytes: 39, compressionCompressedBytes: 55 })
++        expect(decoded.output).toContain("ordinary")
++        expect(decoded.output).not.toContain("high-entropy")
++        expect(decoded.metadata).toMatchObject({ compressed: false, compressionOriginalBytes: process.platform === "win32" && PS.has(sh()) ? 8 : Buffer.byteLength(clixml), compressionCompressedBytes: 8 })
+         const clixmlPath = decoded.metadata.outputPath
+         if (typeof clixmlPath !== "string") throw new Error("expected decoded raw output")
+         expect(decoded.output).toContain(clixmlPath)
+         expect(yield* fs.readFileString(clixmlPath)).toBe(clixml)
+
+diff --git a/packages/core/test/tool-bash.test.ts b/packages/core/test/tool-bash.test.ts
+--- a/packages/core/test/tool-bash.test.ts
++++ b/packages/core/test/tool-bash.test.ts
+@@ -1174,2 +1174,3 @@
+           expect(text).toContain("actual-stderr")
++          // 普通CLIXML解码不属于高熵压缩，完整正文和raw仍分别验收。
+-          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: plainClixml ? 0 : 1 } })
++          expect(settled.output?.structured).toMatchObject({ compression: { compressionHighEntropyLines: 0 } })

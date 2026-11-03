@@ -760,3 +760,47 @@ diff --git a/packages/tui/test/routes/session/auto-review-render.test.tsx b/pack
 +})
 +
  async function withRenderedReview(
+@@ -937,3 +1004,6 @@
+     if (url.pathname === "/session") return json(Object.keys(sessions).map(details))
++    // 此夹具没有请求账本，精确查询必须沿真实缺失资源语义返回404。
++    if (/^\/session\/[^/]+\/request_usage\/[^/]+$/.test(url.pathname))
++      return json({ name: "NotFoundError", data: { message: "Request usage not found" } }, { status: 404 })
+     const match = url.pathname.match(/^\/session\/([^/]+)(?:\/(message|todo|diff))?$/)
+     if (match && sessions[match[1]]) {
+
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -386,2 +386,3 @@
+-    const navigation: { type: string; sessionID: string }[] = []
+-    const navigate = (route: { type: string; sessionID: string }) => navigation.push(route)
++    // 导航夹具保留可选锚点，普通 Session 导航仍可省略。
++    const navigation: { type: string; sessionID: string; reviewID?: string }[] = []
++    const navigate = (route: { type: string; sessionID: string; reviewID?: string }) => navigation.push(route)
+@@ -460,4 +461,5 @@
+-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++    // 状态行点击必须携带精确审查锚点，不能退回子会话末尾。
++    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
+     expect(parentClicks).toBe(0)
+     expect(expanded()).toBe(false)
+     if (kind === "edit") expect(app.captureCharFrame()).toContain("Click to expand")
+@@ -466,3 +468,3 @@
+-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
+     expect(parentClicks).toBe(0)
+     expect(expanded()).toBe(false)
+@@ -475,3 +477,3 @@
+     expect(effects).toEqual(["default", "bubble", "clear"])
+-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
+     navigation.length = 0
+@@ -482,3 +484,3 @@
+     expect(production.openAutoReviewSession(review, navigate, app.renderer)).toBe(true)
+-    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++    expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
+     navigation.length = 0
+@@ -487,3 +489,3 @@
+       expect(production.openAutoReviewFromToolChrome(review, navigate, app.renderer, { ...rowEvent, target })).toBe(true)
+-      expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child" }])
++      expect(navigation).toEqual([{ type: "session", sessionID: "ses_reviewer_child", reviewID: "review_click" }])
+       navigation.length = 0

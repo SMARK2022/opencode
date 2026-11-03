@@ -81,7 +81,7 @@ diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/ses
 diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd/db.ts
 --- a/packages/opencode/src/cli/cmd/db.ts
 +++ b/packages/opencode/src/cli/cmd/db.ts
-@@ -4,6 +4,306 @@ import { Database } from "@opencode-ai/core/database/database"
+@@ -4,6 +4,307 @@ import { Database } from "@opencode-ai/core/database/database"
  import { Effect } from "effect"
  import { sql } from "drizzle-orm"
  import { effectCmd } from "../effect-cmd"
@@ -133,7 +133,8 @@ diff --git a/packages/opencode/src/cli/cmd/db.ts b/packages/opencode/src/cli/cmd
 +async function liveDaemon() {
 +  const lock = await ServerLock.read()
 +  if (!lock) return
-+  if (path.resolve(lock.dbPath) !== path.resolve(Database.path())) return
++  // 按宿主路径语义比较同一数据库，Windows大小写差异不能把活跃owner误判为offline。
++  if (path.relative(lock.dbPath, Database.path()) !== "") return
 +  if (!ServerLock.alive(lock.pid)) {
 +    await ServerLock.clearIfOwner(lock.token)
 +    return
@@ -4403,52 +4404,21 @@ diff --git a/packages/core/src/database/database.ts b/packages/core/src/database
 diff --git a/packages/core/src/database/migration.gen.ts b/packages/core/src/database/migration.gen.ts
 --- a/packages/core/src/database/migration.gen.ts
 +++ b/packages/core/src/database/migration.gen.ts
-@@ -46,6 +46,9 @@ export const migrations = (
-     import("./migration/20260726100000_session_goal"),
-     import("./migration/20260812100000_goal_continue_on_error"),
-     import("./migration/20260901100000_session_goal_integrity"),
-     import("./migration/20261009114905_session_request_usage"),
-+    // #493：cold_storage 表 + message/part.cold_ref 引用列
+@@ -41,6 +41,8 @@ export const migrations = (
+     import("./migration/20260622170816_reset_v2_session_state"),
+     import("./migration/20260622202450_simplify_session_input"),
+     import("./migration/20260623000000_session_step_usage"),
 +    import("./migration/20260717035626_cold_storage"),
 +    import("./migration/20260717035627_native_cold_storage"),
-   ])
- ).map((module) => module.default) satisfies DatabaseMigration.Migration[]
+     import("./migration/20260723100000_normalize_global_session_path"),
+     import("./migration/20260725100000_migrate_review_agent"),
+     import("./migration/20260726100000_session_goal"),
 
 diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/database/schema.gen.ts
 --- a/packages/core/src/database/schema.gen.ts
 +++ b/packages/core/src/database/schema.gen.ts
-@@ -204,6 +204,7 @@ export default {
-           \`time_created\` integer NOT NULL,
-           \`time_updated\` integer NOT NULL,
-           \`data\` text NOT NULL,
-+          \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
-           CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
-         );
-       `)
-@@ -215,6 +216,7 @@ export default {
-           \`time_created\` integer NOT NULL,
-           \`time_updated\` integer NOT NULL,
-           \`data\` text NOT NULL,
-+          \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
-           CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE
-         );
-       `)
-@@ -250,6 +252,7 @@ export default {
-           \`time_created\` integer NOT NULL,
-           \`time_updated\` integer NOT NULL,
-           \`data\` text NOT NULL,
-+          \`cold_ref\` text REFERENCES \`cold_storage\`(\`hash\`),
-           CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
-         );
-       `)
-@@ -361,6 +364,26 @@ export default {
-       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
-       yield* tx.run(`CREATE INDEX \`session_parent_idx\` ON \`session\` (\`parent_id\`);`)
-       yield* tx.run(`CREATE INDEX \`todo_session_idx\` ON \`todo\` (\`session_id\`);`)
-+      // #493：cold_storage envelope 表与 message/part.cold_ref 引用列——fresh DB 与迁移路径 DDL 必须一致。
-+      // RESTRICT FK：payload 生命周期由引用计数管理，owner row 删除走 release 路径。
-+      yield* tx.run(
-+        `
+@@ -199,3 +199,16 @@ export default {
++      yield* tx.run(`
 +        CREATE TABLE \`cold_storage\` (
 +          \`hash\` text PRIMARY KEY,
 +          \`kind\` text NOT NULL,
@@ -4461,13 +4431,59 @@ diff --git a/packages/core/src/database/schema.gen.ts b/packages/core/src/databa
 +          \`time_updated\` integer NOT NULL
 +        );
 +      `)
+       yield* tx.run(`
+         CREATE TABLE \`message\` (
+           \`id\` text PRIMARY KEY,
+@@ -204,6 +217,8 @@ export default {
+           \`time_created\` integer NOT NULL,
+           \`time_updated\` integer NOT NULL,
+           \`data\` text NOT NULL,
++          \`cold_ref\` text,
+-          CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
++          CONSTRAINT \`fk_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
++          CONSTRAINT \`fk_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
+         );
+       `)
+@@ -215,6 +230,8 @@ export default {
+           \`time_created\` integer NOT NULL,
+           \`time_updated\` integer NOT NULL,
+           \`data\` text NOT NULL,
++          \`cold_ref\` text,
+-          CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE
++          CONSTRAINT \`fk_part_message_id_message_id_fk\` FOREIGN KEY (\`message_id\`) REFERENCES \`message\`(\`id\`) ON DELETE CASCADE,
++          CONSTRAINT \`fk_part_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
+         );
+       `)
+@@ -250,6 +267,8 @@ export default {
+           \`time_created\` integer NOT NULL,
+           \`time_updated\` integer NOT NULL,
+           \`data\` text NOT NULL,
++          \`cold_ref\` text,
+-          CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE
++          CONSTRAINT \`fk_session_message_session_id_session_id_fk\` FOREIGN KEY (\`session_id\`) REFERENCES \`session\`(\`id\`) ON DELETE CASCADE,
++          CONSTRAINT \`fk_session_message_cold_ref_cold_storage_hash_fk\` FOREIGN KEY (\`cold_ref\`) REFERENCES \`cold_storage\`(\`hash\`) ON DELETE RESTRICT
+         );
+       `)
+@@ -334,8 +353,11 @@ export default {
+       yield* tx.run(
+         `CREATE UNIQUE INDEX \`permission_project_action_resource_idx\` ON \`permission\` (\`project_id\`,\`action\`,\`resource\`);`,
+       )
 +      yield* tx.run(`CREATE INDEX \`cold_storage_ref_count_idx\` ON \`cold_storage\` (\`ref_count\`);`)
+       yield* tx.run(
+         `CREATE INDEX \`message_session_time_created_id_idx\` ON \`message\` (\`session_id\`,\`time_created\`,\`id\`);`,
+       )
 +      yield* tx.run(`CREATE INDEX \`message_cold_ref_idx\` ON \`message\` (\`cold_ref\`);`)
+       yield* tx.run(`CREATE INDEX \`part_message_id_id_idx\` ON \`part\` (\`message_id\`,\`id\`);`)
+       yield* tx.run(`CREATE INDEX \`part_session_idx\` ON \`part\` (\`session_id\`);`)
 +      yield* tx.run(`CREATE INDEX \`part_cold_ref_idx\` ON \`part\` (\`cold_ref\`);`)
+@@ -356,6 +378,7 @@ export default {
+       yield* tx.run(
+         `CREATE INDEX \`session_message_session_time_created_id_idx\` ON \`session_message\` (\`session_id\`,\`time_created\`,\`id\`);`,
+       )
+       yield* tx.run(`CREATE INDEX \`session_message_time_created_idx\` ON \`session_message\` (\`time_created\`);`)
 +      yield* tx.run(`CREATE INDEX \`session_message_cold_ref_idx\` ON \`session_message\` (\`cold_ref\`);`)
-     })
-   },
- } satisfies Omit<DatabaseMigration.Migration, "id">
+       yield* tx.run(`CREATE INDEX \`session_project_idx\` ON \`session\` (\`project_id\`);`)
+       yield* tx.run(`CREATE INDEX \`session_workspace_idx\` ON \`session\` (\`workspace_id\`);`)
 
 diff --git a/packages/core/src/database/migration/20260717035626_cold_storage.ts b/packages/core/src/database/migration/20260717035626_cold_storage.ts
 new file mode 100644
@@ -8044,3 +8060,328 @@ diff --git a/packages/core/test/session-projector.test.ts b/packages/core/test/s
        expect(reverted?.data).not.toHaveProperty("summary")
 +      expect(reverted?.data).toMatchObject({ files })
 +      expect(yield* db.select().from(ColdStorageTable).all()).toEqual([])
+
+diff --git a/packages/core/schema.json b/packages/core/schema.json
+--- a/packages/core/schema.json
++++ b/packages/core/schema.json
+@@ -60,6 +60,10 @@
+       "name": "project",
+       "entityType": "tables"
+     },
++    {
++      "name": "cold_storage",
++      "entityType": "tables"
++    },
+     {
+       "name": "message",
+       "entityType": "tables"
+@@ -1360,8 +1364,98 @@
+       "generated": null,
+       "name": "commands",
+       "entityType": "columns",
+       "table": "project"
+     },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "hash",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "kind",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "text",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "codec",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "blob",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "payload",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "raw_bytes",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "compressed_bytes",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": "0",
++      "generated": null,
++      "name": "ref_count",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_created",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
++    {
++      "type": "integer",
++      "notNull": true,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "time_updated",
++      "entityType": "columns",
++      "table": "cold_storage"
++    },
+     {
+       "type": "text",
+       "notNull": false,
+@@ -1410,8 +1504,18 @@
+       "generated": null,
+       "name": "data",
+       "entityType": "columns",
+       "table": "message"
+     },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_ref",
++      "entityType": "columns",
++      "table": "message"
++    },
+     {
+       "type": "text",
+       "notNull": false,
+@@ -1470,8 +1574,18 @@
+       "generated": null,
+       "name": "data",
+       "entityType": "columns",
+       "table": "part"
+     },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_ref",
++      "entityType": "columns",
++      "table": "part"
++    },
+     {
+       "type": "text",
+       "notNull": false,
+@@ -1650,8 +1764,18 @@
+       "generated": null,
+       "name": "data",
+       "entityType": "columns",
+       "table": "session_message"
+     },
++    {
++      "type": "text",
++      "notNull": false,
++      "autoincrement": false,
++      "default": null,
++      "generated": null,
++      "name": "cold_ref",
++      "entityType": "columns",
++      "table": "session_message"
++    },
+     {
+       "type": "text",
+       "notNull": false,
+@@ -2169,6 +2293,17 @@
+       "name": "fk_message_session_id_session_id_fk",
+       "entityType": "fks",
+       "table": "message"
+     },
++    {
++      "columns": ["cold_ref"],
++      "tableTo": "cold_storage",
++      "columnsTo": ["hash"],
++      "onUpdate": "NO ACTION",
++      "onDelete": "RESTRICT",
++      "nameExplicit": false,
++      "name": "fk_message_cold_ref_cold_storage_hash_fk",
++      "entityType": "fks",
++      "table": "message"
++    },
+     {
+       "columns": [
+@@ -2180,6 +2315,17 @@
+       "name": "fk_part_message_id_message_id_fk",
+       "entityType": "fks",
+       "table": "part"
+     },
++    {
++      "columns": ["cold_ref"],
++      "tableTo": "cold_storage",
++      "columnsTo": ["hash"],
++      "onUpdate": "NO ACTION",
++      "onDelete": "RESTRICT",
++      "nameExplicit": false,
++      "name": "fk_part_cold_ref_cold_storage_hash_fk",
++      "entityType": "fks",
++      "table": "part"
++    },
+     {
+       "columns": [
+@@ -2213,6 +2359,17 @@
+       "name": "fk_session_message_session_id_session_id_fk",
+       "entityType": "fks",
+       "table": "session_message"
+     },
++    {
++      "columns": ["cold_ref"],
++      "tableTo": "cold_storage",
++      "columnsTo": ["hash"],
++      "onUpdate": "NO ACTION",
++      "onDelete": "RESTRICT",
++      "nameExplicit": false,
++      "name": "fk_session_message_cold_ref_cold_storage_hash_fk",
++      "entityType": "fks",
++      "table": "session_message"
++    },
+     {
+       "columns": [
+@@ -2353,8 +2510,15 @@
+       "table": "project",
+       "entityType": "pks"
+     },
++    {
++      "columns": ["hash"],
++      "nameExplicit": false,
++      "name": "cold_storage_pk",
++      "table": "cold_storage",
++      "entityType": "pks"
++    },
+     {
+       "columns": [
+         "id"
+       ],
+       "nameExplicit": false,
+@@ -2596,6 +2760,20 @@
+       "name": "permission_project_action_resource_idx",
+       "entityType": "indexes",
+       "table": "permission"
+     },
++    {
++      "columns": [
++        {
++          "value": "ref_count",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "cold_storage_ref_count_idx",
++      "entityType": "indexes",
++      "table": "cold_storage"
++    },
+     {
+       "columns": [
+@@ -2618,6 +2796,20 @@
+       "name": "message_session_time_created_id_idx",
+       "entityType": "indexes",
+       "table": "message"
+     },
++    {
++      "columns": [
++        {
++          "value": "cold_ref",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "message_cold_ref_idx",
++      "entityType": "indexes",
++      "table": "message"
++    },
+     {
+       "columns": [
+@@ -2650,6 +2842,20 @@
+       "name": "part_session_idx",
+       "entityType": "indexes",
+       "table": "part"
+     },
++    {
++      "columns": [
++        {
++          "value": "cold_ref",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "part_cold_ref_idx",
++      "entityType": "indexes",
++      "table": "part"
++    },
+     {
+       "columns": [
+@@ -2788,6 +2994,20 @@
+       "name": "session_message_time_created_idx",
+       "entityType": "indexes",
+       "table": "session_message"
+     },
++    {
++      "columns": [
++        {
++          "value": "cold_ref",
++          "isExpression": false
++        }
++      ],
++      "isUnique": false,
++      "where": null,
++      "origin": "manual",
++      "name": "session_message_cold_ref_idx",
++      "entityType": "indexes",
++      "table": "session_message"
++    },
+     {
+       "columns": [

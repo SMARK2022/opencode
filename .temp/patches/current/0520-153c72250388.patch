@@ -1655,3 +1655,19 @@ index 12a61a3a0..1ed5bde6f 100644
  
        // 在第三 completion 尚未结束前，只有 re-plan 已发生，Goal 必须仍是 active。
        const goal = yield* goalSvc.get(chat.id)
+
+diff --git a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+--- a/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
++++ b/packages/tui/test/cli/tui/inline-tool-wrap-snapshot.test.tsx
+@@ -24,3 +24,4 @@
+ } from "../../../src/routes/session"
+ import { layoutGroups } from "../../../src/util/layout"
+ import { collapseToolOutput } from "../../../src/util/collapse-tool-output"
++import { goalContinuation } from "../../../src/routes/session/goal-continuation"
+@@ -400,4 +401,6 @@
+       selectedForeground,
+       MouseButton,
+       collapseToolOutput,
++      // 执行生产 JSX 时注入同一个纯函数，避免另写 Goal 卡片判定。
++      goalContinuation,
+       stripAnsi,

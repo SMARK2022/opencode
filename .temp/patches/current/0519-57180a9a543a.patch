@@ -189,6 +189,11 @@ diff --git a/packages/tui/src/context/data.tsx b/packages/tui/src/context/data.t
 diff --git a/packages/core/test/session-runner.test.ts b/packages/core/test/session-runner.test.ts
 --- a/packages/core/test/session-runner.test.ts
 +++ b/packages/core/test/session-runner.test.ts
+@@ -414,2 +414,4 @@
+   yield* insertSession(sessionID)
++  // 每个场景只观察自己的请求，不能继承前一用例的续轮次数。
++  requests.length = 0
+ })
 @@ -961,8 +961,15 @@
 -    // 活跃Goal也不能把未知/错误的空结算当正常完成，避免不断注入续跑。
 +    // 已执行工具的未知完成不重放，也不能当作普通 Goal 完成；无工具 unknown 由独立重试用例覆盖。
@@ -394,6 +399,31 @@ diff --git a/packages/sdk/js/src/v2/gen/types.gen.ts b/packages/sdk/js/src/v2/ge
 +    assistantMessageID?: string
      attempt: number
      error: SessionNextRetryError
+diff --git a/packages/opencode/test/cli/run/run-process.test.ts b/packages/opencode/test/cli/run/run-process.test.ts
+--- a/packages/opencode/test/cli/run/run-process.test.ts
++++ b/packages/opencode/test/cli/run/run-process.test.ts
+@@ -231,17 +231,17 @@
+         const events = opencode.parseJsonEvents(result.stdout)
+         expect(result.exitCode).toBe(0)
++        // 无Tool未知完成先重试，不对失败attempt发布step_finish。
+         expect(events.map((event) => event.type)).toEqual([
+           "step_start",
+           "text",
+           "tool_use",
+           "step_finish",
+           "step_start",
+-          "step_finish",
+           "step_start",
+           "text",
+           "step_finish",
+         ])
+         expect(events[1]?.part).toEqual(expect.objectContaining({ type: "text", text: "partial json" }))
+-        expect(events[5]?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))
+-        expect(events[7]?.part).toEqual(expect.objectContaining({ type: "text", text: "recovered" }))
++        expect(events.filter((event) => event.type === "step_finish")).toHaveLength(2)
++        expect(events[6]?.part).toEqual(expect.objectContaining({ type: "text", text: "recovered" }))
+         expect(events.at(-1)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "stop" }))
+
 diff --git a/docs/plans/grok-finish-other-retryable-repair.md b/docs/plans/grok-finish-other-retryable-repair.md
 new file mode 100644
 index 0000000000000000000000000000000000000000..ff5a6bcd7897c7a1018762859453a5de6a969dda

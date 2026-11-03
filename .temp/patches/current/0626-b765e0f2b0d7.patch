@@ -129,16 +129,19 @@ diff --git a/packages/opencode/test/cli/run/lazy-runtime.test.ts b/packages/open
 diff --git a/packages/tui/src/context/sync.tsx b/packages/tui/src/context/sync.tsx
 --- a/packages/tui/src/context/sync.tsx
 +++ b/packages/tui/src/context/sync.tsx
-@@ -422,9 +422,13 @@ export const {
+@@ -422,9 +422,12 @@ export const {
        partConsumers.delete(sessionID)
-       // [0624] 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
-       syncTokens.delete(sessionID)
-       syncingSessions.delete(sessionID)
-       hydratingSessions.delete(sessionID)
+-      // [0624] 撤销在途 sync 的提交资格：迟到响应不能把刚释放的正文写回；另一消费者的请求由新 token 保护。
+-      syncTokens.delete(sessionID)
+-      syncingSessions.delete(sessionID)
+-      hydratingSessions.delete(sessionID)
 -      releaseSessionParts(sessionID)
-+      // 同批路由消费者可能晚于旧树清理注册；仅延迟正文清扫，旧请求资格仍立即失效。
++      // 路由交接在同一批内复用在途刷新；确认无人接手后才一并撤销租约与正文。
 +      queueMicrotask(() => {
 +        if (partConsumers.has(sessionID)) return
++        syncTokens.delete(sessionID)
++        syncingSessions.delete(sessionID)
++        hydratingSessions.delete(sessionID)
 +        releaseSessionParts(sessionID)
 +      })
      }

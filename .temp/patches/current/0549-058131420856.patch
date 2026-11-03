@@ -762,7 +762,7 @@ index b0df2aef2..eb04a80a7 100644
 --- a/packages/opencode/test/cli/db-maintenance.test.ts
 +++ b/packages/opencode/test/cli/db-maintenance.test.ts
 @@ -6,6 +6,8 @@ import stripAnsi from "strip-ansi"
- import { spawn as spawnPty, type IPty } from "@lydell/node-pty"
+ import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun" // Bun 宿主沿 source 的 #pty 使用原生后端。
  import { Database as SQLite } from "bun:sqlite"
  import { Flock } from "@opencode-ai/core/util/flock"
 +// #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
@@ -908,7 +908,7 @@ index b0df2aef2..eb04a80a7 100644
 +  // #549：定宽进度行——吞吐从非零回到 0 时不应残留上一帧更长的 rate 文本（\x1b[K 清行）。
 +  ptyInteractive("progress line clears previous wider rate text", async () => {
 +    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 30) })
-+    const proc = spawnPty(process.execPath, [INDEX_TS, "db", "compress", "--older-than", "0ms", "--batch-size", "1"], {
++    const proc = spawn(process.execPath, [INDEX_TS, "db", "compress", "--older-than", "0ms", "--batch-size", "1"], {
 +      ...PTY_OPTIONS,
 +      cwd: path.dirname(INDEX_TS),
 +      env: Object.fromEntries(Object.entries(isolatedEnv(tmp.path)).filter((entry): entry is [string, string] => entry[1] !== undefined)),

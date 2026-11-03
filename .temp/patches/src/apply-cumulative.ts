@@ -245,6 +245,16 @@ const rejectedStates = new Set<string>()
 let stagingRoot: string | undefined
 class RetryBuild extends Error {}
 
+const progress = { startedAt: Date.now(), lastAt: 0, stage: "准备重放" }
+function showProgress(stage = progress.stage, force = true) {
+  progress.stage = stage
+  const now = Date.now()
+  // 阶段切换立即显示，长阶段节流到十五秒；不逐文件输出或改变报告内容。
+  if (!force && now - progress.lastAt < 15_000) return
+  progress.lastAt = now
+  console.log(`[replay +${Math.floor((now - progress.startedAt) / 1000)}s] ${stage}`)
+}
+
 function runProcess(cwd: string, cmd: string[]): CommandResult {
   // Git 输出必须完整捕获到报告，避免终端截断后只剩 builder 的失败摘要。
   // 非零退出由调用点按 check、apply 或 setup 语义分类，不能统一吞成异常。
@@ -695,6 +705,7 @@ async function removeInterruptedBuilds(manifest: Manifest) {
       .filter((entry) => entry.isDirectory() && entry.name.startsWith(".building-"))
       .map(async (entry) => {
         try {
+          showProgress(`清理中断构建 ${entry.name}`)
           await safeRm(join(statesDir, entry.name), { recursive: true, force: true })
         } catch (error) {
           console.error(`stale staging cleanup skipped: ${entry.name} (${(error as Error).message.split("\n")[0]})`)
@@ -805,7 +816,13 @@ async function copyOnWriteDirectory(source: string, destination: string) {
     return
   }
   // Windows/Linux 没有 shell cp；改用 node:fs 的跨平台递归复制。
-  cpSync(source, destination, { recursive: true, force: true })
+  const stage = progress.stage
+  let copied = 0
+  cpSync(source, destination, { recursive: true, force: true, filter: () => {
+    // 同步复制阻塞定时器；遍历回调只报数量且始终放行，不筛除任何状态内容。
+    showProgress(`${stage}（${++copied} 项）`, false)
+    return true
+  } })
 }
 
 function isInstallState(value: unknown): value is InstallState {
@@ -943,6 +960,7 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
   let install: TestReport["install"] = canReuseInstall ? "reused" : "installed"
   let installStdout = ""
   let installStderr = ""
+  showProgress(canReuseInstall ? "复用冻结依赖安装" : "安装冻结依赖")
   if (!canReuseInstall) {
     // 安装消费已物化的完整依赖图，禁止临时删依赖或改写锁文件掩盖失败。
     // clonefile 显式利用当前 Mac APFS，避免从 Bun cache 复制重复数据块。
@@ -989,6 +1007,7 @@ async function runTypechecks(stateDirectory: string, state: MaterializedState, i
         }
         install = "installed"
       }
+      showProgress(`类型检查 ${workspace}`)
       const result = runBun(join(testWorkspaceRepo, workspace), ["typecheck"])
       typechecks.push({
         workspace,
@@ -1148,6 +1167,7 @@ async function restore(repo: string, baseline: string, checkpointPath: string) {
 }
 
 async function main() {
+  showProgress(`读取迁移输入 ${process.argv.slice(2).join(" ")}`)
   const keepFailure = process.argv.includes("--keep-failure")
   const manifestPath = join(patchRoot, "manifest.json")
   const manifestTsvPath = join(patchRoot, "manifest.tsv")
@@ -1158,6 +1178,7 @@ async function main() {
   const manifestTsvSha256 = await lfNormalizedSha256(manifestTsvPath)
   const request = parseReplayRequest(manifest)
   // 执行前验证完整 manifest，任何物化编号都不能绕过集合证明。
+  showProgress(`校验 manifest（${manifest.commits.length} 项）`)
   await validateManifest(manifest, manifestTsvPath, manifestJsonSha256, manifestTsvSha256, request.verifySource)
   if (request.verifySource) {
     console.log(`verified ${manifest.commits.length} source commits through ${manifest.sourceTip}`)
@@ -1166,6 +1187,7 @@ async function main() {
   const materializeIndex = request.index
   const typecheck = request.typecheck
   const selectedCommits = manifest.commits.slice(0, materializeIndex ?? manifest.commits.length)
+  showProgress(`读取 current 1–${selectedCommits.length}`)
   const inputHashes = await Promise.all(selectedCommits.map((entry) => lfNormalizedSha256(resolve(patchRoot, entry.currentPatch))))
   const inputFingerprint = sha256(selectedCommits.map((entry, index) => `${entry.index}\t${entry.sha}\t${inputHashes[index]}`).join("\n"))
   // 只绑定本次实际消费的输入；主工作区的无关编辑和 HEAD 前进仅记录在报告里。
@@ -1178,13 +1200,17 @@ async function main() {
   }
   let baseState: { name: string; metadata: MaterializedState } | undefined
   if (materializeIndex !== undefined) {
+    showProgress("恢复发布事务与清理中断构建")
     await removeInterruptedBuilds(manifest)
+    showProgress("校验已有物化状态")
     await removeStaleMaterializedStates(manifest)
     // 中断恢复可能还原第六个旧状态，正式构建前再次收敛到最近五个。
     await pruneMaterializedStates()
     // rebuild 排除 exact state，但仍复用更小的有效前缀以保持增量主路径。
     baseState = await reusableState(request.rebuild ? materializeIndex - 1 : materializeIndex)
+    showProgress(`可复用前缀 ${baseState?.metadata.index ?? 0}/${selectedCommits.length}`)
   }
+  showProgress("记录源工作区状态")
   const sourceRepoHeadBefore = requireGit(sourceRepo, ["rev-parse", "HEAD"]).trim()
   // 主仓库允许已有用户修改，但脚本运行期间必须保持同一 HEAD 和状态指纹。
   const sourceRepoFingerprintBefore = await repositoryFingerprint(sourceRepo, targetRepo)
@@ -1210,6 +1236,7 @@ async function main() {
     outcomes: [],
   }
   const runID = `${report.mode}-${materializeIndex === undefined ? "" : String(materializeIndex).padStart(4, "0") + "-"}${report.startedAt.replace(/[:.]/g, "-")}`
+  showProgress("记录目标工作区状态")
   report.targetRepoFingerprintBefore = await repositoryFingerprint(targetRepo, targetRepo)
   // 目标 worktree 可以在 baseline 之后继续提交；只要求 immutable baseline 对象仍可独立 clone。
   requireGit(targetRepo, ["cat-file", "-e", manifest.targetBaseline + "^{commit}"])
@@ -1250,6 +1277,7 @@ async function main() {
   if (baseState) {
     // 已验证前缀使用 APFS COW 复制；只为新增 patch 分配变化块。
     try {
+      showProgress(`复制可复用前缀 #${baseState.metadata.index}`)
       await copyOnWriteDirectory(join(statesDir, baseState.name, "repo"), simulationRepo)
     } catch (error) {
       rejectedStates.add(baseState.name)
@@ -1259,9 +1287,11 @@ async function main() {
     // 初始状态使用本地对象共享 clone，避免复制完整 Git object database。
     // Windows 适配：clone 后用命令级 -c checkout（零持久化）保持 LF 工作区，
     // 与 LF 归一化后的 current patch 行尾一致，避免 git apply 匹配失败。
+    showProgress(`克隆 exact baseline ${manifest.targetBaseline.slice(0, 12)}`)
     requireGit(tempRoot, ["clone", "--local", "--no-checkout", targetRepo, simulationRepo])
     requireGit(simulationRepo, ["-c", "core.autocrlf=false", "checkout", "--detach", manifest.targetBaseline])
   }
+  showProgress("核对重放起始状态")
   const [simulationStatus, simulationWorktreeDiff, simulationIndexDiff, simulationHead] = (() => {
     try {
       return [
@@ -1303,6 +1333,8 @@ async function main() {
 
   // 循环严格按 manifest 前缀推进；首个失败会阻断所有更高 index。
   for (const entry of selectedCommits.slice(baseState?.metadata.index ?? 0)) {
+    // 每二十五项保留里程碑，慢patch由同一十五秒心跳显示当前序号。
+    showProgress(`应用 #${entry.index}/${selectedCommits.length} ${entry.currentPatch}`, report.appliedThisRun === 0 || entry.index % 25 === 0)
     const patchPath = resolve(patchRoot, entry.currentPatch)
     const outcomeBase = {
       index: entry.index,
@@ -1373,6 +1405,7 @@ async function main() {
   }
 
   report.finishedAt = new Date().toISOString()
+  showProgress(`校验累计结果 ${report.passed}/${report.patchCount}`)
   // 源仓库 HEAD 必须保持不变；指纹可能因父工作区编辑变化，只检查 HEAD 避免误报。
   const sourceRepoHeadAfter = requireGit(sourceRepo, ["rev-parse", "HEAD"]).trim()
   report.sourceRepoHeadAfter = sourceRepoHeadAfter
@@ -1412,6 +1445,7 @@ async function main() {
       repo: "repo",
     }
     // metadata 与 repo 在 staging 中共同完成后才替换旧的同 index 状态。
+    showProgress(`发布状态 #${stateIndex}`)
     await rm(checkpointPath, { force: true })
     await rm(join(tempRoot, "current.patch"), { force: true })
     await Bun.write(join(tempRoot, "state.json"), `${JSON.stringify(metadata, null, 2)}\n`)
@@ -1451,20 +1485,30 @@ async function withMaintenanceLock(work: () => Promise<void>) {
 }
 
 async function run() {
-  await withMaintenanceLock(async () => {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        await main()
-        return
-      } catch (error) {
-        if (!(error instanceof RetryBuild) || attempt === 2) throw error
-        console.warn(`automatic recovery ${attempt + 1}/2: ${error.message}`)
-      } finally {
-        if (stagingRoot) await safeRm(stagingRoot, { recursive: true, force: true })
-        stagingRoot = undefined
+  showProgress("等待物化维护锁")
+  const heartbeat = setInterval(() => showProgress(progress.stage, false), 15_000)
+  heartbeat.unref()
+  try {
+    await withMaintenanceLock(async () => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await main()
+          return
+        } catch (error) {
+          if (!(error instanceof RetryBuild) || attempt === 2) throw error
+          console.warn(`automatic recovery ${attempt + 1}/2: ${error.message}`)
+        } finally {
+          if (stagingRoot) {
+            showProgress("清理本轮构建现场")
+            await safeRm(stagingRoot, { recursive: true, force: true })
+          }
+          stagingRoot = undefined
+        }
       }
-    }
-  })
+    })
+  } finally {
+    clearInterval(heartbeat)
+  }
 }
 
 if (import.meta.main) await run()

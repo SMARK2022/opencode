@@ -832,7 +832,10 @@ diff --git a/packages/opencode/src/session/message-v2.ts b/packages/opencode/src
 diff --git a/packages/opencode/test/session/message-v2.test.ts b/packages/opencode/test/session/message-v2.test.ts
 --- a/packages/opencode/test/session/message-v2.test.ts
 +++ b/packages/opencode/test/session/message-v2.test.ts
-@@ -944,6 +944,22 @@ describe("session.message-v2.toModelMessage", () => {
+@@ -1545,9 +1545,25 @@ describe("session.message-v2.toModelMessage", () => {
+               type: "text",
+               value: '<opencode_notice type="compaction_cleared" source="tool_output" reason="old_result_pruned" />',
+             },
            },
          ],
        },
