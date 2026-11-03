@@ -844,3 +844,47 @@ diff --git a/.github/workflows/build-opencode.yml b/.github/workflows/build-open
  
        - name: Download Windows archive
          uses: actions/download-artifact@v4
+diff --git a/packages/client/test/import-boundaries.test.ts b/packages/client/test/import-boundaries.test.ts
+--- a/packages/client/test/import-boundaries.test.ts
++++ b/packages/client/test/import-boundaries.test.ts
+@@ -4,7 +4,8 @@
+-import { join, resolve, sep } from "node:path"
++import { dirname, join, resolve, sep } from "node:path"
+ 
+ const directory = resolve(import.meta.dir, "..")
+-const effect = realpathSync(resolve(import.meta.dir, "../node_modules/effect"))
++// hoisted与独立安装都按消费者实际解析的包根检查依赖边界，不能假定包内node_modules存在。
++const effect = realpathSync(dirname(Bun.resolveSync("effect/package.json", directory)))
+ const schema = resolve(import.meta.dir, "../../schema")
+ const protocol = resolve(import.meta.dir, "../../protocol")
+ const core = resolve(import.meta.dir, "../../core")
+diff --git a/packages/httpapi-codegen/test/generate.test.ts b/packages/httpapi-codegen/test/generate.test.ts
+--- a/packages/httpapi-codegen/test/generate.test.ts
++++ b/packages/httpapi-codegen/test/generate.test.ts
+@@ -4,1 +4,2 @@
+ import { join } from "node:path"
++import { fileURLToPath } from "node:url"
+@@ -608,4 +609,5 @@
+       const output = compile(FixtureApi)
+       const actual = yield* Effect.promise(() =>
+-        Array.fromAsync(new Bun.Glob("*.ts").scan(new URL("generated", import.meta.url).pathname)),
++        // URL的pathname在Windows带额外前导斜杠，必须转换成原生文件路径再扫描fixture。
++        Array.fromAsync(new Bun.Glob("*.ts").scan(fileURLToPath(new URL("generated", import.meta.url)))),
+       )
+diff --git a/packages/httpapi-codegen/test/write.test.ts b/packages/httpapi-codegen/test/write.test.ts
+--- a/packages/httpapi-codegen/test/write.test.ts
++++ b/packages/httpapi-codegen/test/write.test.ts
+@@ -2,1 +2,2 @@
+ import { Effect, FileSystem, Option } from "effect"
++import { join } from "node:path"
+@@ -17,4 +18,5 @@
++      // 写入器使用平台原生路径；精确断言仍核对同一输出目录和文件，不固定POSIX分隔符。
+       expect(writes).toEqual([
+-        { path: "/generated/session.ts", content: "export const session = {}\n" },
+-        { path: "/generated/.httpapi-codegen.json", content: '[\n  "session.ts"\n]\n' },
++        { path: join("/generated", "session.ts"), content: "export const session = {}\n" },
++        { path: join("/generated", ".httpapi-codegen.json"), content: '[\n  "session.ts"\n]\n' },
+       ])
+@@ -58,1 +60,1 @@
+-      Effect.tap(() => Effect.sync(() => expect(removed).toEqual(["/generated/old.ts"]))),
++      Effect.tap(() => Effect.sync(() => expect(removed).toEqual([join("/generated", "old.ts")]))),
