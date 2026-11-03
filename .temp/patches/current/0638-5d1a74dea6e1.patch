@@ -5008,8 +5008,8 @@ index 9ee7bd0..b4bbcfc 100644
          expect(retry).toContain("retry in 9s · #7")
 +
 +        // voice 腿：录音与挂起上传也必须保持单行扩展栏，取消后不污染后续布局。
-+        // macOS生产默认是F8，其他平台是Alt+V；测试仍通过真实快捷键触发controller。
-+        const toggleVoice = () => app.mockInput.pressKey(process.platform === "darwin" ? "f8" : "v", { meta: process.platform !== "darwin" })
++        // macOS默认F8使用mock键盘的大写符号名；小写f8会被当作普通文字输入。
++        const toggleVoice = () => app.mockInput.pressKey(process.platform === "darwin" ? "F8" : "v", { meta: process.platform !== "darwin" })
 +        toggleVoice()
 +        await waitForFrame((frame) => frame.includes("Rec 00:00"))
 +        toggleVoice()
